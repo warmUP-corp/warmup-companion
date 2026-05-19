@@ -1,0 +1,28 @@
+[package]
+name = "warmup-vk-prototype"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+gamepad = ["dep:warmup-gamepad", "dep:enigo", "dep:ctrlc"]
+service = ["gamepad", "dep:windows-service"]
+
+[dependencies]
+warmup-gamepad = { path = "../../../../warmUp/crates/warmup-gamepad", optional = true }
+enigo = { version = "0.3", optional = true }
+ctrlc = { version = "3.4", optional = true }
+windows-service = { version = "0.8", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
