@@ -33,7 +33,10 @@ pub fn run_install() {
         eprintln!("install failed: {e}");
         std::process::exit(1);
     }
+    let bin = Path::new(INSTALL_DIR).join(EXE_NAME);
     println!("Installed. Service {SERVICE_NAME} started.");
+    println!("Binary (SCM uses this): {}", bin.display());
+    println!("NOT C:\\Program Files\\WarmupVk\\ — that path is legacy only.");
     println!("Reboot or Win+L, then tap Y on the controller at the password screen.");
     println!("Log: {DATA_DIR}\\{LOG_NAME}");
 }
@@ -48,12 +51,19 @@ pub fn run_uninstall() {
 
 fn install_inner() -> Result<(), String> {
     require_admin()?;
+    remove_legacy_install_artifacts();
     let src = std::env::current_exe().map_err(|e| e.to_string())?;
     fs::create_dir_all(INSTALL_DIR).map_err(|e| e.to_string())?;
     fs::create_dir_all(DATA_DIR).map_err(|e| e.to_string())?;
 
     let dest = Path::new(INSTALL_DIR).join(EXE_NAME);
     fs::copy(&src, &dest).map_err(|e| format!("copy exe to {INSTALL_DIR}: {e}"))?;
+    if !dest.is_file() {
+        return Err(format!(
+            "install copy missing: {} (service will not start)",
+            dest.display()
+        ));
+    }
     copy_gamecontroller_db()?;
 
     remove_test_services();
@@ -68,7 +78,8 @@ fn install_inner() -> Result<(), String> {
     sc(&["description", SERVICE_NAME, "Description=", DESCRIPTION])?;
     // LocalSystem (default) — required for winlogon / sign-in desktop.
     sc(&["start", SERVICE_NAME])?;
-    log_line(&format!("installed from {}", src.display()));
+    verify_service_running()?;
+    log_line(&format!("installed from {} -> {}", src.display(), dest.display()));
     Ok(())
 }
 
@@ -93,6 +104,22 @@ fn uninstall_service_quiet() {
     let _ = sc(&["stop", SERVICE_NAME]);
     std::thread::sleep(std::time::Duration::from_secs(2));
     let _ = sc(&["delete", SERVICE_NAME]);
+}
+
+/// Old manual installs and terminal runs used `C:\Program Files\WarmupVk\`.
+fn remove_legacy_install_artifacts() {
+    let legacy_dir = Path::new(r"C:\Program Files\WarmupVk");
+    let legacy_exe = legacy_dir.join(EXE_NAME);
+    if legacy_exe.is_file() {
+        let _ = Command::new("taskkill")
+            .args(["/F", "/IM", EXE_NAME])
+            .output();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if fs::remove_file(&legacy_exe).is_ok() {
+            log_line(&format!("removed legacy {}", legacy_exe.display()));
+        }
+        let _ = fs::remove_dir(legacy_dir);
+    }
 }
 
 fn remove_test_services() {
@@ -139,6 +166,25 @@ fn sc(args: &[&str]) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn verify_service_running() -> Result<(), String> {
+    let out = Command::new("sc.exe")
+        .args(["query", SERVICE_NAME])
+        .output()
+        .map_err(|e| format!("sc.exe query: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    if text.contains("RUNNING") {
+        return Ok(());
+    }
+    let hint = if !Path::new(INSTALL_DIR).join(EXE_NAME).is_file() {
+        format!(" (missing {})", Path::new(INSTALL_DIR).join(EXE_NAME).display())
+    } else {
+        String::new()
+    };
+    Err(format!(
+        "{SERVICE_NAME} is not RUNNING after sc start{hint}. sc query output:\n{text}"
+    ))
 }
 
 fn require_admin() -> Result<(), String> {

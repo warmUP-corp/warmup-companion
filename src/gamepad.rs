@@ -380,7 +380,9 @@ where
 
         #[cfg(windows)]
         if service_mode {
-            crate::win::sync_input_desktop();
+            if let Err(e) = crate::win::sync_input_desktop() {
+                service_log(&format!("sync_input_desktop failed: {e}"));
+            }
             poll.log_desktop_sync_if_due(true);
         }
 

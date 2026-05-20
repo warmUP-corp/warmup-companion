@@ -4,18 +4,27 @@
   Build and install WarmupVkSvc (sign-in / UAC gamepad keyboard).
 
 .DESCRIPTION
-  Copies release exe to C:\ProgramData\WarmupVk\bin, registers Windows service
-  WarmupVkSvc with --service (--boot + winlogon). After install, reboot or Win+L
-  and tap Y on the controller at the password screen.
+  Same gamepad-enabled binary as:
+    cargo build --release --features gamepad,service
+  Desktop test (after install or from target\release):
+    warmup-vk-prototype.exe --gamepad --real
 
+  Service binary (SCM): C:\ProgramData\WarmupVk\bin\warmup-vk-prototype.exe
   Log: C:\ProgramData\WarmupVk\service.log
+
+  C:\Program Files\WarmupVk\ is NOT used (legacy manual copies only).
 #>
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
-Write-Host "Building release (gamepad + service)..."
-cargo build --release --features service
+$BinDir = "C:\ProgramData\WarmupVk\bin"
+$BinExe = Join-Path $BinDir "warmup-vk-prototype.exe"
+$LogFile = "C:\ProgramData\WarmupVk\service.log"
+$LegacyExe = "C:\Program Files\WarmupVk\warmup-vk-prototype.exe"
+
+Write-Host "Building release (--features gamepad,service)..."
+cargo build --release --features "gamepad,service"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $Exe = Join-Path $Root "target\release\warmup-vk-prototype.exe"
@@ -23,6 +32,44 @@ if (-not (Test-Path $Exe)) {
     throw "Missing $Exe"
 }
 
-Write-Host "Installing service (also removes WarmupVkTest* debug services)..."
+cmd /c "findstr /C:`"gamepad loop running`" /C:`"warmup-gamepad (SDL3)`" `"$Exe`" >nul 2>&1"
+if ($LASTEXITCODE -ne 0) {
+    throw "Built exe is missing gamepad support. Re-run this script."
+}
+Write-Host "OK: gamepad feature present in $Exe"
+
+Write-Host "Installing service..."
 & $Exe install
-exit $LASTEXITCODE
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+if (-not (Test-Path $BinExe)) {
+    throw @"
+Install failed: service binary not at:
+  $BinExe
+
+The service is registered to use ProgramData, not Program Files.
+If you only have $LegacyExe, delete it and run this script again as Administrator.
+"@
+}
+
+Write-Host ""
+Write-Host "=== Install OK ===" -ForegroundColor Green
+Write-Host "Service binary: $BinExe"
+Write-Host "Log file:       $LogFile"
+if (Test-Path $LegacyExe) {
+    Write-Host "WARNING: legacy copy still exists (not used by service): $LegacyExe" -ForegroundColor Yellow
+    Write-Host "         You can remove that folder to avoid confusion."
+}
+
+Write-Host ""
+Write-Host "Service status:"
+sc.exe qc WarmupVkSvc
+sc.exe query WarmupVkSvc
+
+if (Test-Path $LogFile) {
+    Write-Host ""
+    Write-Host "Last log lines:"
+    Get-Content $LogFile -Tail 8
+}
+
+exit 0

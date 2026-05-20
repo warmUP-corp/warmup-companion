@@ -156,11 +156,35 @@ impl App {
         self.config_winlogon_0xd9 = true;
         self.boot_mode = true;
         self.service_started = true;
-        // Do not pin the gamepad thread to winlogon — sync via OpenInputDesktop each frame.
         self.foreground = Foreground::LogonUi;
         self.input_desktop = Desktop::Winlogon;
-        self.log("service: boot path (input desktop synced each gamepad frame)");
+        if self.use_real_win32 {
+            match win::attach_input() {
+                Ok(()) => {
+                    let cur = win::current_desktop_name().unwrap_or_else(|| "?".into());
+                    self.attached_desktop = if cur.eq_ignore_ascii_case("winlogon") {
+                        Desktop::Winlogon
+                    } else {
+                        Desktop::Default
+                    };
+                    self.input_desktop = self.attached_desktop;
+                    self.service_log(&format!("worker input desktop: {cur}"));
+                }
+                Err(e) => self.service_log(&format!("worker attach_input failed: {e}")),
+            }
+        }
+        self.log("service: boot path (input desktop follows lock/logon/UAC)");
     }
+
+    #[cfg(all(windows, feature = "service"))]
+    fn service_log(&self, msg: &str) {
+        if std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0") {
+            crate::install::log_line(msg);
+        }
+    }
+
+    #[cfg(not(all(windows, feature = "service")))]
+    fn service_log(&self, _msg: &str) {}
 
     fn attach_named(&mut self, desktop: Desktop) {
         if self.use_real_win32 {
@@ -239,6 +263,7 @@ impl App {
     fn toggle_virtual_keyboard_combo(&mut self) {
         if !self.mask_0x200_active {
             self.log("button: mask 0x200 absent -> slot 7 not resolved");
+            self.service_log("Y tap: mask 0x200 inactive");
             return;
         }
 
@@ -251,10 +276,12 @@ impl App {
         if let Some(last) = self.last_vk_toggle {
             if now.duration_since(last) < debounce {
                 self.log("VK toggle debounced (button bounce)");
+                self.service_log("Y tap: debounced");
                 return;
             }
         }
         self.last_vk_toggle = Some(now);
+        self.service_log("Y tap: toggle VK");
 
         self.run_slot7_binding();
         self.dispatch_vk_toggle();
@@ -285,6 +312,7 @@ impl App {
             self.log(&format!(
                 "{FN_EXECUTE_QUEUED_ACTION}: queued action != 7 -> no VK path"
             ));
+            self.service_log("VK toggle: queued action != 7");
             return;
         }
 
@@ -295,6 +323,7 @@ impl App {
 
         if self.modal_block_bit_4 {
             self.log("blocked: app state bit 4 set");
+            self.service_log("VK toggle: blocked (modal bit 4)");
             return;
         }
 
@@ -327,9 +356,14 @@ impl App {
             return;
         }
         if self.use_real_win32 {
-            let attach = match self.input_desktop {
-                Desktop::Winlogon => win::VkAttach::Input,
-                Desktop::Default => win::VkAttach::Current,
+            let attach = if std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0") {
+                // Lock screen (Win+L), logon, and UAC all need OpenInputDesktop on the UI thread.
+                win::VkAttach::Input
+            } else {
+                match self.input_desktop {
+                    Desktop::Winlogon => win::VkAttach::Input,
+                    Desktop::Default => win::VkAttach::Current,
+                }
             };
             match win::VkSession::open(attach) {
                 Ok(session) => {
@@ -735,6 +769,15 @@ fn dispatch_install_or_service(args: &[String]) {
     }
     #[cfg(feature = "service")]
     {
+        if args.iter().any(|a| a == "--service-worker") {
+            match service::run_worker() {
+                Ok(()) => std::process::exit(0),
+                Err(e) => {
+                    install::log_line(&format!("service worker failed: {e}"));
+                    std::process::exit(1);
+                }
+            }
+        }
         let scm_start = args.len() <= 1 && !has_interactive_console();
         let force_service = args.iter().any(|a| a == "--service");
         if scm_start || force_service {

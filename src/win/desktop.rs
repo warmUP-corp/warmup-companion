@@ -90,10 +90,9 @@ pub fn attach_input() -> Result<(), String> {
     }
 }
 
-/// Follow the interactive input desktop (sign-in, UAC, or user default).
-/// Required for Session-0 service threads before SDL / SendInput / enigo.
-pub fn sync_input_desktop() {
-    let _ = attach_input();
+/// Follow the interactive input desktop (lock screen, sign-in, UAC, or user default).
+pub fn sync_input_desktop() -> Result<(), String> {
+    attach_input()
 }
 
 pub fn current_desktop_name() -> Option<String> {

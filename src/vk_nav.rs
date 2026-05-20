@@ -243,7 +243,7 @@ fn send_key(key: KeyCell) {
 fn sync_service_input_desktop() {
     #[cfg(windows)]
     if std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0") {
-        crate::win::sync_input_desktop();
+        let _ = crate::win::sync_input_desktop();
     }
 }
 
