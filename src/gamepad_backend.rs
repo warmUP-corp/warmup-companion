@@ -61,6 +61,12 @@ fn mapping_db_path() -> PathBuf {
             return installed;
         }
     }
+    let warmup_db = PathBuf::from(
+        r"C:\Users\jonas\warmUp\apps\desktop\src-tauri\resources\gamecontrollerdb.txt",
+    );
+    if warmup_db.is_file() {
+        return warmup_db;
+    }
     PathBuf::from(
         r"C:\Users\Jonas.Voegel\Full-Screen-Console-PC-v2-Tauri\apps\desktop\src-tauri\resources\gamecontrollerdb.txt",
     )
