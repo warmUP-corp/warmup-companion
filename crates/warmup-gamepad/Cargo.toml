@@ -1,0 +1,8 @@
+[package]
+name = "warmup-gamepad"
+version = "0.1.0"
+edition = "2021"
+description = "Shim: re-exports warmUP desktop `gamepad/input.rs` (SDL3) for the VK prototype"
+
+[dependencies]
+sdl3 = { version = "0.17", features = ["build-from-source-static"] }

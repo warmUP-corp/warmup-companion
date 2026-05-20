@@ -37,7 +37,7 @@ fn service_main(_arguments: Vec<OsString>) {
 
 fn run_service_core() -> Result<(), String> {
     std::env::set_var("WARMUP_VK_SERVICE", "1");
-    install::log_line("WarmupVkSvc starting (features: service+gamepad, SDL3/enigo)");
+    install::log_line("WarmupVkSvc starting (features: service+gamepad, XInput/enigo)");
 
     let status_handle = service_control_handler::register(SERVICE_NAME, move |event| {
         match event {

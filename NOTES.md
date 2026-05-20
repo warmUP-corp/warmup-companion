@@ -37,14 +37,18 @@ Rust constants: `src/symbols.rs`.
 
 ## SDL3 gamepad (optional)
 
-Uses shared crate **`C:\Users\jonas\warmUp\crates\warmup-gamepad`** (same SDL3 code as warmUP desktop).
+The prototype depends on **`warmup-keyboard/crates/warmup-gamepad`**, a thin shim that `#[path]`-includes the real SDL3 implementation from the warmUP desktop app:
+
+`Full-Screen-Console-PC-v2-Tauri/apps/desktop/src-tauri/src/gamepad/input.rs`
+
+No duplicate crate inside the Tauri repo; edit that file only in the desktop tree.
 
 ```powershell
 cargo run --features gamepad -- --gamepad
 cargo run --features gamepad   # CLI + `pad` snapshot
 ```
 
-Maps **Y / Triangle** (SDL north face) → mask `0x200`. Controller DB: `warmUp\apps\desktop\src-tauri\resources\gamecontrollerdb.txt` or env `WARMUP_GAMECONTROLLER_DB`.
+Maps **Y / Triangle** (SDL north face) → mask `0x200`. Controller DB: `Full-Screen-Console-PC-v2-Tauri/apps/desktop/src-tauri/resources/gamecontrollerdb.txt` or env `WARMUP_GAMECONTROLLER_DB`.
 
 ## Real on-screen keyboard (`--real`)
 

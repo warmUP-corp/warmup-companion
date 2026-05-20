@@ -1,14 +1,17 @@
 //! Gamepad: PC cursor when VK closed; full keyboard control when VK open.
+//!
+//! Service mode uses XInput (secure desktop). Desktop `--gamepad` uses SDL3.
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
-use warmup_gamepad::{ButtonChange, GamepadInput};
-
+use crate::gamepad_backend::{ButtonChange, GamepadBackend, SdlBackend};
 use crate::pc_cursor::PcCursor;
+
+#[cfg(windows)]
+use crate::xinput_backend::XInputBackend;
 
 /// North face: Triangle / Y — toggles VK when keyboard is closed.
 const VK_MASK_BUTTON: &str = "Y";
@@ -16,6 +19,7 @@ const VK_MASK_BUTTON: &str = "Y";
 const POLL_INTERVAL: Duration = Duration::from_millis(8);
 /// Ignore Y release right after opening VK (same physical tap must not close).
 const Y_RELEASE_GRACE: Duration = Duration::from_millis(550);
+const DESKTOP_SYNC_LOG_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VkLoopAction {
@@ -23,36 +27,65 @@ pub enum VkLoopAction {
     Close,
 }
 
+enum Backend {
+    Sdl(SdlBackend),
+    #[cfg(windows)]
+    XInput(XInputBackend),
+}
+
 pub struct GamepadPoll {
-    input: GamepadInput,
+    backend: Backend,
     vk_down: bool,
     a_down_while_vk: bool,
     last_vk_open: bool,
     y_ignore_until: Option<Instant>,
+    last_desktop_log: Instant,
 }
 
 impl GamepadPoll {
-    pub fn open() -> Result<Self, String> {
-        let db = mapping_db_path();
-        let input = GamepadInput::new(&db)?;
-        if let Some(name) = input.active_controller_name() {
-            println!("> warmup-gamepad: {name}");
+    pub fn open_desktop() -> Result<Self, String> {
+        let backend = SdlBackend::open()?;
+        let label = backend.controller_label();
+        if label == "none" {
+            println!("> warmup-gamepad (SDL3): no pad connected yet");
         } else {
-            println!("> warmup-gamepad: no pad connected yet");
+            println!("> warmup-gamepad (SDL3): {label}");
         }
-        Ok(Self {
-            input,
+        Ok(Self::new(Backend::Sdl(backend)))
+    }
+
+    #[cfg(windows)]
+    pub fn open_service() -> Self {
+        service_log("gamepad backend: XInput (service / secure desktop)");
+        Self::new(Backend::XInput(XInputBackend::new()))
+    }
+
+    #[cfg(not(windows))]
+    pub fn open_service() -> Result<Self, String> {
+        Err("XInput service backend requires Windows".to_string())
+    }
+
+    fn new(backend: Backend) -> Self {
+        Self {
+            backend,
             vk_down: false,
             a_down_while_vk: false,
             last_vk_open: false,
             y_ignore_until: None,
-        })
+            last_desktop_log: Instant::now() - DESKTOP_SYNC_LOG_INTERVAL,
+        }
+    }
+
+    pub fn open() -> Result<Self, String> {
+        Self::open_desktop()
     }
 
     pub fn controller_label(&self) -> String {
-        self.input
-            .active_controller_name()
-            .unwrap_or_else(|| "none".to_string())
+        match &self.backend {
+            Backend::Sdl(b) => b.controller_label(),
+            #[cfg(windows)]
+            Backend::XInput(b) => b.controller_label(),
+        }
     }
 
     pub fn poll_frame(
@@ -67,8 +100,21 @@ impl GamepadPoll {
         }
         self.last_vk_open = vk_open;
 
-        self.input.poll_events();
-        let changes = self.input.detect_button_changes();
+        match &mut self.backend {
+            Backend::Sdl(b) => b.poll()?,
+            #[cfg(windows)]
+            Backend::XInput(b) => b.poll()?,
+        }
+        let changes = match &mut self.backend {
+            Backend::Sdl(b) => b.button_changes(),
+            #[cfg(windows)]
+            Backend::XInput(b) => b.button_changes(),
+        };
+        let (lx, ly, rx, ry) = match &self.backend {
+            Backend::Sdl(b) => b.axes(),
+            #[cfg(windows)]
+            Backend::XInput(b) => b.axes(),
+        };
 
         if vk_open {
             #[cfg(windows)]
@@ -86,7 +132,6 @@ impl GamepadPoll {
             return Ok(edges);
         }
 
-        let (lx, ly, rx, ry) = self.input.axes();
         cursor.move_stick(lx, ly, dt_secs);
         cursor.scroll_stick(rx, ry, dt_secs);
 
@@ -174,30 +219,37 @@ impl GamepadPoll {
     }
 
     pub fn snapshot(&mut self) -> Result<String, String> {
-        self.input.poll_events();
-        let name = self
-            .input
-            .active_controller_name()
-            .unwrap_or_else(|| "none".to_string());
-        let ty = self.input.active_controller_type();
-        let (lx, ly, _, _) = self.input.axes();
-        Ok(format!("{name} ({ty}) stick=({lx:.2},{ly:.2})"))
-    }
-}
-
-fn mapping_db_path() -> PathBuf {
-    if let Ok(p) = std::env::var("WARMUP_GAMECONTROLLER_DB") {
-        return PathBuf::from(p);
-    }
-    #[cfg(windows)]
-    {
-        let installed =
-            PathBuf::from(r"C:\ProgramData\WarmupVk\gamecontrollerdb.txt");
-        if installed.is_file() {
-            return installed;
+        match &mut self.backend {
+            Backend::Sdl(b) => {
+                b.poll()?;
+                let name = b.controller_label();
+                let (lx, ly, _, _) = b.axes();
+                Ok(format!("{name} (SDL3) stick=({lx:.2},{ly:.2})"))
+            }
+            #[cfg(windows)]
+            Backend::XInput(b) => {
+                b.poll()?;
+                let name = b.controller_label();
+                let (lx, ly, _, _) = b.axes();
+                Ok(format!("{name} (XInput) stick=({lx:.2},{ly:.2})"))
+            }
         }
     }
-    PathBuf::from(r"C:\Users\jonas\warmUp\apps\desktop\src-tauri\resources\gamecontrollerdb.txt")
+
+    pub fn log_desktop_sync_if_due(&mut self, service_mode: bool) {
+        if !service_mode {
+            return;
+        }
+        if self.last_desktop_log.elapsed() < DESKTOP_SYNC_LOG_INTERVAL {
+            return;
+        }
+        self.last_desktop_log = Instant::now();
+        #[cfg(windows)]
+        {
+            let name = crate::win::current_desktop_name().unwrap_or_else(|| "?".into());
+            service_log(&format!("input desktop sync: thread on {name}"));
+        }
+    }
 }
 
 fn dedupe_consecutive_y_edges(changes: Vec<ButtonChange>) -> Vec<ButtonChange> {
@@ -271,20 +323,25 @@ where
     V: FnMut() -> bool,
     A: FnMut(VkLoopAction),
 {
-    let mut poll = match GamepadPoll::open() {
-        Ok(p) => p,
-        Err(e) => {
-            if service_mode {
-                #[cfg(windows)]
-                service_log(&format!("gamepad open failed: {e}"));
-                return Err(e);
-            }
-            return Err(e);
+    let mut poll = if service_mode {
+        #[cfg(windows)]
+        {
+            GamepadPoll::open_service()
+        }
+        #[cfg(not(windows))]
+        {
+            return GamepadPoll::open_service();
+        }
+    } else {
+        match GamepadPoll::open_desktop() {
+            Ok(p) => p,
+            Err(e) => return Err(e),
         }
     };
+
     #[cfg(windows)]
     if service_mode {
-        service_log(&format!("gamepad SDL ready: {}", poll.controller_label()));
+        service_log(&format!("gamepad ready: {}", poll.controller_label()));
     }
     if use_ctrlc {
         install_ctrlc_handler()?;
@@ -313,7 +370,7 @@ where
         println!("Ctrl+C to stop.");
     } else {
         #[cfg(windows)]
-        service_log("gamepad loop running (service mode, Y=toggle VK)");
+        service_log("gamepad loop running (XInput, Y=toggle VK)");
     }
     let mut last_tick = Instant::now();
     while RUNNING.load(Ordering::SeqCst) {
@@ -324,6 +381,7 @@ where
         #[cfg(windows)]
         if service_mode {
             crate::win::sync_input_desktop();
+            poll.log_desktop_sync_if_due(true);
         }
 
         match poll.poll_frame(&mut cursor, dt, vk_open()) {

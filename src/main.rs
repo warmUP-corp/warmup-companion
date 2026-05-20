@@ -14,9 +14,13 @@ mod win;
 mod win;
 
 #[cfg(feature = "gamepad")]
+mod gamepad_backend;
+#[cfg(feature = "gamepad")]
 mod gamepad;
 #[cfg(feature = "gamepad")]
 mod pc_cursor;
+#[cfg(all(windows, feature = "gamepad"))]
+mod xinput_backend;
 
 use std::env;
 use std::fmt;
@@ -384,59 +388,169 @@ impl App {
     }
 
     fn log(&self, msg: &str) {
+        repl_scroll::note_line();
         println!("> {msg}");
     }
 
-    fn print_state(&self) {
-        println!();
-        println!("STATE");
-        println!("  boot_mode {G_BOOT_SERVICE_MODE:28} : {}", self.boot_mode);
-        println!("  service WarmupSvc          : {}", self.service_started);
-        println!("  config +0xd9 winlogon      : {}", self.config_winlogon_0xd9);
-        println!("  attached desktop           : {}", self.attached_desktop);
-        println!("  input desktop              : {}", self.input_desktop);
-        println!("  foreground                 : {}", self.foreground);
-        println!(
+    /// One screen line per entry (incl. leading/trailing blank lines).
+    fn state_lines(&self) -> Vec<String> {
+        let mut v = Vec::with_capacity(24);
+        v.push(String::new());
+        v.push("STATE".into());
+        v.push(format!(
+            "  boot_mode {G_BOOT_SERVICE_MODE:28} : {}",
+            self.boot_mode
+        ));
+        v.push(format!(
+            "  service WarmupSvc          : {}",
+            self.service_started
+        ));
+        v.push(format!(
+            "  config +0xd9 winlogon      : {}",
+            self.config_winlogon_0xd9
+        ));
+        v.push(format!("  attached desktop           : {}", self.attached_desktop));
+        v.push(format!("  input desktop              : {}", self.input_desktop));
+        v.push(format!("  foreground                 : {}", self.foreground));
+        v.push(format!(
             "  {G_FULLSCREEN_FG_FLAG:28} : {}",
             self.fullscreen_profile_flag
-        );
-        println!(
+        ));
+        v.push(format!(
             "  {G_APP_FEATURE_FLAGS} bit 9 Spiral  : {}",
             self.spiral_bit_9
-        );
-        println!("  {G_VK_OPEN_LATCH:28} : {}", self.vk_open_latch);
-        println!("  state[0x2c] bit 4 block    : {}", self.modal_block_bit_4);
-        println!("  mask bit 0x200 active      : {}", self.mask_0x200_active);
-        println!("  slot7 type/subtype         : {}/{}", self.slot7_action_type, self.slot7_subtype);
-        println!("  queued action              : {}", self.queued_action);
-        println!(
+        ));
+        v.push(format!("  {G_VK_OPEN_LATCH:28} : {}", self.vk_open_latch));
+        v.push(format!(
+            "  state[0x2c] bit 4 block    : {}",
+            self.modal_block_bit_4
+        ));
+        v.push(format!(
+            "  mask bit 0x200 active      : {}",
+            self.mask_0x200_active
+        ));
+        v.push(format!(
+            "  slot7 type/subtype         : {}/{}",
+            self.slot7_action_type, self.slot7_subtype
+        ));
+        v.push(format!("  queued action              : {}", self.queued_action));
+        v.push(format!(
             "  Xbox window                : {}",
             match self.xbox_window_desktop {
                 Some(d) => format!("visible on {d}"),
-                None => "not visible".to_string(),
+                None => "not visible".into(),
             }
-        );
-        println!(
+        ));
+        v.push(format!(
             "  Spiral window              : {}",
             match self.spiral_window_desktop {
                 Some(d) => format!("visible on {d}"),
-                None => "not visible".to_string(),
+                None => "not visible".into(),
             }
-        );
-        println!("  real Win32 (--real)        : {}", self.use_real_win32);
-        println!(
+        ));
+        v.push(format!(
+            "  real Win32 (--real)        : {}",
+            self.use_real_win32
+        ));
+        v.push(format!(
             "  OS keyboard session        : {}",
             self.vk_session
                 .as_ref()
                 .map(|s| s.describe())
                 .unwrap_or("none")
-        );
+        ));
         #[cfg(windows)]
-        println!(
+        v.push(format!(
             "  VK window visible          : {}",
             win::is_vk_visible()
-        );
-        println!();
+        ));
+        v.push(String::new());
+        v
+    }
+}
+
+/// Count `println!` lines after last STATE panel so CUU can reach panel top (ANSI).
+mod repl_scroll {
+    use std::cell::{Cell, RefCell};
+
+    use super::{App, io, Write};
+
+    thread_local! {
+        static ENABLED: Cell<bool> = Cell::new(false);
+        static AFTER_STATE: Cell<u32> = Cell::new(0);
+        static LAST_STATE_LINES: RefCell<Option<Vec<String>>> = RefCell::new(None);
+    }
+
+    pub fn enable(y: bool) {
+        ENABLED.with(|e| e.set(y));
+    }
+
+    pub fn note_line() {
+        ENABLED.with(|en| {
+            if en.get() {
+                AFTER_STATE.with(|a| a.set(a.get().saturating_add(1)));
+            }
+        });
+    }
+
+    pub fn note_lines(n: u32) {
+        ENABLED.with(|en| {
+            if en.get() {
+                AFTER_STATE.with(|a| a.set(a.get().saturating_add(n)));
+            }
+        });
+    }
+
+    fn take_after_lines() -> u32 {
+        AFTER_STATE.with(|a| {
+            let n = a.get();
+            a.set(0);
+            n
+        })
+    }
+
+    /// Repaint STATE block in place: CUU to panel top, rewrite only changed rows.
+    pub fn paint_state_panel(app: &App) {
+        let enabled = ENABLED.with(|e| e.get());
+        if !enabled {
+            let lines = app.state_lines();
+            for line in &lines {
+                println!("{line}");
+            }
+            return;
+        }
+
+        let since = take_after_lines();
+        let new = app.state_lines();
+        let prev = LAST_STATE_LINES.with(|cell| cell.borrow_mut().take());
+
+        if let Some(ref p) = prev {
+            let up = p.len() as u32 + since;
+            print!("\x1b[{up}A");
+        }
+
+        let max = prev.as_ref().map_or(0, |p: &Vec<String>| p.len()).max(new.len());
+        for i in 0..max {
+            print!("\r");
+            let old = prev.as_ref().and_then(|p: &Vec<String>| p.get(i));
+            let nw = new.get(i);
+            if old == nw && nw.is_some() {
+                print!("\x1b[1B");
+            } else {
+                print!("\x1b[2K");
+                if let Some(s) = nw {
+                    print!("{s}");
+                }
+                if i + 1 < max {
+                    print!("\n");
+                }
+            }
+        }
+
+        LAST_STATE_LINES.with(|cell| {
+            *cell.borrow_mut() = Some(new);
+        });
+        let _ = io::stdout().flush();
     }
 }
 
@@ -468,7 +582,8 @@ fn main() {
     println!("Type `help` for commands. State prints after each command.");
     #[cfg(feature = "gamepad")]
     println!("Gamepad: `pad` or `cargo run --features gamepad -- --gamepad` (warmUP SDL3 crate)");
-    app.print_state();
+    repl_scroll::enable(true);
+    repl_scroll::paint_state_panel(&app);
 
     loop {
         print!("warmup> ");
@@ -478,20 +593,26 @@ fn main() {
         if io::stdin().read_line(&mut line).is_err() {
             break;
         }
+        repl_scroll::note_line();
 
         let cmd = line.trim().to_ascii_lowercase();
+        if cmd.is_empty() {
+            repl_scroll::paint_state_panel(&app);
+            continue;
+        }
         match cmd.as_str() {
-            "" => continue,
             "help" => print_help(),
             "state" => {}
             "normal" => app.start_normal(),
             "boot" => app.start_boot(),
             "cfg winlogon on" => {
                 app.config_winlogon_0xd9 = true;
+                repl_scroll::note_line();
                 println!("> config +0xd9 set");
             }
             "cfg winlogon off" => {
                 app.config_winlogon_0xd9 = false;
+                repl_scroll::note_line();
                 println!("> config +0xd9 clear");
             }
             "fg normal" => app.set_foreground(Foreground::Normal),
@@ -506,67 +627,87 @@ fn main() {
             "release" => app.release_virtual_keyboard_combo(),
             "spiral on" => {
                 app.spiral_bit_9 = true;
+                repl_scroll::note_line();
                 println!(
                     "> {G_APP_FEATURE_FLAGS} bit 9: {FN_EXECUTE_QUEUED_ACTION} use_spiral=1"
                 );
             }
             "spiral off" => {
                 app.spiral_bit_9 = false;
+                repl_scroll::note_line();
                 println!(
                     "> bit 9 clear: {FN_EXECUTE_QUEUED_ACTION} use_spiral=0 -> Xbox"
                 );
             }
             "block on" => {
                 app.modal_block_bit_4 = true;
+                repl_scroll::note_line();
                 println!("> state[0x2c] bit 4 set");
             }
             "block off" => {
                 app.modal_block_bit_4 = false;
+                repl_scroll::note_line();
                 println!("> state[0x2c] bit 4 clear");
             }
             "mask on" => {
                 app.mask_0x200_active = true;
+                repl_scroll::note_line();
                 println!("> mask 0x200 active");
             }
             "mask off" => {
                 app.mask_0x200_active = false;
+                repl_scroll::note_line();
                 println!("> mask 0x200 inactive");
             }
             "slot good" => {
                 app.slot7_action_type = 6;
                 app.slot7_subtype = 7;
+                repl_scroll::note_line();
                 println!("> slot 7 queues action 7");
             }
             "slot bad" => {
                 app.slot7_action_type = 1;
                 app.slot7_subtype = 0;
+                repl_scroll::note_line();
                 println!("> slot 7 no longer queues action 7");
             }
             "reset" => {
                 let real = app.use_real_win32;
                 app = App::default();
                 app.use_real_win32 = real;
+                repl_scroll::note_line();
                 println!("> reset");
             }
             "quit" | "exit" => break,
             #[cfg(feature = "gamepad")]
             "pad" => match gamepad::GamepadPoll::open().and_then(|mut g| g.snapshot()) {
-                Ok(s) => println!("> {s}"),
-                Err(e) => println!("> gamepad error: {e}"),
+                Ok(s) => {
+                    repl_scroll::note_line();
+                    println!("> {s}");
+                }
+                Err(e) => {
+                    repl_scroll::note_line();
+                    println!("> gamepad error: {e}");
+                }
             },
             other => {
                 #[cfg(feature = "gamepad")]
                 if other == "gamepad" {
+                    repl_scroll::note_line();
                     println!("> use: cargo run --features gamepad -- --gamepad");
                 } else {
+                    repl_scroll::note_line();
                     println!("> unknown command: {other}");
                 }
                 #[cfg(not(feature = "gamepad"))]
-                println!("> unknown command: {other}");
+                {
+                    repl_scroll::note_line();
+                    println!("> unknown command: {other}");
+                }
             }
         }
 
-        app.print_state();
+        repl_scroll::paint_state_panel(&app);
     }
 }
 
@@ -636,8 +777,7 @@ fn run_gamepad_mode() {
         println!("real Win32 VK enabled (WarmupXboxVkWindow)");
     }
     println!("Sign-in service: build with --features service, then `install` as Admin");
-    app.print_state();
-
+    repl_scroll::paint_state_panel(&app);
     let vk_open = std::cell::Cell::new(false);
     let result = run_boot_gamepad_loop(&mut app, &vk_open, false);
     if let Some(session) = app.vk_session.take() {
@@ -663,7 +803,7 @@ pub(crate) fn run_boot_gamepad_loop(
             app.toggle_virtual_keyboard_combo();
             vk_open.set(app.vk_session.is_some());
             if !service_mode {
-                app.print_state();
+                repl_scroll::paint_state_panel(&*app);
             } else {
                 #[cfg(windows)]
                 {
@@ -682,7 +822,7 @@ pub(crate) fn run_boot_gamepad_loop(
             app.close_vk();
             vk_open.set(false);
             if !service_mode {
-                app.print_state();
+                repl_scroll::paint_state_panel(&*app);
             } else {
                 #[cfg(windows)]
                 install::log_line("VK closed");
@@ -696,9 +836,27 @@ pub(crate) fn run_boot_gamepad_loop(
     }
 }
 
+fn help_screen_rows(help: &str) -> u32 {
+    let cols = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(120)
+        .max(40);
+    let mut rows = 0u32;
+    for line in help.split('\n') {
+        let w = line.chars().count() as u32;
+        rows = rows.saturating_add(if w == 0 {
+            1
+        } else {
+            (w + cols - 1) / cols
+        });
+    }
+    // println! adds one '\n' after HELP → cursor sits on following row
+    rows.saturating_add(1)
+}
+
 fn print_help() {
-    println!(
-        r#"COMMANDS
+    const HELP: &str = r#"COMMANDS
   normal              start normal user instance on default desktop
   cfg winlogon on     set config.bin +0xd9
   cfg winlogon off    clear config.bin +0xd9
@@ -726,6 +884,7 @@ SCENARIOS
   normal -> fg uac -> press
   cfg winlogon on -> boot -> fg logon -> press
   cfg winlogon on -> boot -> fg uac -> press -> press
-"#
-    );
+"#;
+    repl_scroll::note_lines(help_screen_rows(HELP));
+    println!("{HELP}");
 }
