@@ -9,21 +9,24 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::time::Duration;
 
 use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::Foundation::{
+    CloseHandle, LocalFree, BOOL, HANDLE, HLOCAL, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
+use windows::Win32::Security::Authorization::{
+    SetEntriesInAclW, EXPLICIT_ACCESS_W, SET_ACCESS, TRUSTEE_IS_GROUP, TRUSTEE_IS_SID, TRUSTEE_W,
+};
 use windows::Win32::Security::{
-    DuplicateTokenEx, SetTokenInformation, SecurityIdentification, TokenPrimary, TokenSessionId,
-    TOKEN_ACCESS_MASK,
+    AdjustTokenPrivileges, AllocateAndInitializeSid, DuplicateTokenEx, FreeSid,
+    InitializeSecurityDescriptor, LookupPrivilegeValueW, SecurityIdentification,
+    SetSecurityDescriptorDacl, SetTokenInformation, TokenPrimary, TokenSessionId, ACL,
+    PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SECURITY_NT_AUTHORITY,
+    SE_PRIVILEGE_ENABLED, SE_TAKE_OWNERSHIP_NAME, TOKEN_ACCESS_MASK, TOKEN_PRIVILEGES,
 };
 use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-    TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
-use windows::Win32::System::Environment::{
-    CreateEnvironmentBlock, DestroyEnvironmentBlock,
-};
-use windows::Win32::System::RemoteDesktop::{
-    ProcessIdToSessionId, WTSGetActiveConsoleSessionId,
-};
+use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
+use windows::Win32::System::RemoteDesktop::{ProcessIdToSessionId, WTSGetActiveConsoleSessionId};
 use windows::Win32::System::Threading::{
     CreateProcessAsUserW, GetExitCodeProcess, OpenProcess, OpenProcessToken, TerminateProcess,
     WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
@@ -74,31 +77,31 @@ fn run_service_core() -> Result<(), String> {
     RESTART_REQUESTED.store(false, Ordering::SeqCst);
     install::log_line("WarmupVkSvc starting (launcher branch)");
 
-    let status_handle = service_control_handler::register(SERVICE_NAME, move |event| {
-        match event {
-            ServiceControl::Stop | ServiceControl::Shutdown => {
-                install::log_line("service stop requested");
-                crate::gamepad::request_stop();
-                STOP_REQUESTED.store(true, Ordering::SeqCst);
-                terminate_child();
-                ServiceControlHandlerResult::NoError
-            }
-            // Win+L lock/unlock must not kill the worker — LockApp uses the input desktop (often Default).
-            ServiceControl::SessionChange(change)
-                if matches!(
-                    change.reason,
-                    SessionChangeReason::ConsoleConnect
-                        | SessionChangeReason::SessionLogon
-                        | SessionChangeReason::SessionLogoff
-                ) =>
-            {
-                install::log_line(&format!("session change {:?}; relaunch requested", change.reason));
-                RESTART_REQUESTED.store(true, Ordering::SeqCst);
-                ServiceControlHandlerResult::NoError
-            }
-            ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
-            _ => ServiceControlHandlerResult::NotImplemented,
+    let status_handle = service_control_handler::register(SERVICE_NAME, move |event| match event {
+        ServiceControl::Stop | ServiceControl::Shutdown => {
+            install::log_line("service stop requested");
+            crate::gamepad::request_stop();
+            STOP_REQUESTED.store(true, Ordering::SeqCst);
+            terminate_child();
+            ServiceControlHandlerResult::NoError
         }
+        ServiceControl::SessionChange(change)
+            if matches!(
+                change.reason,
+                SessionChangeReason::ConsoleConnect
+                    | SessionChangeReason::SessionLogon
+                    | SessionChangeReason::SessionLogoff
+            ) =>
+        {
+            install::log_line(&format!(
+                "session change {:?}; relaunch requested",
+                change.reason
+            ));
+            RESTART_REQUESTED.store(true, Ordering::SeqCst);
+            ServiceControlHandlerResult::NoError
+        }
+        ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+        _ => ServiceControlHandlerResult::NotImplemented,
     })
     .map_err(|e| format!("register service handler: {e}"))?;
 
@@ -185,15 +188,17 @@ fn launcher_loop() -> Result<(), String> {
             if wait == WAIT_TIMEOUT {
                 continue;
             }
-            CHILD_PROCESS.compare_exchange(raw, 0, Ordering::SeqCst, Ordering::SeqCst).ok();
-            unsafe {
-                let _ = CloseHandle(child.handle);
-            }
+            CHILD_PROCESS
+                .compare_exchange(raw, 0, Ordering::SeqCst, Ordering::SeqCst)
+                .ok();
             if wait == WAIT_OBJECT_0 {
                 let code = worker_exit_code(child.handle);
                 install::log_line(&format!("service worker exited code={code}; relaunching"));
             } else {
                 install::log_line(&format!("service worker wait returned {}", wait.0));
+            }
+            unsafe {
+                let _ = CloseHandle(child.handle);
             }
             std::thread::sleep(Duration::from_secs(LAUNCH_RETRY_SECS));
             break;
@@ -245,16 +250,77 @@ unsafe fn duplicate_primary_token_for_session(
     OpenProcessToken(process, TOKEN_ACCESS_MASK(0x201eb), &mut token)
         .map_err(|e| format!("OpenProcessToken(winlogon): {e}"))?;
 
+    let mut admin_sid = PSID::default();
+    AllocateAndInitializeSid(
+        &SECURITY_NT_AUTHORITY,
+        2,
+        32,
+        544,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        &mut admin_sid,
+    )
+    .map_err(|e| {
+        let _ = CloseHandle(token);
+        format!("AllocateAndInitializeSid(Admins): {e}")
+    })?;
+
+    let mut access = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: 0xf003f,
+        grfAccessMode: SET_ACCESS,
+        Trustee: TRUSTEE_W {
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_GROUP,
+            ptstrName: PWSTR(admin_sid.0.cast()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut acl: *mut ACL = std::ptr::null_mut();
+    let acl_err = SetEntriesInAclW(Some(std::slice::from_mut(&mut access)), None, &mut acl);
+    if acl_err.0 != 0 {
+        let _ = FreeSid(admin_sid);
+        let _ = CloseHandle(token);
+        return Err(format!("SetEntriesInAclW: {}", acl_err.0));
+    }
+
+    let mut descriptor = SECURITY_DESCRIPTOR::default();
+    let descriptor_ptr = PSECURITY_DESCRIPTOR((&mut descriptor as *mut SECURITY_DESCRIPTOR).cast());
+    if let Err(e) = InitializeSecurityDescriptor(descriptor_ptr, 1) {
+        let _ = LocalFree(HLOCAL(acl.cast()));
+        let _ = FreeSid(admin_sid);
+        let _ = CloseHandle(token);
+        return Err(format!("InitializeSecurityDescriptor: {e}"));
+    }
+    if let Err(e) = SetSecurityDescriptorDacl(descriptor_ptr, true, Some(acl), false) {
+        let _ = LocalFree(HLOCAL(acl.cast()));
+        let _ = FreeSid(admin_sid);
+        let _ = CloseHandle(token);
+        return Err(format!("SetSecurityDescriptorDacl: {e}"));
+    }
+
+    let attrs = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: (&mut descriptor as *mut SECURITY_DESCRIPTOR).cast(),
+        bInheritHandle: BOOL(1),
+    };
+
     let mut primary = HANDLE::default();
     let dup = DuplicateTokenEx(
         token,
         TOKEN_ACCESS_MASK(0x2000000),
-        None,
+        Some(&attrs),
         SecurityIdentification,
         TokenPrimary,
         &mut primary,
     );
     let _ = CloseHandle(token);
+    let _ = LocalFree(HLOCAL(acl.cast()));
+    let _ = FreeSid(admin_sid);
     dup.map_err(|e| format!("DuplicateTokenEx: {e}"))?;
 
     SetTokenInformation(
@@ -267,7 +333,33 @@ unsafe fn duplicate_primary_token_for_session(
         let _ = CloseHandle(primary);
         format!("SetTokenInformation(TokenSessionId): {e}")
     })?;
+    if let Err(e) = enable_take_ownership(primary) {
+        let _ = CloseHandle(primary);
+        return Err(e);
+    }
     Ok(primary)
+}
+
+unsafe fn enable_take_ownership(token: HANDLE) -> Result<(), String> {
+    let mut luid = Default::default();
+    LookupPrivilegeValueW(None, SE_TAKE_OWNERSHIP_NAME, &mut luid)
+        .map_err(|e| format!("LookupPrivilegeValueW(SeTakeOwnershipPrivilege): {e}"))?;
+    let privileges = TOKEN_PRIVILEGES {
+        PrivilegeCount: 1,
+        Privileges: [windows::Win32::Security::LUID_AND_ATTRIBUTES {
+            Luid: luid,
+            Attributes: SE_PRIVILEGE_ENABLED,
+        }],
+    };
+    AdjustTokenPrivileges(
+        token,
+        false,
+        Some(&privileges),
+        std::mem::size_of::<TOKEN_PRIVILEGES>() as u32,
+        None,
+        None,
+    )
+    .map_err(|e| format!("AdjustTokenPrivileges(SeTakeOwnershipPrivilege): {e}"))
 }
 
 unsafe fn create_worker_process(token: HANDLE) -> Result<WorkerProcess, String> {
@@ -359,7 +451,10 @@ fn nul_terminated_utf16(buf: &[u16]) -> String {
 }
 
 fn wide(s: &str) -> Vec<u16> {
-    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 fn wide_os(s: &OsStr) -> Vec<u16> {

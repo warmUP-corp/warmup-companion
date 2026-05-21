@@ -10,6 +10,9 @@ pub mod desktop {
     pub fn current_desktop_name() -> Option<String> {
         None
     }
+    pub fn input_desktop_name() -> Result<String, String> {
+        Err("real desktop attach requires Windows".into())
+    }
 }
 
 pub mod xbox_vk {
@@ -31,5 +34,5 @@ pub mod xbox_vk {
     }
 }
 
-pub use desktop::{attach_input, attach_named, current_desktop_name};
+pub use desktop::{attach_input, attach_named, current_desktop_name, input_desktop_name};
 pub use xbox_vk::{VkAttach, VkSession};

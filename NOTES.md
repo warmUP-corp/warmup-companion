@@ -58,6 +58,60 @@ Maps **Y / Triangle** (SDL north face) → mask `0x200`. Controller DB: `Full-Sc
 - Main/gamepad thread no longer blocks on desktop attach; UAC path uses `VkAttach::Input` on the UI thread.
 - If attach fails, the window still opens on the current desktop (logged).
 
+## Joyxoff lock-screen model
+
+Decomp source of truth:
+
+- Service starts worker with a winlogon token and `lpDesktop = "winsta0\\default"`.
+- Worker can start on the default desktop. Only UI/VK window threads attach to the input desktop before `CreateWindowExW`.
+- Poll thread must not desktop-hop. No `SetThreadDesktop` from cursor, XInput poll, or VK navigation key-send paths.
+- Service cursor is disabled (`PcCursor::new_service()` has no `Enigo`) so stick/click paths cannot force desktop attach.
+- XInput loads Joyxoff-style: `xinput1_4.dll` ordinal `100`, fallback named `XInputGetState`, fallback `xinput1_3.dll`.
+
+Expected loader log:
+
+```text
+XInput loader: xinput1_4.dll ordinal 100/GetState
+```
+
+Expected lock-screen watch log:
+
+```text
+desktop watch: worker thread on Default; input desktop Winlogon
+```
+
+Bad old pattern:
+
+```text
+input desktop sync: thread on Winlogon
+input desktop sync: thread on Default
+```
+
+That meant poll/cursor/input path was calling `SetThreadDesktop`, destabilizing lock-screen behavior.
+
+## Winlogon debug overlay
+
+Temporary diagnostic window: `WarmupDebugOverlayWindow`.
+
+- Enabled by default in service builds.
+- Auto-opens when `input_desktop_name() == "Winlogon"`.
+- Runs on its own UI thread; that thread calls `OpenInputDesktop + SetThreadDesktop` before creating the window.
+- Draws current thread desktop, input desktop, PID, XInput loader, last raw button mask/time, last VK action, and VK visibility.
+- Hides/destroys when input desktop returns `Default`.
+
+Success log:
+
+```text
+debug ui: shown on Winlogon
+debug ui: UI thread desktop: Winlogon
+desktop watch: worker thread on Default; input desktop Winlogon
+```
+
+Failure split:
+
+- Overlay visible, but no `XInput buttons ... [Y]`: UI/desktop path fixed; remaining bug is locked-screen controller backend.
+- Overlay not visible: desktop/window creation path still wrong. Check `debug ui: desktop attach failed` or `debug ui: create window failed`.
+
 ```powershell
 cargo run --features gamepad -- --gamepad
 ```

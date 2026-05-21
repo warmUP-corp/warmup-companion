@@ -8,8 +8,8 @@ use std::cell::RefCell;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::StationsAndDesktops::{
-    CloseDesktop, CloseWindowStation, GetThreadDesktop, GetUserObjectInformationW,
-    OpenDesktopW, OpenInputDesktop, OpenWindowStationW, SetProcessWindowStation, SetThreadDesktop,
+    CloseDesktop, CloseWindowStation, GetThreadDesktop, GetUserObjectInformationW, OpenDesktopW,
+    OpenInputDesktop, OpenWindowStationW, SetProcessWindowStation, SetThreadDesktop,
     DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, HDESK, HWINSTA, UOI_NAME,
     USER_OBJECT_INFORMATION_INDEX,
 };
@@ -38,10 +38,8 @@ unsafe fn open_station() -> Result<HWINSTA, String> {
 }
 
 unsafe fn apply_guard(guard: DesktopGuard) -> Result<(), String> {
-    SetProcessWindowStation(guard.station)
-        .map_err(|e| format!("SetProcessWindowStation: {e}"))?;
-    SetThreadDesktop(guard.desktop)
-        .map_err(|e| format!("SetThreadDesktop: {e}"))?;
+    SetProcessWindowStation(guard.station).map_err(|e| format!("SetProcessWindowStation: {e}"))?;
+    SetThreadDesktop(guard.desktop).map_err(|e| format!("SetThreadDesktop: {e}"))?;
     ACTIVE.with(|slot| {
         if let Some(old) = slot.borrow_mut().take() {
             let _ = CloseDesktop(old.desktop);
@@ -90,25 +88,43 @@ pub fn attach_input() -> Result<(), String> {
     }
 }
 
-/// Follow the interactive input desktop (lock screen, sign-in, UAC, or user default).
-pub fn sync_input_desktop() -> Result<(), String> {
-    attach_input()
+pub fn input_desktop_name() -> Result<String, String> {
+    unsafe {
+        let station = open_station()?;
+        let h_desktop = OpenInputDesktop(
+            DESKTOP_CONTROL_FLAGS(0),
+            false,
+            DESKTOP_ACCESS_FLAGS(DESKTOP_ALL),
+        )
+        .map_err(|e| {
+            let _ = CloseWindowStation(station);
+            format!("OpenInputDesktop: {e}")
+        })?;
+        let name = desktop_name(h_desktop).unwrap_or_else(|| "?".into());
+        let _ = CloseDesktop(h_desktop);
+        let _ = CloseWindowStation(station);
+        Ok(name)
+    }
 }
 
 pub fn current_desktop_name() -> Option<String> {
     unsafe {
         let h = GetThreadDesktop(GetCurrentThreadId()).ok()?;
-        let mut buf = [0u16; 256];
-        let mut needed = 0u32;
-        GetUserObjectInformationW(
-            HANDLE(h.0),
-            USER_OBJECT_INFORMATION_INDEX(UOI_NAME.0 as i32),
-            Some(buf.as_mut_ptr().cast()),
-            (buf.len() * 2) as u32,
-            Some(&mut needed),
-        )
-        .ok()?;
-        let len = (needed as usize / 2).min(buf.len()).saturating_sub(1);
-        Some(String::from_utf16_lossy(&buf[..len]))
+        desktop_name(h)
     }
+}
+
+unsafe fn desktop_name(h: HDESK) -> Option<String> {
+    let mut buf = [0u16; 256];
+    let mut needed = 0u32;
+    GetUserObjectInformationW(
+        HANDLE(h.0),
+        USER_OBJECT_INFORMATION_INDEX(UOI_NAME.0 as i32),
+        Some(buf.as_mut_ptr().cast()),
+        (buf.len() * 2) as u32,
+        Some(&mut needed),
+    )
+    .ok()?;
+    let len = (needed as usize / 2).min(buf.len()).saturating_sub(1);
+    Some(String::from_utf16_lossy(&buf[..len]))
 }

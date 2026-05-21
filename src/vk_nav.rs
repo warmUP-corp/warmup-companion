@@ -240,15 +240,7 @@ fn send_key(key: KeyCell) {
     }
 }
 
-fn sync_service_input_desktop() {
-    #[cfg(windows)]
-    if std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0") {
-        let _ = crate::win::sync_input_desktop();
-    }
-}
-
 fn send_vk(vk: VIRTUAL_KEY) {
-    sync_service_input_desktop();
     unsafe {
         let down = INPUT {
             r#type: INPUT_KEYBOARD,
@@ -279,7 +271,6 @@ fn send_vk(vk: VIRTUAL_KEY) {
 }
 
 fn send_unicode(units: &[u16]) {
-    sync_service_input_desktop();
     for &unit in units {
         unsafe {
             let down = INPUT {

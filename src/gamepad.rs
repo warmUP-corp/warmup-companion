@@ -247,7 +247,10 @@ impl GamepadPoll {
         #[cfg(windows)]
         {
             let name = crate::win::current_desktop_name().unwrap_or_else(|| "?".into());
-            service_log(&format!("input desktop sync: thread on {name}"));
+            let input = crate::win::input_desktop_name().unwrap_or_else(|e| format!("? ({e})"));
+            service_log(&format!(
+                "desktop watch: worker thread on {name}; input desktop {input}"
+            ));
         }
     }
 }
@@ -290,7 +293,7 @@ fn interruptible_sleep(duration: Duration) {
     }
 }
 
-pub fn run_watch_loop<V, A>(mut vk_open: V, mut on_action: A) -> Result<(), String>
+pub fn run_watch_loop<V, A>(vk_open: V, on_action: A) -> Result<(), String>
 where
     V: FnMut() -> bool,
     A: FnMut(VkLoopAction),
@@ -380,9 +383,7 @@ where
 
         #[cfg(windows)]
         if service_mode {
-            if let Err(e) = crate::win::sync_input_desktop() {
-                service_log(&format!("sync_input_desktop failed: {e}"));
-            }
+            crate::win::debug_overlay::tick();
             poll.log_desktop_sync_if_due(true);
         }
 

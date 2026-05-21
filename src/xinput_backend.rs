@@ -2,8 +2,11 @@
 
 use std::time::{Duration, Instant};
 
+use windows::core::PCSTR;
+use windows::Win32::Foundation::HMODULE;
+use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 use windows::Win32::UI::Input::XboxController::{
-    XInputGetState, XINPUT_GAMEPAD, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_DPAD_DOWN,
+    XINPUT_GAMEPAD, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_DPAD_DOWN,
     XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT, XINPUT_GAMEPAD_DPAD_UP,
     XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_RIGHT_SHOULDER, XINPUT_GAMEPAD_X,
     XINPUT_GAMEPAD_Y, XINPUT_STATE,
@@ -18,6 +21,8 @@ const ERROR_DEVICE_NOT_CONNECTED: u32 = 1167;
 
 const LEFT_DEADZONE: i16 = 7849;
 const RIGHT_DEADZONE: i16 = 8689;
+
+type XInputGetStateFn = unsafe extern "system" fn(u32, *mut XINPUT_STATE) -> u32;
 
 fn button_masks() -> [(&'static str, u16); 10] {
     [
@@ -35,6 +40,8 @@ fn button_masks() -> [(&'static str, u16); 10] {
 }
 
 pub struct XInputBackend {
+    _module: Option<HMODULE>,
+    get_state: Option<XInputGetStateFn>,
     active_slot: Option<u32>,
     prev_buttons: [u16; 4],
     slot_connected: [bool; 4],
@@ -42,11 +49,15 @@ pub struct XInputBackend {
     axes: (f32, f32, f32, f32),
     last_status_log: Instant,
     last_no_pad_log: Instant,
+    last_raw_log: Instant,
 }
 
 impl XInputBackend {
     pub fn new() -> Self {
+        let (module, get_state) = load_xinput_get_state();
         Self {
+            _module: module,
+            get_state,
             active_slot: None,
             prev_buttons: [0; 4],
             slot_connected: [false; 4],
@@ -54,6 +65,14 @@ impl XInputBackend {
             axes: (0.0, 0.0, 0.0, 0.0),
             last_status_log: Instant::now() - Duration::from_secs(60),
             last_no_pad_log: Instant::now() - Duration::from_secs(60),
+            last_raw_log: Instant::now() - Duration::from_secs(60),
+        }
+    }
+
+    fn get_state(&self, slot: u32, state: &mut XINPUT_STATE) -> u32 {
+        match self.get_state {
+            Some(f) => unsafe { f(slot, state) },
+            None => ERROR_DEVICE_NOT_CONNECTED,
         }
     }
 
@@ -127,6 +146,22 @@ impl XInputBackend {
         }
         out
     }
+
+    fn log_button_change(&mut self, slot: u32, prev: u16, cur: u16) {
+        if prev == cur {
+            return;
+        }
+        let names: Vec<&str> = button_masks()
+            .iter()
+            .filter_map(|(name, mask)| if cur & *mask != 0 { Some(*name) } else { None })
+            .collect();
+        service_log(&format!(
+            "XInput buttons slot {slot}: 0x{prev:04x} -> 0x{cur:04x} [{}]",
+            names.join("+")
+        ));
+        crate::debug_state::record_xinput_buttons(cur, &names.join("+"));
+        self.last_raw_log = Instant::now();
+    }
 }
 
 impl GamepadBackend for XInputBackend {
@@ -137,7 +172,7 @@ impl GamepadBackend for XInputBackend {
 
         for slot in 0..SLOTS {
             let mut state = XINPUT_STATE::default();
-            let err = unsafe { XInputGetState(slot, &mut state) };
+            let err = self.get_state(slot, &mut state);
             if err == ERROR_SUCCESS {
                 connected[slot as usize] = true;
                 states[slot as usize] = Some(state.Gamepad);
@@ -159,6 +194,7 @@ impl GamepadBackend for XInputBackend {
         let prev = self.prev_buttons[idx];
         let cur = pad.wButtons.0;
         self.prev_buttons[idx] = cur;
+        self.log_button_change(slot, prev, cur);
         self.pending = Self::edges(prev, cur);
         self.axes = (
             Self::norm_thumb(pad.sThumbLX, LEFT_DEADZONE),
@@ -183,6 +219,32 @@ impl GamepadBackend for XInputBackend {
             None => "none".to_string(),
         }
     }
+}
+
+fn load_xinput_get_state() -> (Option<HMODULE>, Option<XInputGetStateFn>) {
+    unsafe {
+        for (name, dll) in [
+            ("xinput1_4.dll", b"xinput1_4.dll\0".as_ptr()),
+            ("xinput1_3.dll", b"xinput1_3.dll\0".as_ptr()),
+        ] {
+            let Ok(module) = LoadLibraryA(PCSTR(dll)) else {
+                continue;
+            };
+            let proc = GetProcAddress(module, PCSTR(100usize as *const u8))
+                .or_else(|| GetProcAddress(module, PCSTR(b"XInputGetState\0".as_ptr())));
+            let Some(proc) = proc else {
+                continue;
+            };
+            let get_state: XInputGetStateFn = std::mem::transmute(proc);
+            let label = format!("{name} ordinal 100/GetState");
+            crate::debug_state::set_xinput_loader(label.clone());
+            service_log(&format!("XInput loader: {label}"));
+            return (Some(module), Some(get_state));
+        }
+    }
+    crate::debug_state::set_xinput_loader("failed");
+    service_log("XInput loader: failed");
+    (None, None)
 }
 
 fn service_log(msg: &str) {

@@ -6,6 +6,8 @@ mod install;
 mod service;
 
 #[cfg(windows)]
+mod debug_state;
+#[cfg(windows)]
 mod vk_nav;
 #[cfg(windows)]
 mod win;
@@ -14,9 +16,9 @@ mod win;
 mod win;
 
 #[cfg(feature = "gamepad")]
-mod gamepad_backend;
-#[cfg(feature = "gamepad")]
 mod gamepad;
+#[cfg(feature = "gamepad")]
+mod gamepad_backend;
 #[cfg(feature = "gamepad")]
 mod pc_cursor;
 #[cfg(all(windows, feature = "gamepad"))]
@@ -131,7 +133,9 @@ impl App {
         self.boot_mode = false;
         self.service_started = false;
         self.attach_named(Desktop::Default);
-        self.log(&format!("normal start: {FN_ATTACH_NAMED_DESKTOP}(\"default\")"));
+        self.log(&format!(
+            "normal start: {FN_ATTACH_NAMED_DESKTOP}(\"default\")"
+        ));
     }
 
     fn start_boot(&mut self) {
@@ -159,19 +163,11 @@ impl App {
         self.foreground = Foreground::LogonUi;
         self.input_desktop = Desktop::Winlogon;
         if self.use_real_win32 {
-            match win::attach_input() {
-                Ok(()) => {
-                    let cur = win::current_desktop_name().unwrap_or_else(|| "?".into());
-                    self.attached_desktop = if cur.eq_ignore_ascii_case("winlogon") {
-                        Desktop::Winlogon
-                    } else {
-                        Desktop::Default
-                    };
-                    self.input_desktop = self.attached_desktop;
-                    self.service_log(&format!("worker input desktop: {cur}"));
-                }
-                Err(e) => self.service_log(&format!("worker attach_input failed: {e}")),
-            }
+            let cur = win::current_desktop_name().unwrap_or_else(|| "?".into());
+            let input = win::input_desktop_name().unwrap_or_else(|e| format!("? ({e})"));
+            self.service_log(&format!(
+                "worker thread desktop: {cur}; input desktop: {input}"
+            ));
         }
         self.log("service: boot path (input desktop follows lock/logon/UAC)");
     }
@@ -195,10 +191,14 @@ impl App {
             match win::attach_named(name) {
                 Ok(()) => {
                     if let Some(cur) = win::current_desktop_name() {
-                        self.log(&format!("{FN_ATTACH_NAMED_DESKTOP}(\"{name}\") → thread on {cur}"));
+                        self.log(&format!(
+                            "{FN_ATTACH_NAMED_DESKTOP}(\"{name}\") → thread on {cur}"
+                        ));
                     }
                 }
-                Err(e) => self.log(&format!("{FN_ATTACH_NAMED_DESKTOP}(\"{name}\") failed: {e}")),
+                Err(e) => self.log(&format!(
+                    "{FN_ATTACH_NAMED_DESKTOP}(\"{name}\") failed: {e}"
+                )),
             }
         }
         self.attached_desktop = desktop;
@@ -219,9 +219,7 @@ impl App {
                 Ok(()) => {
                     let cur = win::current_desktop_name().unwrap_or_else(|| "input".into());
                     self.attached_desktop = self.input_desktop;
-                    self.log(&format!(
-                        "{FN_ATTACH_INPUT_DESKTOP}: attached to {cur}"
-                    ));
+                    self.log(&format!("{FN_ATTACH_INPUT_DESKTOP}: attached to {cur}"));
                     return true;
                 }
                 Err(e) => {
@@ -282,6 +280,8 @@ impl App {
         }
         self.last_vk_toggle = Some(now);
         self.service_log("Y tap: toggle VK");
+        #[cfg(windows)]
+        crate::debug_state::record_action("Y tap: toggle VK");
 
         self.run_slot7_binding();
         self.dispatch_vk_toggle();
@@ -344,8 +344,12 @@ impl App {
             let kind = session.describe();
             session.close();
             self.log(&format!("VK closed ({kind})"));
+            #[cfg(windows)]
+            crate::debug_state::record_action(format!("VK closed ({kind})"));
         } else {
             self.log(&format!("{G_VK_OPEN_LATCH} cleared -> VK closes"));
+            #[cfg(windows)]
+            crate::debug_state::record_action("VK close requested");
         }
     }
 
@@ -370,12 +374,16 @@ impl App {
                     let kind = session.describe();
                     self.vk_open_latch = true;
                     self.log(&format!("VK shown: {kind}"));
+                    #[cfg(windows)]
+                    crate::debug_state::record_action(format!("VK shown: {kind}"));
                     self.vk_session = Some(session);
                 }
                 Err(e) => {
                     self.action_latch = false;
                     self.modal_block_bit_4 = false;
                     self.log(&format!("VK failed: {e}"));
+                    #[cfg(windows)]
+                    crate::debug_state::record_action(format!("VK failed: {e}"));
                     #[cfg(windows)]
                     if std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0") {
                         install::log_line(&format!("VK failed: {e}"));
@@ -443,9 +451,18 @@ impl App {
             "  config +0xd9 winlogon      : {}",
             self.config_winlogon_0xd9
         ));
-        v.push(format!("  attached desktop           : {}", self.attached_desktop));
-        v.push(format!("  input desktop              : {}", self.input_desktop));
-        v.push(format!("  foreground                 : {}", self.foreground));
+        v.push(format!(
+            "  attached desktop           : {}",
+            self.attached_desktop
+        ));
+        v.push(format!(
+            "  input desktop              : {}",
+            self.input_desktop
+        ));
+        v.push(format!(
+            "  foreground                 : {}",
+            self.foreground
+        ));
         v.push(format!(
             "  {G_FULLSCREEN_FG_FLAG:28} : {}",
             self.fullscreen_profile_flag
@@ -467,7 +484,10 @@ impl App {
             "  slot7 type/subtype         : {}/{}",
             self.slot7_action_type, self.slot7_subtype
         ));
-        v.push(format!("  queued action              : {}", self.queued_action));
+        v.push(format!(
+            "  queued action              : {}",
+            self.queued_action
+        ));
         v.push(format!(
             "  Xbox window                : {}",
             match self.xbox_window_desktop {
@@ -507,7 +527,7 @@ impl App {
 mod repl_scroll {
     use std::cell::{Cell, RefCell};
 
-    use super::{App, io, Write};
+    use super::{io, App, Write};
 
     thread_local! {
         static ENABLED: Cell<bool> = Cell::new(false);
@@ -563,7 +583,10 @@ mod repl_scroll {
             print!("\x1b[{up}A");
         }
 
-        let max = prev.as_ref().map_or(0, |p: &Vec<String>| p.len()).max(new.len());
+        let max = prev
+            .as_ref()
+            .map_or(0, |p: &Vec<String>| p.len())
+            .max(new.len());
         for i in 0..max {
             print!("\r");
             let old = prev.as_ref().and_then(|p: &Vec<String>| p.get(i));
@@ -662,16 +685,12 @@ fn main() {
             "spiral on" => {
                 app.spiral_bit_9 = true;
                 repl_scroll::note_line();
-                println!(
-                    "> {G_APP_FEATURE_FLAGS} bit 9: {FN_EXECUTE_QUEUED_ACTION} use_spiral=1"
-                );
+                println!("> {G_APP_FEATURE_FLAGS} bit 9: {FN_EXECUTE_QUEUED_ACTION} use_spiral=1");
             }
             "spiral off" => {
                 app.spiral_bit_9 = false;
                 repl_scroll::note_line();
-                println!(
-                    "> bit 9 clear: {FN_EXECUTE_QUEUED_ACTION} use_spiral=0 -> Xbox"
-                );
+                println!("> bit 9 clear: {FN_EXECUTE_QUEUED_ACTION} use_spiral=0 -> Xbox");
             }
             "block on" => {
                 app.modal_block_bit_4 = true;
@@ -808,7 +827,10 @@ fn run_gamepad_mode() {
         app.start_boot();
         println!("> --boot: service path + {G_BOOT_SERVICE_MODE}");
     }
-    if args.iter().any(|a| a == "--cfg-winlogon" || a == "--winlogon") {
+    if args
+        .iter()
+        .any(|a| a == "--cfg-winlogon" || a == "--winlogon")
+    {
         app.config_winlogon_0xd9 = true;
         println!("> --cfg-winlogon: config +0xd9 set");
         if app.boot_mode {
@@ -852,9 +874,7 @@ pub(crate) fn run_boot_gamepad_loop(
                 {
                     if app.vk_session.is_some() {
                         let vis = win::is_vk_visible();
-                        install::log_line(&format!(
-                            "VK opened (window visible={vis})"
-                        ));
+                        install::log_line(&format!("VK opened (window visible={vis})"));
                     } else {
                         install::log_line("VK closed");
                     }
@@ -888,11 +908,7 @@ fn help_screen_rows(help: &str) -> u32 {
     let mut rows = 0u32;
     for line in help.split('\n') {
         let w = line.chars().count() as u32;
-        rows = rows.saturating_add(if w == 0 {
-            1
-        } else {
-            (w + cols - 1) / cols
-        });
+        rows = rows.saturating_add(if w == 0 { 1 } else { (w + cols - 1) / cols });
     }
     // println! adds one '\n' after HELP → cursor sits on following row
     rows.saturating_add(1)

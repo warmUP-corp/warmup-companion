@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/jonas/.claude/**)",
+      "Read(//c/Users/jonas/.claude/plugins/**)"
+    ]
+  }
+}

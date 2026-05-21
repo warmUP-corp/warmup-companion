@@ -17,13 +17,6 @@ pub struct PcCursor {
     scroll_remainder_y: f32,
 }
 
-fn sync_service_input_desktop() {
-    #[cfg(windows)]
-    if std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0") {
-        let _ = crate::win::sync_input_desktop();
-    }
-}
-
 impl PcCursor {
     pub fn new() -> Result<Self, String> {
         let enigo =
@@ -33,8 +26,7 @@ impl PcCursor {
 
     /// Session-0 service: skip mouse (enigo often fails without interactive desktop).
     pub fn new_service() -> Self {
-        let enigo = Enigo::new(&Settings::default()).ok();
-        Self::with_enigo(enigo)
+        Self::with_enigo(None)
     }
 
     fn with_enigo(enigo: Option<Enigo>) -> Self {
@@ -48,7 +40,6 @@ impl PcCursor {
     }
 
     pub fn move_stick(&mut self, stick_x: f32, stick_y: f32, dt_secs: f32) {
-        sync_service_input_desktop();
         let (dx, dy) = stick_delta(stick_x, stick_y, SENSITIVITY, dt_secs);
         if dx == 0.0 && dy == 0.0 {
             self.remainder_x = 0.0;
@@ -69,7 +60,6 @@ impl PcCursor {
     }
 
     pub fn scroll_stick(&mut self, stick_x: f32, stick_y: f32, dt_secs: f32) {
-        sync_service_input_desktop();
         let (sx, sy) = scroll_delta(stick_x, stick_y, dt_secs);
         if sx == 0.0 && sy == 0.0 {
             self.scroll_remainder_x = 0.0;
@@ -93,7 +83,6 @@ impl PcCursor {
     }
 
     pub fn left_click(&mut self) {
-        sync_service_input_desktop();
         if let Some(enigo) = self.enigo.as_mut() {
             let _ = enigo.button(enigo::Button::Left, Direction::Click);
         }
