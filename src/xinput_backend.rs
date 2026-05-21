@@ -1,15 +1,37 @@
 //! XInput polling for Session-0 service / secure desktop (sign-in, UAC).
+//!
+//! Joyxoff insight: XInputGetState returns neutral (zeroed) state to processes
+//! that have no foreground-eligible window on the input desktop. Mitigation: the
+//! secure poll thread runs a real Win32 UI message pump and owns a tiny anchor
+//! window on the Winlogon desktop. The XInputGetState call then happens on the
+//! same thread that owns a window on the input desktop, matching Joyxoff's
+//! `SetTimer(NULL, ..., FUN_0044e890)` pattern on a `JoyXoffMWindow` thread.
 
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use windows::core::PCSTR;
-use windows::Win32::Foundation::HMODULE;
-use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
+use windows::core::{w, PCSTR};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Security::{
+    DuplicateTokenEx, ImpersonateLoggedOnUser, RevertToSelf, SecurityImpersonation,
+    TokenImpersonation, TOKEN_ACCESS_MASK,
+};
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryA};
+use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::XboxController::{
     XINPUT_GAMEPAD, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_DPAD_DOWN,
     XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT, XINPUT_GAMEPAD_DPAD_UP,
     XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_RIGHT_SHOULDER, XINPUT_GAMEPAD_X,
     XINPUT_GAMEPAD_Y, XINPUT_STATE,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
+    PostThreadMessageW, RegisterClassW, SetTimer, TranslateMessage, HMENU, MSG, WM_DESTROY,
+    WM_NULL, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::gamepad_backend::ButtonChange;
@@ -18,11 +40,37 @@ use crate::gamepad_backend::GamepadBackend;
 const SLOTS: u32 = 4;
 const ERROR_SUCCESS: u32 = 0;
 const ERROR_DEVICE_NOT_CONNECTED: u32 = 1167;
+const ERROR_EMPTY: u32 = 4306;
 
 const LEFT_DEADZONE: i16 = 7849;
 const RIGHT_DEADZONE: i16 = 8689;
 
 type XInputGetStateFn = unsafe extern "system" fn(u32, *mut XINPUT_STATE) -> u32;
+type XInputGetKeystrokeFn = unsafe extern "system" fn(u32, u32, *mut XInputKeystroke) -> u32;
+
+const XINPUT_KEYSTROKE_KEYDOWN: u16 = 0x0001;
+const XINPUT_KEYSTROKE_KEYUP: u16 = 0x0002;
+
+const VK_PAD_A: u16 = 0x5800;
+const VK_PAD_B: u16 = 0x5801;
+const VK_PAD_X: u16 = 0x5802;
+const VK_PAD_Y: u16 = 0x5803;
+const VK_PAD_LSHOULDER: u16 = 0x5804;
+const VK_PAD_RSHOULDER: u16 = 0x5805;
+const VK_PAD_DPAD_UP: u16 = 0x5810;
+const VK_PAD_DPAD_DOWN: u16 = 0x5811;
+const VK_PAD_DPAD_LEFT: u16 = 0x5812;
+const VK_PAD_DPAD_RIGHT: u16 = 0x5813;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct XInputKeystroke {
+    virtual_key: u16,
+    unicode: u16,
+    flags: u16,
+    user_index: u8,
+    hid_code: u8,
+}
 
 fn button_masks() -> [(&'static str, u16); 10] {
     [
@@ -42,6 +90,8 @@ fn button_masks() -> [(&'static str, u16); 10] {
 pub struct XInputBackend {
     _module: Option<HMODULE>,
     get_state: Option<XInputGetStateFn>,
+    get_keystroke: Option<XInputGetKeystrokeFn>,
+    secure: Option<SecurePollThread>,
     active_slot: Option<u32>,
     prev_buttons: [u16; 4],
     slot_connected: [bool; 4],
@@ -50,14 +100,133 @@ pub struct XInputBackend {
     last_status_log: Instant,
     last_no_pad_log: Instant,
     last_raw_log: Instant,
+    last_secure_check: Instant,
+}
+
+struct SecurePollThread {
+    rx: mpsc::Receiver<SecureMsg>,
+    stop: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+    thread_id: u32,
+}
+
+const ANCHOR_CLASS: windows::core::PCWSTR = w!("WarmupXInputAnchorWindow");
+const POLL_TIMER_ID: usize = 21;
+const POLL_TIMER_MS: u32 = 8;
+
+struct PollState {
+    get_state: XInputGetStateFn,
+    get_keystroke: Option<XInputGetKeystrokeFn>,
+    tx: mpsc::Sender<SecureMsg>,
+    prev_buttons: [u16; 4],
+    active_slot: Option<u32>,
+    connected_prev: [bool; 4],
+    last_status: Instant,
+    last_no_pad: Instant,
+    last_probe_log: Instant,
+    iter_count: u64,
+}
+
+thread_local! {
+    static POLL_STATE: RefCell<Option<PollState>> = const { RefCell::new(None) };
+}
+
+/// Per-thread `ImpersonateLoggedOnUser` guard. Acquires the interactive user
+/// token and impersonates it for the lifetime of this object. `RevertToSelf`
+/// runs in `Drop`. Silent (logged but not fatal) on failure — pre-logon Winlogon
+/// has no interactive user.
+struct ImpersonationGuard {
+    impersonated: bool,
+    user_token: Option<HANDLE>,
+    primary_token: Option<HANDLE>,
+}
+
+impl ImpersonationGuard {
+    fn try_acquire(tx: &mpsc::Sender<SecureMsg>) -> Self {
+        let mut guard = Self {
+            impersonated: false,
+            user_token: None,
+            primary_token: None,
+        };
+        unsafe {
+            let session = WTSGetActiveConsoleSessionId();
+            if session == 0xFFFF_FFFF {
+                let _ = tx.send(SecureMsg::Error(
+                    "impersonate: no active console session".into(),
+                ));
+                return guard;
+            }
+            let mut user_token = HANDLE::default();
+            if WTSQueryUserToken(session, &mut user_token).is_err() {
+                let _ = tx.send(SecureMsg::Error(format!(
+                    "impersonate: WTSQueryUserToken(session={session}) failed (no logged-in user?)"
+                )));
+                return guard;
+            }
+            guard.user_token = Some(user_token);
+
+            let mut primary = HANDLE::default();
+            if let Err(e) = DuplicateTokenEx(
+                user_token,
+                TOKEN_ACCESS_MASK(0xf01ff),
+                None,
+                SecurityImpersonation,
+                TokenImpersonation,
+                &mut primary,
+            ) {
+                let _ = tx.send(SecureMsg::Error(format!("impersonate: DuplicateTokenEx: {e}")));
+                return guard;
+            }
+            guard.primary_token = Some(primary);
+
+            if let Err(e) = ImpersonateLoggedOnUser(primary) {
+                let _ = tx.send(SecureMsg::Error(format!(
+                    "impersonate: ImpersonateLoggedOnUser: {e}"
+                )));
+                return guard;
+            }
+            guard.impersonated = true;
+            let _ = tx.send(SecureMsg::Error(format!(
+                "impersonate: now running as interactive user (session {session})"
+            )));
+        }
+        guard
+    }
+}
+
+impl Drop for ImpersonationGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if self.impersonated {
+                let _ = RevertToSelf();
+            }
+            if let Some(h) = self.primary_token.take() {
+                let _ = CloseHandle(h);
+            }
+            if let Some(h) = self.user_token.take() {
+                let _ = CloseHandle(h);
+            }
+        }
+    }
+}
+
+enum SecureMsg {
+    Ready(String),
+    Slots([bool; 4]),
+    Buttons { slot: u32, prev: u16, cur: u16 },
+    Axes((f32, f32, f32, f32)),
+    NoController,
+    Error(String),
 }
 
 impl XInputBackend {
     pub fn new() -> Self {
-        let (module, get_state) = load_xinput_get_state();
+        let (module, get_state, get_keystroke) = load_xinput_api();
         Self {
             _module: module,
             get_state,
+            get_keystroke,
+            secure: None,
             active_slot: None,
             prev_buttons: [0; 4],
             slot_connected: [false; 4],
@@ -66,6 +235,7 @@ impl XInputBackend {
             last_status_log: Instant::now() - Duration::from_secs(60),
             last_no_pad_log: Instant::now() - Duration::from_secs(60),
             last_raw_log: Instant::now() - Duration::from_secs(60),
+            last_secure_check: Instant::now() - Duration::from_secs(60),
         }
     }
 
@@ -73,6 +243,13 @@ impl XInputBackend {
         match self.get_state {
             Some(f) => unsafe { f(slot, state) },
             None => ERROR_DEVICE_NOT_CONNECTED,
+        }
+    }
+
+    fn get_keystroke(&self, slot: u32, key: &mut XInputKeystroke) -> u32 {
+        match self.get_keystroke {
+            Some(f) => unsafe { f(slot, 0, key) },
+            None => ERROR_EMPTY,
         }
     }
 
@@ -162,11 +339,140 @@ impl XInputBackend {
         crate::debug_state::record_xinput_buttons(cur, &names.join("+"));
         self.last_raw_log = Instant::now();
     }
+
+    fn poll_keystrokes(&mut self, slot: u32) {
+        for _ in 0..16 {
+            let mut key = XInputKeystroke::default();
+            let err = self.get_keystroke(slot, &mut key);
+            if err == ERROR_EMPTY || err == ERROR_DEVICE_NOT_CONNECTED {
+                break;
+            }
+            if err != ERROR_SUCCESS {
+                service_log(&format!("XInputGetKeystroke({slot}) error {err}"));
+                break;
+            }
+            service_log(&format!(
+                "XInput keystroke slot {slot}: vk=0x{:04x} flags=0x{:04x} user={} hid=0x{:02x}",
+                key.virtual_key, key.flags, key.user_index, key.hid_code
+            ));
+            let Some(mask) = key_to_mask(key.virtual_key) else {
+                continue;
+            };
+            let idx = slot as usize;
+            let prev = self.prev_buttons[idx];
+            let mut cur = prev;
+            if key.flags & XINPUT_KEYSTROKE_KEYDOWN != 0 {
+                cur |= mask;
+            }
+            if key.flags & XINPUT_KEYSTROKE_KEYUP != 0 {
+                cur &= !mask;
+            }
+            if prev != cur {
+                self.prev_buttons[idx] = cur;
+                self.log_button_change(slot, prev, cur);
+                self.pending.extend(Self::edges(prev, cur));
+            }
+        }
+    }
+
+    fn sync_secure_helper(&mut self) -> bool {
+        if self.last_secure_check.elapsed() >= Duration::from_millis(250) {
+            self.last_secure_check = Instant::now();
+            let on_winlogon = crate::win::input_desktop_name()
+                .map(|name| name.eq_ignore_ascii_case("Winlogon"))
+                .unwrap_or(false);
+            match (on_winlogon, self.secure.is_some()) {
+                (true, false) => match SecurePollThread::spawn() {
+                    Ok(thread) => {
+                        service_log("XInput secure helper: starting on input desktop");
+                        self.secure = Some(thread);
+                    }
+                    Err(e) => service_log(&format!("XInput secure helper: spawn failed: {e}")),
+                },
+                (false, true) => {
+                    service_log("XInput secure helper: stopping");
+                    self.secure.take();
+                }
+                _ => {}
+            }
+        }
+
+        let Some(secure) = self.secure.as_ref() else {
+            return false;
+        };
+
+        let mut messages = Vec::new();
+        while let Ok(msg) = secure.rx.try_recv() {
+            messages.push(msg);
+        }
+        let got_msg = !messages.is_empty();
+        for msg in messages {
+            match msg {
+                SecureMsg::Ready(desktop) => {
+                    service_log(&format!("XInput secure helper: thread on {desktop}"));
+                }
+                SecureMsg::Slots(connected) => self.log_slots_if_changed(connected),
+                SecureMsg::Buttons { slot, prev, cur } => {
+                    self.log_button_change(slot, prev, cur);
+                    self.pending.extend(Self::edges(prev, cur));
+                }
+                SecureMsg::Axes(axes) => self.axes = axes,
+                SecureMsg::NoController => {
+                    self.axes = (0.0, 0.0, 0.0, 0.0);
+                    self.log_no_controller();
+                }
+                SecureMsg::Error(e) => service_log(&format!("XInput secure helper: {e}")),
+            }
+        }
+        got_msg || self.secure.is_some()
+    }
+}
+
+impl SecurePollThread {
+    fn spawn() -> Result<Self, String> {
+        let (tx, rx) = mpsc::channel();
+        let (tid_tx, tid_rx) = mpsc::sync_channel::<u32>(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let join = thread::Builder::new()
+            .name("warmup-xinput-winlogon".into())
+            .spawn(move || secure_poll_main(tx, worker_stop, tid_tx))
+            .map_err(|e| format!("xinput secure thread: {e}"))?;
+        let thread_id = tid_rx
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|e| format!("xinput secure thread tid: {e}"))?;
+        Ok(Self {
+            rx,
+            stop,
+            join: Some(join),
+            thread_id,
+        })
+    }
+}
+
+impl Drop for SecurePollThread {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        unsafe {
+            // Wake the message pump so it observes `stop` and exits GetMessage.
+            let _ = PostThreadMessageW(self.thread_id, WM_NULL, WPARAM(0), LPARAM(0));
+        }
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
 }
 
 impl GamepadBackend for XInputBackend {
     fn poll(&mut self) -> Result<(), String> {
         self.pending.clear();
+        // Keep the Winlogon-attached helper alive for diagnostics/fallback, but
+        // still poll XInput from the service worker's Default desktop. Joyxoff's
+        // controller loop runs from its normal UI/render thread; attaching the
+        // polling thread to Winlogon can produce packet changes with neutral
+        // buttons on some systems.
+        let _ = self.sync_secure_helper();
+
         let mut connected = [false; 4];
         let mut states: [Option<XINPUT_GAMEPAD>; 4] = [None; 4];
 
@@ -195,7 +501,8 @@ impl GamepadBackend for XInputBackend {
         let cur = pad.wButtons.0;
         self.prev_buttons[idx] = cur;
         self.log_button_change(slot, prev, cur);
-        self.pending = Self::edges(prev, cur);
+        self.pending.extend(Self::edges(prev, cur));
+        self.poll_keystrokes(slot);
         self.axes = (
             Self::norm_thumb(pad.sThumbLX, LEFT_DEADZONE),
             Self::norm_thumb(pad.sThumbLY, LEFT_DEADZONE),
@@ -221,7 +528,27 @@ impl GamepadBackend for XInputBackend {
     }
 }
 
-fn load_xinput_get_state() -> (Option<HMODULE>, Option<XInputGetStateFn>) {
+fn key_to_mask(vk: u16) -> Option<u16> {
+    Some(match vk {
+        VK_PAD_DPAD_UP => XINPUT_GAMEPAD_DPAD_UP.0,
+        VK_PAD_DPAD_DOWN => XINPUT_GAMEPAD_DPAD_DOWN.0,
+        VK_PAD_DPAD_LEFT => XINPUT_GAMEPAD_DPAD_LEFT.0,
+        VK_PAD_DPAD_RIGHT => XINPUT_GAMEPAD_DPAD_RIGHT.0,
+        VK_PAD_A => XINPUT_GAMEPAD_A.0,
+        VK_PAD_B => XINPUT_GAMEPAD_B.0,
+        VK_PAD_X => XINPUT_GAMEPAD_X.0,
+        VK_PAD_Y => XINPUT_GAMEPAD_Y.0,
+        VK_PAD_LSHOULDER => XINPUT_GAMEPAD_LEFT_SHOULDER.0,
+        VK_PAD_RSHOULDER => XINPUT_GAMEPAD_RIGHT_SHOULDER.0,
+        _ => return None,
+    })
+}
+
+fn load_xinput_api() -> (
+    Option<HMODULE>,
+    Option<XInputGetStateFn>,
+    Option<XInputGetKeystrokeFn>,
+) {
     unsafe {
         for (name, dll) in [
             ("xinput1_4.dll", b"xinput1_4.dll\0".as_ptr()),
@@ -236,15 +563,309 @@ fn load_xinput_get_state() -> (Option<HMODULE>, Option<XInputGetStateFn>) {
                 continue;
             };
             let get_state: XInputGetStateFn = std::mem::transmute(proc);
+            let get_keystroke = GetProcAddress(module, PCSTR(b"XInputGetKeystroke\0".as_ptr()))
+                .map(|p| std::mem::transmute::<_, XInputGetKeystrokeFn>(p));
             let label = format!("{name} ordinal 100/GetState");
             crate::debug_state::set_xinput_loader(label.clone());
-            service_log(&format!("XInput loader: {label}"));
-            return (Some(module), Some(get_state));
+            service_log(&format!(
+                "XInput loader: {label}; keystroke={}",
+                get_keystroke.is_some()
+            ));
+            return (Some(module), Some(get_state), get_keystroke);
         }
     }
     crate::debug_state::set_xinput_loader("failed");
     service_log("XInput loader: failed");
-    (None, None)
+    (None, None, None)
+}
+
+fn secure_poll_main(
+    tx: mpsc::Sender<SecureMsg>,
+    stop: Arc<AtomicBool>,
+    tid_tx: mpsc::SyncSender<u32>,
+) {
+    // 1. Attach thread to the Winlogon desktop *before* loading xinput so the
+    //    DLL's process/desktop association is bound to Winlogon from the start.
+    match crate::win::attach_input() {
+        Ok(()) => {
+            let desktop = crate::win::current_desktop_name().unwrap_or_else(|| "?".into());
+            let _ = tx.send(SecureMsg::Ready(desktop));
+        }
+        Err(e) => {
+            let _ = tx.send(SecureMsg::Error(format!("desktop attach failed: {e}")));
+            let _ = tid_tx.send(unsafe { GetCurrentThreadId() });
+            return;
+        }
+    }
+
+    // 1b. Impersonate the interactive user on this poll thread. XInput shim
+    //     returns neutral (zeroed) state for processes whose thread token is
+    //     SYSTEM/winlogon-impersonated when the input desktop is Winlogon. The
+    //     interactive user token has full GameInput/XInput access. Mirrors
+    //     Joyxoff's `FUN_00419ef0` boot-thread pattern (WTSQueryUserToken +
+    //     ImpersonateLoggedOnUser). On pre-logon Winlogon (no logged-in user),
+    //     WTSQueryUserToken fails and we run without impersonation.
+    let _impersonation = ImpersonationGuard::try_acquire(&tx);
+
+    // 2. Load XInput on this Winlogon-attached thread.
+    let (_module, get_state, get_keystroke) = load_xinput_api();
+    let Some(get_state) = get_state else {
+        let _ = tx.send(SecureMsg::Error("loader failed".into()));
+        let _ = tid_tx.send(unsafe { GetCurrentThreadId() });
+        return;
+    };
+
+    // 3. Stash poll state in thread-local so the wndproc can reach it without
+    //    going through a raw pointer in GWLP_USERDATA.
+    POLL_STATE.with(|s| {
+        *s.borrow_mut() = Some(PollState {
+            get_state,
+            get_keystroke,
+            tx: tx.clone(),
+            prev_buttons: [0; 4],
+            active_slot: None,
+            connected_prev: [false; 4],
+            last_status: Instant::now() - Duration::from_secs(60),
+            last_no_pad: Instant::now() - Duration::from_secs(60),
+            last_probe_log: Instant::now() - Duration::from_secs(60),
+            iter_count: 0,
+        });
+    });
+
+    // 4. Register class + create the anchor window on the Winlogon desktop.
+    //    This is the key bypass: XInput delivers real packets to processes that
+    //    own a window on the input desktop, and the poll runs on this thread.
+    let hwnd = unsafe {
+        let instance = match GetModuleHandleW(None) {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = tx.send(SecureMsg::Error(format!("GetModuleHandleW: {e}")));
+                let _ = tid_tx.send(GetCurrentThreadId());
+                POLL_STATE.with(|s| *s.borrow_mut() = None);
+                return;
+            }
+        };
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(anchor_wndproc),
+            hInstance: instance.into(),
+            lpszClassName: ANCHOR_CLASS,
+            ..Default::default()
+        };
+        // RegisterClassW returns 0 if class already exists; ignore.
+        RegisterClassW(&wc);
+        match CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            ANCHOR_CLASS,
+            w!("Warmup XInput Anchor"),
+            WS_POPUP,
+            -32000,
+            -32000,
+            1,
+            1,
+            None,
+            HMENU::default(),
+            HINSTANCE(instance.0),
+            None,
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = tx.send(SecureMsg::Error(format!("CreateWindowExW anchor: {e}")));
+                let _ = tid_tx.send(GetCurrentThreadId());
+                POLL_STATE.with(|s| *s.borrow_mut() = None);
+                return;
+            }
+        }
+    };
+
+    unsafe {
+        if SetTimer(hwnd, POLL_TIMER_ID, POLL_TIMER_MS, None) == 0 {
+            let _ = tx.send(SecureMsg::Error("SetTimer failed for anchor poll".into()));
+        }
+    }
+
+    // 5. Publish our thread id so Drop can wake us via PostThreadMessageW.
+    let _ = tid_tx.send(unsafe { GetCurrentThreadId() });
+
+    // 6. Pump messages. WM_TIMER fires xinput poll inside anchor_wndproc.
+    let mut msg = MSG::default();
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+        let ok = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+        if !ok.as_bool() {
+            break;
+        }
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+        unsafe {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    unsafe {
+        let _ = KillTimer(hwnd, POLL_TIMER_ID);
+        let _ = DestroyWindow(hwnd);
+    }
+    POLL_STATE.with(|s| *s.borrow_mut() = None);
+}
+
+unsafe extern "system" fn anchor_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if msg == WM_TIMER && wparam.0 == POLL_TIMER_ID {
+        POLL_STATE.with(|s| {
+            if let Some(state) = s.borrow_mut().as_mut() {
+                poll_xinput_tick(state);
+            }
+        });
+        return LRESULT(0);
+    }
+    if msg == WM_DESTROY {
+        return LRESULT(0);
+    }
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+fn poll_xinput_tick(state: &mut PollState) {
+    let mut connected = [false; 4];
+    let mut states: [Option<XINPUT_GAMEPAD>; 4] = [None; 4];
+    let mut errs = [0u32; 4];
+    let mut packets = [0u32; 4];
+    for slot in 0..SLOTS {
+        let mut s = XINPUT_STATE::default();
+        let err = unsafe { (state.get_state)(slot, &mut s) };
+        errs[slot as usize] = err;
+        if err == ERROR_SUCCESS {
+            connected[slot as usize] = true;
+            states[slot as usize] = Some(s.Gamepad);
+            packets[slot as usize] = s.dwPacketNumber;
+        } else if err != ERROR_DEVICE_NOT_CONNECTED {
+            let _ = state
+                .tx
+                .send(SecureMsg::Error(format!("XInputGetState({slot}) error {err}")));
+        }
+        if let Some(get_keystroke) = state.get_keystroke {
+            secure_poll_keystrokes(&state.tx, get_keystroke, slot, &mut state.prev_buttons);
+        }
+    }
+
+    state.iter_count += 1;
+    let probe_due = state.last_probe_log.elapsed() >= Duration::from_secs(2);
+    if state.iter_count == 1 || probe_due {
+        state.last_probe_log = Instant::now();
+        let summary: Vec<String> = (0..SLOTS as usize)
+            .map(|i| format!("{}:{}", i, errs[i]))
+            .collect();
+        let mut raw = String::new();
+        for i in 0..SLOTS as usize {
+            if let Some(pad) = states[i] {
+                raw.push_str(&format!(
+                    " s{i}:pkt={} btn=0x{:04x} lt={} rt={} lx={} ly={} rx={} ry={}",
+                    packets[i],
+                    pad.wButtons.0,
+                    pad.bLeftTrigger,
+                    pad.bRightTrigger,
+                    pad.sThumbLX,
+                    pad.sThumbLY,
+                    pad.sThumbRX,
+                    pad.sThumbRY,
+                ));
+            }
+        }
+        let _ = state.tx.send(SecureMsg::Error(format!(
+            "probe iter={} errs=[{}]{raw}",
+            state.iter_count,
+            summary.join(",")
+        )));
+    }
+
+    let slots_changed = connected
+        .iter()
+        .zip(state.connected_prev.iter())
+        .any(|(a, b)| a != b);
+    if slots_changed || state.last_status.elapsed() >= Duration::from_secs(30) {
+        state.last_status = Instant::now();
+        state.connected_prev = connected;
+        let _ = state.tx.send(SecureMsg::Slots(connected));
+    }
+
+    let slot = match state.active_slot {
+        Some(slot) if connected[slot as usize] => Some(slot),
+        _ => {
+            state.active_slot = (0..SLOTS).find(|i| connected[*i as usize]);
+            state.active_slot
+        }
+    };
+
+    let Some(slot) = slot else {
+        if state.last_no_pad.elapsed() >= Duration::from_secs(15) {
+            state.last_no_pad = Instant::now();
+            let _ = state.tx.send(SecureMsg::NoController);
+        }
+        return;
+    };
+
+    let pad = states[slot as usize].expect("connected slot has state");
+    let idx = slot as usize;
+    let prev = state.prev_buttons[idx];
+    let cur = pad.wButtons.0;
+    state.prev_buttons[idx] = cur;
+    if prev != cur {
+        let _ = state.tx.send(SecureMsg::Buttons { slot, prev, cur });
+    }
+    let _ = state.tx.send(SecureMsg::Axes((
+        XInputBackend::norm_thumb(pad.sThumbLX, LEFT_DEADZONE),
+        XInputBackend::norm_thumb(pad.sThumbLY, LEFT_DEADZONE),
+        XInputBackend::norm_thumb(pad.sThumbRX, RIGHT_DEADZONE),
+        XInputBackend::norm_thumb(pad.sThumbRY, RIGHT_DEADZONE),
+    )));
+}
+
+fn secure_poll_keystrokes(
+    tx: &mpsc::Sender<SecureMsg>,
+    get_keystroke: XInputGetKeystrokeFn,
+    slot: u32,
+    prev_buttons: &mut [u16; 4],
+) {
+    for _ in 0..16 {
+        let mut key = XInputKeystroke::default();
+        let err = unsafe { get_keystroke(slot, 0, &mut key) };
+        if err == ERROR_EMPTY || err == ERROR_DEVICE_NOT_CONNECTED {
+            break;
+        }
+        if err != ERROR_SUCCESS {
+            let _ = tx.send(SecureMsg::Error(format!(
+                "XInputGetKeystroke({slot}) error {err}"
+            )));
+            break;
+        }
+        let _ = tx.send(SecureMsg::Error(format!(
+            "keystroke slot {slot}: vk=0x{:04x} flags=0x{:04x} user={} hid=0x{:02x}",
+            key.virtual_key, key.flags, key.user_index, key.hid_code
+        )));
+        let Some(mask) = key_to_mask(key.virtual_key) else {
+            continue;
+        };
+        let idx = slot as usize;
+        let prev = prev_buttons[idx];
+        let mut cur = prev;
+        if key.flags & XINPUT_KEYSTROKE_KEYDOWN != 0 {
+            cur |= mask;
+        }
+        if key.flags & XINPUT_KEYSTROKE_KEYUP != 0 {
+            cur &= !mask;
+        }
+        if prev != cur {
+            prev_buttons[idx] = cur;
+            let _ = tx.send(SecureMsg::Buttons { slot, prev, cur });
+        }
+    }
 }
 
 fn service_log(msg: &str) {

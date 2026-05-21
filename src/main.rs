@@ -891,6 +891,24 @@ pub(crate) fn run_boot_gamepad_loop(
                 install::log_line("VK closed");
             }
         }
+        gamepad::VkLoopAction::Reopen => {
+            app.close_vk();
+            app.open_xbox_vk();
+            vk_open.set(app.vk_session.is_some());
+            if !service_mode {
+                repl_scroll::paint_state_panel(&*app);
+            } else {
+                #[cfg(windows)]
+                {
+                    if app.vk_session.is_some() {
+                        let vis = win::is_vk_visible();
+                        install::log_line(&format!("VK reopened (window visible={vis})"));
+                    } else {
+                        install::log_line("VK reopen failed");
+                    }
+                }
+            }
+        }
     };
     if service_mode {
         gamepad::run_watch_loop_service(|| vk_open.get(), on_action)

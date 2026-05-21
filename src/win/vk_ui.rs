@@ -99,11 +99,11 @@ pub fn tick_dpad_hold(now: Instant) -> bool {
 }
 
 impl VkUiThread {
-    pub fn spawn() -> Result<Self, String> {
+    pub fn spawn(attach: VkAttach) -> Result<Self, String> {
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<u32, String>>(1);
         let join = thread::Builder::new()
             .name("warmup-vk-ui".into())
-            .spawn(move || ui_thread_main(ready_tx))
+            .spawn(move || ui_thread_main(ready_tx, attach))
             .map_err(|e| format!("vk ui thread: {e}"))?;
         let thread_id = ready_rx
             .recv()
@@ -147,7 +147,11 @@ impl Drop for VkUiThread {
     }
 }
 
-fn ui_thread_main(ready: mpsc::SyncSender<Result<u32, String>>) {
+fn ui_thread_main(ready: mpsc::SyncSender<Result<u32, String>>, attach: VkAttach) {
+    if let Err(e) = try_attach_for_window(attach) {
+        let _ = ready.send(Err(format!("desktop attach failed: {e}")));
+        return;
+    }
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let instance = GetModuleHandleW(None).expect("module handle");

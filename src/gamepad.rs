@@ -25,6 +25,7 @@ const DESKTOP_SYNC_LOG_INTERVAL: Duration = Duration::from_secs(10);
 pub enum VkLoopAction {
     Toggle,
     Close,
+    Reopen,
 }
 
 enum Backend {
@@ -40,6 +41,8 @@ pub struct GamepadPoll {
     last_vk_open: bool,
     y_ignore_until: Option<Instant>,
     last_desktop_log: Instant,
+    #[cfg(windows)]
+    last_input_desktop: Option<String>,
 }
 
 impl GamepadPoll {
@@ -73,6 +76,8 @@ impl GamepadPoll {
             last_vk_open: false,
             y_ignore_until: None,
             last_desktop_log: Instant::now() - DESKTOP_SYNC_LOG_INTERVAL,
+            #[cfg(windows)]
+            last_input_desktop: None,
         }
     }
 
@@ -116,6 +121,11 @@ impl GamepadPoll {
             Backend::XInput(b) => b.axes(),
         };
 
+        #[cfg(windows)]
+        let desktop_reopen = self.reopen_on_input_desktop_change(vk_open);
+        #[cfg(not(windows))]
+        let desktop_reopen = None;
+
         if vk_open {
             #[cfg(windows)]
             {
@@ -124,6 +134,9 @@ impl GamepadPoll {
                 }
             }
             let mut edges = Vec::new();
+            if let Some(edge) = desktop_reopen {
+                edges.push(edge);
+            }
             for change in &changes {
                 if let Some(edge) = self.handle_vk_open_button(change) {
                     edges.push(edge);
@@ -137,6 +150,9 @@ impl GamepadPoll {
 
         let changes = dedupe_consecutive_y_edges(changes);
         let mut edges = Vec::new();
+        if let Some(edge) = desktop_reopen {
+            edges.push(edge);
+        }
         for change in changes {
             if change.button_name == "A" && change.pressed {
                 cursor.left_click();
@@ -160,6 +176,27 @@ impl GamepadPoll {
             }
         }
         Ok(edges)
+    }
+
+    #[cfg(windows)]
+    fn reopen_on_input_desktop_change(&mut self, vk_open: bool) -> Option<VkLoopAction> {
+        if !std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0") {
+            return None;
+        }
+        let Ok(input) = crate::win::input_desktop_name() else {
+            return None;
+        };
+        let changed = self
+            .last_input_desktop
+            .as_ref()
+            .is_some_and(|old| old != &input);
+        self.last_input_desktop = Some(input.clone());
+        if vk_open && changed {
+            service_log(&format!("input desktop changed to {input}; reopening VK"));
+            Some(VkLoopAction::Reopen)
+        } else {
+            None
+        }
     }
 
     #[cfg(windows)]

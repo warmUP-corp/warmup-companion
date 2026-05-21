@@ -2,7 +2,19 @@
   "permissions": {
     "allow": [
       "Read(//c/Users/jonas/.claude/**)",
-      "Read(//c/Users/jonas/.claude/plugins/**)"
+      "Read(//c/Users/jonas/.claude/plugins/**)",
+      "PowerShell(Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-Command','sc.exe stop WarmupVkSvc; pause')",
+      "mcp__ghidra__list_open_programs",
+      "mcp__ghidra__decompile_function",
+      "mcp__ghidra__get_xrefs_to",
+      "mcp__ghidra__get_function_callers",
+      "mcp__ghidra__list_imports",
+      "mcp__ghidra__list_functions",
+      "mcp__ghidra__search_functions",
+      "mcp__ghidra__list_functions_enhanced",
+      "mcp__ghidra__get_entry_points",
+      "mcp__ghidra__run_analysis",
+      "mcp__ghidra__list_strings"
     ]
   }
 }

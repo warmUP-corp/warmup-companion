@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "code-review-graph": {
+      "command": "uvx",
+      "args": [
+        "code-review-graph",
+        "serve"
+      ],
+      "type": "stdio"
+    },
+    "ghidra": {
+      "command": "C:\\Users\\jonas\\Documents\\Codex\\2026-05-19\\setup-a-venv-and-extra-folder\\ghidra-mcp-server\\.venv\\Scripts\\python.exe",
+      "args": [
+        "C:\\Users\\jonas\\Documents\\Codex\\2026-05-19\\setup-a-venv-and-extra-folder\\ghidra-mcp-server\\server.py"
+      ],
+      "type": "stdio"
+    }
+  }
+}
