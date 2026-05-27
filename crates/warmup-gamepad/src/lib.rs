@@ -7,6 +7,45 @@ use std::path::Path;
 /// SDL3 trigger press threshold: SDL3 range is 0..=32767; 50% ≈ 16383.
 const TRIGGER_THRESHOLD: i16 = 16_383;
 
+/// When several pads are plugged in, prefer PlayStation / Xbox over generic HID.
+fn open_preferred_gamepad(gc_sub: &GamepadSubsystem) -> Option<Gamepad> {
+    let ids: Vec<_> = gc_sub.gamepads().unwrap_or_default();
+    let mut best: Option<(i32, Gamepad)> = None;
+    for id in ids {
+        let Ok(gp) = gc_sub.open(id) else {
+            continue;
+        };
+        let score = score_gamepad(&gp);
+        let replace = best.as_ref().map(|(s, _)| score > *s).unwrap_or(true);
+        if replace {
+            best = Some((score, gp));
+        }
+    }
+    best.map(|(_, gp)| gp)
+}
+
+fn score_gamepad(gp: &Gamepad) -> i32 {
+    match gp.r#type() {
+        GamepadType::PS5 => 100,
+        GamepadType::PS4 => 90,
+        GamepadType::XboxOne => 80,
+        GamepadType::Xbox360 => 70,
+        _ => {
+            let name = gp.name().unwrap_or_default().to_ascii_lowercase();
+            if name.contains("dualsense") || name.contains("ps5") {
+                95
+            } else if name.contains("dualshock") || name.contains("ps4") || name.contains("playstation")
+            {
+                85
+            } else if name.contains("xbox") {
+                75
+            } else {
+                0
+            }
+        }
+    }
+}
+
 /// Maps SDL3 `GamepadType` to our canonical controller type string.
 /// SDL3 identifies most controllers natively, eliminating the need for name heuristics.
 pub fn sdl3_type_to_str(t: GamepadType) -> &'static str {
@@ -113,11 +152,14 @@ impl GamepadInput {
             }
         }
 
-        let active_gamepad = gc_sub
-            .gamepads()
-            .unwrap_or_default()
-            .into_iter()
-            .find_map(|id| gc_sub.open(id).ok());
+        let active_gamepad = open_preferred_gamepad(&gc_sub);
+        if let Some(ref gp) = active_gamepad {
+            eprintln!(
+                "[gamepad] SDL3: active pad {} ({})",
+                gp.name().unwrap_or_else(|| "?".to_string()),
+                sdl3_type_to_str(gp.r#type())
+            );
+        }
 
         let mut input = Self {
             _sdl: sdl,
@@ -156,14 +198,13 @@ impl GamepadInput {
 
         // Detect new connection when no pad is active.
         if self.active_gamepad.is_none() {
-            let new_gp = self
-                .gc_sub
-                .gamepads()
-                .unwrap_or_default()
-                .into_iter()
-                .find_map(|id| self.gc_sub.open(id).ok());
-            if new_gp.is_some() {
-                self.active_gamepad = new_gp;
+            if let Some(gp) = open_preferred_gamepad(&self.gc_sub) {
+                eprintln!(
+                    "[gamepad] SDL3: connected {} ({})",
+                    gp.name().unwrap_or_else(|| "?".to_string()),
+                    sdl3_type_to_str(gp.r#type())
+                );
+                self.active_gamepad = Some(gp);
                 any_change = true;
             }
         }

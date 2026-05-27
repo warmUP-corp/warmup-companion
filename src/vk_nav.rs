@@ -17,6 +17,18 @@ pub struct KeyCell {
 
 pub const ROWS: &[&[KeyCell]] = &[
     &[
+        KeyCell { label: "1", ch: '1', vk: None },
+        KeyCell { label: "2", ch: '2', vk: None },
+        KeyCell { label: "3", ch: '3', vk: None },
+        KeyCell { label: "4", ch: '4', vk: None },
+        KeyCell { label: "5", ch: '5', vk: None },
+        KeyCell { label: "6", ch: '6', vk: None },
+        KeyCell { label: "7", ch: '7', vk: None },
+        KeyCell { label: "8", ch: '8', vk: None },
+        KeyCell { label: "9", ch: '9', vk: None },
+        KeyCell { label: "0", ch: '0', vk: None },
+    ],
+    &[
         KeyCell { label: "Q", ch: 'q', vk: None },
         KeyCell { label: "W", ch: 'w', vk: None },
         KeyCell { label: "E", ch: 'e', vk: None },

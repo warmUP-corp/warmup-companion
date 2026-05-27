@@ -22,6 +22,8 @@ mod gamepad_backend;
 #[cfg(feature = "gamepad")]
 mod pc_cursor;
 #[cfg(all(windows, feature = "gamepad"))]
+mod hid_gamepad;
+#[cfg(all(windows, feature = "gamepad"))]
 mod xinput_backend;
 
 use std::env;

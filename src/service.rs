@@ -45,6 +45,7 @@ use crate::{run_boot_gamepad_loop, App};
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 const WORKER_ARGS: &[&str] = &["--service-worker", "--boot", "--cfg-winlogon"];
 const WAIT_SLICE_MS: u32 = 1000;
+const GRACEFUL_STOP_MS: u32 = 5000;
 /// `WTSGetActiveConsoleSessionId` when no interactive session exists yet (pre-logon / boot).
 const INVALID_CONSOLE_SESSION: u32 = 0xFFFF_FFFF;
 const LAUNCH_RETRY_SECS: u64 = 2;
@@ -85,19 +86,26 @@ fn run_service_core() -> Result<(), String> {
             terminate_child();
             ServiceControlHandlerResult::NoError
         }
-        ServiceControl::SessionChange(change)
-            if matches!(
+        ServiceControl::SessionChange(change) => {
+            // SessionLogon: user reached the desktop — keep the worker alive and let
+            // the gamepad loop close VK when input desktop leaves Winlogon. Hard-restart
+            // on logon looked like a crash and tore down VK mid-transition.
+            let restart = matches!(
                 change.reason,
-                SessionChangeReason::ConsoleConnect
-                    | SessionChangeReason::SessionLogon
-                    | SessionChangeReason::SessionLogoff
-            ) =>
-        {
+                SessionChangeReason::ConsoleConnect | SessionChangeReason::SessionLogoff
+            );
             install::log_line(&format!(
-                "session change {:?}; relaunch requested",
-                change.reason
+                "session change {:?}{}",
+                change.reason,
+                if restart {
+                    "; worker restart requested"
+                } else {
+                    " (no worker restart)"
+                }
             ));
-            RESTART_REQUESTED.store(true, Ordering::SeqCst);
+            if restart {
+                RESTART_REQUESTED.store(true, Ordering::SeqCst);
+            }
             ServiceControlHandlerResult::NoError
         }
         ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
@@ -180,8 +188,8 @@ fn launcher_loop() -> Result<(), String> {
                 return Ok(());
             }
             if RESTART_REQUESTED.swap(false, Ordering::SeqCst) {
-                install::log_line("restarting service worker after session change");
-                terminate_child();
+                install::log_line("stopping service worker after session change (graceful)");
+                stop_child_gracefully(child.handle);
                 break;
             }
             let wait = unsafe { WaitForSingleObject(child.handle, WAIT_SLICE_MS) };
@@ -222,6 +230,22 @@ fn terminate_child() {
         let _ = TerminateProcess(handle, 0);
         let _ = CloseHandle(handle);
     }
+}
+
+/// Wait for the worker to exit after session change; avoid `TerminateProcess` when possible.
+fn stop_child_gracefully(handle: HANDLE) {
+    unsafe {
+        let wait = WaitForSingleObject(handle, GRACEFUL_STOP_MS);
+        if wait == WAIT_OBJECT_0 {
+            let code = worker_exit_code(handle);
+            install::log_line(&format!("service worker exited gracefully (code={code})"));
+        } else {
+            install::log_line("service worker did not exit in time; terminating");
+            let _ = TerminateProcess(handle, 0);
+        }
+        let _ = CloseHandle(handle);
+    }
+    CHILD_PROCESS.store(0, Ordering::SeqCst);
 }
 
 fn launch_worker_in_active_session() -> Result<WorkerProcess, String> {

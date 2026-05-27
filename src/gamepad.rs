@@ -19,6 +19,8 @@ const VK_MASK_BUTTON: &str = "Y";
 const POLL_INTERVAL: Duration = Duration::from_millis(8);
 /// Ignore Y release right after opening VK (same physical tap must not close).
 const Y_RELEASE_GRACE: Duration = Duration::from_millis(550);
+/// Ignore spurious X/dpad from misaligned HID for a moment after VK opens.
+const VK_NAV_INPUT_GRACE: Duration = Duration::from_millis(450);
 const DESKTOP_SYNC_LOG_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,9 +42,8 @@ pub struct GamepadPoll {
     a_down_while_vk: bool,
     last_vk_open: bool,
     y_ignore_until: Option<Instant>,
+    vk_nav_grace_until: Option<Instant>,
     last_desktop_log: Instant,
-    /// Left-stick emulated D-pad while VK is open (secure desktop often lacks XInput dpad bits).
-    stick_dpad: Option<&'static str>,
     #[cfg(windows)]
     last_input_desktop: Option<String>,
 }
@@ -61,8 +62,75 @@ impl GamepadPoll {
 
     #[cfg(windows)]
     pub fn open_service() -> Self {
-        service_log("gamepad backend: XInput (service / secure desktop)");
-        Self::new(Backend::XInput(XInputBackend::new()))
+        let mut poll = Self::new(Self::service_backend_for_input_desktop());
+        poll.sync_service_backend();
+        poll
+    }
+
+    /// Winlogon sign-in: raw HID + XInput. Logged-in desktop: SDL3 (DualSense, etc.).
+    #[cfg(windows)]
+    fn service_backend_for_input_desktop() -> Backend {
+        if Self::input_desktop_is_winlogon() {
+            service_log("gamepad backend: HID + XInput (Winlogon)");
+            Backend::XInput(XInputBackend::new())
+        } else {
+            match SdlBackend::open() {
+                Ok(b) => {
+                    service_log(&format!(
+                        "gamepad backend: SDL3 (userland) — {}",
+                        b.controller_label()
+                    ));
+                    Backend::Sdl(b)
+                }
+                Err(e) => {
+                    service_log(&format!(
+                        "gamepad backend: SDL3 unavailable ({e}); using XInput fallback"
+                    ));
+                    Backend::XInput(XInputBackend::new())
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn input_desktop_is_winlogon() -> bool {
+        crate::win::input_desktop_name()
+            .map(|n| n.eq_ignore_ascii_case("winlogon"))
+            .unwrap_or(false)
+    }
+
+    /// Switch between SDL3 (Default) and HID+XInput (Winlogon) when the service crosses desktops.
+    #[cfg(windows)]
+    fn sync_service_backend(&mut self) {
+        if !std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0") {
+            return;
+        }
+        let on_winlogon = Self::input_desktop_is_winlogon();
+        let using_xinput = matches!(self.backend, Backend::XInput(_));
+        if on_winlogon == using_xinput {
+            return;
+        }
+        self.reset_vk_controls();
+        self.backend = if on_winlogon {
+            service_log("input desktop → Winlogon: switching to HID+XInput");
+            Backend::XInput(XInputBackend::new())
+        } else {
+            match SdlBackend::open() {
+                Ok(b) => {
+                    service_log(&format!(
+                        "input desktop → Default: switching to SDL3 — {}",
+                        b.controller_label()
+                    ));
+                    Backend::Sdl(b)
+                }
+                Err(e) => {
+                    service_log(&format!(
+                        "input desktop → Default: SDL3 failed ({e}); keeping XInput"
+                    ));
+                    return;
+                }
+            }
+        };
     }
 
     #[cfg(not(windows))]
@@ -77,8 +145,8 @@ impl GamepadPoll {
             a_down_while_vk: false,
             last_vk_open: false,
             y_ignore_until: None,
+            vk_nav_grace_until: None,
             last_desktop_log: Instant::now() - DESKTOP_SYNC_LOG_INTERVAL,
-            stick_dpad: None,
             #[cfg(windows)]
             last_input_desktop: None,
         }
@@ -89,7 +157,7 @@ impl GamepadPoll {
         self.vk_down = false;
         self.a_down_while_vk = false;
         self.y_ignore_until = None;
-        self.stick_dpad = None;
+        self.vk_nav_grace_until = None;
         self.last_vk_open = false;
         #[cfg(windows)]
         crate::vk_nav::reset_selection();
@@ -98,56 +166,15 @@ impl GamepadPoll {
     pub fn on_vk_opened(&mut self) {
         self.vk_down = false;
         self.a_down_while_vk = false;
-        self.stick_dpad = None;
         self.y_ignore_until = Some(Instant::now() + Y_RELEASE_GRACE);
+        self.vk_nav_grace_until = Some(Instant::now() + VK_NAV_INPUT_GRACE);
         #[cfg(windows)]
-        crate::vk_nav::reset_selection();
-    }
-
-    fn stick_dpad_edges(&mut self, lx: f32, ly: f32) -> Vec<ButtonChange> {
-        const THRESH: f32 = 0.55;
-        let dir = if ly > THRESH && ly.abs() >= lx.abs() {
-            Some("UP")
-        } else if ly < -THRESH && ly.abs() >= lx.abs() {
-            Some("DOWN")
-        } else if lx < -THRESH {
-            Some("LEFT")
-        } else if lx > THRESH {
-            Some("RIGHT")
-        } else {
-            None
-        };
-
-        let mut edges = Vec::new();
-        match (self.stick_dpad, dir) {
-            (Some(old), Some(new)) if old != new => {
-                edges.push(ButtonChange {
-                    button_name: old,
-                    pressed: false,
-                });
-                edges.push(ButtonChange {
-                    button_name: new,
-                    pressed: true,
-                });
-                self.stick_dpad = Some(new);
+        {
+            crate::vk_nav::reset_selection();
+            if Self::service_signin_desktop() {
+                service_log("sign-in: VK nav only (LB/RB disabled); row 1 = digits");
             }
-            (Some(old), None) => {
-                edges.push(ButtonChange {
-                    button_name: old,
-                    pressed: false,
-                });
-                self.stick_dpad = None;
-            }
-            (None, Some(new)) => {
-                edges.push(ButtonChange {
-                    button_name: new,
-                    pressed: true,
-                });
-                self.stick_dpad = Some(new);
-            }
-            _ => {}
         }
-        edges
     }
 
     pub fn open() -> Result<Self, String> {
@@ -171,10 +198,12 @@ impl GamepadPoll {
         if vk_open && !self.last_vk_open {
             self.on_vk_opened();
         }
-        if !vk_open && self.last_vk_open {
-            self.stick_dpad = None;
-        }
         self.last_vk_open = vk_open;
+
+        #[cfg(windows)]
+        if std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0") {
+            self.sync_service_backend();
+        }
 
         match &mut self.backend {
             Backend::Sdl(b) => b.poll()?,
@@ -208,9 +237,7 @@ impl GamepadPoll {
             if let Some(edge) = desktop_reopen {
                 edges.push(edge);
             }
-            let mut vk_changes = changes;
-            vk_changes.extend(self.stick_dpad_edges(lx, ly));
-            for change in &vk_changes {
+            for change in &changes {
                 if let Some(edge) = self.handle_vk_open_button(change) {
                     edges.push(edge);
                 }
@@ -264,19 +291,40 @@ impl GamepadPoll {
             .as_ref()
             .is_some_and(|old| old != &input);
         self.last_input_desktop = Some(input.clone());
-        if vk_open && changed {
+        if !vk_open || !changed {
+            return None;
+        }
+        let on_winlogon = input.eq_ignore_ascii_case("winlogon");
+        self.reset_vk_controls();
+        if on_winlogon {
             service_log(&format!("input desktop changed to {input}; reopening VK"));
-            self.reset_vk_controls();
             Some(VkLoopAction::Reopen)
         } else {
-            None
+            service_log(&format!(
+                "input desktop changed to {input}; closing VK (left Winlogon)"
+            ));
+            Some(VkLoopAction::Close)
         }
+    }
+
+    #[cfg(windows)]
+    fn service_signin_desktop() -> bool {
+        std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0")
+            && Self::input_desktop_is_winlogon()
     }
 
     #[cfg(windows)]
     fn handle_vk_open_button(&mut self, change: &ButtonChange) -> Option<VkLoopAction> {
         use crate::vk_nav;
         use crate::win::vk_ui;
+
+        if change.button_name != VK_MASK_BUTTON
+            && self
+                .vk_nav_grace_until
+                .is_some_and(|until| Instant::now() < until)
+        {
+            return None;
+        }
 
         match (change.button_name, change.pressed) {
             (VK_MASK_BUTTON, false) => {
@@ -312,14 +360,16 @@ impl GamepadPoll {
                 None
             }
             ("X", true) => Some(VkLoopAction::Close),
-            ("LB", true) => {
+            ("LB", true) if !Self::service_signin_desktop() => {
                 vk_nav::cursor_left();
                 None
             }
-            ("RB", true) => {
+            ("LB", true) => None,
+            ("RB", true) if !Self::service_signin_desktop() => {
                 vk_nav::enter();
                 None
             }
+            ("RB", true) => None,
             _ => None,
         }
     }
@@ -484,7 +534,10 @@ where
         println!("Ctrl+C to stop.");
     } else {
         #[cfg(windows)]
-        service_log("gamepad loop running (XInput, Y=toggle VK)");
+        service_log(&format!(
+            "gamepad loop running ({}; Y/Triangle=toggle VK)",
+            poll.controller_label()
+        ));
     }
     let mut last_tick = Instant::now();
     while RUNNING.load(Ordering::SeqCst) {

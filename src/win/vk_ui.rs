@@ -44,7 +44,7 @@ const WM_WARMUP_QUIT: u32 = WM_USER + 2;
 const WM_WARMUP_REPAINT: u32 = WM_USER + 3;
 
 const VK_WIDTH: i32 = 720;
-const VK_HEIGHT: i32 = 260;
+const VK_HEIGHT: i32 = 318;
 /// Re-assert topmost while visible (shell search/task UI also uses HWND_TOPMOST).
 const VK_ZORDER_TIMER_ID: usize = 1;
 const VK_ZORDER_TIMER_MS: u32 = 200;

@@ -1,4 +1,4 @@
-//! Logical gamepad input — SDL3 on desktop, XInput in Windows service mode.
+//! Logical gamepad input — SDL3 on userland / `--gamepad`; HID+XInput on Winlogon service path.
 
 use std::path::PathBuf;
 
@@ -50,7 +50,7 @@ impl GamepadBackend for SdlBackend {
     }
 }
 
-fn mapping_db_path() -> PathBuf {
+pub fn mapping_db_path() -> PathBuf {
     if let Ok(p) = std::env::var("WARMUP_GAMECONTROLLER_DB") {
         return PathBuf::from(p);
     }
