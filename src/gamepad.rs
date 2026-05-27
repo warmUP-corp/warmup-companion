@@ -41,6 +41,8 @@ pub struct GamepadPoll {
     last_vk_open: bool,
     y_ignore_until: Option<Instant>,
     last_desktop_log: Instant,
+    /// Left-stick emulated D-pad while VK is open (secure desktop often lacks XInput dpad bits).
+    stick_dpad: Option<&'static str>,
     #[cfg(windows)]
     last_input_desktop: Option<String>,
 }
@@ -76,9 +78,76 @@ impl GamepadPoll {
             last_vk_open: false,
             y_ignore_until: None,
             last_desktop_log: Instant::now() - DESKTOP_SYNC_LOG_INTERVAL,
+            stick_dpad: None,
             #[cfg(windows)]
             last_input_desktop: None,
         }
+    }
+
+    /// Clear VK navigation / Y-latch state after close, desktop change, or reopen.
+    pub fn reset_vk_controls(&mut self) {
+        self.vk_down = false;
+        self.a_down_while_vk = false;
+        self.y_ignore_until = None;
+        self.stick_dpad = None;
+        self.last_vk_open = false;
+        #[cfg(windows)]
+        crate::vk_nav::reset_selection();
+    }
+
+    pub fn on_vk_opened(&mut self) {
+        self.vk_down = false;
+        self.a_down_while_vk = false;
+        self.stick_dpad = None;
+        self.y_ignore_until = Some(Instant::now() + Y_RELEASE_GRACE);
+        #[cfg(windows)]
+        crate::vk_nav::reset_selection();
+    }
+
+    fn stick_dpad_edges(&mut self, lx: f32, ly: f32) -> Vec<ButtonChange> {
+        const THRESH: f32 = 0.55;
+        let dir = if ly > THRESH && ly.abs() >= lx.abs() {
+            Some("UP")
+        } else if ly < -THRESH && ly.abs() >= lx.abs() {
+            Some("DOWN")
+        } else if lx < -THRESH {
+            Some("LEFT")
+        } else if lx > THRESH {
+            Some("RIGHT")
+        } else {
+            None
+        };
+
+        let mut edges = Vec::new();
+        match (self.stick_dpad, dir) {
+            (Some(old), Some(new)) if old != new => {
+                edges.push(ButtonChange {
+                    button_name: old,
+                    pressed: false,
+                });
+                edges.push(ButtonChange {
+                    button_name: new,
+                    pressed: true,
+                });
+                self.stick_dpad = Some(new);
+            }
+            (Some(old), None) => {
+                edges.push(ButtonChange {
+                    button_name: old,
+                    pressed: false,
+                });
+                self.stick_dpad = None;
+            }
+            (None, Some(new)) => {
+                edges.push(ButtonChange {
+                    button_name: new,
+                    pressed: true,
+                });
+                self.stick_dpad = Some(new);
+            }
+            _ => {}
+        }
+        edges
     }
 
     pub fn open() -> Result<Self, String> {
@@ -100,8 +169,10 @@ impl GamepadPoll {
         vk_open: bool,
     ) -> Result<Vec<VkLoopAction>, String> {
         if vk_open && !self.last_vk_open {
-            self.vk_down = false;
-            self.y_ignore_until = Some(Instant::now() + Y_RELEASE_GRACE);
+            self.on_vk_opened();
+        }
+        if !vk_open && self.last_vk_open {
+            self.stick_dpad = None;
         }
         self.last_vk_open = vk_open;
 
@@ -137,7 +208,9 @@ impl GamepadPoll {
             if let Some(edge) = desktop_reopen {
                 edges.push(edge);
             }
-            for change in &changes {
+            let mut vk_changes = changes;
+            vk_changes.extend(self.stick_dpad_edges(lx, ly));
+            for change in &vk_changes {
                 if let Some(edge) = self.handle_vk_open_button(change) {
                     edges.push(edge);
                 }
@@ -193,6 +266,7 @@ impl GamepadPoll {
         self.last_input_desktop = Some(input.clone());
         if vk_open && changed {
             service_log(&format!("input desktop changed to {input}; reopening VK"));
+            self.reset_vk_controls();
             Some(VkLoopAction::Reopen)
         } else {
             None
@@ -418,16 +492,31 @@ where
         let dt = now.duration_since(last_tick).as_secs_f32();
         last_tick = now;
 
-        #[cfg(windows)]
-        if service_mode {
-            crate::win::debug_overlay::tick();
-            poll.log_desktop_sync_if_due(true);
-        }
-
         match poll.poll_frame(&mut cursor, dt, vk_open()) {
             Ok(actions) => {
                 for action in actions {
-                    on_action(action);
+                    match action {
+                        VkLoopAction::Close => {
+                            poll.reset_vk_controls();
+                            on_action(action);
+                        }
+                        VkLoopAction::Reopen => {
+                            poll.reset_vk_controls();
+                            on_action(action);
+                            if vk_open() {
+                                poll.on_vk_opened();
+                            }
+                        }
+                        VkLoopAction::Toggle => {
+                            let was_open = vk_open();
+                            on_action(action);
+                            if vk_open() && !was_open {
+                                poll.on_vk_opened();
+                            } else if !vk_open() && was_open {
+                                poll.reset_vk_controls();
+                            }
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -437,6 +526,15 @@ where
                 } else {
                     return Err(e);
                 }
+            }
+        }
+
+        #[cfg(windows)]
+        if service_mode {
+            crate::win::debug_overlay::tick();
+            poll.log_desktop_sync_if_due(true);
+            if crate::win::debug_overlay::take_vk_toggle_request() {
+                on_action(VkLoopAction::Toggle);
             }
         }
 

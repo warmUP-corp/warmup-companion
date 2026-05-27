@@ -1,5 +1,6 @@
 //! Temporary Winlogon debug panel. UI thread attaches to input desktop, poll thread stays put.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -15,6 +16,7 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
     LoadCursorW, PeekMessageW, PostQuitMessage, PostThreadMessageW, RegisterClassW, SetTimer,
@@ -31,7 +33,7 @@ const WM_DEBUG_HIDE: u32 = WM_USER + 21;
 const WM_DEBUG_QUIT: u32 = WM_USER + 22;
 
 const PANEL_W: i32 = 520;
-const PANEL_H: i32 = 190;
+const PANEL_H: i32 = 212;
 const REPAINT_TIMER_ID: usize = 11;
 const REPAINT_TIMER_MS: u32 = 250;
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
@@ -40,6 +42,7 @@ struct DebugOverlayController {
     thread: Option<DebugOverlayThread>,
     last_tick: Instant,
     last_on_winlogon: bool,
+    input_probe_failures: u8,
 }
 
 impl Default for DebugOverlayController {
@@ -48,6 +51,7 @@ impl Default for DebugOverlayController {
             thread: None,
             last_tick: Instant::now() - TICK_INTERVAL,
             last_on_winlogon: false,
+            input_probe_failures: 0,
         }
     }
 }
@@ -59,9 +63,15 @@ struct DebugOverlayThread {
 
 thread_local! {
     static HWND_STATE: std::cell::Cell<Option<HWND>> = const { std::cell::Cell::new(None) };
+    static F10_DOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 static CONTROLLER: OnceLock<Mutex<DebugOverlayController>> = OnceLock::new();
+static VK_TOGGLE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+pub fn take_vk_toggle_request() -> bool {
+    VK_TOGGLE_REQUESTED.swap(false, Ordering::SeqCst)
+}
 
 pub fn tick() {
     if std::env::var_os("WARMUP_VK_SERVICE").is_none_or(|v| v == "0") {
@@ -76,9 +86,20 @@ pub fn tick() {
     }
     c.last_tick = Instant::now();
 
-    let on_winlogon = desktop::input_desktop_name()
-        .map(|name| name.eq_ignore_ascii_case("Winlogon"))
-        .unwrap_or(false);
+    let on_winlogon = match desktop::input_desktop_name() {
+        Ok(name) => {
+            c.input_probe_failures = 0;
+            name.eq_ignore_ascii_case("Winlogon")
+        }
+        Err(e) => {
+            c.input_probe_failures = c.input_probe_failures.saturating_add(1);
+            if c.thread.is_some() && c.last_on_winlogon && c.input_probe_failures < 12 {
+                return;
+            }
+            service_log(&format!("debug ui: input desktop probe failed: {e}"));
+            false
+        }
+    };
 
     if on_winlogon {
         if c.thread.is_none() {
@@ -262,6 +283,7 @@ unsafe extern "system" fn debug_wndproc(
         }
         WM_TIMER => {
             if wparam.0 == REPAINT_TIMER_ID {
+                poll_debug_shortcut();
                 let _ = InvalidateRect(hwnd, None, true);
             }
             LRESULT(0)
@@ -277,6 +299,18 @@ unsafe extern "system" fn debug_wndproc(
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
+}
+
+fn poll_debug_shortcut() {
+    let down = unsafe { GetAsyncKeyState(0x79) < 0 }; // VK_F10
+    F10_DOWN.with(|was_down| {
+        let pressed = down && !was_down.get();
+        was_down.set(down);
+        if pressed {
+            VK_TOGGLE_REQUESTED.store(true, Ordering::SeqCst);
+            service_log("debug shortcut: F10 toggle VK requested");
+        }
+    });
 }
 
 fn paint_debug(hwnd: HWND) {
@@ -310,6 +344,7 @@ fn paint_debug(hwnd: HWND) {
             format!("buttons: {}", snapshot.last_buttons),
             format!("action: {}", snapshot.last_action),
             format!("vk visible: {}", super::vk_ui::is_vk_visible()),
+            "F10: toggle VK (debug)".to_string(),
         ];
 
         for (i, line) in lines.iter().enumerate() {

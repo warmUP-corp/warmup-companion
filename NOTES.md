@@ -63,8 +63,10 @@ Maps **Y / Triangle** (SDL north face) → mask `0x200`. Controller DB: `Full-Sc
 Decomp source of truth:
 
 - Service starts worker with a winlogon token and `lpDesktop = "winsta0\\default"`.
-- Worker can start on the default desktop. Only UI/VK window threads attach to the input desktop before `CreateWindowExW`.
-- Poll thread must not desktop-hop. No `SetThreadDesktop` from cursor, XInput poll, or VK navigation key-send paths.
+- With config `+0xd9`, Joyxoff's worker calls `SetThreadDesktop("winlogon")` before creating `JoyXoffMWindow` or polling XInput.
+- Warmup service worker follows that order at sign-in, then migrates its controller thread and reloads XInput when a later lock/UAC transition changes the input desktop.
+- Desktop changes are handled once per transition on the controller thread. Cursor and VK navigation key-send paths do not switch desktops.
+- On Winlogon, XInput polling stays under the Winlogon-token worker and runs on the anchor-window thread, matching Joyxoff's window-owning timer path. Joyxoff uses interactive-user impersonation for registry/config work, not its XInput timer.
 - Service cursor is disabled (`PcCursor::new_service()` has no `Enigo`) so stick/click paths cannot force desktop attach.
 - XInput loads Joyxoff-style: `xinput1_4.dll` ordinal `100`, fallback named `XInputGetState`, fallback `xinput1_3.dll`.
 
@@ -77,7 +79,8 @@ XInput loader: xinput1_4.dll ordinal 100/GetState
 Expected lock-screen watch log:
 
 ```text
-desktop watch: worker thread on Default; input desktop Winlogon
+worker thread desktop: Winlogon; input desktop: Winlogon
+desktop watch: worker thread on Winlogon; input desktop Winlogon
 ```
 
 Bad old pattern:
@@ -97,6 +100,7 @@ Temporary diagnostic window: `WarmupDebugOverlayWindow`.
 - Auto-opens when `input_desktop_name() == "Winlogon"`.
 - Runs on its own UI thread; that thread calls `OpenInputDesktop + SetThreadDesktop` before creating the window.
 - Draws current thread desktop, input desktop, PID, XInput loader, last raw button mask/time, last VK action, and VK visibility.
+- Press `F10` on the Winlogon debug overlay to toggle the VK without controller input.
 - Hides/destroys when input desktop returns `Default`.
 
 Success log:
@@ -104,7 +108,7 @@ Success log:
 ```text
 debug ui: shown on Winlogon
 debug ui: UI thread desktop: Winlogon
-desktop watch: worker thread on Default; input desktop Winlogon
+desktop watch: worker thread on Winlogon; input desktop Winlogon
 ```
 
 Failure split:

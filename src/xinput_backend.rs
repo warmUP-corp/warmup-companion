@@ -8,20 +8,25 @@
 //! `SetTimer(NULL, ..., FUN_0044e890)` pattern on a `JoyXoffMWindow` thread.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::mem::size_of;
+use std::slice;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use windows::core::{w, PCSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::Security::{
-    DuplicateTokenEx, ImpersonateLoggedOnUser, RevertToSelf, SecurityImpersonation,
-    TokenImpersonation, TOKEN_ACCESS_MASK,
+use windows::Win32::Devices::HumanInterfaceDevice::{
+    HidP_GetUsagesEx, HidP_Input, HIDP_STATUS_SUCCESS, PHIDP_PREPARSED_DATA, USAGE_AND_PAGE,
 };
+use windows::Win32::Foundation::{HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryA};
-use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::Input::{
+    GetRawInputData, GetRawInputDeviceInfoW, RegisterRawInputDevices, HRAWINPUT, RAWINPUT,
+    RAWINPUTDEVICE, RAWINPUTHEADER, RIDI_PREPARSEDDATA, RID_INPUT, RIDEV_INPUTSINK, RIM_TYPEHID,
+};
 use windows::Win32::UI::Input::XboxController::{
     XINPUT_GAMEPAD, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_DPAD_DOWN,
     XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT, XINPUT_GAMEPAD_DPAD_UP,
@@ -30,8 +35,10 @@ use windows::Win32::UI::Input::XboxController::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
-    PostThreadMessageW, RegisterClassW, SetTimer, TranslateMessage, HMENU, MSG, WM_DESTROY,
-    WM_NULL, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    PostThreadMessageW, RegisterClassW, SetTimer, SetWindowPos, ShowWindow, TranslateMessage,
+    HMENU, HWND_TOPMOST, MSG, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, WM_DESTROY,
+    WM_INPUT, WM_NULL, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 
 use crate::gamepad_backend::ButtonChange;
@@ -101,8 +108,11 @@ pub struct XInputBackend {
     last_no_pad_log: Instant,
     last_raw_log: Instant,
     last_secure_check: Instant,
+    /// Consecutive input-desktop probes that were not Winlogon while helper runs.
+    secure_leave_winlogon_streak: u8,
 }
 
+#[allow(dead_code)]
 struct SecurePollThread {
     rx: mpsc::Receiver<SecureMsg>,
     stop: Arc<AtomicBool>,
@@ -110,10 +120,14 @@ struct SecurePollThread {
     thread_id: u32,
 }
 
+#[allow(dead_code)]
 const ANCHOR_CLASS: windows::core::PCWSTR = w!("WarmupXInputAnchorWindow");
+#[allow(dead_code)]
 const POLL_TIMER_ID: usize = 21;
+#[allow(dead_code)]
 const POLL_TIMER_MS: u32 = 8;
 
+#[allow(dead_code)]
 struct PollState {
     get_state: XInputGetStateFn,
     get_keystroke: Option<XInputGetKeystrokeFn>,
@@ -125,89 +139,14 @@ struct PollState {
     last_no_pad: Instant,
     last_probe_log: Instant,
     iter_count: u64,
+    raw_preparsed: HashMap<usize, Vec<usize>>,
+    raw_diag_count: u32,
+    /// Latest button mask from raw HID (XUSB); merged when XInputGetState is neutral.
+    last_raw_buttons: u16,
 }
 
 thread_local! {
     static POLL_STATE: RefCell<Option<PollState>> = const { RefCell::new(None) };
-}
-
-/// Per-thread `ImpersonateLoggedOnUser` guard. Acquires the interactive user
-/// token and impersonates it for the lifetime of this object. `RevertToSelf`
-/// runs in `Drop`. Silent (logged but not fatal) on failure — pre-logon Winlogon
-/// has no interactive user.
-struct ImpersonationGuard {
-    impersonated: bool,
-    user_token: Option<HANDLE>,
-    primary_token: Option<HANDLE>,
-}
-
-impl ImpersonationGuard {
-    fn try_acquire(tx: &mpsc::Sender<SecureMsg>) -> Self {
-        let mut guard = Self {
-            impersonated: false,
-            user_token: None,
-            primary_token: None,
-        };
-        unsafe {
-            let session = WTSGetActiveConsoleSessionId();
-            if session == 0xFFFF_FFFF {
-                let _ = tx.send(SecureMsg::Error(
-                    "impersonate: no active console session".into(),
-                ));
-                return guard;
-            }
-            let mut user_token = HANDLE::default();
-            if WTSQueryUserToken(session, &mut user_token).is_err() {
-                let _ = tx.send(SecureMsg::Error(format!(
-                    "impersonate: WTSQueryUserToken(session={session}) failed (no logged-in user?)"
-                )));
-                return guard;
-            }
-            guard.user_token = Some(user_token);
-
-            let mut primary = HANDLE::default();
-            if let Err(e) = DuplicateTokenEx(
-                user_token,
-                TOKEN_ACCESS_MASK(0xf01ff),
-                None,
-                SecurityImpersonation,
-                TokenImpersonation,
-                &mut primary,
-            ) {
-                let _ = tx.send(SecureMsg::Error(format!("impersonate: DuplicateTokenEx: {e}")));
-                return guard;
-            }
-            guard.primary_token = Some(primary);
-
-            if let Err(e) = ImpersonateLoggedOnUser(primary) {
-                let _ = tx.send(SecureMsg::Error(format!(
-                    "impersonate: ImpersonateLoggedOnUser: {e}"
-                )));
-                return guard;
-            }
-            guard.impersonated = true;
-            let _ = tx.send(SecureMsg::Error(format!(
-                "impersonate: now running as interactive user (session {session})"
-            )));
-        }
-        guard
-    }
-}
-
-impl Drop for ImpersonationGuard {
-    fn drop(&mut self) {
-        unsafe {
-            if self.impersonated {
-                let _ = RevertToSelf();
-            }
-            if let Some(h) = self.primary_token.take() {
-                let _ = CloseHandle(h);
-            }
-            if let Some(h) = self.user_token.take() {
-                let _ = CloseHandle(h);
-            }
-        }
-    }
 }
 
 enum SecureMsg {
@@ -236,7 +175,21 @@ impl XInputBackend {
             last_no_pad_log: Instant::now() - Duration::from_secs(60),
             last_raw_log: Instant::now() - Duration::from_secs(60),
             last_secure_check: Instant::now() - Duration::from_secs(60),
+            secure_leave_winlogon_streak: 0,
         }
+    }
+
+    fn input_is_winlogon(&mut self) -> bool {
+        let winlogon = match crate::win::input_desktop_name() {
+            Ok(name) => name.eq_ignore_ascii_case("Winlogon"),
+            Err(_) => false,
+        };
+        if winlogon {
+            self.secure_leave_winlogon_streak = 0;
+            return true;
+        }
+        self.secure_leave_winlogon_streak = self.secure_leave_winlogon_streak.saturating_add(1);
+        self.secure.is_some() && self.secure_leave_winlogon_streak < 12
     }
 
     fn get_state(&self, slot: u32, state: &mut XINPUT_STATE) -> u32 {
@@ -378,9 +331,7 @@ impl XInputBackend {
     fn sync_secure_helper(&mut self) -> bool {
         if self.last_secure_check.elapsed() >= Duration::from_millis(250) {
             self.last_secure_check = Instant::now();
-            let on_winlogon = crate::win::input_desktop_name()
-                .map(|name| name.eq_ignore_ascii_case("Winlogon"))
-                .unwrap_or(false);
+            let on_winlogon = self.input_is_winlogon();
             match (on_winlogon, self.secure.is_some()) {
                 (true, false) => match SecurePollThread::spawn() {
                     Ok(thread) => {
@@ -392,6 +343,7 @@ impl XInputBackend {
                 (false, true) => {
                     service_log("XInput secure helper: stopping");
                     self.secure.take();
+                    self.secure_leave_winlogon_streak = 0;
                 }
                 _ => {}
             }
@@ -473,6 +425,15 @@ impl GamepadBackend for XInputBackend {
         // buttons on some systems.
         let _ = self.sync_secure_helper();
 
+        // Winlogon helper owns real button state; primary GetState on Default returns
+        // neutral masks and would clobber secure edges if we merged them here.
+        if self.secure.is_some() {
+            for slot in 0..SLOTS {
+                self.poll_keystrokes(slot);
+            }
+            return Ok(());
+        }
+
         let mut connected = [false; 4];
         let mut states: [Option<XINPUT_GAMEPAD>; 4] = [None; 4];
 
@@ -544,6 +505,43 @@ fn key_to_mask(vk: u16) -> Option<u16> {
     })
 }
 
+#[allow(dead_code)]
+fn hid_usage_to_mask(page: u16, usage: u16) -> Option<u16> {
+    Some(match (page, usage) {
+        (0x09, 1) => XINPUT_GAMEPAD_A.0,
+        (0x09, 2) => XINPUT_GAMEPAD_B.0,
+        (0x09, 3) => XINPUT_GAMEPAD_X.0,
+        (0x09, 4) => XINPUT_GAMEPAD_Y.0,
+        (0x09, 5) => XINPUT_GAMEPAD_LEFT_SHOULDER.0,
+        (0x09, 6) => XINPUT_GAMEPAD_RIGHT_SHOULDER.0,
+        (0x09, 12) => XINPUT_GAMEPAD_DPAD_UP.0,
+        (0x09, 13) => XINPUT_GAMEPAD_DPAD_DOWN.0,
+        (0x09, 14) => XINPUT_GAMEPAD_DPAD_LEFT.0,
+        (0x09, 15) => XINPUT_GAMEPAD_DPAD_RIGHT.0,
+        _ => return None,
+    })
+}
+
+/// Standard XUSB 16-bit button field (dpad, shoulders, face buttons).
+const XUSB_BUTTON_MASK: u16 = 0xF3FF;
+
+/// Xbox 360 / XUSB gamepad input reports expose a 16-bit button field at bytes 2–3.
+fn xusb_buttons_from_report(report: &[u8]) -> Option<u16> {
+    if report.len() < 4 {
+        return None;
+    }
+    for buttons in [
+        u16::from_be_bytes([report[2], report[3]]),
+        u16::from_le_bytes([report[2], report[3]]),
+    ] {
+        let masked = buttons & XUSB_BUTTON_MASK;
+        if masked != 0 {
+            return Some(masked);
+        }
+    }
+    None
+}
+
 fn load_xinput_api() -> (
     Option<HMODULE>,
     Option<XInputGetStateFn>,
@@ -579,6 +577,7 @@ fn load_xinput_api() -> (
     (None, None, None)
 }
 
+#[allow(dead_code)]
 fn secure_poll_main(
     tx: mpsc::Sender<SecureMsg>,
     stop: Arc<AtomicBool>,
@@ -598,41 +597,9 @@ fn secure_poll_main(
         }
     }
 
-    // 1b. Impersonate the interactive user on this poll thread. XInput shim
-    //     returns neutral (zeroed) state for processes whose thread token is
-    //     SYSTEM/winlogon-impersonated when the input desktop is Winlogon. The
-    //     interactive user token has full GameInput/XInput access. Mirrors
-    //     Joyxoff's `FUN_00419ef0` boot-thread pattern (WTSQueryUserToken +
-    //     ImpersonateLoggedOnUser). On pre-logon Winlogon (no logged-in user),
-    //     WTSQueryUserToken fails and we run without impersonation.
-    let _impersonation = ImpersonationGuard::try_acquire(&tx);
-
-    // 2. Load XInput on this Winlogon-attached thread.
-    let (_module, get_state, get_keystroke) = load_xinput_api();
-    let Some(get_state) = get_state else {
-        let _ = tx.send(SecureMsg::Error("loader failed".into()));
-        let _ = tid_tx.send(unsafe { GetCurrentThreadId() });
-        return;
-    };
-
-    // 3. Stash poll state in thread-local so the wndproc can reach it without
-    //    going through a raw pointer in GWLP_USERDATA.
-    POLL_STATE.with(|s| {
-        *s.borrow_mut() = Some(PollState {
-            get_state,
-            get_keystroke,
-            tx: tx.clone(),
-            prev_buttons: [0; 4],
-            active_slot: None,
-            connected_prev: [false; 4],
-            last_status: Instant::now() - Duration::from_secs(60),
-            last_no_pad: Instant::now() - Duration::from_secs(60),
-            last_probe_log: Instant::now() - Duration::from_secs(60),
-            iter_count: 0,
-        });
-    });
-
-    // 4. Register class + create the anchor window on the Winlogon desktop.
+    // 2. Register class + create the anchor window on the Winlogon desktop first.
+    //    Joyxoff polls XInput on the window-owning thread under the Winlogon worker
+    //    token — not via ImpersonateLoggedOnUser on the timer path (see NOTES.md).
     //    This is the key bypass: XInput delivers real packets to processes that
     //    own a window on the input desktop, and the poll runs on this thread.
     let hwnd = unsafe {
@@ -658,8 +625,8 @@ fn secure_poll_main(
             ANCHOR_CLASS,
             w!("Warmup XInput Anchor"),
             WS_POPUP,
-            -32000,
-            -32000,
+            0,
+            0,
             1,
             1,
             None,
@@ -678,15 +645,58 @@ fn secure_poll_main(
     };
 
     unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            1,
+            1,
+            SWP_SHOWWINDOW | SWP_NOACTIVATE,
+        );
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        let _ = tx.send(SecureMsg::Error(
+            "anchor window shown on Winlogon for XInput focus eligibility".into(),
+        ));
+    }
+
+    // 3. Load XInput after the anchor HWND exists on Winlogon.
+    let (_module, get_state, get_keystroke) = load_xinput_api();
+    let Some(get_state) = get_state else {
+        let _ = tx.send(SecureMsg::Error("loader failed".into()));
+        let _ = tid_tx.send(unsafe { GetCurrentThreadId() });
+        return;
+    };
+
+    POLL_STATE.with(|s| {
+        *s.borrow_mut() = Some(PollState {
+            get_state,
+            get_keystroke,
+            tx: tx.clone(),
+            prev_buttons: [0; 4],
+            active_slot: None,
+            connected_prev: [false; 4],
+            last_status: Instant::now() - Duration::from_secs(60),
+            last_no_pad: Instant::now() - Duration::from_secs(60),
+            last_probe_log: Instant::now() - Duration::from_secs(60),
+            iter_count: 0,
+            raw_preparsed: HashMap::new(),
+            raw_diag_count: 0,
+            last_raw_buttons: 0,
+        });
+    });
+
+    unsafe {
+        register_raw_gamepad(hwnd, &tx);
         if SetTimer(hwnd, POLL_TIMER_ID, POLL_TIMER_MS, None) == 0 {
             let _ = tx.send(SecureMsg::Error("SetTimer failed for anchor poll".into()));
         }
     }
 
-    // 5. Publish our thread id so Drop can wake us via PostThreadMessageW.
+    // 4. Publish our thread id so Drop can wake us via PostThreadMessageW.
     let _ = tid_tx.send(unsafe { GetCurrentThreadId() });
 
-    // 6. Pump messages. WM_TIMER fires xinput poll inside anchor_wndproc.
+    // 5. Pump messages. WM_TIMER fires xinput poll inside anchor_wndproc.
     let mut msg = MSG::default();
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -712,6 +722,7 @@ fn secure_poll_main(
     POLL_STATE.with(|s| *s.borrow_mut() = None);
 }
 
+#[allow(dead_code)]
 unsafe extern "system" fn anchor_wndproc(
     hwnd: HWND,
     msg: u32,
@@ -726,12 +737,185 @@ unsafe extern "system" fn anchor_wndproc(
         });
         return LRESULT(0);
     }
+    if msg == WM_INPUT {
+        POLL_STATE.with(|s| {
+            if let Some(state) = s.borrow_mut().as_mut() {
+                poll_raw_hid_input(state, HRAWINPUT(lparam.0 as _));
+            }
+        });
+        return LRESULT(0);
+    }
     if msg == WM_DESTROY {
         return LRESULT(0);
     }
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
+#[allow(dead_code)]
+fn register_raw_gamepad(hwnd: HWND, tx: &mpsc::Sender<SecureMsg>) {
+    let devices = [
+        RAWINPUTDEVICE {
+            usUsagePage: 0x01,
+            usUsage: 0x05,
+            dwFlags: RIDEV_INPUTSINK,
+            hwndTarget: hwnd,
+        },
+        RAWINPUTDEVICE {
+            usUsagePage: 0x01,
+            usUsage: 0x04,
+            dwFlags: RIDEV_INPUTSINK,
+            hwndTarget: hwnd,
+        },
+    ];
+    match unsafe { RegisterRawInputDevices(&devices, size_of::<RAWINPUTDEVICE>() as u32) } {
+        Ok(()) => {
+            let _ = tx.send(SecureMsg::Error(
+                "raw HID fallback registered for gamepad/joystick".into(),
+            ));
+        }
+        Err(e) => {
+            let _ = tx.send(SecureMsg::Error(format!("raw HID register failed: {e}")));
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn poll_raw_hid_input(state: &mut PollState, raw_handle: HRAWINPUT) {
+    let mut size = 0u32;
+    unsafe {
+        GetRawInputData(
+            raw_handle,
+            RID_INPUT,
+            None,
+            &mut size,
+            size_of::<RAWINPUTHEADER>() as u32,
+        );
+    }
+    if size == 0 {
+        return;
+    }
+
+    let words = (size as usize + size_of::<usize>() - 1) / size_of::<usize>();
+    let mut storage = vec![0usize; words];
+    let read = unsafe {
+        GetRawInputData(
+            raw_handle,
+            RID_INPUT,
+            Some(storage.as_mut_ptr().cast()),
+            &mut size,
+            size_of::<RAWINPUTHEADER>() as u32,
+        )
+    };
+    if read == u32::MAX || read == 0 {
+        return;
+    }
+
+    let raw = unsafe { &*(storage.as_ptr() as *const RAWINPUT) };
+    if raw.header.dwType != RIM_TYPEHID.0 {
+        return;
+    }
+
+    let Some(preparsed) = raw_preparsed_data(state, raw) else {
+        return;
+    };
+    let hid = unsafe { raw.data.hid };
+    let report_size = hid.dwSizeHid as usize;
+    let report_count = hid.dwCount as usize;
+    if report_size == 0 || report_count == 0 {
+        return;
+    }
+
+    let raw_start = unsafe { slice::from_raw_parts(hid.bRawData.as_ptr(), report_size * report_count) };
+    for report in raw_start.chunks(report_size) {
+        let mut usages = [USAGE_AND_PAGE::default(); 64];
+        let mut usage_len = usages.len() as u32;
+        let status = unsafe {
+            HidP_GetUsagesEx(
+                HidP_Input,
+                0,
+                usages.as_mut_ptr(),
+                &mut usage_len,
+                preparsed,
+                report,
+            )
+        };
+
+        let mut cur = 0u16;
+        let mut seen = Vec::new();
+        if status == HIDP_STATUS_SUCCESS {
+            for usage in usages.iter().take(usage_len as usize) {
+                seen.push(format!("{:02x}:{:02x}", usage.UsagePage, usage.Usage));
+                if let Some(mask) = hid_usage_to_mask(usage.UsagePage, usage.Usage) {
+                    cur |= mask;
+                }
+            }
+        }
+        if cur == 0 {
+            cur = xusb_buttons_from_report(report).unwrap_or(0);
+        }
+        state.last_raw_buttons = cur;
+
+        let prev = state.prev_buttons[0];
+        if prev != cur {
+            state.prev_buttons[0] = cur;
+            service_log(&format!(
+                "XInput secure helper: raw HID buttons 0x{prev:04x} -> 0x{cur:04x} [{}]",
+                if seen.is_empty() {
+                    "xusb".to_string()
+                } else {
+                    seen.join(",")
+                }
+            ));
+            let _ = state.tx.send(SecureMsg::Buttons { slot: 0, prev, cur });
+        } else if cur != 0 && state.raw_diag_count < 4 {
+            state.raw_diag_count = state.raw_diag_count.saturating_add(1);
+            service_log(&format!(
+                "XInput secure helper: raw HID held 0x{cur:04x} usages=[{}]",
+                seen.join(",")
+            ));
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn raw_preparsed_data(state: &mut PollState, raw: &RAWINPUT) -> Option<PHIDP_PREPARSED_DATA> {
+    let key = raw.header.hDevice.0 as usize;
+    if !state.raw_preparsed.contains_key(&key) {
+        let mut bytes = 0u32;
+        unsafe {
+            GetRawInputDeviceInfoW(raw.header.hDevice, RIDI_PREPARSEDDATA, None, &mut bytes);
+        }
+        if bytes == 0 {
+            return None;
+        }
+        let words = (bytes as usize + size_of::<usize>() - 1) / size_of::<usize>();
+        let mut storage = vec![0usize; words];
+        let got = unsafe {
+            GetRawInputDeviceInfoW(
+                raw.header.hDevice,
+                RIDI_PREPARSEDDATA,
+                Some(storage.as_mut_ptr().cast()),
+                &mut bytes,
+            )
+        };
+        if got == u32::MAX || got == 0 {
+            let _ = state
+                .tx
+                .send(SecureMsg::Error("raw HID preparsed data unavailable".into()));
+            return None;
+        }
+        state.raw_preparsed.insert(key, storage);
+        let _ = state.tx.send(SecureMsg::Error(format!(
+            "raw HID preparsed cached for device 0x{key:x} ({bytes} bytes)"
+        )));
+    }
+    state
+        .raw_preparsed
+        .get_mut(&key)
+        .map(|buf| PHIDP_PREPARSED_DATA(buf.as_mut_ptr() as isize))
+}
+
+#[allow(dead_code)]
 fn poll_xinput_tick(state: &mut PollState) {
     let mut connected = [false; 4];
     let mut states: [Option<XINPUT_GAMEPAD>; 4] = [None; 4];
@@ -814,7 +998,10 @@ fn poll_xinput_tick(state: &mut PollState) {
     let pad = states[slot as usize].expect("connected slot has state");
     let idx = slot as usize;
     let prev = state.prev_buttons[idx];
-    let cur = pad.wButtons.0;
+    let mut cur = pad.wButtons.0;
+    if slot == 0 {
+        cur |= state.last_raw_buttons;
+    }
     state.prev_buttons[idx] = cur;
     if prev != cur {
         let _ = state.tx.send(SecureMsg::Buttons { slot, prev, cur });
@@ -827,6 +1014,7 @@ fn poll_xinput_tick(state: &mut PollState) {
     )));
 }
 
+#[allow(dead_code)]
 fn secure_poll_keystrokes(
     tx: &mpsc::Sender<SecureMsg>,
     get_keystroke: XInputGetKeystrokeFn,

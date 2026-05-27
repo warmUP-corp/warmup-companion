@@ -163,13 +163,17 @@ impl App {
         self.foreground = Foreground::LogonUi;
         self.input_desktop = Desktop::Winlogon;
         if self.use_real_win32 {
+            // JoyXoff keeps its controller/XInput path on the normal desktop.
+            // Its Winlogon attach is for the UI window thread; polling XInput
+            // from a Winlogon-attached worker returns neutral buttons here.
+            self.attach_named(Desktop::Default);
             let cur = win::current_desktop_name().unwrap_or_else(|| "?".into());
             let input = win::input_desktop_name().unwrap_or_else(|e| format!("? ({e})"));
             self.service_log(&format!(
                 "worker thread desktop: {cur}; input desktop: {input}"
             ));
         }
-        self.log("service: boot path (input desktop follows lock/logon/UAC)");
+        self.log("service: boot path (controller stays on default desktop; VK UI follows winlogon)");
     }
 
     #[cfg(all(windows, feature = "service"))]
@@ -340,6 +344,8 @@ impl App {
         self.modal_block_bit_4 = false;
         self.xbox_window_desktop = None;
         self.spiral_window_desktop = None;
+        #[cfg(windows)]
+        crate::vk_nav::reset_selection();
         if let Some(session) = self.vk_session.take() {
             let kind = session.describe();
             session.close();
@@ -375,7 +381,10 @@ impl App {
                     self.vk_open_latch = true;
                     self.log(&format!("VK shown: {kind}"));
                     #[cfg(windows)]
-                    crate::debug_state::record_action(format!("VK shown: {kind}"));
+                    {
+                        crate::vk_nav::reset_selection();
+                        crate::debug_state::record_action(format!("VK shown: {kind}"));
+                    }
                     self.vk_session = Some(session);
                 }
                 Err(e) => {
