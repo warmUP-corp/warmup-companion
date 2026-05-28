@@ -37,6 +37,8 @@ pub struct PadSample {
 pub enum HidProfile {
     /// Wired / wireless Xbox via XUSB byte layout (LE u16 @ 2–3).
     Xusb,
+    /// Raw Input report is noisy/non-button data; keep bytes for diagnostics only.
+    XusbButtonByte,
     /// DualShock 4 / DualSense USB report id 0x01.
     SonyUsb,
     /// DualShock 4 Bluetooth report id 0x01 (buttons @ 8–9).
@@ -49,6 +51,7 @@ impl HidProfile {
     pub fn label(self) -> &'static str {
         match self {
             Self::Xusb => "xusb",
+            Self::XusbButtonByte => "xusb-raw",
             Self::SonyUsb => "sony-usb",
             Self::SonyBluetooth => "sony-bt",
             Self::GenericHidP => "hidp",
@@ -162,6 +165,9 @@ pub fn profile_for_vid_pid(vid: u16, pid: u16, name: &str) -> HidProfile {
         }
         return HidProfile::SonyUsb;
     }
+    if vid == 0x045e && pid == 0x02ff {
+        return HidProfile::XusbButtonByte;
+    }
     if vid == 0x045e {
         return HidProfile::Xusb;
     }
@@ -191,6 +197,10 @@ pub fn decode_report_logged(device: &mut DeviceState, report: &[u8]) -> (PadSamp
             let off = device.xusb_button_offset(report);
             let b = parse_xusb_mask_at(report, off).unwrap_or(0);
             (b, if b != 0 { "xusb" } else { "" })
+        }
+        HidProfile::XusbButtonByte => {
+            let _ = report;
+            (0, "")
         }
         HidProfile::SonyUsb => {
             let b = parse_sony_usb_mask(report);
@@ -374,7 +384,7 @@ fn ds4_dpad_hat(hat: u8) -> u16 {
 
 fn stick_active_for_profile(profile: HidProfile, report: &[u8]) -> bool {
     match profile {
-        HidProfile::Xusb => xusb_stick_active(report),
+        HidProfile::Xusb | HidProfile::XusbButtonByte => xusb_stick_active(report),
         HidProfile::SonyUsb | HidProfile::SonyBluetooth => sony_stick_active(report),
         HidProfile::GenericHidP => false,
     }
@@ -416,7 +426,7 @@ fn sony_stick_active(report: &[u8]) -> bool {
 
 fn sticks_for_profile(profile: HidProfile, report: &[u8]) -> (f32, f32, f32, f32) {
     match profile {
-        HidProfile::Xusb => {
+        HidProfile::Xusb | HidProfile::XusbButtonByte => {
             if report.len() < 10 {
                 return (0.0, 0.0, 0.0, 0.0);
             }
@@ -663,7 +673,7 @@ fn profile_from_gcdb_name(name: &str) -> HidProfile {
 pub fn process_raw_input(
     devices: &mut HashMap<usize, DeviceState>,
     raw: &RAWINPUT,
-) -> Option<(usize, PadSample, &'static str, String)> {
+) -> Option<(usize, PadSample, &'static str, String, Vec<u8>)> {
     if raw.header.dwType != windows::Win32::UI::Input::RIM_TYPEHID.0 {
         return None;
     }
@@ -691,6 +701,7 @@ pub fn process_raw_input(
         unsafe { std::slice::from_raw_parts(hid.bRawData.as_ptr(), report_size * report_count) };
     let mut last = PadSample::default();
     let mut last_src = "";
+    let mut last_report = Vec::new();
     for (i, report) in raw_start.chunks(report_size).enumerate() {
         if just_opened.is_some() && i == 0 {
             device.calibrate_xusb_from_report(report);
@@ -698,6 +709,8 @@ pub fn process_raw_input(
         let (sample, src) = decode_report_logged(device, report);
         last = sample;
         last_src = src;
+        last_report.clear();
+        last_report.extend_from_slice(report);
     }
     let dev = format!(
         "{} {:04x}:{:04x} {}",
@@ -712,9 +725,9 @@ pub fn process_raw_input(
         } else {
             String::new()
         };
-        return Some((key, last, "open", format!("{open} | {dev}{off_note}")));
+        return Some((key, last, "open", format!("{open} | {dev}{off_note}"), last_report));
     }
-    Some((key, last, last_src, dev))
+    Some((key, last, last_src, dev, last_report))
 }
 
 #[cfg(test)]
@@ -735,4 +748,5 @@ mod tests {
         assert!(plausible_mask(0x000f).is_none());
         assert!(plausible_mask(0x005f).is_none());
     }
+
 }

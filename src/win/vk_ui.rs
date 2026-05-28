@@ -3,7 +3,7 @@
 //! Dedicated UI thread (Joyxoff-style). `PostThreadMessage` show/hide are handled in the
 //! thread message loop — **not** in `wndproc` (thread messages have `hwnd == NULL`).
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -24,11 +24,11 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
-    GetSystemMetrics, GetWindowRect, IsWindowVisible, KillTimer, LoadCursorW, PeekMessageW,
-    PostQuitMessage, PostThreadMessageW, RegisterClassW, SetTimer, SetWindowPos, ShowWindow,
-    SystemParametersInfoW, TranslateMessage, SM_CXSCREEN, SM_CYSCREEN,
+    GetForegroundWindow, GetSystemMetrics, GetWindowRect, IsWindowVisible, KillTimer, LoadCursorW,
+    PeekMessageW, PostQuitMessage, PostThreadMessageW, RegisterClassW, SetForegroundWindow,
+    SetTimer, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage, SM_CXSCREEN, SM_CYSCREEN,
     CS_HREDRAW, CS_VREDRAW, HMENU, HWND_NOTOPMOST, HWND_TOPMOST, MSG, PM_NOREMOVE,
-    SPI_GETWORKAREA, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SPI_GETWORKAREA, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SWP_NOZORDER, SWP_SHOWWINDOW, WINDOWPOS, WM_DESTROY, WM_LBUTTONDOWN, WM_PAINT, WM_TIMER,
     WM_USER, WM_WINDOWPOSCHANGING, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_EX_TOOLWINDOW, WS_POPUP,
     WNDCLASSW,
@@ -51,6 +51,8 @@ const VK_ZORDER_TIMER_MS: u32 = 200;
 
 static VK_VISIBLE: AtomicBool = AtomicBool::new(false);
 static UI_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+static VK_HWND: AtomicIsize = AtomicIsize::new(0);
+static TEXT_TARGET_HWND: AtomicIsize = AtomicIsize::new(0);
 
 const SEL_FILL: u32 = 0x00E85D04;
 const KEY_FILL: u32 = 0x00303030;
@@ -95,6 +97,24 @@ pub fn tick_dpad_hold(now: Instant) -> bool {
         true
     } else {
         false
+    }
+}
+
+pub fn focus_text_target() {
+    let hwnd = TEXT_TARGET_HWND.load(Ordering::Acquire);
+    if hwnd != 0 {
+        unsafe {
+            let _ = SetForegroundWindow(HWND(hwnd as *mut _));
+        }
+    }
+}
+
+pub fn refocus_vk() {
+    let hwnd = VK_HWND.load(Ordering::Acquire);
+    if hwnd != 0 && secure_desktop_mode() {
+        unsafe {
+            let _ = SetForegroundWindow(HWND(hwnd as *mut _));
+        }
     }
 }
 
@@ -213,6 +233,12 @@ fn ui_show(attach: VkAttach) {
     if let Some(name) = desktop::current_desktop_name() {
         vk_log::log(&format!("UI thread desktop: {name}"));
     }
+    if secure_desktop_mode() {
+        let foreground = unsafe { GetForegroundWindow() };
+        if !foreground.0.is_null() {
+            TEXT_TARGET_HWND.store(foreground.0 as isize, Ordering::Release);
+        }
+    }
     let hwnd = match unsafe { create_vk_window() } {
         Ok(h) => h,
         Err(e) => {
@@ -221,6 +247,7 @@ fn ui_show(attach: VkAttach) {
             return;
         }
     };
+    VK_HWND.store(hwnd.0 as isize, Ordering::Release);
     UI.with(|ui| ui.borrow_mut().hwnd = Some(hwnd));
     vk_nav::reset_selection();
     unsafe {
@@ -255,6 +282,8 @@ fn ui_hide() {
     unsafe {
         destroy_vk_window(h);
     }
+    VK_HWND.store(0, Ordering::Release);
+    TEXT_TARGET_HWND.store(0, Ordering::Release);
     VK_VISIBLE.store(false, Ordering::SeqCst);
     vk_log::log("WarmupXboxVkWindow hidden");
 }
@@ -323,7 +352,11 @@ fn window_style() -> windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE {
 }
 
 fn window_ex_style() -> windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE {
-    WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+    if secure_desktop_mode() {
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW
+    } else {
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+    }
 }
 
 unsafe fn outer_window_size() -> (i32, i32) {
@@ -400,20 +433,37 @@ unsafe fn stop_zorder_timer(hwnd: HWND) {
 unsafe fn show_and_place(hwnd: HWND) {
     let (outer_w, outer_h) = outer_window_size();
     let (x, y) = work_area_bottom_center(outer_w, outer_h);
-    let _ = SetWindowPos(
-        hwnd,
-        HWND_TOPMOST,
-        x,
-        y,
-        outer_w,
-        outer_h,
-        SWP_SHOWWINDOW | SWP_NOACTIVATE,
-    );
-    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    if secure_desktop_mode() {
+        let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, outer_w, outer_h, SWP_SHOWWINDOW);
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = SetForegroundWindow(hwnd);
+    } else {
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            x,
+            y,
+            outer_w,
+            outer_h,
+            SWP_SHOWWINDOW | SWP_NOACTIVATE,
+        );
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
     ensure_topmost(hwnd);
     start_zorder_timer(hwnd);
     let _ = RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
     log_window_rect(hwnd);
+}
+
+fn service_mode() -> bool {
+    std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0")
+}
+
+fn secure_desktop_mode() -> bool {
+    service_mode()
+        && desktop::input_desktop_name()
+            .map(|name| name.eq_ignore_ascii_case("Winlogon"))
+            .unwrap_or(false)
 }
 
 unsafe fn destroy_vk_window(hwnd: HWND) {

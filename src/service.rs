@@ -87,13 +87,10 @@ fn run_service_core() -> Result<(), String> {
             ServiceControlHandlerResult::NoError
         }
         ServiceControl::SessionChange(change) => {
-            // SessionLogon: user reached the desktop — keep the worker alive and let
-            // the gamepad loop close VK when input desktop leaves Winlogon. Hard-restart
-            // on logon looked like a crash and tore down VK mid-transition.
-            let restart = matches!(
-                change.reason,
-                SessionChangeReason::ConsoleConnect | SessionChangeReason::SessionLogoff
-            );
+            // User reached or reconnected to the desktop: keep the worker alive and
+            // let the gamepad loop switch backend. Hard-restart tears down VK and
+            // loses controller state mid-transition.
+            let restart = matches!(change.reason, SessionChangeReason::SessionLogoff);
             install::log_line(&format!(
                 "session change {:?}{}",
                 change.reason,
@@ -141,11 +138,29 @@ fn run_service_core() -> Result<(), String> {
 pub fn run_worker() -> Result<(), String> {
     std::env::set_var("WARMUP_VK_SERVICE", "1");
     install::log_line("service worker starting (XInput + VK UI)");
+    install::log_line(r"service log file: C:\ProgramData\WarmupVk\service.log");
 
     let mut app = App::default();
     app.use_real_win32 = true;
     app.configure_boot_service();
     install::log_line("boot path active; tap Y on sign-in / UAC to open VK");
+
+    // Joyxoff parity: after attaching the main thread to Winlogon
+    // (`configure_boot_service`), create the anchor window on that desktop. HID /
+    // XInput delivery requires the process to own a window on the input desktop.
+    // The handle is intentionally leaked — it lives for the worker's lifetime.
+    let _anchor = unsafe {
+        match crate::win::create_main_anchor() {
+            Ok(hwnd) => {
+                install::log_line(&format!("worker anchor hwnd={:?} on winlogon", hwnd.0));
+                Some(hwnd)
+            }
+            Err(e) => {
+                install::log_line(&format!("worker anchor failed: {e}"));
+                None
+            }
+        }
+    };
 
     let vk_open = std::cell::Cell::new(false);
     let gamepad_result = run_boot_gamepad_loop(&mut app, &vk_open, true);

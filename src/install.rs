@@ -49,12 +49,34 @@ pub fn run_uninstall() {
     println!("Uninstalled {SERVICE_NAME}.");
 }
 
+/// Stop the service without deleting it. Use before manual `cargo run -- install`
+/// so the installer can overwrite the locked exe.
+pub fn run_stop() {
+    if let Err(e) = require_admin() {
+        eprintln!("stop failed: {e}");
+        std::process::exit(1);
+    }
+    match stop_service_blocking() {
+        Ok(StopOutcome::Stopped) => println!("Service {SERVICE_NAME} stopped."),
+        Ok(StopOutcome::NotInstalled) => println!("Service {SERVICE_NAME} not installed."),
+        Ok(StopOutcome::AlreadyStopped) => println!("Service {SERVICE_NAME} already stopped."),
+        Err(e) => {
+            eprintln!("stop failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn install_inner() -> Result<(), String> {
     require_admin()?;
     remove_legacy_install_artifacts();
     let src = std::env::current_exe().map_err(|e| e.to_string())?;
     fs::create_dir_all(INSTALL_DIR).map_err(|e| e.to_string())?;
     fs::create_dir_all(DATA_DIR).map_err(|e| e.to_string())?;
+
+    // Stop + delete BEFORE copying — old exe is locked by the running service.
+    remove_test_services();
+    uninstall_service_quiet();
 
     let dest = Path::new(INSTALL_DIR).join(EXE_NAME);
     fs::copy(&src, &dest).map_err(|e| format!("copy exe to {INSTALL_DIR}: {e}"))?;
@@ -65,9 +87,6 @@ fn install_inner() -> Result<(), String> {
         ));
     }
     copy_gamecontroller_db()?;
-
-    remove_test_services();
-    uninstall_service_quiet();
     // sc.exe: `binPath=` and path are separate argv tokens; no quotes (path has no spaces).
     // SCM starts the exe directly; main() dispatches to service_dispatcher when argc == 1.
     let exe = dest.display().to_string();
@@ -101,9 +120,62 @@ fn uninstall_inner() -> Result<(), String> {
 }
 
 fn uninstall_service_quiet() {
-    let _ = sc(&["stop", SERVICE_NAME]);
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    let _ = stop_service_blocking();
     let _ = sc(&["delete", SERVICE_NAME]);
+}
+
+enum StopOutcome {
+    Stopped,
+    AlreadyStopped,
+    NotInstalled,
+}
+
+/// Issue `sc stop`, then poll `sc query` until STOPPED or timeout.
+/// Avoids the race where `sc delete` runs before the worker child has fully exited
+/// and released its handle on the install dir exe.
+fn stop_service_blocking() -> Result<StopOutcome, String> {
+    match query_service_state()? {
+        Some(state) if state == "STOPPED" => return Ok(StopOutcome::AlreadyStopped),
+        None => return Ok(StopOutcome::NotInstalled),
+        _ => {}
+    }
+    let _ = sc(&["stop", SERVICE_NAME]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        match query_service_state()? {
+            Some(state) if state == "STOPPED" => return Ok(StopOutcome::Stopped),
+            None => return Ok(StopOutcome::NotInstalled),
+            _ => {}
+        }
+    }
+    Err(format!("{SERVICE_NAME} did not reach STOPPED within 15s"))
+}
+
+/// Returns `Ok(None)` if the service is not installed, or the current state token
+/// (e.g. "RUNNING", "STOPPED", "STOP_PENDING") parsed out of `sc query`.
+fn query_service_state() -> Result<Option<String>, String> {
+    let out = Command::new("sc.exe")
+        .args(["query", SERVICE_NAME])
+        .output()
+        .map_err(|e| format!("sc.exe query: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // 1060 = ERROR_SERVICE_DOES_NOT_EXIST
+    if text.contains("1060") || stderr.contains("1060") {
+        return Ok(None);
+    }
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("STATE") {
+            // "STATE              : 4  RUNNING"
+            return Ok(rest
+                .split_whitespace()
+                .last()
+                .map(|tok| tok.to_string()));
+        }
+    }
+    Ok(None)
 }
 
 /// Old manual installs and terminal runs used `C:\Program Files\WarmupVk\`.
@@ -201,6 +273,8 @@ fn require_admin() -> Result<(), String> {
 }
 
 pub fn log_line(msg: &str) {
+    #[cfg(windows)]
+    crate::debug_state::record_log_line(msg);
     let _ = log_line_inner(msg);
     eprintln!("> {msg}");
 }

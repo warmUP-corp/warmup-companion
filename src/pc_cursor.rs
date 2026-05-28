@@ -40,6 +40,7 @@ impl PcCursor {
     }
 
     pub fn move_stick(&mut self, stick_x: f32, stick_y: f32, dt_secs: f32) {
+        self.ensure_enigo_for_userland_service();
         let (dx, dy) = stick_delta(stick_x, stick_y, SENSITIVITY, dt_secs);
         if dx == 0.0 && dy == 0.0 {
             self.remainder_x = 0.0;
@@ -60,6 +61,7 @@ impl PcCursor {
     }
 
     pub fn scroll_stick(&mut self, stick_x: f32, stick_y: f32, dt_secs: f32) {
+        self.ensure_enigo_for_userland_service();
         let (sx, sy) = scroll_delta(stick_x, stick_y, dt_secs);
         if sx == 0.0 && sy == 0.0 {
             self.scroll_remainder_x = 0.0;
@@ -83,8 +85,30 @@ impl PcCursor {
     }
 
     pub fn left_click(&mut self) {
+        self.ensure_enigo_for_userland_service();
         if let Some(enigo) = self.enigo.as_mut() {
             let _ = enigo.button(enigo::Button::Left, Direction::Click);
+        }
+    }
+
+    fn ensure_enigo_for_userland_service(&mut self) {
+        if self.enigo.is_some() {
+            return;
+        }
+        if std::env::var_os("WARMUP_VK_SERVICE").is_none_or(|v| v == "0") {
+            return;
+        }
+        #[cfg(windows)]
+        {
+            let Ok(input) = crate::win::input_desktop_name() else {
+                return;
+            };
+            if input.eq_ignore_ascii_case("Winlogon") {
+                return;
+            }
+            if let Ok(enigo) = Enigo::new(&Settings::default()) {
+                self.enigo = Some(enigo);
+            }
         }
     }
 }

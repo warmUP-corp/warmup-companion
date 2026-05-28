@@ -21,7 +21,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(8);
 const Y_RELEASE_GRACE: Duration = Duration::from_millis(550);
 /// Ignore spurious X/dpad from misaligned HID for a moment after VK opens.
 const VK_NAV_INPUT_GRACE: Duration = Duration::from_millis(450);
-const DESKTOP_SYNC_LOG_INTERVAL: Duration = Duration::from_secs(10);
+const DESKTOP_SYNC_LOG_INTERVAL: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VkLoopAction {
@@ -46,6 +46,8 @@ pub struct GamepadPoll {
     last_desktop_log: Instant,
     #[cfg(windows)]
     last_input_desktop: Option<String>,
+    #[cfg(windows)]
+    last_desktop_watch: Option<(String, String)>,
 }
 
 impl GamepadPoll {
@@ -149,6 +151,8 @@ impl GamepadPoll {
             last_desktop_log: Instant::now() - DESKTOP_SYNC_LOG_INTERVAL,
             #[cfg(windows)]
             last_input_desktop: None,
+            #[cfg(windows)]
+            last_desktop_watch: None,
         }
     }
 
@@ -263,11 +267,11 @@ impl GamepadPoll {
             let edge = match (self.vk_down, change.pressed) {
                 (false, true) => {
                     self.vk_down = true;
-                    None
+                    Some(VkLoopAction::Toggle)
                 }
                 (true, false) => {
                     self.vk_down = false;
-                    Some(VkLoopAction::Toggle)
+                    None
                 }
                 _ => None,
             };
@@ -328,15 +332,19 @@ impl GamepadPoll {
 
         match (change.button_name, change.pressed) {
             (VK_MASK_BUTTON, false) => {
+                self.vk_down = false;
+                None
+            }
+            (VK_MASK_BUTTON, true) => {
                 if self
                     .y_ignore_until
                     .is_some_and(|until| Instant::now() < until)
                 {
                     return None;
                 }
+                self.vk_down = true;
                 Some(VkLoopAction::Toggle)
             }
-            (VK_MASK_BUTTON, true) => None,
             ("UP" | "DOWN" | "LEFT" | "RIGHT", true) => {
                 vk_nav::dpad_pressed(change.button_name);
                 vk_ui::request_repaint();
@@ -401,17 +409,21 @@ impl GamepadPoll {
         if !service_mode {
             return;
         }
-        if self.last_desktop_log.elapsed() < DESKTOP_SYNC_LOG_INTERVAL {
-            return;
-        }
-        self.last_desktop_log = Instant::now();
         #[cfg(windows)]
         {
             let name = crate::win::current_desktop_name().unwrap_or_else(|| "?".into());
             let input = crate::win::input_desktop_name().unwrap_or_else(|e| format!("? ({e})"));
+            let current = (name, input);
+            let changed = self.last_desktop_watch.as_ref() != Some(&current);
+            if !changed && self.last_desktop_log.elapsed() < DESKTOP_SYNC_LOG_INTERVAL {
+                return;
+            }
             service_log(&format!(
-                "desktop watch: worker thread on {name}; input desktop {input}"
+                "desktop watch: worker thread on {}; input desktop {}",
+                current.0, current.1
             ));
+            self.last_desktop_watch = Some(current);
+            self.last_desktop_log = Instant::now();
         }
     }
 }

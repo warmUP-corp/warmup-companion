@@ -29,11 +29,6 @@ mod xinput_backend;
 use std::env;
 use std::fmt;
 use std::io::{self, Write};
-use std::time::{Duration, Instant};
-
-/// Ignore rapid Y/Triangle bounce (down-up-down) that toggles open→close in one gesture.
-const VK_TOGGLE_DEBOUNCE: Duration = Duration::from_millis(400);
-const VK_TOGGLE_DEBOUNCE_SERVICE: Duration = Duration::from_millis(900);
 
 use symbols::{
     FN_APPLY_MASK_SLOT_ACTION, FN_ATTACH_INPUT_DESKTOP, FN_ATTACH_NAMED_DESKTOP,
@@ -100,7 +95,6 @@ struct App {
     spiral_window_desktop: Option<Desktop>,
     use_real_win32: bool,
     vk_session: Option<win::VkSession>,
-    last_vk_toggle: Option<Instant>,
 }
 
 impl Default for App {
@@ -125,7 +119,6 @@ impl Default for App {
             spiral_window_desktop: None,
             use_real_win32: false,
             vk_session: None,
-            last_vk_toggle: None,
         }
     }
 }
@@ -158,6 +151,11 @@ impl App {
     }
 
     /// Joyxoff `-boot` + config `+0xd9` for sign-in / UAC (service or `--boot --cfg-winlogon`).
+    ///
+    /// Matches Joyxoff `FUN_00426080` (main controller fn): when `+0xd9` is set, the
+    /// main thread runs `warmup_attach_named_desktop("winlogon")` *first*, then creates
+    /// the controller anchor window (`JoyXoffMWindow`) on that desktop. Owning a window
+    /// on the input desktop is the gating condition for HID/XInput delivery.
     pub(crate) fn configure_boot_service(&mut self) {
         self.config_winlogon_0xd9 = true;
         self.boot_mode = true;
@@ -165,17 +163,14 @@ impl App {
         self.foreground = Foreground::LogonUi;
         self.input_desktop = Desktop::Winlogon;
         if self.use_real_win32 {
-            // JoyXoff keeps its controller/XInput path on the normal desktop.
-            // Its Winlogon attach is for the UI window thread; polling XInput
-            // from a Winlogon-attached worker returns neutral buttons here.
-            self.attach_named(Desktop::Default);
+            self.attach_named(Desktop::Winlogon);
             let cur = win::current_desktop_name().unwrap_or_else(|| "?".into());
             let input = win::input_desktop_name().unwrap_or_else(|e| format!("? ({e})"));
             self.service_log(&format!(
                 "worker thread desktop: {cur}; input desktop: {input}"
             ));
         }
-        self.log("service: boot path (controller stays on default desktop; VK UI follows winlogon)");
+        self.log("service: boot path (controller thread on winlogon; VK UI follows input desktop)");
     }
 
     #[cfg(all(windows, feature = "service"))]
@@ -263,7 +258,7 @@ impl App {
         ));
     }
 
-    /// Y/Triangle **tap** (release edge) toggles VK — stays open until next tap.
+    /// Y/Triangle press toggles VK — stays open until next press.
     fn toggle_virtual_keyboard_combo(&mut self) {
         if !self.mask_0x200_active {
             self.log("button: mask 0x200 absent -> slot 7 not resolved");
@@ -271,20 +266,6 @@ impl App {
             return;
         }
 
-        let now = Instant::now();
-        let debounce = if std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0") {
-            VK_TOGGLE_DEBOUNCE_SERVICE
-        } else {
-            VK_TOGGLE_DEBOUNCE
-        };
-        if let Some(last) = self.last_vk_toggle {
-            if now.duration_since(last) < debounce {
-                self.log("VK toggle debounced (button bounce)");
-                self.service_log("Y tap: debounced");
-                return;
-            }
-        }
-        self.last_vk_toggle = Some(now);
         self.service_log("Y tap: toggle VK");
         #[cfg(windows)]
         crate::debug_state::record_action("Y tap: toggle VK");
@@ -314,7 +295,9 @@ impl App {
     }
 
     fn dispatch_vk_toggle(&mut self) {
-        if self.queued_action != 7 {
+        let queued_action = self.queued_action;
+        self.queued_action = 0;
+        if queued_action != 7 {
             self.log(&format!(
                 "{FN_EXECUTE_QUEUED_ACTION}: queued action != 7 -> no VK path"
             ));
@@ -793,6 +776,10 @@ fn dispatch_install_or_service(args: &[String]) {
         }
         Some("uninstall") => {
             install::run_uninstall();
+            std::process::exit(0);
+        }
+        Some("stop") => {
+            install::run_stop();
             std::process::exit(0);
         }
         _ => {}

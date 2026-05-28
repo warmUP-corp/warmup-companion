@@ -243,16 +243,24 @@ pub fn cursor_right() {
 }
 
 fn send_key(key: KeyCell) {
+    #[cfg(windows)]
+    crate::win::vk_ui::focus_text_target();
     if let Some(vk) = key.vk {
         send_vk(vk);
+        #[cfg(windows)]
+        crate::win::vk_ui::refocus_vk();
         return;
     }
     if key.ch != '\0' {
         send_unicode(&[key.ch as u16]);
     }
+    #[cfg(windows)]
+    crate::win::vk_ui::refocus_vk();
 }
 
 fn send_vk(vk: VIRTUAL_KEY) {
+    #[cfg(windows)]
+    crate::win::vk_ui::focus_text_target();
     unsafe {
         let down = INPUT {
             r#type: INPUT_KEYBOARD,
@@ -280,6 +288,8 @@ fn send_vk(vk: VIRTUAL_KEY) {
         };
         let _ = SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32);
     }
+    #[cfg(windows)]
+    crate::win::vk_ui::refocus_vk();
 }
 
 fn send_unicode(units: &[u16]) {

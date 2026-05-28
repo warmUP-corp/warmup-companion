@@ -92,6 +92,16 @@ fn button_masks() -> [(&'static str, u16); 10] {
     ]
 }
 
+fn secure_hid_combo_mask(mask: u16) -> bool {
+    const NON_DPAD: u16 = XINPUT_GAMEPAD_A.0
+        | XINPUT_GAMEPAD_B.0
+        | XINPUT_GAMEPAD_X.0
+        | XINPUT_GAMEPAD_Y.0
+        | XINPUT_GAMEPAD_LEFT_SHOULDER.0
+        | XINPUT_GAMEPAD_RIGHT_SHOULDER.0;
+    (mask & NON_DPAD).count_ones() > 1
+}
+
 pub struct XInputBackend {
     _module: Option<HMODULE>,
     get_state: Option<XInputGetStateFn>,
@@ -140,6 +150,7 @@ struct PollState {
     hid_devices: HashMap<usize, hid_gamepad::DeviceState>,
     last_hid: PadSample,
     hid_diag_count: u32,
+    suppress_until_zero: bool,
 }
 
 thread_local! {
@@ -425,9 +436,6 @@ impl GamepadBackend for XInputBackend {
         // Winlogon helper owns real button state; primary GetState on Default returns
         // neutral masks and would clobber secure edges if we merged them here.
         if self.secure.is_some() {
-            for slot in 0..SLOTS {
-                self.poll_keystrokes(slot);
-            }
             return Ok(());
         }
 
@@ -643,6 +651,7 @@ fn secure_poll_main(
             hid_devices: HashMap::new(),
             last_hid: PadSample::default(),
             hid_diag_count: 0,
+            suppress_until_zero: false,
         });
     });
 
@@ -780,29 +789,62 @@ fn poll_raw_hid_input(state: &mut PollState, raw_handle: HRAWINPUT) {
     }
 
     let raw = unsafe { &*(storage.as_ptr() as *const RAWINPUT) };
-    let Some((_key, sample, src, dev)) = hid_gamepad::process_raw_input(&mut state.hid_devices, raw) else {
+    let Some((_key, sample, src, dev, report)) =
+        hid_gamepad::process_raw_input(&mut state.hid_devices, raw)
+    else {
         return;
     };
+    let raw_hex = report_hex(&report);
     if src == "open" {
-        service_log(&format!("HID secure: {dev}"));
-        state.last_hid = PadSample::default();
+        service_log(&format!("HID secure: {dev} raw={raw_hex}"));
         state.prev_buttons[0] = 0;
         state.hid_diag_count = 0;
-        return;
+        state.suppress_until_zero = false;
     }
     state.last_hid = sample;
     let cur = sample.buttons;
     let prev = state.prev_buttons[0];
     if prev != cur {
+        if state.suppress_until_zero {
+            if cur == 0 {
+                state.suppress_until_zero = false;
+                state.prev_buttons[0] = 0;
+            }
+            service_log(&format!(
+                "HID secure: suppress combo tail 0x{prev:04x} -> 0x{cur:04x} [{src}] raw={raw_hex} ({dev})"
+            ));
+            return;
+        }
+        if secure_hid_combo_mask(prev) || secure_hid_combo_mask(cur) {
+            state.suppress_until_zero = cur != 0;
+            service_log(&format!(
+                "HID secure: suppress noisy combo 0x{prev:04x} -> 0x{cur:04x} [{src}] raw={raw_hex} ({dev})"
+            ));
+            return;
+        }
         state.prev_buttons[0] = cur;
         service_log(&format!(
-            "HID secure: buttons 0x{prev:04x} -> 0x{cur:04x} [{src}] ({dev})"
+            "HID secure: buttons 0x{prev:04x} -> 0x{cur:04x} [{src}] raw={raw_hex} ({dev})"
         ));
         let _ = state.tx.send(SecureMsg::Buttons { slot: 0, prev, cur });
     } else if cur != 0 && state.hid_diag_count < 4 {
         state.hid_diag_count = state.hid_diag_count.saturating_add(1);
-        service_log(&format!("HID secure: held 0x{cur:04x} [{src}] ({dev})"));
+        service_log(&format!("HID secure: held 0x{cur:04x} [{src}] raw={raw_hex} ({dev})"));
     }
+}
+
+fn report_hex(report: &[u8]) -> String {
+    let mut out = String::new();
+    for (i, b) in report.iter().take(16).enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(&format!("{b:02x}"));
+    }
+    if report.len() > 16 {
+        out.push_str(" ...");
+    }
+    out
 }
 
 #[allow(dead_code)]

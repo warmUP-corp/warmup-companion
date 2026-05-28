@@ -33,7 +33,7 @@ const WM_DEBUG_HIDE: u32 = WM_USER + 21;
 const WM_DEBUG_QUIT: u32 = WM_USER + 22;
 
 const PANEL_W: i32 = 520;
-const PANEL_H: i32 = 212;
+const PANEL_H: i32 = 412;
 const REPAINT_TIMER_ID: usize = 11;
 const REPAINT_TIMER_MS: u32 = 250;
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
@@ -43,6 +43,7 @@ struct DebugOverlayController {
     last_tick: Instant,
     last_on_winlogon: bool,
     input_probe_failures: u8,
+    off_winlogon_streak: u8,
 }
 
 impl Default for DebugOverlayController {
@@ -52,6 +53,7 @@ impl Default for DebugOverlayController {
             last_tick: Instant::now() - TICK_INTERVAL,
             last_on_winlogon: false,
             input_probe_failures: 0,
+            off_winlogon_streak: 0,
         }
     }
 }
@@ -89,7 +91,16 @@ pub fn tick() {
     let on_winlogon = match desktop::input_desktop_name() {
         Ok(name) => {
             c.input_probe_failures = 0;
-            name.eq_ignore_ascii_case("Winlogon")
+            let on_winlogon = name.eq_ignore_ascii_case("Winlogon");
+            if on_winlogon {
+                c.off_winlogon_streak = 0;
+            } else {
+                c.off_winlogon_streak = c.off_winlogon_streak.saturating_add(1);
+                if c.thread.is_some() && c.last_on_winlogon && c.off_winlogon_streak < 12 {
+                    return;
+                }
+            }
+            on_winlogon
         }
         Err(e) => {
             c.input_probe_failures = c.input_probe_failures.saturating_add(1);
@@ -335,7 +346,7 @@ fn paint_debug(hwnd: HWND) {
         let snapshot = crate::debug_state::snapshot();
         let thread_desktop = desktop::current_desktop_name().unwrap_or_else(|| "?".into());
         let input_desktop = desktop::input_desktop_name().unwrap_or_else(|e| format!("? ({e})"));
-        let lines = [
+        let mut lines = vec![
             "DEBUG WINLOGON".to_string(),
             format!("thread desktop: {thread_desktop}"),
             format!("input desktop: {input_desktop}"),
@@ -346,6 +357,8 @@ fn paint_debug(hwnd: HWND) {
             format!("vk visible: {}", super::vk_ui::is_vk_visible()),
             "F10: toggle VK (debug)".to_string(),
         ];
+        lines.push("---- log tail ----".to_string());
+        lines.extend(snapshot.log_tail.iter().cloned());
 
         for (i, line) in lines.iter().enumerate() {
             let _ = SetTextColor(

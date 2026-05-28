@@ -6,6 +6,7 @@ pub struct DebugSnapshot {
     pub xinput_loader: String,
     pub last_buttons: String,
     pub last_action: String,
+    pub log_tail: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -13,6 +14,7 @@ struct DebugState {
     xinput_loader: String,
     last_buttons: String,
     last_action: String,
+    log_tail: Vec<String>,
     started: Instant,
 }
 
@@ -22,6 +24,7 @@ impl Default for DebugState {
             xinput_loader: "unknown".into(),
             last_buttons: "never".into(),
             last_action: "none".into(),
+            log_tail: Vec::new(),
             started: Instant::now(),
         }
     }
@@ -54,17 +57,30 @@ pub fn record_action(label: impl Into<String>) {
     }
 }
 
+pub fn record_log_line(msg: impl Into<String>) {
+    if let Ok(mut s) = state().lock() {
+        let elapsed = s.started.elapsed().as_millis();
+        s.log_tail.push(format!("t+{elapsed}ms {}", msg.into()));
+        let excess = s.log_tail.len().saturating_sub(9);
+        if excess > 0 {
+            s.log_tail.drain(0..excess);
+        }
+    }
+}
+
 pub fn snapshot() -> DebugSnapshot {
     match state().lock() {
         Ok(s) => DebugSnapshot {
             xinput_loader: s.xinput_loader.clone(),
             last_buttons: s.last_buttons.clone(),
             last_action: s.last_action.clone(),
+            log_tail: s.log_tail.clone(),
         },
         Err(_) => DebugSnapshot {
             xinput_loader: "poisoned".into(),
             last_buttons: "poisoned".into(),
             last_action: "poisoned".into(),
+            log_tail: vec!["poisoned".into()],
         },
     }
 }
