@@ -19,7 +19,10 @@
       "mcp__ghidra__list_instances",
       "mcp__ghidra__search_strings",
       "mcp__code-review-graph__semantic_search_nodes_tool",
-      "Bash(cargo check *)"
+      "Bash(cargo check *)",
+      "mcp__code-review-graph__list_graph_stats_tool",
+      "mcp__code-review-graph__detect_changes_tool",
+      "mcp__ghidra__search_functions_enhanced"
     ]
   },
   "enabledMcpjsonServers": [

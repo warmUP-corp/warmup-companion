@@ -16,8 +16,8 @@ use windows::Win32::System::StationsAndDesktops::{
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, RegisterClassW, HMENU, WNDCLASSW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, RegisterClassW, HMENU, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 /// Same access mask as decompiled Joyxoff (`0x2000000`).
@@ -145,8 +145,9 @@ pub unsafe fn create_main_anchor() -> Result<HWND, String> {
     };
     // RegisterClassW returns 0 if class already exists; tolerate the second worker.
     RegisterClassW(&wc);
+    // Joyxoff `JoyXoffMWindow` ex_style 0x8080088 = TOPMOST|TOOLWINDOW|NOACTIVATE|LAYERED.
     CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
         class,
         w!("Warmup Worker Anchor"),
         WS_POPUP,

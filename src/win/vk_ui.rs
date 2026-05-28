@@ -18,6 +18,7 @@ use windows::Win32::Graphics::Gdi::{
     SetBkMode, SetTextColor, BACKGROUND_MODE, DT_CENTER, DT_SINGLELINE, DT_VCENTER, PAINTSTRUCT,
     RDW_ALLCHILDREN, RDW_INVALIDATE, RDW_UPDATENOW,
 };
+use windows::Win32::UI::WindowsAndMessaging::{SetLayeredWindowAttributes, LWA_ALPHA};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -30,8 +31,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, HMENU, HWND_NOTOPMOST, HWND_TOPMOST, MSG, PM_NOREMOVE,
     SPI_GETWORKAREA, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SWP_NOZORDER, SWP_SHOWWINDOW, WINDOWPOS, WM_DESTROY, WM_LBUTTONDOWN, WM_PAINT, WM_TIMER,
-    WM_USER, WM_WINDOWPOSCHANGING, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_EX_TOOLWINDOW, WS_POPUP,
-    WNDCLASSW,
+    WM_USER, WM_WINDOWPOSCHANGING, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOPMOST,
+    WS_EX_TOOLWINDOW, WS_POPUP, WNDCLASSW,
 };
 
 use super::desktop;
@@ -352,11 +353,9 @@ fn window_style() -> windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE {
 }
 
 fn window_ex_style() -> windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE {
-    if secure_desktop_mode() {
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW
-    } else {
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
-    }
+    // Joyxoff `JoyXboxVkWindow` ex_style 0x8280088 = TOPMOST|TOOLWINDOW|NOACTIVATE|LAYERED
+    // (+NOREDIRECTIONBITMAP 0x200000 omitted here — not exposed by `windows-rs` 0.58).
+    WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED
 }
 
 unsafe fn outer_window_size() -> (i32, i32) {
@@ -388,7 +387,7 @@ unsafe fn create_vk_window() -> Result<HWND, String> {
     let instance = GetModuleHandleW(None).map_err(|e| format!("GetModuleHandleW: {e}"))?;
     let (outer_w, outer_h) = outer_window_size();
     let (x, y) = work_area_bottom_center(outer_w, outer_h);
-    CreateWindowExW(
+    let hwnd = CreateWindowExW(
         window_ex_style(),
         CLASS_NAME,
         w!("Warmup Xbox VK"),
@@ -402,7 +401,15 @@ unsafe fn create_vk_window() -> Result<HWND, String> {
         windows::Win32::Foundation::HINSTANCE(instance.0),
         None,
     )
-    .map_err(|e| format!("CreateWindowExW: {e}"))
+    .map_err(|e| format!("CreateWindowExW: {e}"))?;
+    // WS_EX_LAYERED window is invisible until alpha is set. Fully opaque (255).
+    let _ = SetLayeredWindowAttributes(
+        hwnd,
+        windows::Win32::Foundation::COLORREF(0),
+        255,
+        LWA_ALPHA,
+    );
+    Ok(hwnd)
 }
 
 const TOPMOST_FLAGS: windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS =

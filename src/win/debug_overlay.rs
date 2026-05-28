@@ -112,27 +112,34 @@ pub fn tick() {
         }
     };
 
-    if on_winlogon {
-        if c.thread.is_none() {
-            match DebugOverlayThread::spawn() {
-                Ok(thread) => {
-                    if thread.show().is_ok() {
-                        service_log("debug ui: shown on Winlogon");
-                    }
-                    c.thread = Some(thread);
-                }
-                Err(e) => service_log(&format!("debug ui: spawn failed: {e}")),
+    // Keep thread alive across desktops; toggle visibility only. Tearing down and
+    // respawning on every Winlogon transition caused the "goes away / comes back"
+    // flicker and a race on the next CreateWindow.
+    let just_spawned = if c.thread.is_none() {
+        match DebugOverlayThread::spawn() {
+            Ok(thread) => {
+                c.thread = Some(thread);
+                true
             }
-        } else if !c.last_on_winlogon {
-            if let Some(thread) = c.thread.as_ref() {
-                let _ = thread.show();
-                service_log("debug ui: shown on Winlogon");
+            Err(e) => {
+                service_log(&format!("debug ui: spawn failed: {e}"));
+                c.last_on_winlogon = on_winlogon;
+                return;
             }
         }
-    } else if let Some(mut thread) = c.thread.take() {
-        let _ = thread.hide();
-        service_log("debug ui: hidden");
-        thread.stop();
+    } else {
+        false
+    };
+    let transitioned = on_winlogon != c.last_on_winlogon;
+    if (just_spawned || transitioned) && c.thread.is_some() {
+        let thread = c.thread.as_ref().expect("checked is_some");
+        if on_winlogon {
+            let _ = thread.show();
+            service_log("debug ui: shown on Winlogon");
+        } else {
+            let _ = thread.hide();
+            service_log("debug ui: hidden (left Winlogon)");
+        }
     }
     c.last_on_winlogon = on_winlogon;
 }

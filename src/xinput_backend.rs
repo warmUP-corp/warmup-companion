@@ -31,10 +31,9 @@ use windows::Win32::UI::Input::XboxController::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
-    PostThreadMessageW, RegisterClassW, SetTimer, SetWindowPos, ShowWindow, TranslateMessage,
-    HMENU, HWND_TOPMOST, MSG, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, WM_DESTROY,
-    WM_INPUT, WM_NULL, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP,
+    PostThreadMessageW, RegisterClassW, SetLayeredWindowAttributes, SetTimer, TranslateMessage,
+    HMENU, LWA_ALPHA, MSG, WM_DESTROY, WM_INPUT, WM_NULL, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::gamepad_backend::ButtonChange;
@@ -588,15 +587,18 @@ fn secure_poll_main(
         };
         // RegisterClassW returns 0 if class already exists; ignore.
         RegisterClassW(&wc);
+        // Joyxoff parity: ex_style 0x8080088 (TOPMOST|TOOLWINDOW|NOACTIVATE|LAYERED),
+        // style WS_POPUP|WS_VISIBLE — created visible (not just ShowWindow'd later),
+        // real on-screen size so the system treats it as a real top-level window.
         match CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
             ANCHOR_CLASS,
             w!("Warmup XInput Anchor"),
-            WS_POPUP,
+            WS_POPUP | WS_VISIBLE,
             0,
             0,
-            1,
-            1,
+            32,
+            32,
             None,
             HMENU::default(),
             HINSTANCE(instance.0),
@@ -613,18 +615,16 @@ fn secure_poll_main(
     };
 
     unsafe {
-        let _ = SetWindowPos(
+        // Layered window is fully transparent until alpha is set; opaque 255 so the
+        // system treats it as a real visible top-level window for input routing.
+        let _ = SetLayeredWindowAttributes(
             hwnd,
-            HWND_TOPMOST,
-            0,
-            0,
-            1,
-            1,
-            SWP_SHOWWINDOW | SWP_NOACTIVATE,
+            windows::Win32::Foundation::COLORREF(0),
+            255,
+            LWA_ALPHA,
         );
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         let _ = tx.send(SecureMsg::Error(
-            "anchor window shown on Winlogon for XInput focus eligibility".into(),
+            "anchor window created visible on Winlogon for XInput focus eligibility".into(),
         ));
     }
 

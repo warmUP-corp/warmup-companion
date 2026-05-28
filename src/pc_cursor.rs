@@ -24,9 +24,10 @@ impl PcCursor {
         Ok(Self::with_enigo(Some(enigo)))
     }
 
-    /// Session-0 service: skip mouse (enigo often fails without interactive desktop).
+    /// Service worker (user session, not session 0). Try Enigo eagerly so post-login
+    /// cursor control works without waiting for `ensure_enigo_for_userland_service`.
     pub fn new_service() -> Self {
-        Self::with_enigo(None)
+        Self::with_enigo(Enigo::new(&Settings::default()).ok())
     }
 
     fn with_enigo(enigo: Option<Enigo>) -> Self {
