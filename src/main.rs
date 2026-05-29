@@ -1,3 +1,4 @@
+mod config;
 mod symbols;
 mod vk_gate;
 
@@ -178,7 +179,7 @@ impl App {
 
     #[cfg(all(windows, feature = "service"))]
     fn service_log(&self, msg: &str) {
-        if std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0") {
+        if crate::config::service_mode() {
             crate::install::log_line(msg);
         }
     }
@@ -261,7 +262,7 @@ impl App {
         ));
     }
 
-    /// Snapshot the App state the gate needs. The one `WARMUP_VK_SERVICE` read
+    /// Snapshot the App state the gate needs. The [`config::service_mode`] read
     /// is the only impure part; `vk_gate::decide` itself reads nothing.
     fn gate_input(&self) -> vk_gate::GateInput {
         vk_gate::GateInput {
@@ -271,7 +272,7 @@ impl App {
             vk_open: self.vk_session.is_some(),
             modal_block_bit_4: self.modal_block_bit_4,
             spiral_bit_9: self.spiral_bit_9,
-            service_mode: std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0"),
+            service_mode: crate::config::service_mode(),
             input_desktop: self.input_desktop,
         }
     }
@@ -383,7 +384,7 @@ impl App {
                     #[cfg(windows)]
                     crate::debug_state::record_action(format!("VK failed: {e}"));
                     #[cfg(windows)]
-                    if std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0") {
+                    if crate::config::service_mode() {
                         install::log_line(&format!("VK failed: {e}"));
                     }
                 }

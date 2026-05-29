@@ -84,7 +84,7 @@ pub fn take_vk_toggle_request() -> bool {
 }
 
 pub fn tick() {
-    if std::env::var_os("WARMUP_VK_SERVICE").is_none_or(|v| v == "0") {
+    if !crate::config::service_mode() {
         return;
     }
     let controller = CONTROLLER.get_or_init(|| Mutex::new(DebugOverlayController::default()));
@@ -318,7 +318,7 @@ unsafe fn draw_line(hdc: windows::Win32::Graphics::Gdi::HDC, x: i32, y: i32, tex
 }
 
 fn service_log(msg: &str) {
-    if std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0") {
+    if crate::config::service_mode() {
         crate::install::log_line(msg);
     }
 }

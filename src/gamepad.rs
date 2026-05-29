@@ -36,6 +36,54 @@ enum Backend {
     XInput(XInputBackend),
 }
 
+/// One canonical frame from whichever backend is active: button edges + axes.
+/// Lets the caller poll one interface instead of matching the enum per field.
+struct PadFrame {
+    changes: Vec<ButtonChange>,
+    axes: (f32, f32, f32, f32),
+}
+
+impl Backend {
+    /// Poll the active backend and read back its edges + axes in one shot.
+    /// The enum match lives here, not at the call site.
+    fn poll_frame(&mut self) -> Result<PadFrame, String> {
+        match self {
+            Backend::Sdl(b) => {
+                b.poll()?;
+                Ok(PadFrame {
+                    changes: b.button_changes(),
+                    axes: b.axes(),
+                })
+            }
+            #[cfg(windows)]
+            Backend::XInput(b) => {
+                b.poll()?;
+                Ok(PadFrame {
+                    changes: b.button_changes(),
+                    axes: b.axes(),
+                })
+            }
+        }
+    }
+
+    fn controller_label(&self) -> String {
+        match self {
+            Backend::Sdl(b) => b.controller_label(),
+            #[cfg(windows)]
+            Backend::XInput(b) => b.controller_label(),
+        }
+    }
+
+    /// Short backend tag for diagnostics (`SDL3` / `XInput`).
+    fn kind_label(&self) -> &'static str {
+        match self {
+            Backend::Sdl(_) => "SDL3",
+            #[cfg(windows)]
+            Backend::XInput(_) => "XInput",
+        }
+    }
+}
+
 pub struct GamepadPoll {
     backend: Backend,
     vk_down: bool,
@@ -104,7 +152,7 @@ impl GamepadPoll {
     /// Switch between SDL3 (Default) and HID+XInput (Winlogon) when the service crosses desktops.
     #[cfg(windows)]
     fn sync_service_backend(&mut self) {
-        if !std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0") {
+        if !crate::config::service_mode() {
             return;
         }
         let on_winlogon = Self::input_desktop_is_winlogon();
@@ -186,11 +234,7 @@ impl GamepadPoll {
     }
 
     pub fn controller_label(&self) -> String {
-        match &self.backend {
-            Backend::Sdl(b) => b.controller_label(),
-            #[cfg(windows)]
-            Backend::XInput(b) => b.controller_label(),
-        }
+        self.backend.controller_label()
     }
 
     pub fn poll_frame(
@@ -205,25 +249,12 @@ impl GamepadPoll {
         self.last_vk_open = vk_open;
 
         #[cfg(windows)]
-        if std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0") {
+        if crate::config::service_mode() {
             self.sync_service_backend();
         }
 
-        match &mut self.backend {
-            Backend::Sdl(b) => b.poll()?,
-            #[cfg(windows)]
-            Backend::XInput(b) => b.poll()?,
-        }
-        let changes = match &mut self.backend {
-            Backend::Sdl(b) => b.button_changes(),
-            #[cfg(windows)]
-            Backend::XInput(b) => b.button_changes(),
-        };
-        let (lx, ly, rx, ry) = match &self.backend {
-            Backend::Sdl(b) => b.axes(),
-            #[cfg(windows)]
-            Backend::XInput(b) => b.axes(),
-        };
+        let PadFrame { changes, axes } = self.backend.poll_frame()?;
+        let (lx, ly, rx, ry) = axes;
 
         #[cfg(windows)]
         let desktop_reopen = self.reopen_on_input_desktop_change(vk_open);
@@ -284,7 +315,7 @@ impl GamepadPoll {
 
     #[cfg(windows)]
     fn reopen_on_input_desktop_change(&mut self, vk_open: bool) -> Option<VkLoopAction> {
-        if !std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0") {
+        if !crate::config::service_mode() {
             return None;
         }
         let Ok(input) = crate::win::input_desktop_name() else {
@@ -313,8 +344,7 @@ impl GamepadPoll {
 
     #[cfg(windows)]
     fn service_signin_desktop() -> bool {
-        std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0")
-            && Self::input_desktop_is_winlogon()
+        crate::config::service_mode() && Self::input_desktop_is_winlogon()
     }
 
     #[cfg(windows)]
@@ -388,21 +418,11 @@ impl GamepadPoll {
     }
 
     pub fn snapshot(&mut self) -> Result<String, String> {
-        match &mut self.backend {
-            Backend::Sdl(b) => {
-                b.poll()?;
-                let name = b.controller_label();
-                let (lx, ly, _, _) = b.axes();
-                Ok(format!("{name} (SDL3) stick=({lx:.2},{ly:.2})"))
-            }
-            #[cfg(windows)]
-            Backend::XInput(b) => {
-                b.poll()?;
-                let name = b.controller_label();
-                let (lx, ly, _, _) = b.axes();
-                Ok(format!("{name} (XInput) stick=({lx:.2},{ly:.2})"))
-            }
-        }
+        let kind = self.backend.kind_label();
+        let frame = self.backend.poll_frame()?;
+        let name = self.backend.controller_label();
+        let (lx, ly, _, _) = frame.axes;
+        Ok(format!("{name} ({kind}) stick=({lx:.2},{ly:.2})"))
     }
 
     pub fn log_desktop_sync_if_due(&mut self, service_mode: bool) {
@@ -484,7 +504,7 @@ where
 
 #[cfg(windows)]
 fn service_log(msg: &str) {
-    if std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0") {
+    if crate::config::service_mode() {
         crate::install::log_line(msg);
     }
 }
