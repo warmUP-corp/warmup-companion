@@ -1,5 +1,5 @@
 use sdl3::GamepadSubsystem;
-use sdl3::gamepad::{Axis, Button, Gamepad, GamepadType};
+use sdl3::gamepad::{Axis, Button as SdlButton, Gamepad, GamepadType};
 use sdl3::sys::gamepad::{SDL_GetGamepadFromID, SDL_GetGamepadTouchpadFinger, SDL_SetGamepadLED};
 use std::collections::HashMap;
 use std::path::Path;
@@ -60,54 +60,107 @@ pub fn sdl3_type_to_str(t: GamepadType) -> &'static str {
     }
 }
 
+/// The canonical gamepad button — one identity shared by every backend
+/// (SDL3, XInput, HID) and every consumer (VK nav, the toggle gate). Backends
+/// translate their native codes into this enum; callers match on it instead of
+/// comparing `&str` names, so a typo or a missing button is a compile error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Button {
+    A,
+    B,
+    X,
+    Y,
+    Lb,
+    Rb,
+    Lt,
+    Rt,
+    Select,
+    Start,
+    L3,
+    R3,
+    Up,
+    Down,
+    Left,
+    Right,
+    Guide,
+    Touchpad,
+}
+
+impl Button {
+    /// Canonical display name (used in logs and the debug overlay).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Button::A => "A",
+            Button::B => "B",
+            Button::X => "X",
+            Button::Y => "Y",
+            Button::Lb => "LB",
+            Button::Rb => "RB",
+            Button::Lt => "LT",
+            Button::Rt => "RT",
+            Button::Select => "SELECT",
+            Button::Start => "START",
+            Button::L3 => "L3",
+            Button::R3 => "R3",
+            Button::Up => "UP",
+            Button::Down => "DOWN",
+            Button::Left => "LEFT",
+            Button::Right => "RIGHT",
+            Button::Guide => "GUIDE",
+            Button::Touchpad => "TOUCHPAD",
+        }
+    }
+}
+
 /// SDL3 buttons tracked for press/release changes.
 /// Triggers (LT/RT) are axes in SDL3; they are handled separately and synthesised into ButtonChange.
-const TRACKED_BUTTONS: &[Button] = &[
-    Button::South,
-    Button::East,
-    Button::West,
-    Button::North,
-    Button::LeftShoulder,
-    Button::RightShoulder,
-    Button::Back,
-    Button::Start,
-    Button::LeftStick,
-    Button::RightStick,
-    Button::DPadUp,
-    Button::DPadDown,
-    Button::DPadLeft,
-    Button::DPadRight,
-    Button::Guide,
-    Button::Touchpad,
+const TRACKED_BUTTONS: &[SdlButton] = &[
+    SdlButton::South,
+    SdlButton::East,
+    SdlButton::West,
+    SdlButton::North,
+    SdlButton::LeftShoulder,
+    SdlButton::RightShoulder,
+    SdlButton::Back,
+    SdlButton::Start,
+    SdlButton::LeftStick,
+    SdlButton::RightStick,
+    SdlButton::DPadUp,
+    SdlButton::DPadDown,
+    SdlButton::DPadLeft,
+    SdlButton::DPadRight,
+    SdlButton::Guide,
+    SdlButton::Touchpad,
 ];
 
-/// Maps an SDL3 button to our canonical button name.
-fn button_name(btn: Button) -> &'static str {
-    match btn {
-        Button::South => "A",
-        Button::East => "B",
-        Button::West => "X",
-        Button::North => "Y",
-        Button::LeftShoulder => "LB",
-        Button::RightShoulder => "RB",
-        Button::Back => "SELECT",
-        Button::Start => "START",
-        Button::LeftStick => "L3",
-        Button::RightStick => "R3",
-        Button::DPadUp => "UP",
-        Button::DPadDown => "DOWN",
-        Button::DPadLeft => "LEFT",
-        Button::DPadRight => "RIGHT",
-        Button::Guide => "GUIDE",
-        Button::Touchpad => "TOUCHPAD",
-        _ => "UNKNOWN",
-    }
+/// Maps an SDL3 button to our canonical [`Button`]. Returns `None` for buttons
+/// we do not track.
+fn sdl_to_button(btn: SdlButton) -> Option<Button> {
+    Some(match btn {
+        SdlButton::South => Button::A,
+        SdlButton::East => Button::B,
+        SdlButton::West => Button::X,
+        SdlButton::North => Button::Y,
+        SdlButton::LeftShoulder => Button::Lb,
+        SdlButton::RightShoulder => Button::Rb,
+        SdlButton::Back => Button::Select,
+        SdlButton::Start => Button::Start,
+        SdlButton::LeftStick => Button::L3,
+        SdlButton::RightStick => Button::R3,
+        SdlButton::DPadUp => Button::Up,
+        SdlButton::DPadDown => Button::Down,
+        SdlButton::DPadLeft => Button::Left,
+        SdlButton::DPadRight => Button::Right,
+        SdlButton::Guide => Button::Guide,
+        SdlButton::Touchpad => Button::Touchpad,
+        _ => return None,
+    })
 }
 
 /// A detected button state change (including synthesised LT/RT from trigger axes).
 #[derive(Clone, Copy)]
 pub struct ButtonChange {
-    pub button_name: &'static str,
+    pub button: Button,
     pub pressed: bool,
 }
 
@@ -128,7 +181,7 @@ pub struct GamepadInput {
     _sdl: sdl3::Sdl,
     gc_sub: GamepadSubsystem,
     active_gamepad: Option<Gamepad>,
-    prev_buttons: HashMap<Button, bool>,
+    prev_buttons: HashMap<SdlButton, bool>,
     prev_trigger_left: bool,
     prev_trigger_right: bool,
     pending_button_changes: Vec<ButtonChange>,
@@ -222,10 +275,9 @@ impl GamepadInput {
                 let was = self.prev_buttons.get(&btn).copied().unwrap_or(false);
                 if pressed != was {
                     self.prev_buttons.insert(btn, pressed);
-                    self.pending_button_changes.push(ButtonChange {
-                        button_name: button_name(btn),
-                        pressed,
-                    });
+                    if let Some(button) = sdl_to_button(btn) {
+                        self.pending_button_changes.push(ButtonChange { button, pressed });
+                    }
                 }
             }
             // Synthesise LT/RT from trigger axes.
@@ -234,14 +286,14 @@ impl GamepadInput {
             if lt_pressed != self.prev_trigger_left {
                 self.prev_trigger_left = lt_pressed;
                 self.pending_button_changes.push(ButtonChange {
-                    button_name: "LT",
+                    button: Button::Lt,
                     pressed: lt_pressed,
                 });
             }
             if rt_pressed != self.prev_trigger_right {
                 self.prev_trigger_right = rt_pressed;
                 self.pending_button_changes.push(ButtonChange {
-                    button_name: "RT",
+                    button: Button::Rt,
                     pressed: rt_pressed,
                 });
             }
@@ -559,8 +611,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn guide_button_maps_to_guide_name() {
-        assert_eq!(button_name(Button::Guide), "GUIDE");
+    fn guide_button_maps_to_guide() {
+        assert_eq!(sdl_to_button(SdlButton::Guide), Some(Button::Guide));
+        assert_eq!(Button::Guide.as_str(), "GUIDE");
     }
 
     #[test]

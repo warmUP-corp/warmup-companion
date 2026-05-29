@@ -1,5 +1,6 @@
 pub mod desktop;
 pub mod debug_overlay;
+pub mod desktop_window;
 mod vk_log;
 pub mod vk_ui;
 pub mod xbox_vk;

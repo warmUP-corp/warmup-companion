@@ -1,4 +1,5 @@
 mod symbols;
+mod vk_gate;
 
 #[cfg(windows)]
 mod install;
@@ -25,6 +26,8 @@ mod pc_cursor;
 mod hid_gamepad;
 #[cfg(all(windows, feature = "gamepad"))]
 mod xinput_backend;
+#[cfg(all(windows, feature = "gamepad"))]
+mod xusb_ioctl;
 
 use std::env;
 use std::fmt;
@@ -258,9 +261,31 @@ impl App {
         ));
     }
 
-    /// Y/Triangle press toggles VK — stays open until next press.
+    /// Snapshot the App state the gate needs. The one `WARMUP_VK_SERVICE` read
+    /// is the only impure part; `vk_gate::decide` itself reads nothing.
+    fn gate_input(&self) -> vk_gate::GateInput {
+        vk_gate::GateInput {
+            mask_0x200_active: self.mask_0x200_active,
+            slot7_action_type: self.slot7_action_type,
+            slot7_subtype: self.slot7_subtype,
+            vk_open: self.vk_session.is_some(),
+            modal_block_bit_4: self.modal_block_bit_4,
+            spiral_bit_9: self.spiral_bit_9,
+            service_mode: std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0"),
+            input_desktop: self.input_desktop,
+        }
+    }
+
+    /// Y/Triangle press toggles VK — stays open until next press. The decision
+    /// lives in [`vk_gate::decide`]; this method only enacts it (logs, latches,
+    /// thread spawns).
     fn toggle_virtual_keyboard_combo(&mut self) {
-        if !self.mask_0x200_active {
+        use vk_gate::{Blocked, VkAction};
+
+        let input = self.gate_input();
+        let action = vk_gate::decide(input);
+
+        if action == VkAction::Blocked(Blocked::MaskAbsent) {
             self.log("button: mask 0x200 absent -> slot 7 not resolved");
             self.service_log("Y tap: mask 0x200 inactive");
             return;
@@ -270,8 +295,31 @@ impl App {
         #[cfg(windows)]
         crate::debug_state::record_action("Y tap: toggle VK");
 
-        self.run_slot7_binding();
-        self.dispatch_vk_toggle();
+        // `run_slot7_binding` log: slot 7 either queues action 7 or it doesn't.
+        if input.slot7_action_type == 6 {
+            self.log(&format!(
+                "{FN_PROCESS_CONTROLLER_INPUT} -> {FN_APPLY_MASK_SLOT_ACTION}: mask 0x200 slot 7, action 7 queued"
+            ));
+        } else {
+            self.log("slot 7 exists, but action type is not queueing VK action");
+        }
+
+        match action {
+            VkAction::Blocked(Blocked::MaskAbsent) => unreachable!("handled above"),
+            VkAction::Blocked(Blocked::SlotNotQueueing | Blocked::QueuedNotSeven) => {
+                self.log(&format!(
+                    "{FN_EXECUTE_QUEUED_ACTION}: queued action != 7 -> no VK path"
+                ));
+                self.service_log("VK toggle: queued action != 7");
+            }
+            VkAction::Close => self.close_vk(),
+            VkAction::Blocked(Blocked::ModalBit4) => {
+                self.log("blocked: app state bit 4 set");
+                self.service_log("VK toggle: blocked (modal bit 4)");
+            }
+            VkAction::OpenSpiral => self.open_spiral_vk(),
+            VkAction::OpenXbox { attach } => self.open_xbox_vk(attach),
+        }
     }
 
     fn release_virtual_keyboard_combo(&mut self) {
@@ -280,47 +328,6 @@ impl App {
             "{}: release (VK stays open until next Y tap)",
             symbols::FN_ON_CONTROLLER_RELEASE
         ));
-    }
-
-    fn run_slot7_binding(&mut self) {
-        if self.slot7_action_type == 6 {
-            self.queued_action = self.slot7_subtype;
-            self.log(&format!(
-                "{FN_PROCESS_CONTROLLER_INPUT} -> {FN_APPLY_MASK_SLOT_ACTION}: mask 0x200 slot 7, action 7 queued"
-            ));
-        } else {
-            self.queued_action = 0;
-            self.log("slot 7 exists, but action type is not queueing VK action");
-        }
-    }
-
-    fn dispatch_vk_toggle(&mut self) {
-        let queued_action = self.queued_action;
-        self.queued_action = 0;
-        if queued_action != 7 {
-            self.log(&format!(
-                "{FN_EXECUTE_QUEUED_ACTION}: queued action != 7 -> no VK path"
-            ));
-            self.service_log("VK toggle: queued action != 7");
-            return;
-        }
-
-        if self.vk_session.is_some() {
-            self.close_vk();
-            return;
-        }
-
-        if self.modal_block_bit_4 {
-            self.log("blocked: app state bit 4 set");
-            self.service_log("VK toggle: blocked (modal bit 4)");
-            return;
-        }
-
-        if self.spiral_bit_9 {
-            self.open_spiral_vk();
-        } else {
-            self.open_xbox_vk();
-        }
     }
 
     fn close_vk(&mut self) {
@@ -344,21 +351,18 @@ impl App {
         }
     }
 
-    fn open_xbox_vk(&mut self) {
+    fn open_xbox_vk(&mut self, attach: vk_gate::GateAttach) {
         if !self.open_vk_common(&format!(
             "{FN_CREATE_XBOX_VK_WINDOW} / {FN_XBOX_VK_THREAD_ENTRY}"
         )) {
             return;
         }
         if self.use_real_win32 {
-            let attach = if std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0") {
-                // Lock screen (Win+L), logon, and UAC all need OpenInputDesktop on the UI thread.
-                win::VkAttach::Input
-            } else {
-                match self.input_desktop {
-                    Desktop::Winlogon => win::VkAttach::Input,
-                    Desktop::Default => win::VkAttach::Current,
-                }
+            // Attach desktop was decided by the gate (lock/logon/UAC and the
+            // service path need OpenInputDesktop on the UI thread).
+            let attach = match attach {
+                vk_gate::GateAttach::Input => win::VkAttach::Input,
+                vk_gate::GateAttach::Current => win::VkAttach::Current,
             };
             match win::VkSession::open(attach) {
                 Ok(session) => {
@@ -891,7 +895,8 @@ pub(crate) fn run_boot_gamepad_loop(
         }
         gamepad::VkLoopAction::Reopen => {
             app.close_vk();
-            app.open_xbox_vk();
+            let attach = vk_gate::attach_for(app.gate_input());
+            app.open_xbox_vk(attach);
             vk_open.set(app.vk_session.is_some());
             if !service_mode {
                 repl_scroll::paint_state_panel(&*app);

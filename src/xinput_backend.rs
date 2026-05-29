@@ -36,10 +36,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
+use crate::gamepad_backend::Button;
 use crate::gamepad_backend::ButtonChange;
 use crate::gamepad_backend::GamepadBackend;
 use crate::gamepad_backend::mapping_db_path;
 use crate::hid_gamepad::{self, PadSample};
+use crate::xusb_ioctl::{XusbDevice, XusbReport};
 
 const SLOTS: u32 = 4;
 const ERROR_SUCCESS: u32 = 0;
@@ -76,19 +78,26 @@ struct XInputKeystroke {
     hid_code: u8,
 }
 
-fn button_masks() -> [(&'static str, u16); 10] {
-    [
-        ("UP", XINPUT_GAMEPAD_DPAD_UP.0),
-        ("DOWN", XINPUT_GAMEPAD_DPAD_DOWN.0),
-        ("LEFT", XINPUT_GAMEPAD_DPAD_LEFT.0),
-        ("RIGHT", XINPUT_GAMEPAD_DPAD_RIGHT.0),
-        ("A", XINPUT_GAMEPAD_A.0),
-        ("B", XINPUT_GAMEPAD_B.0),
-        ("X", XINPUT_GAMEPAD_X.0),
-        ("Y", XINPUT_GAMEPAD_Y.0),
-        ("LB", XINPUT_GAMEPAD_LEFT_SHOULDER.0),
-        ("RB", XINPUT_GAMEPAD_RIGHT_SHOULDER.0),
-    ]
+/// The one [`Button`] ↔ XInput mask table. HID and XInput both map through this;
+/// nothing else hard-codes the bit for a button.
+const BUTTON_MASKS: &[(Button, u16)] = &[
+    (Button::Up, XINPUT_GAMEPAD_DPAD_UP.0),
+    (Button::Down, XINPUT_GAMEPAD_DPAD_DOWN.0),
+    (Button::Left, XINPUT_GAMEPAD_DPAD_LEFT.0),
+    (Button::Right, XINPUT_GAMEPAD_DPAD_RIGHT.0),
+    (Button::A, XINPUT_GAMEPAD_A.0),
+    (Button::B, XINPUT_GAMEPAD_B.0),
+    (Button::X, XINPUT_GAMEPAD_X.0),
+    (Button::Y, XINPUT_GAMEPAD_Y.0),
+    (Button::Lb, XINPUT_GAMEPAD_LEFT_SHOULDER.0),
+    (Button::Rb, XINPUT_GAMEPAD_RIGHT_SHOULDER.0),
+];
+
+/// XInput mask bit for a button, if it has one.
+pub(crate) fn button_mask(button: Button) -> Option<u16> {
+    BUTTON_MASKS
+        .iter()
+        .find_map(|&(b, mask)| (b == button).then_some(mask))
 }
 
 fn secure_hid_combo_mask(mask: u16) -> bool {
@@ -150,6 +159,16 @@ struct PollState {
     last_hid: PadSample,
     hid_diag_count: u32,
     suppress_until_zero: bool,
+    /// Diagnostics: count of XInputGetKeystroke events seen since spawn, and the
+    /// most recent raw HID report. Surfaced in the 2s probe so the next deploy
+    /// shows definitively whether Y arrives via keystroke or which HID byte moves.
+    keystroke_events: u64,
+    last_raw_report: Vec<u8>,
+    /// Physical XUSB pads opened via direct DeviceIoControl. These bypass the
+    /// XInput foreground focus gate that zeroes `get_state` on Winlogon.
+    xusb: Vec<XusbDevice>,
+    /// Most recent XUSB report (for the probe dump + offset verification).
+    last_xusb: Option<XusbReport>,
 }
 
 thread_local! {
@@ -271,12 +290,12 @@ impl XInputBackend {
 
     fn edges(prev: u16, cur: u16) -> Vec<ButtonChange> {
         let mut out = Vec::new();
-        for (name, mask) in button_masks() {
+        for &(button, mask) in BUTTON_MASKS {
             let was = prev & mask != 0;
             let now = cur & mask != 0;
             if was != now {
                 out.push(ButtonChange {
-                    button_name: name,
+                    button,
                     pressed: now,
                 });
             }
@@ -288,9 +307,9 @@ impl XInputBackend {
         if prev == cur {
             return;
         }
-        let names: Vec<&str> = button_masks()
+        let names: Vec<&str> = BUTTON_MASKS
             .iter()
-            .filter_map(|(name, mask)| if cur & *mask != 0 { Some(*name) } else { None })
+            .filter_map(|(b, mask)| (cur & *mask != 0).then(|| b.as_str()))
             .collect();
         service_log(&format!(
             "XInput buttons slot {slot}: 0x{prev:04x} -> 0x{cur:04x} [{}]",
@@ -652,7 +671,22 @@ fn secure_poll_main(
             last_hid: PadSample::default(),
             hid_diag_count: 0,
             suppress_until_zero: false,
+            keystroke_events: 0,
+            last_raw_report: Vec::new(),
+            xusb: Vec::new(),
+            last_xusb: None,
         });
+    });
+
+    // Open physical XUSB pads directly — the focus-gate bypass for Winlogon.
+    let (xusb_devices, xusb_log) = XusbDevice::open_all();
+    for line in xusb_log {
+        let _ = tx.send(SecureMsg::Error(line));
+    }
+    POLL_STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            state.xusb = xusb_devices;
+        }
     });
 
     let gcdb = mapping_db_path();
@@ -775,6 +809,7 @@ fn poll_raw_hid_input(state: &mut PollState, raw_handle: HRAWINPUT) {
 
     let words = (size as usize + size_of::<usize>() - 1) / size_of::<usize>();
     let mut storage = vec![0usize; words];
+    let capacity = words * size_of::<usize>();
     let read = unsafe {
         GetRawInputData(
             raw_handle,
@@ -787,14 +822,21 @@ fn poll_raw_hid_input(state: &mut PollState, raw_handle: HRAWINPUT) {
     if read == u32::MAX || read == 0 {
         return;
     }
+    // `read` is the byte count GetRawInputData wrote; never trust it past the
+    // allocation. process_raw_input clamps the HID payload to these bytes.
+    let raw_bytes = (read as usize).min(capacity);
+    if raw_bytes < size_of::<RAWINPUTHEADER>() {
+        return;
+    }
 
     let raw = unsafe { &*(storage.as_ptr() as *const RAWINPUT) };
     let Some((_key, sample, src, dev, report)) =
-        hid_gamepad::process_raw_input(&mut state.hid_devices, raw)
+        hid_gamepad::process_raw_input(&mut state.hid_devices, raw, raw_bytes)
     else {
         return;
     };
     let raw_hex = report_hex(&report);
+    state.last_raw_report = report.clone();
     if src == "open" {
         service_log(&format!("HID secure: {dev} raw={raw_hex}"));
         state.prev_buttons[0] = 0;
@@ -867,9 +909,29 @@ fn poll_xinput_tick(state: &mut PollState) {
                 .send(SecureMsg::Error(format!("XInputGetState({slot}) error {err}")));
         }
         if let Some(get_keystroke) = state.get_keystroke {
-            secure_poll_keystrokes(&state.tx, get_keystroke, slot, &mut state.prev_buttons);
+            state.keystroke_events +=
+                secure_poll_keystrokes(&state.tx, get_keystroke, slot, &mut state.prev_buttons);
         }
     }
+
+    // Direct XUSB read — authoritative on Winlogon, where DLL get_state is
+    // gated to a neutral state by the foreground focus check. Pick the first
+    // device that responds; mark its slot connected even if the DLL did not.
+    let mut xusb_rep = None;
+    let mut xusb_idx = None;
+    for (i, dev) in state.xusb.iter().enumerate() {
+        if let Some(rep) = dev.poll() {
+            xusb_rep = Some(rep);
+            xusb_idx = Some(i);
+            break;
+        }
+    }
+    if let Some(i) = xusb_idx {
+        if i < SLOTS as usize {
+            connected[i] = true;
+        }
+    }
+    state.last_xusb = xusb_rep;
 
     state.iter_count += 1;
     let probe_due = state.last_probe_log.elapsed() >= Duration::from_secs(2);
@@ -894,10 +956,26 @@ fn poll_xinput_tick(state: &mut PollState) {
                 ));
             }
         }
+        let xusb_str = match &state.last_xusb {
+            Some(rep) => format!(
+                " xusb:btn=0x{:04x} lt={} rt={} lx={} ly={} rx={} ry={} raw=[{}]",
+                rep.buttons,
+                rep.left_trigger,
+                rep.right_trigger,
+                rep.thumb_lx,
+                rep.thumb_ly,
+                rep.thumb_rx,
+                rep.thumb_ry,
+                report_hex(&rep.raw),
+            ),
+            None => " xusb:none".into(),
+        };
         let _ = state.tx.send(SecureMsg::Error(format!(
-            "probe iter={} errs=[{}]{raw}",
+            "probe iter={} errs=[{}]{raw} keystroke_events={} hid_raw=[{}]{xusb_str}",
             state.iter_count,
-            summary.join(",")
+            summary.join(","),
+            state.keystroke_events,
+            report_hex(&state.last_raw_report),
         )));
     }
 
@@ -964,7 +1042,8 @@ fn secure_poll_keystrokes(
     get_keystroke: XInputGetKeystrokeFn,
     slot: u32,
     prev_buttons: &mut [u16; 4],
-) {
+) -> u64 {
+    let mut events = 0u64;
     for _ in 0..16 {
         let mut key = XInputKeystroke::default();
         let err = unsafe { get_keystroke(slot, 0, &mut key) };
@@ -977,6 +1056,7 @@ fn secure_poll_keystrokes(
             )));
             break;
         }
+        events += 1;
         let Some(mask) = key_to_mask(key.virtual_key) else {
             continue;
         };
@@ -998,6 +1078,7 @@ fn secure_poll_keystrokes(
             let _ = tx.send(SecureMsg::Buttons { slot, prev, cur });
         }
     }
+    events
 }
 
 fn service_log(msg: &str) {

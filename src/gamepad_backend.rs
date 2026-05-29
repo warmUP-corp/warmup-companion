@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-pub use warmup_gamepad::{ButtonChange, GamepadInput};
+pub use warmup_gamepad::{Button, ButtonChange, GamepadInput};
 
 /// Polls physical controller state and produces normalized axes + button edges.
 pub trait GamepadBackend {

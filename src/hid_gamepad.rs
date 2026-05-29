@@ -670,9 +670,13 @@ fn profile_from_gcdb_name(name: &str) -> HidProfile {
     HidProfile::GenericHidP
 }
 
+/// `raw_bytes` is the number of bytes `GetRawInputData` actually wrote into the
+/// buffer backing `raw`. It bounds the HID payload slice so a malformed/oversized
+/// `dwSizeHid * dwCount` can never read past the allocation (was STATUS_HEAP_CORRUPTION).
 pub fn process_raw_input(
     devices: &mut HashMap<usize, DeviceState>,
     raw: &RAWINPUT,
+    raw_bytes: usize,
 ) -> Option<(usize, PadSample, &'static str, String, Vec<u8>)> {
     if raw.header.dwType != windows::Win32::UI::Input::RIM_TYPEHID.0 {
         return None;
@@ -697,8 +701,17 @@ pub fn process_raw_input(
     if report_size == 0 || report_count == 0 {
         return None;
     }
-    let raw_start =
-        unsafe { std::slice::from_raw_parts(hid.bRawData.as_ptr(), report_size * report_count) };
+    // Clamp the payload to what the buffer actually holds. `bRawData` is a
+    // flexible array at the tail of RAWINPUT; the bytes available after it are
+    // `raw_bytes - (bRawData - buffer_start)`. Trusting dwSizeHid*dwCount blindly
+    // read past the Vec and corrupted the heap.
+    let data_offset = hid.bRawData.as_ptr() as usize - (raw as *const RAWINPUT as usize);
+    let available = raw_bytes.saturating_sub(data_offset);
+    let total = report_size.saturating_mul(report_count).min(available);
+    if total < report_size {
+        return None;
+    }
+    let raw_start = unsafe { std::slice::from_raw_parts(hid.bRawData.as_ptr(), total) };
     let mut last = PadSample::default();
     let mut last_src = "";
     let mut last_report = Vec::new();

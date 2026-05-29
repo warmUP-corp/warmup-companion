@@ -3,6 +3,9 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "gamepad")]
+use crate::gamepad_backend::Button;
+
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
     VIRTUAL_KEY, VK_BACK, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE,
@@ -87,25 +90,32 @@ pub struct KeyPos {
 
 struct NavState {
     pos: KeyPos,
-    hold_button: Option<&'static str>,
+    #[cfg(feature = "gamepad")]
+    hold_button: Option<Button>,
     hold_count: u32,
     hold_deadline: Option<Instant>,
 }
 
 static NAV: Mutex<NavState> = Mutex::new(NavState {
     pos: KeyPos { row: 0, col: 0 },
+    #[cfg(feature = "gamepad")]
     hold_button: None,
     hold_count: 0,
     hold_deadline: None,
 });
 
+#[cfg(feature = "gamepad")]
 const HOLD_INITIAL: Duration = Duration::from_millis(350);
+#[cfg(feature = "gamepad")]
 const HOLD_REPEAT: Duration = Duration::from_millis(70);
 
 pub fn reset_selection() {
     if let Ok(mut nav) = NAV.lock() {
         nav.pos = KeyPos { row: 0, col: 0 };
-        nav.hold_button = None;
+        #[cfg(feature = "gamepad")]
+        {
+            nav.hold_button = None;
+        }
         nav.hold_count = 0;
         nav.hold_deadline = None;
     }
@@ -120,7 +130,8 @@ pub fn selected_key() -> KeyCell {
     ROWS[pos.row][pos.col]
 }
 
-pub fn move_selection(dir: &str) -> bool {
+#[cfg(feature = "gamepad")]
+pub fn move_selection(dir: Button) -> bool {
     let mut nav = match NAV.lock() {
         Ok(n) => n,
         Err(_) => return false,
@@ -128,7 +139,7 @@ pub fn move_selection(dir: &str) -> bool {
     let row_count = ROWS.len();
     let mut pos = nav.pos;
     let changed = match dir {
-        "LEFT" => {
+        Button::Left => {
             if pos.col > 0 {
                 pos.col -= 1;
                 true
@@ -136,7 +147,7 @@ pub fn move_selection(dir: &str) -> bool {
                 false
             }
         }
-        "RIGHT" => {
+        Button::Right => {
             if pos.col + 1 < ROWS[pos.row].len() {
                 pos.col += 1;
                 true
@@ -144,7 +155,7 @@ pub fn move_selection(dir: &str) -> bool {
                 false
             }
         }
-        "UP" => {
+        Button::Up => {
             if pos.row > 0 {
                 pos.row -= 1;
                 pos.col = pos.col.min(ROWS[pos.row].len().saturating_sub(1));
@@ -153,7 +164,7 @@ pub fn move_selection(dir: &str) -> bool {
                 false
             }
         }
-        "DOWN" => {
+        Button::Down => {
             if pos.row + 1 < row_count {
                 pos.row += 1;
                 pos.col = pos.col.min(ROWS[pos.row].len().saturating_sub(1));
@@ -171,6 +182,7 @@ pub fn move_selection(dir: &str) -> bool {
 }
 
 /// D-pad with hold-to-repeat (call each frame).
+#[cfg(feature = "gamepad")]
 pub fn tick_dpad_hold(now: Instant) -> bool {
     let mut nav = match NAV.lock() {
         Ok(n) => n,
@@ -191,7 +203,8 @@ pub fn tick_dpad_hold(now: Instant) -> bool {
     move_selection(btn)
 }
 
-pub fn dpad_pressed(dir: &'static str) {
+#[cfg(feature = "gamepad")]
+pub fn dpad_pressed(dir: Button) {
     let mut nav = match NAV.lock() {
         Ok(n) => n,
         Err(_) => return,
@@ -203,7 +216,8 @@ pub fn dpad_pressed(dir: &'static str) {
     let _ = move_selection(dir);
 }
 
-pub fn dpad_released(dir: &str) {
+#[cfg(feature = "gamepad")]
+pub fn dpad_released(dir: Button) {
     let Ok(mut nav) = NAV.lock() else {
         return;
     };
@@ -243,24 +257,18 @@ pub fn cursor_right() {
 }
 
 fn send_key(key: KeyCell) {
-    #[cfg(windows)]
-    crate::win::vk_ui::focus_text_target();
+    // No focus/foreground calls: NOACTIVATE window never steals focus, so the
+    // already-focused control receives the input (Joyxoff parity).
     if let Some(vk) = key.vk {
         send_vk(vk);
-        #[cfg(windows)]
-        crate::win::vk_ui::refocus_vk();
         return;
     }
     if key.ch != '\0' {
         send_unicode(&[key.ch as u16]);
     }
-    #[cfg(windows)]
-    crate::win::vk_ui::refocus_vk();
 }
 
 fn send_vk(vk: VIRTUAL_KEY) {
-    #[cfg(windows)]
-    crate::win::vk_ui::focus_text_target();
     unsafe {
         let down = INPUT {
             r#type: INPUT_KEYBOARD,
@@ -288,8 +296,6 @@ fn send_vk(vk: VIRTUAL_KEY) {
         };
         let _ = SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32);
     }
-    #[cfg(windows)]
-    crate::win::vk_ui::refocus_vk();
 }
 
 fn send_unicode(units: &[u16]) {

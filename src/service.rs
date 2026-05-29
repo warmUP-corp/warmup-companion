@@ -136,6 +136,9 @@ fn run_service_core() -> Result<(), String> {
 
 /// Worker child launched into active console session. Owns XInput polling and VK UI.
 pub fn run_worker() -> Result<(), String> {
+    std::panic::set_hook(Box::new(|info| {
+        install::log_line(&format!("WORKER PANIC: {info}"));
+    }));
     std::env::set_var("WARMUP_VK_SERVICE", "1");
     install::log_line("service worker starting (XInput + VK UI)");
     install::log_line(r"service log file: C:\ProgramData\WarmupVk\service.log");

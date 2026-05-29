@@ -1,17 +1,19 @@
 //! Native `WarmupXboxVkWindow` — prototype Xbox-style on-screen keyboard.
 //!
-//! Dedicated UI thread (Joyxoff-style). `PostThreadMessage` show/hide are handled in the
-//! thread message loop — **not** in `wndproc` (thread messages have `hwnd == NULL`).
+//! Paint-only adapter over [`super::desktop_window`]. The shared band owns the
+//! thread, class registration, and message pump; this module supplies the
+//! wndproc, the show/hide bodies, and the WinEvent reattach hooks. Show/hide are
+//! handled in the band's pump (thread messages have `hwnd == NULL`) — **not** in
+//! `vk_wndproc`.
 
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
-use std::sync::mpsc;
-use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::vk_nav::{self, KeyCell, ROWS};
 
 use windows::core::w;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect, InvalidateRect,
     RedrawWindow,
@@ -19,30 +21,25 @@ use windows::Win32::Graphics::Gdi::{
     RDW_ALLCHILDREN, RDW_INVALIDATE, RDW_UPDATENOW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{SetLayeredWindowAttributes, LWA_ALPHA};
+use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::{
-    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
-    GetForegroundWindow, GetSystemMetrics, GetWindowRect, IsWindowVisible, KillTimer, LoadCursorW,
-    PeekMessageW, PostQuitMessage, PostThreadMessageW, RegisterClassW, SetForegroundWindow,
-    SetTimer, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage, SM_CXSCREEN, SM_CYSCREEN,
-    CS_HREDRAW, CS_VREDRAW, HMENU, HWND_NOTOPMOST, HWND_TOPMOST, MSG, PM_NOREMOVE,
-    SPI_GETWORKAREA, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics, GetWindowRect,
+    IsWindowVisible, KillTimer, PostThreadMessageW,
+    EVENT_SYSTEM_DESKTOPSWITCH, EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT,
+    SetTimer, SetWindowPos, ShowWindow, SystemParametersInfoW, SM_CXSCREEN, SM_CYSCREEN,
+    HMENU, HWND_NOTOPMOST, HWND_TOPMOST,
+    SPI_GETWORKAREA, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SWP_NOZORDER, SWP_SHOWWINDOW, WINDOWPOS, WM_DESTROY, WM_LBUTTONDOWN, WM_PAINT, WM_TIMER,
-    WM_USER, WM_WINDOWPOSCHANGING, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOPMOST,
-    WS_EX_TOOLWINDOW, WS_POPUP, WNDCLASSW,
+    WM_WINDOWPOSCHANGING, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOPMOST,
+    WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use super::desktop;
+use super::desktop_window::{self, DesktopApp, DesktopWindowThread, WM_APP_REPAINT, WM_APP_SHOW};
 use super::vk_log;
 
-const CLASS_NAME: windows::core::PCWSTR = w!("WarmupXboxVkWindow");
-const WM_WARMUP_SHOW: u32 = WM_USER;
-const WM_WARMUP_HIDE: u32 = WM_USER + 1;
-const WM_WARMUP_QUIT: u32 = WM_USER + 2;
-const WM_WARMUP_REPAINT: u32 = WM_USER + 3;
+const WINDOW_CLASS: windows::core::PCWSTR = w!("WarmupXboxVkWindow");
 
 const VK_WIDTH: i32 = 720;
 const VK_HEIGHT: i32 = 318;
@@ -53,7 +50,6 @@ const VK_ZORDER_TIMER_MS: u32 = 200;
 static VK_VISIBLE: AtomicBool = AtomicBool::new(false);
 static UI_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 static VK_HWND: AtomicIsize = AtomicIsize::new(0);
-static TEXT_TARGET_HWND: AtomicIsize = AtomicIsize::new(0);
 
 const SEL_FILL: u32 = 0x00E85D04;
 const KEY_FILL: u32 = 0x00303030;
@@ -70,12 +66,58 @@ struct UiState {
 }
 
 thread_local! {
-    static UI: std::cell::RefCell<UiState> = std::cell::RefCell::new(UiState { hwnd: None });
+    static UI: RefCell<UiState> = const { RefCell::new(UiState { hwnd: None }) };
+    /// WinEvent hooks installed on the UI thread (drained on pump exit).
+    static WINEVENT_HOOKS: RefCell<Vec<HWINEVENTHOOK>> = const { RefCell::new(Vec::new()) };
+}
+
+/// VK adapter for the shared UI-thread band.
+struct VkApp {
+    attach: VkAttach,
+}
+
+impl DesktopApp for VkApp {
+    const THREAD_NAME: &'static str = "warmup-vk-ui";
+    const CLASS_NAME: windows::core::PCWSTR = WINDOW_CLASS;
+    const BG_COLOR: u32 = BG_FILL;
+    const WNDPROC: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT = vk_wndproc;
+
+    fn on_thread_start(&mut self) -> Result<(), String> {
+        try_attach_for_window(self.attach).map_err(|e| format!("desktop attach failed: {e}"))
+    }
+
+    fn on_ready(&mut self, thread_id: u32) {
+        UI_THREAD_ID.store(thread_id, Ordering::Release);
+    }
+
+    fn install_hooks(&mut self) {
+        install_winevent_hooks();
+    }
+
+    fn remove_hooks(&mut self) {
+        remove_winevent_hooks();
+    }
+
+    fn on_show(&mut self, lparam: LPARAM) {
+        let attach = if lparam.0 == 1 {
+            VkAttach::Input
+        } else {
+            VkAttach::Current
+        };
+        ui_show(attach);
+    }
+
+    fn on_hide(&mut self) {
+        ui_hide();
+    }
+
+    fn on_repaint(&mut self) {
+        ui_repaint();
+    }
 }
 
 pub struct VkUiThread {
-    thread_id: u32,
-    join: Option<JoinHandle<()>>,
+    handle: DesktopWindowThread,
 }
 
 pub fn is_vk_visible() -> bool {
@@ -88,10 +130,11 @@ pub fn request_repaint() {
         return;
     }
     unsafe {
-        let _ = PostThreadMessageW(tid, WM_WARMUP_REPAINT, WPARAM(0), LPARAM(0));
+        let _ = PostThreadMessageW(tid, WM_APP_REPAINT, WPARAM(0), LPARAM(0));
     }
 }
 
+#[cfg(feature = "gamepad")]
 pub fn tick_dpad_hold(now: Instant) -> bool {
     if vk_nav::tick_dpad_hold(now) {
         request_repaint();
@@ -101,123 +144,62 @@ pub fn tick_dpad_hold(now: Instant) -> bool {
     }
 }
 
-pub fn focus_text_target() {
-    let hwnd = TEXT_TARGET_HWND.load(Ordering::Acquire);
-    if hwnd != 0 {
-        unsafe {
-            let _ = SetForegroundWindow(HWND(hwnd as *mut _));
-        }
-    }
-}
-
-pub fn refocus_vk() {
-    let hwnd = VK_HWND.load(Ordering::Acquire);
-    if hwnd != 0 && secure_desktop_mode() {
-        unsafe {
-            let _ = SetForegroundWindow(HWND(hwnd as *mut _));
-        }
-    }
-}
-
 impl VkUiThread {
     pub fn spawn(attach: VkAttach) -> Result<Self, String> {
-        let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<u32, String>>(1);
-        let join = thread::Builder::new()
-            .name("warmup-vk-ui".into())
-            .spawn(move || ui_thread_main(ready_tx, attach))
-            .map_err(|e| format!("vk ui thread: {e}"))?;
-        let thread_id = ready_rx
-            .recv()
-            .map_err(|_| "vk ui thread exited before ready".to_string())??;
-        Ok(Self {
-            thread_id,
-            join: Some(join),
-        })
+        let handle = desktop_window::spawn(VkApp { attach })?;
+        Ok(Self { handle })
     }
 
     pub fn show(&self, attach: VkAttach) -> Result<(), String> {
-        unsafe {
-            PostThreadMessageW(
-                self.thread_id,
-                WM_WARMUP_SHOW,
-                WPARAM(0),
-                LPARAM(attach as isize),
-            )
-            .map_err(|e| format!("PostThreadMessageW show: {e}"))?;
-        }
-        Ok(())
+        self.handle.show(LPARAM(attach as isize))
     }
 
     pub fn hide(&self) -> Result<(), String> {
-        unsafe {
-            PostThreadMessageW(self.thread_id, WM_WARMUP_HIDE, WPARAM(0), LPARAM(0))
-                .map_err(|e| format!("PostThreadMessageW hide: {e}"))?;
-        }
-        Ok(())
+        self.handle.hide()
     }
 }
 
-impl Drop for VkUiThread {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = PostThreadMessageW(self.thread_id, WM_WARMUP_QUIT, WPARAM(0), LPARAM(0));
-        }
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
-    }
-}
-
-fn ui_thread_main(ready: mpsc::SyncSender<Result<u32, String>>, attach: VkAttach) {
-    if let Err(e) = try_attach_for_window(attach) {
-        let _ = ready.send(Err(format!("desktop attach failed: {e}")));
-        return;
-    }
+/// Joyxoff `warmup_create_xbox_vk_window` registers these two hooks (OUTOFCONTEXT,
+/// delivered on the UI thread during the pump). DESKTOPSWITCH re-attaches us to the
+/// new input desktop on lock/logon/UAC; FOREGROUND re-asserts topmost vs LogonUI.
+fn install_winevent_hooks() {
     unsafe {
-        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        let instance = GetModuleHandleW(None).expect("module handle");
-        let bg = CreateSolidBrush(windows::Win32::Foundation::COLORREF(0x001a1a1a));
-        let wc = WNDCLASSW {
-            lpfnWndProc: Some(vk_wndproc),
-            hInstance: instance.into(),
-            lpszClassName: CLASS_NAME,
-            hCursor: LoadCursorW(None, windows::Win32::UI::WindowsAndMessaging::IDC_ARROW)
-                .expect("cursor"),
-            hbrBackground: bg,
-            style: CS_HREDRAW | CS_VREDRAW,
-            ..Default::default()
-        };
-        RegisterClassW(&wc);
-        // Message queue must exist before main thread posts WM_WARMUP_SHOW.
-        let mut msg = MSG::default();
-        let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
+        let desktop_hook = SetWinEventHook(
+            EVENT_SYSTEM_DESKTOPSWITCH,
+            EVENT_SYSTEM_DESKTOPSWITCH,
+            HMODULE::default(),
+            Some(on_desktop_switch),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        );
+        let foreground_hook = SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_FOREGROUND,
+            HMODULE::default(),
+            Some(on_foreground),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        );
+        WINEVENT_HOOKS.with(|h| {
+            let mut h = h.borrow_mut();
+            h.push(desktop_hook);
+            h.push(foreground_hook);
+        });
     }
-    let thread_id = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
-    UI_THREAD_ID.store(thread_id, Ordering::Release);
-    let _ = ready.send(Ok(thread_id));
+}
 
-    let mut msg = MSG::default();
-    while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
-        match msg.message {
-            WM_WARMUP_SHOW => {
-                let attach = if msg.lParam.0 == 1 {
-                    VkAttach::Input
-                } else {
-                    VkAttach::Current
-                };
-                ui_show(attach);
+fn remove_winevent_hooks() {
+    WINEVENT_HOOKS.with(|h| {
+        for hook in h.borrow_mut().drain(..) {
+            if !hook.is_invalid() {
+                unsafe {
+                    let _ = UnhookWinEvent(hook);
+                }
             }
-            WM_WARMUP_HIDE => ui_hide(),
-            WM_WARMUP_REPAINT => ui_repaint(),
-            WM_WARMUP_QUIT => unsafe {
-                PostQuitMessage(0);
-            },
-            _ => unsafe {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            },
         }
-    }
+    });
 }
 
 fn ui_show(attach: VkAttach) {
@@ -233,12 +215,6 @@ fn ui_show(attach: VkAttach) {
     }
     if let Some(name) = desktop::current_desktop_name() {
         vk_log::log(&format!("UI thread desktop: {name}"));
-    }
-    if secure_desktop_mode() {
-        let foreground = unsafe { GetForegroundWindow() };
-        if !foreground.0.is_null() {
-            TEXT_TARGET_HWND.store(foreground.0 as isize, Ordering::Release);
-        }
     }
     let hwnd = match unsafe { create_vk_window() } {
         Ok(h) => h,
@@ -284,9 +260,53 @@ fn ui_hide() {
         destroy_vk_window(h);
     }
     VK_HWND.store(0, Ordering::Release);
-    TEXT_TARGET_HWND.store(0, Ordering::Release);
     VK_VISIBLE.store(false, Ordering::SeqCst);
     vk_log::log("WarmupXboxVkWindow hidden");
+}
+
+/// EVENT_SYSTEM_DESKTOPSWITCH callback. Joyxoff `FUN_0041ece0` re-attaches the VK
+/// thread to the new input desktop on every desktop switch (lock screen, logon, UAC).
+/// Without this our window stays stranded on the old desktop -> invisible after a
+/// switch. Delivered on this UI thread (WINEVENT_OUTOFCONTEXT) during the message
+/// pump, so re-show via a posted message (re-attach + window recreate happens in the
+/// band's WM_APP_SHOW handler, which destroys the old window before SetThreadDesktop).
+unsafe extern "system" fn on_desktop_switch(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    _hwnd: HWND,
+    _id_object: i32,
+    _id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    if !VK_VISIBLE.load(Ordering::SeqCst) {
+        return;
+    }
+    let tid = UI_THREAD_ID.load(Ordering::Acquire);
+    if tid != 0 {
+        let _ = PostThreadMessageW(tid, WM_APP_SHOW, WPARAM(0), LPARAM(1));
+    }
+}
+
+/// EVENT_SYSTEM_FOREGROUND callback. Joyxoff `FUN_0041ed00` re-asserts topmost when
+/// foreground changes; LogonUI grabs foreground aggressively on the secure desktop.
+/// Event-driven re-assert complements the 200ms z-order timer.
+unsafe extern "system" fn on_foreground(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    _hwnd: HWND,
+    _id_object: i32,
+    _id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    if !VK_VISIBLE.load(Ordering::SeqCst) {
+        return;
+    }
+    let tid = UI_THREAD_ID.load(Ordering::Acquire);
+    if tid != 0 {
+        let _ = PostThreadMessageW(tid, WM_APP_REPAINT, WPARAM(0), LPARAM(0));
+    }
 }
 
 unsafe extern "system" fn vk_wndproc(
@@ -389,7 +409,7 @@ unsafe fn create_vk_window() -> Result<HWND, String> {
     let (x, y) = work_area_bottom_center(outer_w, outer_h);
     let hwnd = CreateWindowExW(
         window_ex_style(),
-        CLASS_NAME,
+        WINDOW_CLASS,
         w!("Warmup Xbox VK"),
         window_style(),
         x,
@@ -440,37 +460,23 @@ unsafe fn stop_zorder_timer(hwnd: HWND) {
 unsafe fn show_and_place(hwnd: HWND) {
     let (outer_w, outer_h) = outer_window_size();
     let (x, y) = work_area_bottom_center(outer_w, outer_h);
-    if secure_desktop_mode() {
-        let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, outer_w, outer_h, SWP_SHOWWINDOW);
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = SetForegroundWindow(hwnd);
-    } else {
-        let _ = SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
-            x,
-            y,
-            outer_w,
-            outer_h,
-            SWP_SHOWWINDOW | SWP_NOACTIVATE,
-        );
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-    }
+    // Never activate. Joyxoff's `JoyXboxVkWindow` is NOACTIVATE and shown without
+    // taking foreground, so the focused control (winlogon password edit) keeps focus
+    // and Windows never auto-invokes the native touch keyboard.
+    let _ = SetWindowPos(
+        hwnd,
+        HWND_TOPMOST,
+        x,
+        y,
+        outer_w,
+        outer_h,
+        SWP_SHOWWINDOW | SWP_NOACTIVATE,
+    );
+    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     ensure_topmost(hwnd);
     start_zorder_timer(hwnd);
     let _ = RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
     log_window_rect(hwnd);
-}
-
-fn service_mode() -> bool {
-    std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0")
-}
-
-fn secure_desktop_mode() -> bool {
-    service_mode()
-        && desktop::input_desktop_name()
-            .map(|name| name.eq_ignore_ascii_case("Winlogon"))
-            .unwrap_or(false)
 }
 
 unsafe fn destroy_vk_window(hwnd: HWND) {

@@ -1,8 +1,10 @@
-//! Temporary Winlogon debug panel. UI thread attaches to input desktop, poll thread stays put.
+//! Temporary Winlogon debug panel. Paint-only adapter over
+//! [`super::desktop_window`]: the shared band owns the thread + pump, this module
+//! supplies the wndproc and show/hide bodies. UI thread attaches to the input
+//! desktop on show; the poll thread stays put.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Mutex, OnceLock};
-use std::thread::{self, JoinHandle};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use windows::core::w;
@@ -12,34 +14,27 @@ use windows::Win32::Graphics::Gdi::{
     SetBkMode, SetTextColor, BACKGROUND_MODE, DT_LEFT, DT_SINGLELINE, DT_VCENTER, PAINTSTRUCT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::GetCurrentThreadId;
-use windows::Win32::UI::HiDpi::{
-    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-};
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
-    LoadCursorW, PeekMessageW, PostQuitMessage, PostThreadMessageW, RegisterClassW, SetTimer,
-    SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HMENU, HWND_TOPMOST, MSG,
-    PM_NOREMOVE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, WM_DESTROY, WM_PAINT, WM_TIMER,
-    WM_USER, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WNDCLASSW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, KillTimer, SetTimer, SetWindowPos, ShowWindow,
+    HMENU, HWND_TOPMOST, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, WM_DESTROY, WM_PAINT,
+    WM_TIMER, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use super::desktop;
+use super::desktop_window::{self, DesktopApp, DesktopWindowThread};
 
-const CLASS_NAME: windows::core::PCWSTR = w!("WarmupDebugOverlayWindow");
-const WM_DEBUG_SHOW: u32 = WM_USER + 20;
-const WM_DEBUG_HIDE: u32 = WM_USER + 21;
-const WM_DEBUG_QUIT: u32 = WM_USER + 22;
+const WINDOW_CLASS: windows::core::PCWSTR = w!("WarmupDebugOverlayWindow");
 
 const PANEL_W: i32 = 520;
 const PANEL_H: i32 = 412;
 const REPAINT_TIMER_ID: usize = 11;
 const REPAINT_TIMER_MS: u32 = 250;
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
+const PANEL_BG: u32 = 0x00101010;
 
 struct DebugOverlayController {
-    thread: Option<DebugOverlayThread>,
+    thread: Option<DesktopWindowThread>,
     last_tick: Instant,
     last_on_winlogon: bool,
     input_probe_failures: u8,
@@ -58,9 +53,22 @@ impl Default for DebugOverlayController {
     }
 }
 
-struct DebugOverlayThread {
-    thread_id: u32,
-    join: Option<JoinHandle<()>>,
+/// Debug-overlay adapter for the shared UI-thread band.
+struct DebugApp;
+
+impl DesktopApp for DebugApp {
+    const THREAD_NAME: &'static str = "warmup-debug-overlay";
+    const CLASS_NAME: windows::core::PCWSTR = WINDOW_CLASS;
+    const BG_COLOR: u32 = PANEL_BG;
+    const WNDPROC: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT = debug_wndproc;
+
+    fn on_show(&mut self, _lparam: LPARAM) {
+        ui_show();
+    }
+
+    fn on_hide(&mut self) {
+        ui_hide();
+    }
 }
 
 thread_local! {
@@ -116,7 +124,7 @@ pub fn tick() {
     // respawning on every Winlogon transition caused the "goes away / comes back"
     // flicker and a race on the next CreateWindow.
     let just_spawned = if c.thread.is_none() {
-        match DebugOverlayThread::spawn() {
+        match desktop_window::spawn(DebugApp) {
             Ok(thread) => {
                 c.thread = Some(thread);
                 true
@@ -134,7 +142,7 @@ pub fn tick() {
     if (just_spawned || transitioned) && c.thread.is_some() {
         let thread = c.thread.as_ref().expect("checked is_some");
         if on_winlogon {
-            let _ = thread.show();
+            let _ = thread.show(LPARAM(0));
             service_log("debug ui: shown on Winlogon");
         } else {
             let _ = thread.hide();
@@ -142,91 +150,6 @@ pub fn tick() {
         }
     }
     c.last_on_winlogon = on_winlogon;
-}
-
-impl DebugOverlayThread {
-    fn spawn() -> Result<Self, String> {
-        let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<u32, String>>(1);
-        let join = thread::Builder::new()
-            .name("warmup-debug-overlay".into())
-            .spawn(move || ui_thread_main(ready_tx))
-            .map_err(|e| format!("debug ui thread: {e}"))?;
-        let thread_id = ready_rx
-            .recv()
-            .map_err(|_| "debug ui thread exited before ready".to_string())??;
-        Ok(Self {
-            thread_id,
-            join: Some(join),
-        })
-    }
-
-    fn show(&self) -> Result<(), String> {
-        unsafe {
-            PostThreadMessageW(self.thread_id, WM_DEBUG_SHOW, WPARAM(0), LPARAM(0))
-                .map_err(|e| format!("PostThreadMessageW debug show: {e}"))?;
-        }
-        Ok(())
-    }
-
-    fn hide(&self) -> Result<(), String> {
-        unsafe {
-            PostThreadMessageW(self.thread_id, WM_DEBUG_HIDE, WPARAM(0), LPARAM(0))
-                .map_err(|e| format!("PostThreadMessageW debug hide: {e}"))?;
-        }
-        Ok(())
-    }
-
-    fn stop(&mut self) {
-        unsafe {
-            let _ = PostThreadMessageW(self.thread_id, WM_DEBUG_QUIT, WPARAM(0), LPARAM(0));
-        }
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
-    }
-}
-
-impl Drop for DebugOverlayThread {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
-
-fn ui_thread_main(ready: mpsc::SyncSender<Result<u32, String>>) {
-    unsafe {
-        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        let instance = GetModuleHandleW(None).expect("module handle");
-        let bg = CreateSolidBrush(windows::Win32::Foundation::COLORREF(0x00101010));
-        let wc = WNDCLASSW {
-            lpfnWndProc: Some(debug_wndproc),
-            hInstance: instance.into(),
-            lpszClassName: CLASS_NAME,
-            hCursor: LoadCursorW(None, windows::Win32::UI::WindowsAndMessaging::IDC_ARROW)
-                .expect("cursor"),
-            hbrBackground: bg,
-            style: CS_HREDRAW | CS_VREDRAW,
-            ..Default::default()
-        };
-        RegisterClassW(&wc);
-        let mut msg = MSG::default();
-        let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
-    }
-
-    let _ = ready.send(Ok(unsafe { GetCurrentThreadId() }));
-    let mut msg = MSG::default();
-    while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
-        match msg.message {
-            WM_DEBUG_SHOW => ui_show(),
-            WM_DEBUG_HIDE => ui_hide(),
-            WM_DEBUG_QUIT => unsafe {
-                PostQuitMessage(0);
-            },
-            _ => unsafe {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            },
-        }
-    }
 }
 
 fn ui_show() {
@@ -273,7 +196,7 @@ unsafe fn create_debug_window() -> Result<HWND, String> {
     let instance = GetModuleHandleW(None).map_err(|e| format!("GetModuleHandleW: {e}"))?;
     CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-        CLASS_NAME,
+        WINDOW_CLASS,
         w!("Warmup Debug Overlay"),
         WS_POPUP,
         24,
@@ -345,7 +268,7 @@ fn paint_debug(hwnd: HWND) {
             right: PANEL_W,
             bottom: PANEL_H,
         };
-        let bg = CreateSolidBrush(windows::Win32::Foundation::COLORREF(0x00101010));
+        let bg = CreateSolidBrush(windows::Win32::Foundation::COLORREF(PANEL_BG));
         let _ = FillRect(hdc, &rect, bg);
         let _ = DeleteObject(bg);
         let _ = SetBkMode(hdc, BACKGROUND_MODE(1));

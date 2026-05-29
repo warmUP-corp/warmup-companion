@@ -22,7 +22,20 @@
       "Bash(cargo check *)",
       "mcp__code-review-graph__list_graph_stats_tool",
       "mcp__code-review-graph__detect_changes_tool",
-      "mcp__ghidra__search_functions_enhanced"
+      "mcp__ghidra__search_functions_enhanced",
+      "mcp__code-review-graph__get_architecture_overview_tool",
+      "mcp__ghidra__get_function_xrefs",
+      "PowerShell(cargo build *)",
+      "Bash(echo \"---EXIT $?---\")",
+      "Read(//c/ProgramData/WarmupVk//**)",
+      "Bash(cargo test *)",
+      "mcp__code-review-graph__find_large_functions_tool",
+      "Bash(xargs grep -l \"mod test\\\\|#\\\\[test\\\\|#\\\\[cfg\\(test\\)]\")",
+      "Bash(grep -E \"mask|MASK|0x[0-9A-F]{3,4}\")",
+      "Bash(grep -E \"\\\\.\\(rs|toml\\)$\")",
+      "mcp__code-review-graph__query_graph_tool",
+      "Bash(start *)",
+      "PowerShell(cargo test *)"
     ]
   },
   "enabledMcpjsonServers": [

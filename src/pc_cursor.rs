@@ -11,6 +11,13 @@ const SCROLL_SENSITIVITY: f32 = 5.0;
 
 pub struct PcCursor {
     enigo: Option<Enigo>,
+    /// Service worker only: dedicated SendInput thread on the Default desktop.
+    /// The worker main thread is attached to Winlogon, so injecting from it lands
+    /// on the wrong desktop (invisible after login). The injector thread inherits
+    /// the process startup desktop (`winsta0\default`), so its SendInput reaches
+    /// the user's desktop with no SetThreadDesktop (which fails ERROR_BUSY on a
+    /// thread that owns windows).
+    injector: Option<Injector>,
     remainder_x: f32,
     remainder_y: f32,
     scroll_remainder_x: f32,
@@ -24,15 +31,27 @@ impl PcCursor {
         Ok(Self::with_enigo(Some(enigo)))
     }
 
-    /// Service worker (user session, not session 0). Try Enigo eagerly so post-login
-    /// cursor control works without waiting for `ensure_enigo_for_userland_service`.
+    /// Service worker (user session, not session 0). Cursor injection runs on a
+    /// dedicated Default-desktop thread; falls back to inline Enigo if the thread
+    /// can't spawn.
     pub fn new_service() -> Self {
-        Self::with_enigo(Enigo::new(&Settings::default()).ok())
+        match Injector::spawn() {
+            Some(injector) => Self {
+                enigo: None,
+                injector: Some(injector),
+                remainder_x: 0.0,
+                remainder_y: 0.0,
+                scroll_remainder_x: 0.0,
+                scroll_remainder_y: 0.0,
+            },
+            None => Self::with_enigo(Enigo::new(&Settings::default()).ok()),
+        }
     }
 
     fn with_enigo(enigo: Option<Enigo>) -> Self {
         Self {
             enigo,
+            injector: None,
             remainder_x: 0.0,
             remainder_y: 0.0,
             scroll_remainder_x: 0.0,
@@ -41,7 +60,6 @@ impl PcCursor {
     }
 
     pub fn move_stick(&mut self, stick_x: f32, stick_y: f32, dt_secs: f32) {
-        self.ensure_enigo_for_userland_service();
         let (dx, dy) = stick_delta(stick_x, stick_y, SENSITIVITY, dt_secs);
         if dx == 0.0 && dy == 0.0 {
             self.remainder_x = 0.0;
@@ -55,14 +73,11 @@ impl PcCursor {
         self.remainder_x = total_x - int_x as f32;
         self.remainder_y = total_y - int_y as f32;
         if int_x != 0 || int_y != 0 {
-            if let Some(enigo) = self.enigo.as_mut() {
-                let _ = enigo.move_mouse(int_x, int_y, Coordinate::Rel);
-            }
+            self.dispatch(Cmd::Move(int_x, int_y));
         }
     }
 
     pub fn scroll_stick(&mut self, stick_x: f32, stick_y: f32, dt_secs: f32) {
-        self.ensure_enigo_for_userland_service();
         let (sx, sy) = scroll_delta(stick_x, stick_y, dt_secs);
         if sx == 0.0 && sy == 0.0 {
             self.scroll_remainder_x = 0.0;
@@ -75,40 +90,92 @@ impl PcCursor {
         let total_x = sx + self.scroll_remainder_x;
         let int_x = total_x as i32;
         self.scroll_remainder_x = total_x - int_x as f32;
-        if let Some(enigo) = self.enigo.as_mut() {
-            if int_y != 0 {
-                let _ = enigo.scroll(-int_y, Axis::Vertical);
-            }
-            if int_x != 0 {
-                let _ = enigo.scroll(int_x, Axis::Horizontal);
-            }
+        if int_y != 0 {
+            self.dispatch(Cmd::ScrollV(-int_y));
+        }
+        if int_x != 0 {
+            self.dispatch(Cmd::ScrollH(int_x));
         }
     }
 
     pub fn left_click(&mut self) {
-        self.ensure_enigo_for_userland_service();
-        if let Some(enigo) = self.enigo.as_mut() {
-            let _ = enigo.button(enigo::Button::Left, Direction::Click);
-        }
+        self.dispatch(Cmd::Click);
     }
 
-    fn ensure_enigo_for_userland_service(&mut self) {
-        if self.enigo.is_some() {
+    /// Route a command to the injector thread (service) or inline Enigo.
+    fn dispatch(&mut self, cmd: Cmd) {
+        if let Some(injector) = &self.injector {
+            injector.send(cmd);
             return;
         }
-        if std::env::var_os("WARMUP_VK_SERVICE").is_none_or(|v| v == "0") {
+        let Some(enigo) = self.enigo.as_mut() else {
             return;
-        }
-        #[cfg(windows)]
-        {
-            let Ok(input) = crate::win::input_desktop_name() else {
-                return;
-            };
-            if input.eq_ignore_ascii_case("Winlogon") {
-                return;
+        };
+        match cmd {
+            Cmd::Move(dx, dy) => {
+                let _ = enigo.move_mouse(dx, dy, Coordinate::Rel);
             }
-            if let Ok(enigo) = Enigo::new(&Settings::default()) {
-                self.enigo = Some(enigo);
+            Cmd::ScrollV(v) => {
+                let _ = enigo.scroll(v, Axis::Vertical);
+            }
+            Cmd::ScrollH(h) => {
+                let _ = enigo.scroll(h, Axis::Horizontal);
+            }
+            Cmd::Click => {
+                let _ = enigo.button(enigo::Button::Left, Direction::Click);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Cmd {
+    Move(i32, i32),
+    ScrollV(i32),
+    ScrollH(i32),
+    Click,
+}
+
+/// Dedicated cursor-injection thread. Owns its own Enigo and runs on whatever
+/// desktop the thread was born on — for the service worker that is the process
+/// startup desktop `winsta0\default`, i.e. the user's desktop after login.
+struct Injector {
+    tx: std::sync::mpsc::Sender<Cmd>,
+}
+
+impl Injector {
+    fn spawn() -> Option<Self> {
+        let (tx, rx) = std::sync::mpsc::channel::<Cmd>();
+        std::thread::Builder::new()
+            .name("warmup-cursor-inject".into())
+            .spawn(move || injector_main(rx))
+            .ok()?;
+        Some(Self { tx })
+    }
+
+    fn send(&self, cmd: Cmd) {
+        let _ = self.tx.send(cmd);
+    }
+}
+
+fn injector_main(rx: std::sync::mpsc::Receiver<Cmd>) {
+    let mut enigo = Enigo::new(&Settings::default()).ok();
+    while let Ok(cmd) = rx.recv() {
+        let Some(enigo) = enigo.as_mut() else {
+            continue;
+        };
+        match cmd {
+            Cmd::Move(dx, dy) => {
+                let _ = enigo.move_mouse(dx, dy, Coordinate::Rel);
+            }
+            Cmd::ScrollV(v) => {
+                let _ = enigo.scroll(v, Axis::Vertical);
+            }
+            Cmd::ScrollH(h) => {
+                let _ = enigo.scroll(h, Axis::Horizontal);
+            }
+            Cmd::Click => {
+                let _ = enigo.button(enigo::Button::Left, Direction::Click);
             }
         }
     }

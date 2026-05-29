@@ -7,14 +7,14 @@ use std::time::{Duration, Instant};
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
-use crate::gamepad_backend::{ButtonChange, GamepadBackend, SdlBackend};
+use crate::gamepad_backend::{Button, ButtonChange, GamepadBackend, SdlBackend};
 use crate::pc_cursor::PcCursor;
 
 #[cfg(windows)]
 use crate::xinput_backend::XInputBackend;
 
 /// North face: Triangle / Y — toggles VK when keyboard is closed.
-const VK_MASK_BUTTON: &str = "Y";
+const VK_BUTTON: Button = Button::Y;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(8);
 /// Ignore Y release right after opening VK (same physical tap must not close).
@@ -258,10 +258,10 @@ impl GamepadPoll {
             edges.push(edge);
         }
         for change in changes {
-            if change.button_name == "A" && change.pressed {
+            if change.button == Button::A && change.pressed {
                 cursor.left_click();
             }
-            if change.button_name != VK_MASK_BUTTON {
+            if change.button != VK_BUTTON {
                 continue;
             }
             let edge = match (self.vk_down, change.pressed) {
@@ -322,7 +322,7 @@ impl GamepadPoll {
         use crate::vk_nav;
         use crate::win::vk_ui;
 
-        if change.button_name != VK_MASK_BUTTON
+        if change.button != VK_BUTTON
             && self
                 .vk_nav_grace_until
                 .is_some_and(|until| Instant::now() < until)
@@ -330,12 +330,12 @@ impl GamepadPoll {
             return None;
         }
 
-        match (change.button_name, change.pressed) {
-            (VK_MASK_BUTTON, false) => {
+        match (change.button, change.pressed) {
+            (VK_BUTTON, false) => {
                 self.vk_down = false;
                 None
             }
-            (VK_MASK_BUTTON, true) => {
+            (VK_BUTTON, true) => {
                 if self
                     .y_ignore_until
                     .is_some_and(|until| Instant::now() < until)
@@ -345,39 +345,39 @@ impl GamepadPoll {
                 self.vk_down = true;
                 Some(VkLoopAction::Toggle)
             }
-            ("UP" | "DOWN" | "LEFT" | "RIGHT", true) => {
-                vk_nav::dpad_pressed(change.button_name);
+            (Button::Up | Button::Down | Button::Left | Button::Right, true) => {
+                vk_nav::dpad_pressed(change.button);
                 vk_ui::request_repaint();
                 None
             }
-            ("UP" | "DOWN" | "LEFT" | "RIGHT", false) => {
-                vk_nav::dpad_released(change.button_name);
+            (Button::Up | Button::Down | Button::Left | Button::Right, false) => {
+                vk_nav::dpad_released(change.button);
                 None
             }
-            ("A", true) => {
+            (Button::A, true) => {
                 self.a_down_while_vk = true;
                 None
             }
-            ("A", false) if self.a_down_while_vk => {
+            (Button::A, false) if self.a_down_while_vk => {
                 self.a_down_while_vk = false;
                 vk_nav::activate_selection();
                 None
             }
-            ("B", true) => {
+            (Button::B, true) => {
                 vk_nav::backspace();
                 None
             }
-            ("X", true) => Some(VkLoopAction::Close),
-            ("LB", true) if !Self::service_signin_desktop() => {
+            (Button::X, true) => Some(VkLoopAction::Close),
+            (Button::Lb, true) if !Self::service_signin_desktop() => {
                 vk_nav::cursor_left();
                 None
             }
-            ("LB", true) => None,
-            ("RB", true) if !Self::service_signin_desktop() => {
+            (Button::Lb, true) => None,
+            (Button::Rb, true) if !Self::service_signin_desktop() => {
                 vk_nav::enter();
                 None
             }
-            ("RB", true) => None,
+            (Button::Rb, true) => None,
             _ => None,
         }
     }
@@ -431,9 +431,9 @@ impl GamepadPoll {
 fn dedupe_consecutive_y_edges(changes: Vec<ButtonChange>) -> Vec<ButtonChange> {
     let mut out: Vec<ButtonChange> = Vec::with_capacity(changes.len());
     for c in changes {
-        if c.button_name == VK_MASK_BUTTON {
+        if c.button == VK_BUTTON {
             if let Some(last) = out.last() {
-                if last.button_name == VK_MASK_BUTTON && last.pressed == c.pressed {
+                if last.button == VK_BUTTON && last.pressed == c.pressed {
                     continue;
                 }
             }
