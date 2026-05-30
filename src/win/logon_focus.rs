@@ -27,6 +27,8 @@ use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, TreeScope_Subtree,
 };
 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+#[cfg(feature = "gamepad")]
+use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
 
 /// UIA control-type id for an editable field.
 const CT_EDIT: i32 = 50004;
@@ -83,6 +85,12 @@ pub fn set_active(on_winlogon: bool) {
 
 fn active() -> bool {
     ON_WINLOGON.load(Ordering::SeqCst)
+}
+
+/// True when the input desktop is Winlogon (the secure desktop). Userland inject
+/// paths use this to gate Winlogon-only behavior / diagnostics.
+pub fn is_active() -> bool {
+    active()
 }
 
 /// Userland personal-dictionary gate (ADR 0001). `None` => conservative skip.
@@ -166,6 +174,19 @@ pub fn focus_password_field() -> bool {
     let Some(auto) = automation() else {
         return false;
     };
+
+    // Foreground-juggle: the secure poll holds foreground so the pad stays
+    // readable (XUSB is foreground-gated), but SendInput must reach LogonUI's PIN
+    // field. Restore the credential window to foreground and suppress the anchor's
+    // reclaim for this burst. Must precede find_password_element(), which reads
+    // GetForegroundWindow() to locate the surface.
+    #[cfg(feature = "gamepad")]
+    if let Some(cred) = crate::xinput_backend::logon_credential_window() {
+        crate::xinput_backend::begin_inject_hold();
+        unsafe {
+            let _ = SetForegroundWindow(cred);
+        }
+    }
 
     // Cached element first; SetFocus error => stale, drop and refind.
     let cached = PWD_ELEMENT.with(|s| s.borrow().clone());

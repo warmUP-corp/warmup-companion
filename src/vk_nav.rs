@@ -11,7 +11,7 @@ use crate::gamepad_backend::Button;
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyboardLayout, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_RETURN,
+    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_END, VK_RETURN,
     VK_SPACE, VK_TAB,
 };
 
@@ -483,121 +483,114 @@ pub fn enter() {
 }
 
 fn send_paste() {
-    crate::win::logon_focus::focus_password_field();
+    let collapse = focus_for_inject();
+    let v = VIRTUAL_KEY(b'V' as u16);
+    let mut batch: Vec<INPUT> = Vec::with_capacity(6);
+    // Caret-to-end first, as standalone End presses, so the select-on-focus
+    // selection collapses before Ctrl is held (a held Ctrl would make it Ctrl+End).
+    push_collapse(&mut batch, collapse);
+    batch.push(vk_event(VK_CONTROL, false));
+    batch.push(vk_event(v, false));
+    batch.push(vk_event(v, true));
+    batch.push(vk_event(VK_CONTROL, true));
     unsafe {
-        let ctrl_down = INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VK_CONTROL,
-                    wScan: 0,
-                    dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(0),
-                    time: 0,
-                    dwExtraInfo: 0,
+        let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+/// Focus the credential field for an inject. Returns true on Winlogon, where the
+/// edit selects its entire contents on focus — the caller must then lead its
+/// `SendInput` batch with a caret-to-end (`VK_END`) so the collapse and the key
+/// land in the *same* injection. Two separate sends let the target re-select
+/// (or re-process focus) between them, so every key after the first overwrites
+/// the selection. False off Winlogon, where normal caret rules apply.
+fn focus_for_inject() -> bool {
+    crate::win::logon_focus::focus_password_field()
+}
+
+/// Build a virtual-key down (or up) `INPUT`.
+fn vk_event(vk: VIRTUAL_KEY, up: bool) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: 0,
+                dwFlags: if up {
+                    KEYEVENTF_KEYUP
+                } else {
+                    windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(0)
                 },
+                time: 0,
+                dwExtraInfo: 0,
             },
-        };
-        let v_down = INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(b'V' as u16),
-                    wScan: 0,
-                    dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(0),
-                    time: 0,
-                    dwExtraInfo: 0,
+        },
+    }
+}
+
+/// Build a Unicode-scancode down (or up) `INPUT`.
+fn unicode_event(unit: u16, up: bool) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(0),
+                wScan: unit,
+                dwFlags: if up {
+                    KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+                } else {
+                    KEYEVENTF_UNICODE
                 },
+                time: 0,
+                dwExtraInfo: 0,
             },
-        };
-        let v_up = INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(b'V' as u16),
-                    wScan: 0,
-                    dwFlags: KEYEVENTF_KEYUP,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        let ctrl_up = INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VK_CONTROL,
-                    wScan: 0,
-                    dwFlags: KEYEVENTF_KEYUP,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        let _ = SendInput(&[ctrl_down, v_down, v_up, ctrl_up], std::mem::size_of::<INPUT>() as i32);
+        },
+    }
+}
+
+/// Push a caret-to-end (`VK_END`) down+up onto a Winlogon inject batch so the
+/// select-on-focus selection collapses in the same injection as the key. No-op
+/// off Winlogon.
+fn push_collapse(batch: &mut Vec<INPUT>, on_winlogon: bool) {
+    if on_winlogon {
+        batch.push(vk_event(VK_END, false));
+        batch.push(vk_event(VK_END, true));
     }
 }
 
 fn inject_vk(vk: VIRTUAL_KEY) {
-    crate::win::logon_focus::focus_password_field();
+    let collapse = focus_for_inject();
+    let mut batch: Vec<INPUT> = Vec::with_capacity(4);
+    push_collapse(&mut batch, collapse);
+    batch.push(vk_event(vk, false));
+    batch.push(vk_event(vk, true));
     unsafe {
-        let down = INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: vk,
-                    wScan: 0,
-                    dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(0),
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        let up = INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: vk,
-                    wScan: 0,
-                    dwFlags: KEYEVENTF_KEYUP,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        let _ = SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32);
+        let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
     }
 }
 
 fn send_unicode(units: &[u16]) {
-    crate::win::logon_focus::focus_password_field();
+    let collapse = focus_for_inject();
+    let mut batch: Vec<INPUT> = Vec::with_capacity(units.len() * 2 + 2);
+    push_collapse(&mut batch, collapse);
     for &unit in units {
-        unsafe {
-            let down = INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: VIRTUAL_KEY(0),
-                        wScan: unit,
-                        dwFlags: KEYEVENTF_UNICODE,
-                        time: 0,
-                        dwExtraInfo: 0,
-                    },
-                },
-            };
-            let up = INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: VIRTUAL_KEY(0),
-                        wScan: unit,
-                        dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
-                        time: 0,
-                        dwExtraInfo: 0,
-                    },
-                },
-            };
-            let _ = SendInput(&[down, up], std::mem::size_of::<INPUT>() as i32);
-        }
+        batch.push(unicode_event(unit, false));
+        batch.push(unicode_event(unit, true));
+    }
+    let sent = unsafe { SendInput(&batch, std::mem::size_of::<INPUT>() as i32) };
+    // Userland-typing diagnostic: when off Winlogon, SendInput should land in the
+    // foreground app. Log the event count actually inserted + the loop thread's
+    // desktop + foreground window so a misrouted inject (wrong desktop /
+    // not-foreground / blocked) is visible in the log.
+    #[cfg(feature = "gamepad")]
+    if !crate::win::logon_focus::is_active() {
+        let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+        let desk = crate::win::current_desktop_name().unwrap_or_default();
+        crate::install::log_line(&format!(
+            "vk inject(userland): units={} SendInput->{sent} desktop={desk} fg=0x{:x}",
+            units.len(),
+            fg.0 as usize
+        ));
     }
 }
 

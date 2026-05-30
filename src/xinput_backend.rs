@@ -10,7 +10,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem::size_of;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use windows::core::{w, PCSTR};
 use windows::Win32::Foundation::{HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryA};
-use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId};
 use windows::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
     RID_INPUT, RIDEV_INPUTSINK,
@@ -35,7 +35,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, KillTimer, PostThreadMessageW,
     RegisterClassW, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, TranslateMessage,
     HMENU, LWA_ALPHA, MSG, WM_DESTROY, WM_INPUT, WM_NULL, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::gamepad_backend::Button;
@@ -376,16 +376,58 @@ const ANCHOR_CLASS: windows::core::PCWSTR = w!("WarmupXInputAnchorWindow");
 const POLL_TIMER_ID: usize = 21;
 #[allow(dead_code)]
 const POLL_TIMER_MS: u32 = 8;
-/// Degraded-mode foreground sampling: when NO XUSB pad is open the DLL is the only
-/// button source and it zeroes off-foreground, so claim foreground once every N
-/// ticks while the VK is closed (held-open button still caught within one window).
-const FG_SAMPLE_EVERY: u32 = 60;
-static FG_SAMPLE_TICK: AtomicU32 = AtomicU32::new(0);
-/// Set each poll: true when a physical XUSB pad is open (buttons read directly,
-/// foreground-independent). While true the anchor NEVER claims foreground, so
-/// LogonUI / the userland app keeps input focus. False => fall back to the
-/// foreground claim so the gamepad still works (the pre-XUSB behaviour).
-static XUSB_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Foreground-juggle (Winlogon). The XUSB driver gates GET_GAMEPAD_STATE on the
+/// caller owning foreground, exactly like the XInput DLL — reading the IOCTL
+/// directly does NOT bypass the focus gate on this stack (confirmed via crash
+/// dump A/B: identical IOCTL, real button bytes only while our anchor held
+/// foreground; empty payload once LogonUI took it). So the anchor MUST own
+/// foreground to read the pad — but SendInput into the PIN field needs LogonUI
+/// foreground. We time-multiplex: hold foreground to read/navigate, and let each
+/// inject burst borrow it back briefly.
+///
+/// The credential window (LogonUI / UAC) the poll tick last saw in foreground —
+/// what we steal from. The inject path restores it so SendInput lands there.
+static LOGON_FG_HWND: AtomicIsize = AtomicIsize::new(0);
+/// While > 0 the poll tick skips reclaiming foreground for the anchor, so an
+/// inject burst (focus + SendInput on the loop thread) keeps LogonUI foreground
+/// long enough for its keys to land. Decremented once per ~8ms poll tick.
+static INJECT_HOLD_TICKS: AtomicU32 = AtomicU32::new(0);
+/// Poll ticks to suppress the reclaim per committed key (~8ms each ⇒ ~48ms).
+const INJECT_HOLD_WINDOW: u32 = 6;
+
+/// The credential window (LogonUI / UAC) the secure poll last saw in foreground,
+/// or None if not seen yet. The inject path foregrounds this so SendInput reaches
+/// the PIN field.
+pub fn logon_credential_window() -> Option<HWND> {
+    let h = LOGON_FG_HWND.load(Ordering::Relaxed);
+    (h != 0).then(|| HWND(h as *mut _))
+}
+
+/// Suppress the anchor's foreground reclaim for one inject burst so the loop
+/// thread can foreground LogonUI and SendInput uninterrupted. Called from the
+/// inject path; the poll tick reclaims foreground once the window elapses.
+pub fn begin_inject_hold() {
+    INJECT_HOLD_TICKS.store(INJECT_HOLD_WINDOW, Ordering::Relaxed);
+}
+
+/// Reliably take foreground for `hwnd` even against a window that keeps grabbing
+/// it back (LogonUI). A bare `SetForegroundWindow` is throttled by Windows'
+/// foreground-lock and loses the tug-of-war; attaching our input queue to the
+/// current foreground thread lifts that restriction for the duration of the call.
+/// Self-limiting: once we win, the next tick sees `cur == hwnd` and skips this.
+unsafe fn force_foreground(hwnd: HWND, current_fg: HWND) {
+    let our_tid = GetCurrentThreadId();
+    let fg_tid = GetWindowThreadProcessId(current_fg, None);
+    if fg_tid != 0 && fg_tid != our_tid {
+        let attached = AttachThreadInput(fg_tid, our_tid, true).as_bool();
+        let _ = SetForegroundWindow(hwnd);
+        if attached {
+            let _ = AttachThreadInput(fg_tid, our_tid, false);
+        }
+    } else {
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
 
 #[allow(dead_code)]
 struct PollState {
@@ -891,13 +933,14 @@ fn secure_poll_main(
         };
         // RegisterClassW returns 0 if class already exists; ignore.
         RegisterClassW(&wc);
-        // Passive anchor: the process needs a window on the input desktop for HID /
-        // WM_INPUT delivery and the XUSB device handle, but buttons are read directly
-        // from the XUSB driver, so the window never needs foreground. NOACTIVATE keeps
-        // it from ever stealing focus from LogonUI or the userland app. Off-screen
-        // (-10000), 1x1, alpha 0 so it is never visible.
+        // Foreground-eligible anchor: the pad is only readable while our process
+        // owns the foreground window (the XInput DLL and XUSB IOCTL both return
+        // neutral/frozen state to a background process here), so the anchor MUST be
+        // able to take foreground. WS_VISIBLE + NO WS_EX_NOACTIVATE makes
+        // SetForegroundWindow succeed; off-screen (-10000), 1x1, alpha 0 keeps it
+        // invisible. The inject path briefly yields foreground to LogonUI for typing.
         match CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE,
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
             ANCHOR_CLASS,
             w!("Warmup XInput Anchor"),
             WS_POPUP | WS_VISIBLE,
@@ -920,15 +963,14 @@ fn secure_poll_main(
         }
     };
 
-    // Fully transparent (alpha 0) so the off-screen 1x1 anchor is never visible. We
-    // intentionally do NOT call SetForegroundWindow: buttons come from the direct
-    // XUSB read (foreground-independent), and stealing foreground here would yank
-    // focus off the LogonUI password box / the userland app the user is typing in.
+    // Fully transparent (alpha 0) so the off-screen 1x1 anchor is never visible.
+    // The poll tick claims foreground each tick so the pad stays readable; the
+    // inject path yields it to LogonUI briefly so typed keys reach the PIN box.
     unsafe {
         let _ = SetLayeredWindowAttributes(hwnd, windows::Win32::Foundation::COLORREF(0), 0, LWA_ALPHA);
     }
     let _ = tx.send(SecureMsg::Error(
-        "anchor window created (XUSB-direct buttons; foreground not claimed)".into(),
+        "anchor window created (foreground-eligible; claims fg to read pad)".into(),
     ));
     let _ = tx.send(SecureMsg::Error(probe_self_identity()));
 
@@ -1031,23 +1073,24 @@ unsafe extern "system" fn anchor_wndproc(
     lparam: LPARAM,
 ) -> LRESULT {
     if msg == WM_TIMER && wparam.0 == POLL_TIMER_ID {
-        // Foreground claim ONLY in degraded mode (no XUSB pad open). When XUSB is
-        // feeding buttons directly we never claim foreground, so LogonUI / the
-        // userland app keeps input focus and the user can type. When XUSB is
-        // unavailable the DLL is the only source and zeroes off-foreground, so we
-        // restore the old claim (gamepad works; typing into the box won't, but that
-        // is strictly the pre-XUSB behaviour, not a regression).
-        if !XUSB_ACTIVE.load(Ordering::Relaxed) {
-            let vk_open = crate::win::vk_ui::is_vk_visible();
-            unsafe {
-                if vk_open {
-                    let _ = SetForegroundWindow(hwnd);
-                } else {
-                    let n = FG_SAMPLE_TICK.fetch_add(1, Ordering::Relaxed);
-                    if n % FG_SAMPLE_EVERY == 0 {
-                        let _ = SetForegroundWindow(hwnd);
-                    }
-                }
+        // The pad is only readable while we own the foreground window — the XInput
+        // DLL and the XUSB IOCTL both return neutral/frozen state to a background
+        // process on this stack (confirmed by the service-log A/B). So claim
+        // foreground every tick on Winlogon, EXCEPT during an inject burst, when we
+        // stand down so the user's keystrokes reach LogonUI's PIN field.
+        unsafe {
+            // Remember the credential window while we are NOT foreground; the
+            // inject path hands foreground back to it for SendInput.
+            let cur = GetForegroundWindow();
+            if cur != hwnd && !cur.0.is_null() {
+                LOGON_FG_HWND.store(cur.0 as isize, Ordering::Relaxed);
+            }
+            if INJECT_HOLD_TICKS.load(Ordering::Relaxed) > 0 {
+                INJECT_HOLD_TICKS.fetch_sub(1, Ordering::Relaxed);
+            } else if cur != hwnd {
+                // Lost foreground (LogonUI keeps grabbing it). Reclaim reliably via
+                // the AttachThreadInput trick, not a throttled bare SetForegroundWindow.
+                force_foreground(hwnd, cur);
             }
         }
         POLL_STATE.with(|s| {
@@ -1270,9 +1313,6 @@ fn poll_xinput_tick(state: &mut PollState) {
     if xusb_rep.is_some() {
         state.last_xusb = xusb_rep;
     }
-    // Tell the wndproc whether buttons are coming from XUSB-direct. True => stay
-    // passive (no foreground steal); false => degraded fallback claims foreground.
-    XUSB_ACTIVE.store(!state.xusb.is_empty(), Ordering::Relaxed);
 
     // Surface the raw XUSB report in the debug overlay so byte offsets can be
     // confirmed against live presses on Winlogon (the parsed `buttons` offset is
@@ -1286,7 +1326,28 @@ fn poll_xinput_tick(state: &mut PollState) {
         let mut pid = 0u32;
         unsafe { GetWindowThreadProcessId(fg, Some(&mut pid)) };
         let ours = pid == unsafe { GetCurrentProcessId() };
-        crate::debug_state::set_detail(format!("xinput=0x{xin:04x} fg={}", if ours { "ours" } else { "LogonUI" }));
+        // Live press-test signal: show BOTH sources + an XUSB raw fingerprint that
+        // changes whenever any report byte moves. On a press one of these must move,
+        // or the pad stream is not reaching us at all (desktop/foreground gate).
+        // Fingerprint the INPUT bytes only — skip header (0..5) and the free-running
+        // counter at bytes 5..7, which tick every report even with zero input (that
+        // was the "weird xfp stream"). xfp now moves only on a real button/stick/
+        // trigger change, so a frozen xfp during a press == no live input reaching us.
+        let (xusb_btn, xfp) = match &state.last_xusb {
+            Some(r) => (
+                r.buttons,
+                r.raw
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i >= 7)
+                    .fold(0u32, |a, (_, &b)| a.wrapping_mul(31).wrapping_add(b as u32)),
+            ),
+            None => (0u16, 0u32),
+        };
+        crate::debug_state::set_detail(format!(
+            "xinput=0x{xin:04x} xusb=0x{xusb_btn:04x} xfp=0x{xfp:08x} fg={}",
+            if ours { "ours" } else { "LogonUI" }
+        ));
     }
 
     state.iter_count += 1;
@@ -1374,9 +1435,13 @@ fn poll_xinput_tick(state: &mut PollState) {
     // which the foreground gate doesn't touch) — default to neutral, never panic.
     let pad = states[slot as usize].unwrap_or_default();
 
-    // Authoritative input source. When a physical XUSB pad is open its driver read
-    // is real regardless of foreground; the DLL `pad` is zeroed off-foreground, so
-    // prefer XUSB and fall back to the DLL only when no pad is open.
+    // Authoritative input source. On the secure desktop the DLL `pad` reads
+    // neutral (btn=0) even while our anchor holds foreground — the invisible anchor
+    // does not actually grant LogonUI's input rights — so the XUSB-direct read is
+    // the only source that carries live buttons there. Prefer XUSB whenever a pad
+    // is open; fall back to the DLL only when no XUSB pad is present. (During an
+    // inject burst the anchor yields foreground for ~48ms and XUSB may briefly
+    // freeze, but the user is not navigating then, so that is harmless.)
     let xusb = state.last_xusb.clone().filter(|_| !state.xusb.is_empty());
     let (buttons, lx, ly, rx, ry, lt, rt) = match &xusb {
         Some(r) => (

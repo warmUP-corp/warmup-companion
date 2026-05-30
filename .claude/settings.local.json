@@ -63,7 +63,13 @@
       "PowerShell(Test-Path *)",
       "PowerShell(Out-Null *)",
       "Bash(/c/Users/jonas/AppData/Local/Microsoft/WindowsApps/cdbX64.exe -z 'C:\\\\ProgramData\\\\WarmupVk\\\\worker-crash-36876.dmp' -y 'srv*C:\\\\symbols*https://msdl.microsoft.com/download/symbols' -c '.symfix; .reload; !analyze -v; .ecxr; kP; ~*kb; q')",
-      "Bash(/c/Users/jonas/AppData/Local/Microsoft/WindowsApps/cdbX64.exe -z 'C:\\\\ProgramData\\\\WarmupVk\\\\worker-crash-32080.dmp' -y 'srv*C:\\\\symbols*https://msdl.microsoft.com/download/symbols' -c '.ecxr; kP; q')"
+      "Bash(/c/Users/jonas/AppData/Local/Microsoft/WindowsApps/cdbX64.exe -z 'C:\\\\ProgramData\\\\WarmupVk\\\\worker-crash-32080.dmp' -y 'srv*C:\\\\symbols*https://msdl.microsoft.com/download/symbols' -c '.ecxr; kP; q')",
+      "Bash(powershell *)",
+      "mcp__ghidra__import_file",
+      "mcp__ghidra__search_byte_patterns",
+      "mcp__ghidra__get_function_by_address",
+      "mcp__ghidra__disassemble_function",
+      "mcp__ghidra__disassemble_bytes"
     ]
   },
   "enabledMcpjsonServers": [
