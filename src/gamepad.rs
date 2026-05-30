@@ -82,6 +82,18 @@ impl Backend {
             Backend::XInput(_) => "XInput",
         }
     }
+
+    fn live_input_summary(&self) -> String {
+        match self {
+            Backend::Sdl(b) => b.live_input_summary(),
+            #[cfg(windows)]
+            Backend::XInput(b) => b.live_input_summary(),
+        }
+    }
+
+    fn is_connected(&self) -> bool {
+        self.controller_label() != "none"
+    }
 }
 
 pub struct GamepadPoll {
@@ -156,6 +168,9 @@ impl GamepadPoll {
             return;
         }
         let on_winlogon = Self::input_desktop_is_winlogon();
+        // Publish each poll so the per-keystroke UIA focus redirect (vk_nav send
+        // path) gates correctly and records this loop thread's apartment.
+        crate::win::logon_focus::set_active(on_winlogon);
         let using_xinput = matches!(self.backend, Backend::XInput(_));
         if on_winlogon == using_xinput {
             return;
@@ -163,8 +178,19 @@ impl GamepadPoll {
         self.reset_vk_controls();
         self.backend = if on_winlogon {
             service_log("input desktop → Winlogon: switching to HID+XInput");
+            // Loop thread owns SendInput; bind it to winlogon so injected keys
+            // (and XInput/anchor delivery) land on the secure desktop.
+            if let Err(e) = crate::win::attach_named("winlogon") {
+                service_log(&format!("loop thread attach winlogon failed: {e}"));
+            }
             Backend::XInput(XInputBackend::new())
         } else {
+            // SendInput targets the *calling thread's* desktop. Re-bind the loop
+            // thread to the Default input desktop or typed keys land on winlogon
+            // and never reach userland apps.
+            if let Err(e) = crate::win::attach_input() {
+                service_log(&format!("loop thread attach input(Default) failed: {e}"));
+            }
             match SdlBackend::open() {
                 Ok(b) => {
                     service_log(&format!(
@@ -212,7 +238,10 @@ impl GamepadPoll {
         self.vk_nav_grace_until = None;
         self.last_vk_open = false;
         #[cfg(windows)]
-        crate::vk_nav::reset_selection();
+        {
+            crate::vk_nav::reset_selection();
+            crate::win::logon_focus::clear_cache();
+        }
     }
 
     pub fn on_vk_opened(&mut self) {
@@ -255,6 +284,12 @@ impl GamepadPoll {
 
         let PadFrame { changes, axes } = self.backend.poll_frame()?;
         let (lx, ly, rx, ry) = axes;
+
+        #[cfg(windows)]
+        if crate::config::service_mode() {
+            let input = self.backend.live_input_summary();
+            crate::debug_state::set_gamepad(self.backend.is_connected(), input);
+        }
 
         #[cfg(windows)]
         let desktop_reopen = self.reopen_on_input_desktop_change(vk_open);
@@ -620,6 +655,11 @@ where
             poll.log_desktop_sync_if_due(true);
             if crate::win::debug_overlay::take_vk_toggle_request() {
                 on_action(VkLoopAction::Toggle);
+            }
+            // Loop thread owns the UIA/COM apartment and (on winlogon) is
+            // attached there, so the foreground dump must run here.
+            if crate::win::logon_focus::take_dump_request() {
+                crate::win::logon_focus::dump_foreground_tree();
             }
         }
 

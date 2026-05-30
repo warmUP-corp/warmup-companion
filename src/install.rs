@@ -273,8 +273,6 @@ fn require_admin() -> Result<(), String> {
 }
 
 pub fn log_line(msg: &str) {
-    #[cfg(windows)]
-    crate::debug_state::record_log_line(msg);
     let _ = log_line_inner(msg);
     eprintln!("> {msg}");
 }

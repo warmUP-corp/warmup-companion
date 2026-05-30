@@ -157,6 +157,25 @@ fn sdl_to_button(btn: SdlButton) -> Option<Button> {
     })
 }
 
+const STICK_DEADZONE: f32 = 0.12;
+
+/// Format held buttons plus stick deflection for debug UIs.
+pub fn live_input_format(pressed: &[&str], axes: (f32, f32, f32, f32)) -> String {
+    let mut parts: Vec<String> = pressed.iter().map(|s| (*s).to_string()).collect();
+    let (lx, ly, rx, ry) = axes;
+    if lx.abs() >= STICK_DEADZONE || ly.abs() >= STICK_DEADZONE {
+        parts.push(format!("L({lx:.2},{ly:.2})"));
+    }
+    if rx.abs() >= STICK_DEADZONE || ry.abs() >= STICK_DEADZONE {
+        parts.push(format!("R({rx:.2},{ry:.2})"));
+    }
+    if parts.is_empty() {
+        "(idle)".into()
+    } else {
+        parts.join(" ")
+    }
+}
+
 /// A detected button state change (including synthesised LT/RT from trigger axes).
 #[derive(Clone, Copy)]
 pub struct ButtonChange {
@@ -331,6 +350,28 @@ impl GamepadInput {
             gp.axis(Axis::RightX) as f32 / NORM,
             -(gp.axis(Axis::RightY) as f32 / NORM),
         )
+    }
+
+    /// Pressed buttons and non-idle sticks for debug overlays.
+    pub fn live_input_summary(&self) -> String {
+        let Some(ref gp) = self.active_gamepad else {
+            return String::new();
+        };
+        let mut pressed = Vec::new();
+        for &btn in TRACKED_BUTTONS {
+            if gp.button(btn) {
+                if let Some(b) = sdl_to_button(btn) {
+                    pressed.push(b.as_str());
+                }
+            }
+        }
+        if self.prev_trigger_left {
+            pressed.push(Button::Lt.as_str());
+        }
+        if self.prev_trigger_right {
+            pressed.push(Button::Rt.as_str());
+        }
+        live_input_format(&pressed, self.axes())
     }
 
     /// Returns the name of the active controller as reported by SDL3, if any.

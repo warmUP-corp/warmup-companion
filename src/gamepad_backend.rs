@@ -10,6 +10,7 @@ pub trait GamepadBackend {
     fn button_changes(&mut self) -> Vec<ButtonChange>;
     fn axes(&self) -> (f32, f32, f32, f32);
     fn controller_label(&self) -> String;
+    fn live_input_summary(&self) -> String;
 }
 
 pub struct SdlBackend {
@@ -47,6 +48,10 @@ impl GamepadBackend for SdlBackend {
         self.input
             .active_controller_name()
             .unwrap_or_else(|| "none".to_string())
+    }
+
+    fn live_input_summary(&self) -> String {
+        self.input.live_input_summary()
     }
 }
 

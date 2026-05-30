@@ -37,7 +37,23 @@
       "Bash(start *)",
       "PowerShell(cargo test *)",
       "mcp__ghidra__open_program",
-      "mcp__ghidra__search_instructions"
+      "mcp__ghidra__search_instructions",
+      "PowerShell(Get-Process *)",
+      "mcp__ghidra__inspect_memory_content",
+      "mcp__ghidra__read_memory",
+      "PowerShell(cargo check *)",
+      "mcp__ghidra__run_script_inline",
+      "Bash(py --version)",
+      "mcp__ghidra__connect_instance",
+      "mcp__ghidra__get_current_program_info",
+      "mcp__ghidra__get_bulk_xrefs",
+      "mcp__ghidra__get_external_location",
+      "Bash(python *)",
+      "mcp__ghidra__get_function_count",
+      "mcp__ghidra__get_function_call_graph",
+      "mcp__ghidra__batch_decompile",
+      "Bash(ls -1 src src/win)",
+      "Bash(ls -1 tools)"
     ]
   },
   "enabledMcpjsonServers": [

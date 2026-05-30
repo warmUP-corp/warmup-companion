@@ -4,3 +4,4 @@
 # Added by code-review-graph
 .code-review-graph/
 /crates/warmup-gamepad/target
+/temp/xbox_vk_decomp

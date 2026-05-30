@@ -26,8 +26,8 @@ use super::desktop_window::{self, DesktopApp, DesktopWindowThread};
 
 const WINDOW_CLASS: windows::core::PCWSTR = w!("WarmupDebugOverlayWindow");
 
-const PANEL_W: i32 = 520;
-const PANEL_H: i32 = 412;
+const PANEL_W: i32 = 480;
+const PANEL_H: i32 = 72;
 const REPAINT_TIMER_ID: usize = 11;
 const REPAINT_TIMER_MS: u32 = 250;
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
@@ -74,6 +74,7 @@ impl DesktopApp for DebugApp {
 thread_local! {
     static HWND_STATE: std::cell::Cell<Option<HWND>> = const { std::cell::Cell::new(None) };
     static F10_DOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static F9_DOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 static CONTROLLER: OnceLock<Mutex<DebugOverlayController>> = OnceLock::new();
@@ -252,6 +253,17 @@ fn poll_debug_shortcut() {
             service_log("debug shortcut: F10 toggle VK requested");
         }
     });
+    // F9: dump the foreground UIA subtree (runs on the loop thread, which owns
+    // the COM apartment). Probe for the credential password element's identity.
+    let f9 = unsafe { GetAsyncKeyState(0x78) < 0 }; // VK_F9
+    F9_DOWN.with(|was_down| {
+        let pressed = f9 && !was_down.get();
+        was_down.set(f9);
+        if pressed {
+            super::logon_focus::request_dump();
+            service_log("debug shortcut: F9 UIA foreground dump requested");
+        }
+    });
 }
 
 fn paint_debug(hwnd: HWND) {
@@ -274,28 +286,27 @@ fn paint_debug(hwnd: HWND) {
         let _ = SetBkMode(hdc, BACKGROUND_MODE(1));
 
         let snapshot = crate::debug_state::snapshot();
-        let thread_desktop = desktop::current_desktop_name().unwrap_or_else(|| "?".into());
-        let input_desktop = desktop::input_desktop_name().unwrap_or_else(|e| format!("? ({e})"));
-        let mut lines = vec![
-            "DEBUG WINLOGON".to_string(),
-            format!("thread desktop: {thread_desktop}"),
-            format!("input desktop: {input_desktop}"),
-            format!("pid: {}", std::process::id()),
-            format!("xinput: {}", snapshot.xinput_loader),
-            format!("buttons: {}", snapshot.last_buttons),
-            format!("action: {}", snapshot.last_action),
-            format!("vk visible: {}", super::vk_ui::is_vk_visible()),
-            "F10: toggle VK (debug)".to_string(),
+        let connected = if snapshot.connected {
+            "connected"
+        } else {
+            "not connected"
+        };
+        let input = if snapshot.input.is_empty() {
+            "—".to_string()
+        } else {
+            snapshot.input.clone()
+        };
+        let lines = [
+            format!("gamepad: {connected}"),
+            format!("input: {input}"),
         ];
-        lines.push("---- log tail ----".to_string());
-        lines.extend(snapshot.log_tail.iter().cloned());
 
         for (i, line) in lines.iter().enumerate() {
             let _ = SetTextColor(
                 hdc,
                 windows::Win32::Foundation::COLORREF(if i == 0 { 0x0000FF80 } else { 0x00FFFFFF }),
             );
-            draw_line(hdc, 14, 10 + (i as i32 * 22), line);
+            draw_line(hdc, 14, 10 + (i as i32 * 28), line);
         }
         let _ = EndPaint(hwnd, &ps);
     }

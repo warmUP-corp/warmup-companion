@@ -32,9 +32,9 @@ use windows::Win32::UI::Input::XboxController::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClassNameW,
     GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, KillTimer, PostThreadMessageW,
-    RegisterClassW, SetLayeredWindowAttributes, SetTimer, TranslateMessage, HMENU, LWA_ALPHA, MSG,
+    RegisterClassW, SetTimer, TranslateMessage, HMENU, MSG,
     WM_DESTROY, WM_INPUT, WM_NULL, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::gamepad_backend::Button;
@@ -159,6 +159,76 @@ impl XInputProbe {
             }
         }
         let _ = tx.send(SecureMsg::Error(line));
+    }
+}
+
+/// One-shot identity of THIS worker process: session, token user SID, integrity
+/// level RID, thread desktop. Joyxoff's worker reads the pad on the secure
+/// desktop and ours does not despite byte-identical launch code — so the gate
+/// must be a process attribute. This logs ours; compare against Joyxoff.exe in
+/// Process Explorer (Session / User / Integrity). Integrity RIDs: System=0x4000,
+/// High=0x3000, Medium=0x2000.
+fn probe_self_identity() -> String {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+        TokenUser, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    unsafe {
+        let pid = GetCurrentProcessId();
+        let mut proc_sess = 0u32;
+        let _ = ProcessIdToSessionId(pid, &mut proc_sess);
+
+        let mut tok = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok).is_err() {
+            return format!("SELF pid={pid} proc_sess={proc_sess} token=open_err");
+        }
+        let read = |class| -> Vec<u8> {
+            let mut len = 0u32;
+            let _ = GetTokenInformation(tok, class, None, 0, &mut len);
+            if len == 0 {
+                return Vec::new();
+            }
+            let mut buf = vec![0u8; len as usize];
+            if GetTokenInformation(tok, class, Some(buf.as_mut_ptr().cast()), len, &mut len).is_err()
+            {
+                return Vec::new();
+            }
+            buf
+        };
+
+        let user_buf = read(TokenUser);
+        let user = if user_buf.len() >= size_of::<TOKEN_USER>() {
+            let tu = &*(user_buf.as_ptr() as *const TOKEN_USER);
+            let mut s = PWSTR::null();
+            if ConvertSidToStringSidW(tu.User.Sid, &mut s).is_ok() {
+                let out = s.to_string().unwrap_or_default();
+                let _ = LocalFree(HLOCAL(s.0 as _));
+                out
+            } else {
+                "?".into()
+            }
+        } else {
+            "?".into()
+        };
+
+        let integ_buf = read(TokenIntegrityLevel);
+        let integ = if integ_buf.len() >= size_of::<TOKEN_MANDATORY_LABEL>() {
+            let lab = &*(integ_buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+            let cnt = *GetSidSubAuthorityCount(lab.Label.Sid);
+            let rid = *GetSidSubAuthority(lab.Label.Sid, (cnt - 1) as u32);
+            format!("0x{rid:x}")
+        } else {
+            "?".into()
+        };
+
+        let _ = CloseHandle(tok);
+        let desk = crate::win::current_desktop_name().unwrap_or_else(|| "?".into());
+        format!("SELF pid={pid} proc_sess={proc_sess} user={user} integrity={integ} desktop={desk}")
     }
 }
 
@@ -448,7 +518,6 @@ impl XInputBackend {
             "XInput buttons slot {slot}: 0x{prev:04x} -> 0x{cur:04x} [{}]",
             names.join("+")
         ));
-        crate::debug_state::record_xinput_buttons(cur, &names.join("+"));
         self.last_raw_log = Instant::now();
     }
 
@@ -643,6 +712,18 @@ impl GamepadBackend for XInputBackend {
             None => "none".to_string(),
         }
     }
+
+    fn live_input_summary(&self) -> String {
+        let Some(slot) = self.active_slot else {
+            return String::new();
+        };
+        let mask = self.prev_buttons[slot as usize];
+        let pressed: Vec<&str> = BUTTON_MASKS
+            .iter()
+            .filter_map(|(b, m)| (mask & *m != 0).then_some(b.as_str()))
+            .collect();
+        warmup_gamepad::live_input_format(&pressed, self.axes)
+    }
 }
 
 fn key_to_mask(vk: u16) -> Option<u16> {
@@ -683,7 +764,6 @@ fn load_xinput_api() -> (
             let get_keystroke = GetProcAddress(module, PCSTR(b"XInputGetKeystroke\0".as_ptr()))
                 .map(|p| std::mem::transmute::<_, XInputGetKeystrokeFn>(p));
             let label = format!("{name} ordinal 100/GetState");
-            crate::debug_state::set_xinput_loader(label.clone());
             service_log(&format!(
                 "XInput loader: {label}; keystroke={}",
                 get_keystroke.is_some()
@@ -691,7 +771,6 @@ fn load_xinput_api() -> (
             return (Some(module), Some(get_state), get_keystroke);
         }
     }
-    crate::debug_state::set_xinput_loader("failed");
     service_log("XInput loader: failed");
     (None, None, None)
 }
@@ -740,13 +819,17 @@ fn secure_poll_main(
         // RegisterClassW returns 0 if class already exists; ignore.
         RegisterClassW(&wc);
         // Joyxoff parity: ex_style 0x8080088 (TOPMOST|TOOLWINDOW|NOACTIVATE|LAYERED),
-        // style WS_POPUP|WS_VISIBLE — created visible (not just ShowWindow'd later),
-        // real on-screen size so the system treats it as a real top-level window.
+        // style WS_POPUP only — NOT WS_VISIBLE. Joyxoff's JoyXoffMWindow is created
+        // invisible (style 0x80000000). A *visible* TOPMOST window on the Winlogon
+        // desktop becomes a focus/nav target for the shell's gamepad navigation, so
+        // D-pad presses move LogonUI focus off the password box. XInput's foreground
+        // gate is irrelevant here (LogonUI is always foreground; we read pads via the
+        // direct XUSB path), so visibility buys nothing and only causes the defocus.
         match CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
             ANCHOR_CLASS,
             w!("Warmup XInput Anchor"),
-            WS_POPUP | WS_VISIBLE,
+            WS_POPUP,
             0,
             0,
             32,
@@ -766,19 +849,12 @@ fn secure_poll_main(
         }
     };
 
-    unsafe {
-        // Layered window is fully transparent until alpha is set; opaque 255 so the
-        // system treats it as a real visible top-level window for input routing.
-        let _ = SetLayeredWindowAttributes(
-            hwnd,
-            windows::Win32::Foundation::COLORREF(0),
-            255,
-            LWA_ALPHA,
-        );
-        let _ = tx.send(SecureMsg::Error(
-            "anchor window created visible on Winlogon for XInput focus eligibility".into(),
-        ));
-    }
+    // Anchor stays invisible (no WS_VISIBLE, no alpha) so it is not a gamepad-nav
+    // focus target on the Winlogon desktop. Pads are read via the XUSB path below.
+    let _ = tx.send(SecureMsg::Error(
+        "anchor window created invisible on Winlogon (joyxoff parity, no nav focus)".into(),
+    ));
+    let _ = tx.send(SecureMsg::Error(probe_self_identity()));
 
     // 3. Load XInput after the anchor HWND exists on Winlogon.
     let (_module, get_state, get_keystroke) = load_xinput_api();

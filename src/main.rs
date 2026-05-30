@@ -293,8 +293,6 @@ impl App {
         }
 
         self.service_log("Y tap: toggle VK");
-        #[cfg(windows)]
-        crate::debug_state::record_action("Y tap: toggle VK");
 
         // `run_slot7_binding` log: slot 7 either queues action 7 or it doesn't.
         if input.slot7_action_type == 6 {
@@ -343,12 +341,8 @@ impl App {
             let kind = session.describe();
             session.close();
             self.log(&format!("VK closed ({kind})"));
-            #[cfg(windows)]
-            crate::debug_state::record_action(format!("VK closed ({kind})"));
         } else {
             self.log(&format!("{G_VK_OPEN_LATCH} cleared -> VK closes"));
-            #[cfg(windows)]
-            crate::debug_state::record_action("VK close requested");
         }
     }
 
@@ -371,18 +365,13 @@ impl App {
                     self.vk_open_latch = true;
                     self.log(&format!("VK shown: {kind}"));
                     #[cfg(windows)]
-                    {
-                        crate::vk_nav::reset_selection();
-                        crate::debug_state::record_action(format!("VK shown: {kind}"));
-                    }
+                    crate::vk_nav::reset_selection();
                     self.vk_session = Some(session);
                 }
                 Err(e) => {
                     self.action_latch = false;
                     self.modal_block_bit_4 = false;
                     self.log(&format!("VK failed: {e}"));
-                    #[cfg(windows)]
-                    crate::debug_state::record_action(format!("VK failed: {e}"));
                     #[cfg(windows)]
                     if crate::config::service_mode() {
                         install::log_line(&format!("VK failed: {e}"));

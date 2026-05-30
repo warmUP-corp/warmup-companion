@@ -10,15 +10,19 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::vk_nav::{self, KeyCell, ROWS};
+use crate::vk_nav::{self, KeyAction, KeyCell};
 
 use windows::core::w;
 use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect, InvalidateRect,
-    RedrawWindow,
-    SetBkMode, SetTextColor, BACKGROUND_MODE, DT_CENTER, DT_SINGLELINE, DT_VCENTER, PAINTSTRUCT,
-    RDW_ALLCHILDREN, RDW_INVALIDATE, RDW_UPDATENOW,
+    BeginPaint, CreateFontIndirectW, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW,
+    EndPaint, FillRect, InvalidateRect, RedrawWindow, RoundRect, SelectObject, SetBkMode,
+    SetTextColor, BACKGROUND_MODE, CLEARTYPE_QUALITY, DT_CENTER, DT_SINGLELINE, DT_VCENTER,
+    HFONT, HGDIOBJ, HPEN, LOGFONTW, PAINTSTRUCT, PS_SOLID, RDW_ALLCHILDREN, RDW_INVALIDATE,
+    RDW_UPDATENOW,
+};
+use windows::Win32::System::Registry::{
+    RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD,
 };
 use windows::Win32::UI::WindowsAndMessaging::{SetLayeredWindowAttributes, LWA_ALPHA};
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
@@ -42,7 +46,9 @@ use super::vk_log;
 const WINDOW_CLASS: windows::core::PCWSTR = w!("WarmupXboxVkWindow");
 
 const VK_WIDTH: i32 = 720;
-const VK_HEIGHT: i32 = 318;
+// Tall enough for the largest locale page (digit row + up to 5 letter rows +
+// special row); key height adapts down via `key_metrics` for taller layouts.
+const VK_HEIGHT: i32 = 392;
 /// Re-assert topmost while visible (shell search/task UI also uses HWND_TOPMOST).
 const VK_ZORDER_TIMER_ID: usize = 1;
 const VK_ZORDER_TIMER_MS: u32 = 200;
@@ -51,9 +57,116 @@ static VK_VISIBLE: AtomicBool = AtomicBool::new(false);
 static UI_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 static VK_HWND: AtomicIsize = AtomicIsize::new(0);
 
-const SEL_FILL: u32 = 0x00E85D04;
-const KEY_FILL: u32 = 0x00303030;
-const BG_FILL: u32 = 0x001a1a1a;
+/// Class background brush colour (dark default; per-paint theme overrides it).
+const BG_FILL: u32 = 0x001f1f1f;
+
+/// Themed palette mirroring Joyxoff `FUN_00466970`'s light/dark colour tables.
+/// All fields are GDI `COLORREF` (0x00BBGGRR).
+struct Palette {
+    bg: u32,
+    key: u32,
+    /// Selected-key fill: accent blended 50% over the key colour (Joyxoff draws an
+    /// accent rounded-rect at 0.5 alpha over the key — `FUN_00464480` `DAT_004a4960`).
+    sel_fill: u32,
+    /// Selection border (Joyxoff `DAT_004a4968`, solid accent).
+    accent: u32,
+    text: u32,
+}
+
+/// `0xRRGGBB` -> GDI `COLORREF` (`0x00BBGGRR`).
+const fn rgb(v: u32) -> u32 {
+    let r = (v >> 16) & 0xff;
+    let g = (v >> 8) & 0xff;
+    let b = v & 0xff;
+    (b << 16) | (g << 8) | r
+}
+
+/// Per-channel 50/50 blend of two `COLORREF`s.
+fn blend(a: u32, b: u32) -> u32 {
+    let mix = |s: u32| {
+        let ca = (a >> s) & 0xff;
+        let cb = (b >> s) & 0xff;
+        (ca + cb) / 2
+    };
+    mix(0) | (mix(8) << 8) | (mix(16) << 16)
+}
+
+/// Dark/light accent + greys from `FUN_00466970` (dark accent `0xff4c7b99`,
+/// light accent `0xff0e80c7`; the WinRT `UISettings` override is not applied).
+fn palette(dark: bool) -> Palette {
+    if dark {
+        let accent = rgb(0x4c7b99);
+        Palette {
+            bg: rgb(0x1f1f1f),
+            key: rgb(0x121212),
+            sel_fill: blend(accent, rgb(0x2b2b2b)),
+            accent,
+            text: rgb(0xffffff),
+        }
+    } else {
+        let accent = rgb(0x0e80c7);
+        Palette {
+            bg: rgb(0xf3f3f3),
+            key: rgb(0xdfdfdf),
+            sel_fill: blend(accent, rgb(0xe9e9e9)),
+            accent,
+            text: rgb(0x000000),
+        }
+    }
+}
+
+/// Joyxoff `param_1[0x65]` dark flag, here read live from the OS theme.
+/// `HKCU\...\Themes\Personalize\AppsUseLightTheme` (0 = dark). Defaults to dark.
+fn is_dark_theme() -> bool {
+    unsafe {
+        let mut val: u32 = 0;
+        let mut sz = std::mem::size_of::<u32>() as u32;
+        let res = RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+            w!("AppsUseLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut val as *mut u32 as *mut core::ffi::c_void),
+            Some(&mut sz),
+        );
+        if res.is_ok() {
+            val == 0
+        } else {
+            true
+        }
+    }
+}
+
+/// Glyph + font face for a key (Joyxoff renders special keys from Segoe MDL2 Assets;
+/// we use the equivalent Unicode symbols, which Segoe UI Symbol covers reliably).
+/// Returns `(text, is_symbol_font)`.
+fn key_glyph(key: &KeyCell) -> (String, bool) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_RETURN, VK_SPACE};
+    match &key.action {
+        KeyAction::Shift => ("\u{21E7}".to_string(), true), // ⇧
+        KeyAction::Vk(vk) if *vk == VK_BACK => ("\u{232B}".to_string(), true), // ⌫
+        KeyAction::Vk(vk) if *vk == VK_RETURN => ("\u{21B5}".to_string(), true), // ↵
+        KeyAction::Vk(vk) if *vk == VK_SPACE => (String::new(), false),         // blank space bar
+        _ => (key.label.clone(), false),
+    }
+}
+
+unsafe fn make_font(height: i32, weight: i32, face: &str) -> HFONT {
+    let mut lf = LOGFONTW {
+        lfHeight: height,
+        lfWeight: weight,
+        lfQuality: CLEARTYPE_QUALITY,
+        ..Default::default()
+    };
+    for (i, u) in face.encode_utf16().take(31).enumerate() {
+        lf.lfFaceName[i] = u;
+    }
+    CreateFontIndirectW(&lf)
+}
+
+/// Corner radius for the rounded keys (Joyxoff key radius `+0x134`).
+const KEY_RADIUS: i32 = 8;
 
 #[derive(Clone, Copy, Debug)]
 pub enum VkAttach {
@@ -324,7 +437,7 @@ unsafe extern "system" fn vk_wndproc(
             let x = (lparam.0 & 0xFFFF) as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i32;
             if let Some(key) = hit_test(hwnd, x, y) {
-                vk_nav::activate_key(key);
+                vk_nav::activate_key(&key);
             }
             LRESULT(0)
         }
@@ -511,62 +624,102 @@ pub fn wait_until_visible(timeout: Duration) -> bool {
 }
 
 fn paint_keys(hwnd: HWND) {
+    use windows::Win32::Foundation::{COLORREF, RECT};
     unsafe {
         let mut ps = PAINTSTRUCT::default();
         let hdc = BeginPaint(hwnd, &mut ps);
         if hdc.0.is_null() {
             return;
         }
-        let mut client = windows::Win32::Foundation::RECT::default();
+        let mut client = RECT::default();
         let _ = GetClientRect(hwnd, &mut client);
+        let pal = palette(is_dark_theme());
         let sel = vk_nav::selection();
-        let bg = CreateSolidBrush(windows::Win32::Foundation::COLORREF(BG_FILL));
+        let rows = vk_nav::rows_snapshot();
+
+        // Themed background.
+        let bg = CreateSolidBrush(COLORREF(pal.bg));
         let _ = FillRect(hdc, &client, bg);
-        let _ = DeleteObject(bg);
-        let _ = SetBkMode(hdc, BACKGROUND_MODE(1));
-        let _ = SetTextColor(hdc, windows::Win32::Foundation::COLORREF(0x00FFFFFF));
-        let (kw, kh) = key_metrics(client.right);
-        let key_brush = CreateSolidBrush(windows::Win32::Foundation::COLORREF(KEY_FILL));
-        let sel_brush = CreateSolidBrush(windows::Win32::Foundation::COLORREF(SEL_FILL));
-        let mut y = 8i32;
-        for (ri, row) in ROWS.iter().enumerate() {
+        let _ = DeleteObject(HGDIOBJ(bg.0));
+
+        let (kw, kh) = key_metrics(client.right, client.bottom, &rows);
+
+        // Brushes + pens: key body (borderless) and the accent selection ring.
+        let key_brush = CreateSolidBrush(COLORREF(pal.key));
+        let sel_brush = CreateSolidBrush(COLORREF(pal.sel_fill));
+        let key_pen: HPEN = CreatePen(PS_SOLID, 1, COLORREF(pal.key));
+        let accent_pen: HPEN = CreatePen(PS_SOLID, 2, COLORREF(pal.accent));
+
+        // Bold labels in Segoe UI; special-key glyphs in Segoe UI Symbol.
+        let text_font = make_font(-(kh * 9 / 20), 600, "Segoe UI");
+        let glyph_font = make_font(-(kh / 2), 400, "Segoe UI Symbol");
+
+        let _ = SetBkMode(hdc, BACKGROUND_MODE(1)); // TRANSPARENT
+        let _ = SetTextColor(hdc, COLORREF(pal.text));
+
+        let mut y = ROW_TOP;
+        for (ri, row) in rows.iter().enumerate() {
             let row_w = kw * row.len() as i32 + 4 * (row.len().saturating_sub(1) as i32);
             let mut x = (client.right - row_w) / 2;
             for (ci, key) in row.iter().enumerate() {
-                let cell = windows::Win32::Foundation::RECT {
-                    left: x,
-                    top: y,
-                    right: x + kw,
-                    bottom: y + kh,
-                };
-                let brush = if sel.row == ri && sel.col == ci {
-                    sel_brush
-                } else {
-                    key_brush
-                };
-                let _ = FillRect(hdc, &cell, brush);
-                let mut label: Vec<u16> = key.label.encode_utf16().collect();
-                let mut text_rect = cell;
-                let _ = DrawTextW(
-                    hdc,
-                    &mut label,
-                    &mut text_rect,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                );
+                let selected = sel.row == ri && sel.col == ci;
+                let (left, top, right, bottom) = (x, y, x + kw, y + kh);
+
+                // Key body: rounded rect filled with the key colour, no visible border.
+                let prev_brush = SelectObject(hdc, HGDIOBJ(key_brush.0));
+                let prev_pen = SelectObject(hdc, HGDIOBJ(key_pen.0));
+                let _ = RoundRect(hdc, left, top, right, bottom, KEY_RADIUS, KEY_RADIUS);
+
+                // Selection: accent-tinted fill + 2px accent border (Joyxoff FUN_00464480).
+                if selected {
+                    let _ = SelectObject(hdc, HGDIOBJ(sel_brush.0));
+                    let _ = SelectObject(hdc, HGDIOBJ(accent_pen.0));
+                    let _ = RoundRect(hdc, left, top, right, bottom, KEY_RADIUS, KEY_RADIUS);
+                }
+                let _ = SelectObject(hdc, prev_brush);
+                let _ = SelectObject(hdc, prev_pen);
+
+                // Label or glyph.
+                let (glyph, symbol_font) = key_glyph(key);
+                if !glyph.is_empty() {
+                    let font = if symbol_font { glyph_font } else { text_font };
+                    let prev_font = SelectObject(hdc, HGDIOBJ(font.0));
+                    let mut label: Vec<u16> = glyph.encode_utf16().collect();
+                    let mut text_rect = RECT { left, top, right, bottom };
+                    let _ = DrawTextW(
+                        hdc,
+                        &mut label,
+                        &mut text_rect,
+                        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                    );
+                    let _ = SelectObject(hdc, prev_font);
+                }
                 x += kw + 4;
             }
-            y += kh + 6;
+            y += kh + ROW_GAP;
         }
-        let _ = DeleteObject(key_brush);
-        let _ = DeleteObject(sel_brush);
+
+        let _ = DeleteObject(HGDIOBJ(key_brush.0));
+        let _ = DeleteObject(HGDIOBJ(sel_brush.0));
+        let _ = DeleteObject(HGDIOBJ(key_pen.0));
+        let _ = DeleteObject(HGDIOBJ(accent_pen.0));
+        let _ = DeleteObject(HGDIOBJ(text_font.0));
+        let _ = DeleteObject(HGDIOBJ(glyph_font.0));
         let _ = EndPaint(hwnd, &ps);
     }
 }
 
-fn key_metrics(client_w: i32) -> (i32, i32) {
-    let max_cols = ROWS.iter().map(|r| r.len()).max().unwrap_or(10) as i32;
+const ROW_GAP: i32 = 6;
+const ROW_TOP: i32 = 8;
+
+fn key_metrics(client_w: i32, client_h: i32, rows: &[Vec<KeyCell>]) -> (i32, i32) {
+    let max_cols = rows.iter().map(|r| r.len()).max().unwrap_or(10).max(1) as i32;
     let kw = ((client_w - 32) / max_cols).clamp(48, 72);
-    (kw, 48)
+    // Shrink key height so every row of the active locale/layer fits the window.
+    let n = rows.len().max(1) as i32;
+    let avail = client_h - ROW_TOP * 2 - (n - 1) * ROW_GAP;
+    let kh = (avail / n).clamp(28, 48);
+    (kw, kh)
 }
 
 fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<KeyCell> {
@@ -574,18 +727,19 @@ fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<KeyCell> {
     unsafe {
         let _ = GetClientRect(hwnd, &mut client);
     }
-    let (kw, kh) = key_metrics(client.right);
-    let mut row_y = 8i32;
-    for row in ROWS {
+    let rows = vk_nav::rows_snapshot();
+    let (kw, kh) = key_metrics(client.right, client.bottom, &rows);
+    let mut row_y = ROW_TOP;
+    for row in &rows {
         let row_w = kw * row.len() as i32 + 4 * (row.len().saturating_sub(1) as i32);
         let mut row_x = (client.right - row_w) / 2;
-        for &key in *row {
+        for key in row {
             if x >= row_x && x < row_x + kw && y >= row_y && y < row_y + kh {
-                return Some(key);
+                return Some(key.clone());
             }
             row_x += kw + 4;
         }
-        row_y += kh + 6;
+        row_y += kh + ROW_GAP;
     }
     None
 }
