@@ -7,27 +7,27 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use std::cell::RefCell;
+
 use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect, InvalidateRect,
-    SetBkMode, SetTextColor, BACKGROUND_MODE, DT_LEFT, DT_SINGLELINE, DT_VCENTER, PAINTSTRUCT,
-};
+use windows::Win32::Graphics::Gdi::{InvalidateRect, ValidateRect};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, KillTimer, SetTimer, SetWindowPos, ShowWindow,
     HMENU, HWND_TOPMOST, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, WM_DESTROY, WM_PAINT,
-    WM_TIMER, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_TIMER, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use super::desktop;
 use super::desktop_window::{self, DesktopApp, DesktopWindowThread};
+use super::vk_renderer::VkRenderer;
 
 const WINDOW_CLASS: windows::core::PCWSTR = w!("WarmupDebugOverlayWindow");
 
-const PANEL_W: i32 = 480;
-const PANEL_H: i32 = 72;
+const PANEL_W: i32 = 900;
+const PANEL_H: i32 = 150;
 const REPAINT_TIMER_ID: usize = 11;
 const REPAINT_TIMER_MS: u32 = 250;
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
@@ -73,6 +73,9 @@ impl DesktopApp for DebugApp {
 
 thread_local! {
     static HWND_STATE: std::cell::Cell<Option<HWND>> = const { std::cell::Cell::new(None) };
+    /// D3D11/D2D/DComp renderer for the panel — same pipeline as the keyboard, so a
+    /// correctly drawn panel proves composition works on the Winlogon desktop.
+    static DBG_RENDERER: RefCell<Option<VkRenderer>> = const { RefCell::new(None) };
     static F10_DOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static F9_DOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -175,8 +178,16 @@ fn ui_show() {
                     SWP_SHOWWINDOW | SWP_NOACTIVATE,
                 );
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                match VkRenderer::create(hwnd) {
+                    Ok(r) => {
+                        DBG_RENDERER.with(|c| *c.borrow_mut() = Some(r));
+                        service_log("debug ui: D3D11/DComp renderer created");
+                    }
+                    Err(e) => service_log(&format!("debug ui: renderer init failed: {e}")),
+                }
                 let _ = SetTimer(hwnd, REPAINT_TIMER_ID, REPAINT_TIMER_MS, None);
-                let _ = InvalidateRect(hwnd, None, true);
+                render_debug(hwnd);
+                let _ = InvalidateRect(hwnd, None, false);
             }
         }
         Err(e) => service_log(&format!("debug ui: create window failed: {e}")),
@@ -186,6 +197,9 @@ fn ui_show() {
 fn ui_hide() {
     let hwnd = HWND_STATE.with(|state| state.take());
     if let Some(hwnd) = hwnd {
+        // Drop the renderer (releases the DComp target bound to this HWND) BEFORE
+        // DestroyWindow, or releasing it against a dead HWND crashes.
+        DBG_RENDERER.with(|c| *c.borrow_mut() = None);
         unsafe {
             let _ = KillTimer(hwnd, REPAINT_TIMER_ID);
             let _ = DestroyWindow(hwnd);
@@ -196,7 +210,7 @@ fn ui_hide() {
 unsafe fn create_debug_window() -> Result<HWND, String> {
     let instance = GetModuleHandleW(None).map_err(|e| format!("GetModuleHandleW: {e}"))?;
     CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
         WINDOW_CLASS,
         w!("Warmup Debug Overlay"),
         WS_POPUP,
@@ -220,18 +234,24 @@ unsafe extern "system" fn debug_wndproc(
 ) -> LRESULT {
     match msg {
         WM_PAINT => {
-            paint_debug(hwnd);
+            render_debug(hwnd);
+            let _ = ValidateRect(hwnd, None);
             LRESULT(0)
         }
         WM_TIMER => {
             if wparam.0 == REPAINT_TIMER_ID {
                 poll_debug_shortcut();
-                let _ = InvalidateRect(hwnd, None, true);
+                render_debug(hwnd);
             }
             LRESULT(0)
         }
         WM_DESTROY => {
             let _ = KillTimer(hwnd, REPAINT_TIMER_ID);
+            let _ = DBG_RENDERER.try_with(|c| {
+                if let Ok(mut r) = c.try_borrow_mut() {
+                    *r = None;
+                }
+            });
             let _ = HWND_STATE.try_with(|state| {
                 if state.get() == Some(hwnd) {
                     state.set(None);
@@ -266,66 +286,45 @@ fn poll_debug_shortcut() {
     });
 }
 
-fn paint_debug(hwnd: HWND) {
-    unsafe {
-        let mut ps = PAINTSTRUCT::default();
-        let hdc = BeginPaint(hwnd, &mut ps);
-        if hdc.0.is_null() {
-            return;
-        }
-
-        let rect = windows::Win32::Foundation::RECT {
-            left: 0,
-            top: 0,
-            right: PANEL_W,
-            bottom: PANEL_H,
-        };
-        let bg = CreateSolidBrush(windows::Win32::Foundation::COLORREF(PANEL_BG));
-        let _ = FillRect(hdc, &rect, bg);
-        let _ = DeleteObject(bg);
-        let _ = SetBkMode(hdc, BACKGROUND_MODE(1));
-
-        let snapshot = crate::debug_state::snapshot();
-        let connected = if snapshot.connected {
-            "connected"
-        } else {
-            "not connected"
-        };
-        let input = if snapshot.input.is_empty() {
-            "—".to_string()
-        } else {
-            snapshot.input.clone()
-        };
-        let lines = [
-            format!("gamepad: {connected}"),
-            format!("input: {input}"),
-        ];
-
-        for (i, line) in lines.iter().enumerate() {
-            let _ = SetTextColor(
-                hdc,
-                windows::Win32::Foundation::COLORREF(if i == 0 { 0x0000FF80 } else { 0x00FFFFFF }),
-            );
-            draw_line(hdc, 14, 10 + (i as i32 * 28), line);
-        }
-        let _ = EndPaint(hwnd, &ps);
-    }
-}
-
-unsafe fn draw_line(hdc: windows::Win32::Graphics::Gdi::HDC, x: i32, y: i32, text: &str) {
-    let mut buf: Vec<u16> = text.encode_utf16().collect();
-    let mut rect = windows::Win32::Foundation::RECT {
-        left: x,
-        top: y,
-        right: PANEL_W - 12,
-        bottom: y + 20,
+/// Render the panel through the shared D3D11/D2D/DComp renderer. Colours are GDI
+/// `COLORREF` (0x00BBGGRR) — the renderer converts them. A correctly drawn panel here
+/// confirms the composition pipeline works on the Winlogon desktop.
+fn render_debug(hwnd: HWND) {
+    let snapshot = crate::debug_state::snapshot();
+    let connected = if snapshot.connected { "connected" } else { "not connected" };
+    let input = if snapshot.input.is_empty() {
+        "—".to_string()
+    } else {
+        snapshot.input.clone()
     };
-    let _ = DrawTextW(
-        hdc,
-        &mut buf,
-        &mut rect,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
+    let desktop = desktop::current_desktop_name().unwrap_or_else(|| "?".into());
+    let detail = if snapshot.detail.is_empty() {
+        "—".to_string()
+    } else {
+        snapshot.detail.clone()
+    };
+    let lines = vec![
+        (0x0000FF80u32, "render: D3D11 + D2D + DComp OK".to_string()),
+        (0x0000FF80u32, format!("gamepad: {connected}")),
+        (0x00FFFFFFu32, format!("input: {input}")),
+        (0x00FFFFFFu32, format!("desktop: {desktop}")),
+        (0x0000D0FFu32, detail),
+    ];
+    // Accent border in COLORREF (R=0x4c,G=0x7b,B=0x99) -> 0x00997b4c.
+    DBG_RENDERER.with(|c| {
+        if let Ok(mut slot) = c.try_borrow_mut() {
+            if let Some(r) = slot.as_mut() {
+                unsafe {
+                    if let Err(e) = r.resize(hwnd) {
+                        service_log(&format!("debug ui: renderer resize: {e}"));
+                    }
+                    if let Err(e) = r.draw_debug(PANEL_BG, 0x00997b4c, &lines) {
+                        service_log(&format!("debug ui: renderer draw: {e}"));
+                    }
+                }
+            }
+        }
+    });
 }
 
 fn service_log(msg: &str) {

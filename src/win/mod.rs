@@ -4,6 +4,7 @@ pub mod desktop_window;
 pub mod logon_focus;
 pub mod vk_layouts;
 mod vk_log;
+mod vk_renderer;
 pub mod vk_ui;
 pub mod xbox_vk;
 

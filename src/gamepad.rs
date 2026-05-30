@@ -13,12 +13,12 @@ use crate::pc_cursor::PcCursor;
 #[cfg(windows)]
 use crate::xinput_backend::XInputBackend;
 
-/// North face: Triangle / Y — toggles VK when keyboard is closed.
-const VK_BUTTON: Button = Button::Y;
+/// Left stick click (L3) — toggles VK open/closed.
+const VK_BUTTON: Button = Button::L3;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(8);
-/// Ignore Y release right after opening VK (same physical tap must not close).
-const Y_RELEASE_GRACE: Duration = Duration::from_millis(550);
+/// Ignore L3 release right after opening VK (same press must not instantly close).
+const VK_TOGGLE_RELEASE_GRACE: Duration = Duration::from_millis(550);
 /// Ignore spurious X/dpad from misaligned HID for a moment after VK opens.
 const VK_NAV_INPUT_GRACE: Duration = Duration::from_millis(450);
 const DESKTOP_SYNC_LOG_INTERVAL: Duration = Duration::from_secs(120);
@@ -101,8 +101,9 @@ pub struct GamepadPoll {
     vk_down: bool,
     a_down_while_vk: bool,
     last_vk_open: bool,
-    y_ignore_until: Option<Instant>,
+    vk_toggle_ignore_until: Option<Instant>,
     vk_nav_grace_until: Option<Instant>,
+    stick_nav: Option<Button>,
     last_desktop_log: Instant,
     #[cfg(windows)]
     last_input_desktop: Option<String>,
@@ -220,8 +221,9 @@ impl GamepadPoll {
             vk_down: false,
             a_down_while_vk: false,
             last_vk_open: false,
-            y_ignore_until: None,
+            vk_toggle_ignore_until: None,
             vk_nav_grace_until: None,
+            stick_nav: None,
             last_desktop_log: Instant::now() - DESKTOP_SYNC_LOG_INTERVAL,
             #[cfg(windows)]
             last_input_desktop: None,
@@ -234,8 +236,9 @@ impl GamepadPoll {
     pub fn reset_vk_controls(&mut self) {
         self.vk_down = false;
         self.a_down_while_vk = false;
-        self.y_ignore_until = None;
+        self.vk_toggle_ignore_until = None;
         self.vk_nav_grace_until = None;
+        self.stick_nav = None;
         self.last_vk_open = false;
         #[cfg(windows)]
         {
@@ -247,13 +250,13 @@ impl GamepadPoll {
     pub fn on_vk_opened(&mut self) {
         self.vk_down = false;
         self.a_down_while_vk = false;
-        self.y_ignore_until = Some(Instant::now() + Y_RELEASE_GRACE);
+        self.vk_toggle_ignore_until = Some(Instant::now() + VK_TOGGLE_RELEASE_GRACE);
         self.vk_nav_grace_until = Some(Instant::now() + VK_NAV_INPUT_GRACE);
         #[cfg(windows)]
         {
             crate::vk_nav::reset_selection();
             if Self::service_signin_desktop() {
-                service_log("sign-in: VK nav only (LB/RB disabled); row 1 = digits");
+                service_log("sign-in: VK open — LB=page RB=Enter L3=close");
             }
         }
     }
@@ -299,6 +302,7 @@ impl GamepadPoll {
         if vk_open {
             #[cfg(windows)]
             {
+                self.sync_stick_nav(lx, ly);
                 if crate::win::vk_ui::tick_dpad_hold(Instant::now()) {
                     crate::win::vk_ui::request_repaint();
                 }
@@ -318,7 +322,7 @@ impl GamepadPoll {
         cursor.move_stick(lx, ly, dt_secs);
         cursor.scroll_stick(rx, ry, dt_secs);
 
-        let changes = dedupe_consecutive_y_edges(changes);
+        let changes = dedupe_consecutive_toggle_edges(changes);
         let mut edges = Vec::new();
         if let Some(edge) = desktop_reopen {
             edges.push(edge);
@@ -395,20 +399,21 @@ impl GamepadPoll {
             return None;
         }
 
+        // A=activate, B=backspace, X=space, LB=page, RB=Enter, LT=shift, RT=caps, L3=close,
+        // D-pad/L-stick axis=move focus.
         match (change.button, change.pressed) {
-            (VK_BUTTON, false) => {
-                self.vk_down = false;
-                None
-            }
             (VK_BUTTON, true) => {
                 if self
-                    .y_ignore_until
+                    .vk_toggle_ignore_until
                     .is_some_and(|until| Instant::now() < until)
                 {
                     return None;
                 }
-                self.vk_down = true;
-                Some(VkLoopAction::Toggle)
+                Some(VkLoopAction::Close)
+            }
+            (VK_BUTTON, false) => {
+                self.vk_down = false;
+                None
             }
             (Button::Up | Button::Down | Button::Left | Button::Right, true) => {
                 vk_nav::dpad_pressed(change.button);
@@ -425,24 +430,52 @@ impl GamepadPoll {
             }
             (Button::A, false) if self.a_down_while_vk => {
                 self.a_down_while_vk = false;
-                vk_nav::activate_selection();
+                if !crate::vk_predict::commit_if_strip_active() {
+                    vk_nav::activate_selection();
+                }
+                vk_ui::request_repaint();
                 None
             }
             (Button::B, true) => {
                 vk_nav::backspace();
+                vk_ui::request_repaint();
                 None
             }
-            (Button::X, true) => Some(VkLoopAction::Close),
-            (Button::Lb, true) if !Self::service_signin_desktop() => {
-                vk_nav::cursor_left();
+            (Button::X, true) => {
+                vk_nav::space();
+                vk_ui::request_repaint();
                 None
             }
-            (Button::Lb, true) => None,
-            (Button::Rb, true) if !Self::service_signin_desktop() => {
-                vk_nav::enter();
+            (Button::Lb, true) => {
+                if crate::vk_predict::strip_active() {
+                    crate::vk_predict::cycle_prev();
+                    vk_ui::request_repaint();
+                } else {
+                    vk_nav::next_layer();
+                }
                 None
             }
-            (Button::Rb, true) => None,
+            (Button::Rb, true) => {
+                if crate::vk_predict::strip_active() {
+                    crate::vk_predict::cycle_next();
+                    vk_ui::request_repaint();
+                } else {
+                    vk_nav::enter();
+                }
+                None
+            }
+            (Button::Lt, true) => {
+                vk_nav::set_shift(true);
+                None
+            }
+            (Button::Lt, false) => {
+                vk_nav::set_shift(false);
+                None
+            }
+            (Button::Rt, true) => {
+                vk_nav::toggle_caps();
+                None
+            }
             _ => None,
         }
     }
@@ -450,6 +483,38 @@ impl GamepadPoll {
     #[cfg(not(windows))]
     fn handle_vk_open_button(&mut self, _change: &ButtonChange) -> Option<VkLoopAction> {
         None
+    }
+
+    /// Left stick → grid focus with the same hold-repeat path as the D-pad (`FUN_00464d00`).
+    #[cfg(windows)]
+    fn sync_stick_nav(&mut self, lx: f32, ly: f32) {
+        use crate::vk_nav;
+        use crate::win::vk_ui;
+
+        const THRESH: f32 = 0.55;
+        let dir = if lx.abs().max(ly.abs()) < THRESH {
+            None
+        } else if lx.abs() > ly.abs() {
+            Some(if lx > 0.0 { Button::Right } else { Button::Left })
+        } else {
+            Some(if ly > 0.0 { Button::Up } else { Button::Down })
+        };
+
+        match (self.stick_nav, dir) {
+            (None, None) => {}
+            (None, Some(d)) => {
+                vk_nav::dpad_pressed(d);
+                vk_ui::request_repaint();
+            }
+            (Some(old), None) => vk_nav::dpad_released(old),
+            (Some(old), Some(d)) if old != d => {
+                vk_nav::dpad_released(old);
+                vk_nav::dpad_pressed(d);
+                vk_ui::request_repaint();
+            }
+            _ => {}
+        }
+        self.stick_nav = dir;
     }
 
     pub fn snapshot(&mut self) -> Result<String, String> {
@@ -483,7 +548,7 @@ impl GamepadPoll {
     }
 }
 
-fn dedupe_consecutive_y_edges(changes: Vec<ButtonChange>) -> Vec<ButtonChange> {
+fn dedupe_consecutive_toggle_edges(changes: Vec<ButtonChange>) -> Vec<ButtonChange> {
     let mut out: Vec<ButtonChange> = Vec::with_capacity(changes.len());
     for c in changes {
         if c.button == VK_BUTTON {
@@ -589,20 +654,21 @@ where
         println!("  left stick   → mouse");
         println!("  right stick  → scroll");
         println!("  A            → click");
-        println!("  tap Y        → open keyboard");
+        println!("  L3 (stick click) → open keyboard");
         println!("Controls (VK open):");
-        println!("  D-pad        → move key focus");
+        println!("  D-pad/L-stick → move key focus");
         println!("  A            → type selected key");
         println!("  B            → backspace");
-        println!("  X            → close keyboard");
-        println!("  LB           → cursor left in field");
+        println!("  X            → space");
+        println!("  L3           → close keyboard");
+        println!("  LB           → next page (#+= symbols, ABC)");
         println!("  RB           → Enter");
-        println!("  tap Y        → close keyboard");
+        println!("  Shift        → on-screen ⇧ key + A");
         println!("Ctrl+C to stop.");
     } else {
         #[cfg(windows)]
         service_log(&format!(
-            "gamepad loop running ({}; Y/Triangle=toggle VK)",
+            "gamepad loop running ({}; L3=toggle VK)",
             poll.controller_label()
         ));
     }

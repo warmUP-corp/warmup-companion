@@ -12,6 +12,8 @@ mod debug_state;
 #[cfg(windows)]
 mod vk_nav;
 #[cfg(windows)]
+mod vk_predict;
+#[cfg(windows)]
 mod win;
 #[cfg(not(windows))]
 #[path = "win_stub.rs"]
@@ -829,7 +831,7 @@ fn run_gamepad_mode() {
             app.attach_named(Desktop::Winlogon);
         }
     }
-    println!("Warmup gamepad mode — sticks move mouse; tap Y/Triangle to toggle VK");
+    println!("Warmup gamepad mode — sticks move mouse; L3 (stick click) toggles VK");
     if use_real {
         println!("real Win32 VK enabled (WarmupXboxVkWindow)");
     }
@@ -948,7 +950,7 @@ fn print_help() {
   quit                exit
   --real              Win32 desktop + TabTip/JoyXboxVkWindow (Windows)
   pad                 (gamepad feature) SDL3 snapshot
-  --gamepad           (gamepad feature) sticks + Y/Triangle → VK
+  --gamepad           (gamepad feature) sticks + L3 → VK
 
 SCENARIOS
   normal -> fg uac -> press

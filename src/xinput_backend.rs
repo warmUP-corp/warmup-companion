@@ -26,15 +26,16 @@ use windows::Win32::UI::Input::{
 use windows::Win32::UI::Input::XboxController::{
     XINPUT_CAPABILITIES, XINPUT_GAMEPAD, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B,
     XINPUT_GAMEPAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT,
-    XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_RIGHT_SHOULDER,
-    XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y, XINPUT_STATE,
+    XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_LEFT_THUMB, XINPUT_GAMEPAD_LEFT_SHOULDER,
+    XINPUT_GAMEPAD_RIGHT_THUMB, XINPUT_GAMEPAD_RIGHT_SHOULDER, XINPUT_GAMEPAD_X,
+    XINPUT_GAMEPAD_Y, XINPUT_STATE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClassNameW,
     GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, KillTimer, PostThreadMessageW,
-    RegisterClassW, SetTimer, TranslateMessage, HMENU, MSG,
-    WM_DESTROY, WM_INPUT, WM_NULL, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    RegisterClassW, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, TranslateMessage,
+    HMENU, LWA_ALPHA, MSG, WM_DESTROY, WM_INPUT, WM_NULL, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::gamepad_backend::Button;
@@ -281,6 +282,34 @@ struct XInputKeystroke {
 
 /// The one [`Button`] ↔ XInput mask table. HID and XInput both map through this;
 /// nothing else hard-codes the bit for a button.
+/// Analog trigger pressed threshold (0–255), matching SDL `TRIGGER_THRESHOLD` feel.
+const TRIGGER_PRESS_THRESH: u8 = 30;
+
+fn poll_trigger_edges(
+    prev_lt: &mut bool,
+    prev_rt: &mut bool,
+    left: u8,
+    right: u8,
+    out: &mut Vec<ButtonChange>,
+) {
+    let lt = left > TRIGGER_PRESS_THRESH;
+    let rt = right > TRIGGER_PRESS_THRESH;
+    if lt != *prev_lt {
+        *prev_lt = lt;
+        out.push(ButtonChange {
+            button: Button::Lt,
+            pressed: lt,
+        });
+    }
+    if rt != *prev_rt {
+        *prev_rt = rt;
+        out.push(ButtonChange {
+            button: Button::Rt,
+            pressed: rt,
+        });
+    }
+}
+
 const BUTTON_MASKS: &[(Button, u16)] = &[
     (Button::Up, XINPUT_GAMEPAD_DPAD_UP.0),
     (Button::Down, XINPUT_GAMEPAD_DPAD_DOWN.0),
@@ -292,6 +321,8 @@ const BUTTON_MASKS: &[(Button, u16)] = &[
     (Button::Y, XINPUT_GAMEPAD_Y.0),
     (Button::Lb, XINPUT_GAMEPAD_LEFT_SHOULDER.0),
     (Button::Rb, XINPUT_GAMEPAD_RIGHT_SHOULDER.0),
+    (Button::L3, XINPUT_GAMEPAD_LEFT_THUMB.0),
+    (Button::R3, XINPUT_GAMEPAD_RIGHT_THUMB.0),
 ];
 
 /// XInput mask bit for a button, if it has one.
@@ -320,6 +351,8 @@ pub struct XInputBackend {
     prev_buttons: [u16; 4],
     slot_connected: [bool; 4],
     pending: Vec<ButtonChange>,
+    prev_trigger_left: bool,
+    prev_trigger_right: bool,
     axes: (f32, f32, f32, f32),
     last_status_log: Instant,
     last_no_pad_log: Instant,
@@ -370,6 +403,8 @@ struct PollState {
     xusb: Vec<XusbDevice>,
     /// Most recent XUSB report (for the probe dump + offset verification).
     last_xusb: Option<XusbReport>,
+    prev_trigger_left: bool,
+    prev_trigger_right: bool,
     /// Step-C diagnostic: side-by-side xinput1_3 vs xinput1_4 GetStateEx.
     probe: XInputProbe,
 }
@@ -382,6 +417,7 @@ enum SecureMsg {
     Ready(String),
     Slots([bool; 4]),
     Buttons { slot: u32, prev: u16, cur: u16 },
+    Trigger(ButtonChange),
     Axes((f32, f32, f32, f32)),
     NoController,
     Error(String),
@@ -399,6 +435,8 @@ impl XInputBackend {
             prev_buttons: [0; 4],
             slot_connected: [false; 4],
             pending: Vec::new(),
+            prev_trigger_left: false,
+            prev_trigger_right: false,
             axes: (0.0, 0.0, 0.0, 0.0),
             last_status_log: Instant::now() - Duration::from_secs(60),
             last_no_pad_log: Instant::now() - Duration::from_secs(60),
@@ -591,13 +629,27 @@ impl XInputBackend {
                 SecureMsg::Ready(desktop) => {
                     service_log(&format!("XInput secure helper: thread on {desktop}"));
                 }
-                SecureMsg::Slots(connected) => self.log_slots_if_changed(connected),
+                SecureMsg::Slots(connected) => {
+                    self.log_slots_if_changed(connected);
+                    // Reflect the helper's connection state in active_slot so
+                    // controller_label()/is_connected() and the debug overlay see the
+                    // pad the helper is reading on Winlogon.
+                    let _ = self.pick_active_slot(&connected);
+                }
                 SecureMsg::Buttons { slot, prev, cur } => {
                     self.log_button_change(slot, prev, cur);
+                    // The helper owns button state on Winlogon; record it so the live
+                    // input summary (and controller_label) reflect the active pad.
+                    if (slot as usize) < self.prev_buttons.len() {
+                        self.active_slot = Some(slot);
+                        self.prev_buttons[slot as usize] = cur;
+                    }
                     self.pending.extend(Self::edges(prev, cur));
                 }
+                SecureMsg::Trigger(edge) => self.pending.push(edge),
                 SecureMsg::Axes(axes) => self.axes = axes,
                 SecureMsg::NoController => {
+                    self.active_slot = None;
                     self.axes = (0.0, 0.0, 0.0, 0.0);
                     self.log_no_controller();
                 }
@@ -688,6 +740,13 @@ impl GamepadBackend for XInputBackend {
         self.prev_buttons[idx] = cur;
         self.log_button_change(slot, prev, cur);
         self.pending.extend(Self::edges(prev, cur));
+        poll_trigger_edges(
+            &mut self.prev_trigger_left,
+            &mut self.prev_trigger_right,
+            pad.bLeftTrigger,
+            pad.bRightTrigger,
+            &mut self.pending,
+        );
         self.poll_keystrokes(slot);
         self.axes = (
             Self::norm_thumb(pad.sThumbLX, LEFT_DEADZONE),
@@ -818,22 +877,20 @@ fn secure_poll_main(
         };
         // RegisterClassW returns 0 if class already exists; ignore.
         RegisterClassW(&wc);
-        // Joyxoff parity: ex_style 0x8080088 (TOPMOST|TOOLWINDOW|NOACTIVATE|LAYERED),
-        // style WS_POPUP only — NOT WS_VISIBLE. Joyxoff's JoyXoffMWindow is created
-        // invisible (style 0x80000000). A *visible* TOPMOST window on the Winlogon
-        // desktop becomes a focus/nav target for the shell's gamepad navigation, so
-        // D-pad presses move LogonUI focus off the password box. XInput's foreground
-        // gate is irrelevant here (LogonUI is always foreground; we read pads via the
-        // direct XUSB path), so visibility buys nothing and only causes the defocus.
+        // EXPERIMENT: XInput 1.4 background-zeroes wButtons unless our process owns a
+        // foreground-eligible window. The invisible/NOACTIVATE anchor never qualifies,
+        // and the XUSB IOCTL returns a stub (no buttons) on this driver — so we make
+        // the anchor foreground-eligible: WS_VISIBLE, off-screen (-10000), 1x1, alpha 0
+        // (never seen), and drop NOACTIVATE so SetForegroundWindow can take it.
         match CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
             ANCHOR_CLASS,
             w!("Warmup XInput Anchor"),
-            WS_POPUP,
-            0,
-            0,
-            32,
-            32,
+            WS_POPUP | WS_VISIBLE,
+            -10000,
+            -10000,
+            1,
+            1,
             None,
             HMENU::default(),
             HINSTANCE(instance.0),
@@ -849,10 +906,14 @@ fn secure_poll_main(
         }
     };
 
-    // Anchor stays invisible (no WS_VISIBLE, no alpha) so it is not a gamepad-nav
-    // focus target on the Winlogon desktop. Pads are read via the XUSB path below.
+    // Fully transparent (alpha 0) so the off-screen 1x1 anchor is never visible, then
+    // claim foreground so XInput stops zeroing buttons.
+    unsafe {
+        let _ = SetLayeredWindowAttributes(hwnd, windows::Win32::Foundation::COLORREF(0), 0, LWA_ALPHA);
+        let _ = SetForegroundWindow(hwnd);
+    }
     let _ = tx.send(SecureMsg::Error(
-        "anchor window created invisible on Winlogon (joyxoff parity, no nav focus)".into(),
+        "anchor window created foreground-eligible (XInput button-gate experiment)".into(),
     ));
     let _ = tx.send(SecureMsg::Error(probe_self_identity()));
 
@@ -884,6 +945,8 @@ fn secure_poll_main(
             last_raw_report: Vec::new(),
             xusb: Vec::new(),
             last_xusb: None,
+            prev_trigger_left: false,
+            prev_trigger_right: false,
             probe: XInputProbe::load(),
         });
     });
@@ -952,6 +1015,11 @@ unsafe extern "system" fn anchor_wndproc(
     lparam: LPARAM,
 ) -> LRESULT {
     if msg == WM_TIMER && wparam.0 == POLL_TIMER_ID {
+        // Re-claim foreground each tick — LogonUI keeps grabbing it, and XInput only
+        // returns buttons while our process owns the foreground window.
+        unsafe {
+            let _ = SetForegroundWindow(hwnd);
+        }
         POLL_STATE.with(|s| {
             if let Some(state) = s.borrow_mut().as_mut() {
                 poll_xinput_tick(state);
@@ -1147,6 +1215,21 @@ fn poll_xinput_tick(state: &mut PollState) {
     }
     state.last_xusb = xusb_rep;
 
+    // Surface the raw XUSB report in the debug overlay so byte offsets can be
+    // confirmed against live presses on Winlogon (the parsed `buttons` offset is
+    // provisional — see xusb_ioctl::parse_report).
+    // Verify the foreground experiment: show XInput slot-0 buttons + whether our
+    // process currently owns the foreground window. If `fg=ours` and `xinput` goes
+    // non-zero on a press, the gate is defeated and the existing edge path delivers it.
+    {
+        let xin = states[0].map(|p| p.wButtons.0).unwrap_or(0);
+        let fg = unsafe { GetForegroundWindow() };
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(fg, Some(&mut pid)) };
+        let ours = pid == unsafe { GetCurrentProcessId() };
+        crate::debug_state::set_detail(format!("xinput=0x{xin:04x} fg={}", if ours { "ours" } else { "LogonUI" }));
+    }
+
     state.iter_count += 1;
     let probe_due = state.last_probe_log.elapsed() >= Duration::from_secs(2);
     if state.iter_count == 1 || probe_due {
@@ -1171,17 +1254,26 @@ fn poll_xinput_tick(state: &mut PollState) {
             }
         }
         let xusb_str = match &state.last_xusb {
-            Some(rep) => format!(
-                " xusb:btn=0x{:04x} lt={} rt={} lx={} ly={} rx={} ry={} raw=[{}]",
-                rep.buttons,
-                rep.left_trigger,
-                rep.right_trigger,
-                rep.thumb_lx,
-                rep.thumb_ly,
-                rep.thumb_rx,
-                rep.thumb_ry,
-                report_hex(&rep.raw),
-            ),
+            Some(rep) => {
+                let full: String = rep
+                    .raw
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!(
+                    " xusb:btn=0x{:04x} lt={} rt={} lx={} ly={} rx={} ry={} len={} raw=[{}]",
+                    rep.buttons,
+                    rep.left_trigger,
+                    rep.right_trigger,
+                    rep.thumb_lx,
+                    rep.thumb_ly,
+                    rep.thumb_rx,
+                    rep.thumb_ry,
+                    rep.raw.len(),
+                    full,
+                )
+            }
             None => " xusb:none".into(),
         };
         let _ = state.tx.send(SecureMsg::Error(format!(
@@ -1220,6 +1312,22 @@ fn poll_xinput_tick(state: &mut PollState) {
     };
 
     let pad = states[slot as usize].expect("connected slot has state");
+    let (lt, rt) = state
+        .last_xusb
+        .as_ref()
+        .map(|r| (r.left_trigger, r.right_trigger))
+        .unwrap_or((pad.bLeftTrigger, pad.bRightTrigger));
+    let mut trigger_edges = Vec::new();
+    poll_trigger_edges(
+        &mut state.prev_trigger_left,
+        &mut state.prev_trigger_right,
+        lt,
+        rt,
+        &mut trigger_edges,
+    );
+    for edge in trigger_edges {
+        let _ = state.tx.send(SecureMsg::Trigger(edge));
+    }
     let xinput_stick = pad.sThumbLX.abs() > LEFT_DEADZONE || pad.sThumbLY.abs() > LEFT_DEADZONE;
     // Button edges come from WM_INPUT (HID) and XInputGetKeystroke only. Merging
     // last_hid into GetState when wButtons==0 stuck false masks (HidP 0xb200).

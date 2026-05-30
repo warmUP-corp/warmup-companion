@@ -15,43 +15,43 @@ use crate::vk_nav::{self, KeyAction, KeyCell};
 use windows::core::w;
 use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontIndirectW, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW,
-    EndPaint, FillRect, InvalidateRect, RedrawWindow, RoundRect, SelectObject, SetBkMode,
-    SetTextColor, BACKGROUND_MODE, CLEARTYPE_QUALITY, DT_CENTER, DT_SINGLELINE, DT_VCENTER,
-    HFONT, HGDIOBJ, HPEN, LOGFONTW, PAINTSTRUCT, PS_SOLID, RDW_ALLCHILDREN, RDW_INVALIDATE,
-    RDW_UPDATENOW,
+    GetMonitorInfoW, MonitorFromWindow, ValidateRect, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
 };
 use windows::Win32::System::Registry::{
     RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD,
 };
-use windows::Win32::UI::WindowsAndMessaging::{SetLayeredWindowAttributes, LWA_ALPHA};
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics, GetWindowRect,
     IsWindowVisible, KillTimer, PostThreadMessageW,
     EVENT_SYSTEM_DESKTOPSWITCH, EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT,
-    SetTimer, SetWindowPos, ShowWindow, SystemParametersInfoW, SM_CXSCREEN, SM_CYSCREEN,
+    SetTimer, SetWindowPos, ShowWindow, SM_CXSCREEN, SM_CYSCREEN,
     HMENU, HWND_NOTOPMOST, HWND_TOPMOST,
-    SPI_GETWORKAREA, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SWP_NOZORDER, SWP_SHOWWINDOW, WINDOWPOS, WM_DESTROY, WM_LBUTTONDOWN, WM_PAINT, WM_TIMER,
-    WM_WINDOWPOSCHANGING, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOPMOST,
-    WS_EX_TOOLWINDOW, WS_POPUP,
+    WM_WINDOWPOSCHANGING, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    WS_EX_TOPMOST, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use super::desktop;
-use super::desktop_window::{self, DesktopApp, DesktopWindowThread, WM_APP_REPAINT, WM_APP_SHOW};
+use super::desktop_window::{self, DesktopApp, DesktopWindowThread, WM_APP_HIDE, WM_APP_REPAINT, WM_APP_SHOW};
 use super::vk_log;
+use super::vk_renderer::{self, VkPalette, VkRenderer};
 
 const WINDOW_CLASS: windows::core::PCWSTR = w!("WarmupXboxVkWindow");
 
-const VK_WIDTH: i32 = 720;
-// Tall enough for the largest locale page (digit row + up to 5 letter rows +
-// special row); key height adapts down via `key_metrics` for taller layouts.
-const VK_HEIGHT: i32 = 392;
+/// Joyxoff docks the keyboard full-monitor-width at the screen bottom; its height is
+/// `monitorHeight * 384/1080` (`_DAT_00494db8`=384 @ the 1080p reference monitor —
+/// see `warmup_create_xbox_vk_window` + `FUN_00467190`).
+const VK_REF_MONITOR_H: f32 = 1080.0;
+const VK_KB_REF_H: f32 = 384.0;
 /// Re-assert topmost while visible (shell search/task UI also uses HWND_TOPMOST).
 const VK_ZORDER_TIMER_ID: usize = 1;
 const VK_ZORDER_TIMER_MS: u32 = 200;
+/// Joyxoff `FUN_00466970` drives frames from a timer (id 100); we use 16 ms (~60 Hz).
+const VK_RENDER_TIMER_ID: usize = 2;
+const VK_RENDER_TIMER_MS: u32 = 16;
 
 static VK_VISIBLE: AtomicBool = AtomicBool::new(false);
 static UI_THREAD_ID: AtomicU32 = AtomicU32::new(0);
@@ -59,19 +59,6 @@ static VK_HWND: AtomicIsize = AtomicIsize::new(0);
 
 /// Class background brush colour (dark default; per-paint theme overrides it).
 const BG_FILL: u32 = 0x001f1f1f;
-
-/// Themed palette mirroring Joyxoff `FUN_00466970`'s light/dark colour tables.
-/// All fields are GDI `COLORREF` (0x00BBGGRR).
-struct Palette {
-    bg: u32,
-    key: u32,
-    /// Selected-key fill: accent blended 50% over the key colour (Joyxoff draws an
-    /// accent rounded-rect at 0.5 alpha over the key — `FUN_00464480` `DAT_004a4960`).
-    sel_fill: u32,
-    /// Selection border (Joyxoff `DAT_004a4968`, solid accent).
-    accent: u32,
-    text: u32,
-}
 
 /// `0xRRGGBB` -> GDI `COLORREF` (`0x00BBGGRR`).
 const fn rgb(v: u32) -> u32 {
@@ -81,36 +68,24 @@ const fn rgb(v: u32) -> u32 {
     (b << 16) | (g << 8) | r
 }
 
-/// Per-channel 50/50 blend of two `COLORREF`s.
-fn blend(a: u32, b: u32) -> u32 {
-    let mix = |s: u32| {
-        let ca = (a >> s) & 0xff;
-        let cb = (b >> s) & 0xff;
-        (ca + cb) / 2
-    };
-    mix(0) | (mix(8) << 8) | (mix(16) << 16)
-}
-
 /// Dark/light accent + greys from `FUN_00466970` (dark accent `0xff4c7b99`,
 /// light accent `0xff0e80c7`; the WinRT `UISettings` override is not applied).
-fn palette(dark: bool) -> Palette {
+fn vk_palette(dark: bool) -> VkPalette {
     if dark {
-        let accent = rgb(0x4c7b99);
-        Palette {
+        VkPalette {
             bg: rgb(0x1f1f1f),
-            key: rgb(0x121212),
-            sel_fill: blend(accent, rgb(0x2b2b2b)),
-            accent,
+            key: rgb(0x2b2b2b),
+            accent: rgb(0x4c7b99),
             text: rgb(0xffffff),
+            sel_text: rgb(0xffffff),
         }
     } else {
-        let accent = rgb(0x0e80c7);
-        Palette {
+        VkPalette {
             bg: rgb(0xf3f3f3),
-            key: rgb(0xdfdfdf),
-            sel_fill: blend(accent, rgb(0xe9e9e9)),
-            accent,
+            key: rgb(0xe9e9e9),
+            accent: rgb(0x0e80c7),
             text: rgb(0x000000),
+            sel_text: rgb(0xffffff),
         }
     }
 }
@@ -144,29 +119,36 @@ fn is_dark_theme() -> bool {
 fn key_glyph(key: &KeyCell) -> (String, bool) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_RETURN, VK_SPACE};
     match &key.action {
-        KeyAction::Shift => ("\u{21E7}".to_string(), true), // ⇧
-        KeyAction::Vk(vk) if *vk == VK_BACK => ("\u{232B}".to_string(), true), // ⌫
-        KeyAction::Vk(vk) if *vk == VK_RETURN => ("\u{21B5}".to_string(), true), // ↵
-        KeyAction::Vk(vk) if *vk == VK_SPACE => (String::new(), false),         // blank space bar
+        KeyAction::Shift | KeyAction::CapsLock => (key.label.clone(), false),
+        KeyAction::CloseVk => ("\u{2325}".to_string(), true), // keyboard dismiss
+        KeyAction::Paste => (key.label.clone(), false),
+        KeyAction::Vk(vk) if *vk == VK_BACK => (key.label.clone(), false),
+        KeyAction::Vk(vk) if *vk == VK_RETURN => (key.label.clone(), false),
+        KeyAction::Vk(vk) if *vk == VK_SPACE => (String::new(), false),
         _ => (key.label.clone(), false),
     }
 }
 
-unsafe fn make_font(height: i32, weight: i32, face: &str) -> HFONT {
-    let mut lf = LOGFONTW {
-        lfHeight: height,
-        lfWeight: weight,
-        lfQuality: CLEARTYPE_QUALITY,
-        ..Default::default()
-    };
-    for (i, u) in face.encode_utf16().take(31).enumerate() {
-        lf.lfFaceName[i] = u;
+fn key_hint(key: &KeyCell) -> Option<&'static str> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_RETURN, VK_SPACE};
+    match &key.action {
+        // Badges only for face buttons that fire without selecting the key first
+        // (`gamepad::handle_vk_open_button`).
+        KeyAction::Vk(vk) if *vk == VK_BACK => Some("B"),
+        KeyAction::Vk(vk) if *vk == VK_RETURN => Some("RB"),
+        KeyAction::Vk(vk) if *vk == VK_SPACE => Some("X"),
+        KeyAction::Shift => Some("LT"),
+        KeyAction::CapsLock => Some("RT"),
+        KeyAction::CloseVk => Some("L3"),
+        _ => None,
     }
-    CreateFontIndirectW(&lf)
 }
 
-/// Corner radius for the rounded keys (Joyxoff key radius `+0x134`).
-const KEY_RADIUS: i32 = 8;
+/// Top legend — must match `handle_vk_open_button` bindings.
+const VK_LEGEND: &str =
+    "A: Select     B: Backspace     X: Space     RB: Enter     LT: Shift     RT: Caps     L3: Close";
+const VK_LEGEND_PREDICT: &str =
+    "A: Commit word     LB/RB: Cycle     B: Backspace     X: Space     L3: Close";
 
 #[derive(Clone, Copy, Debug)]
 pub enum VkAttach {
@@ -176,10 +158,20 @@ pub enum VkAttach {
 
 struct UiState {
     hwnd: Option<HWND>,
+    renderer: Option<VkRenderer>,
+    /// Foreground app window we shrank to make room for the keyboard, and its
+    /// original rect to restore on hide.
+    reserved: Option<(HWND, windows::Win32::Foundation::RECT)>,
 }
 
 thread_local! {
-    static UI: RefCell<UiState> = const { RefCell::new(UiState { hwnd: None }) };
+    static UI: RefCell<UiState> = const {
+        RefCell::new(UiState {
+            hwnd: None,
+            renderer: None,
+            reserved: None,
+        })
+    };
     /// WinEvent hooks installed on the UI thread (drained on pump exit).
     static WINEVENT_HOOKS: RefCell<Vec<HWINEVENTHOOK>> = const { RefCell::new(Vec::new()) };
 }
@@ -244,6 +236,16 @@ pub fn request_repaint() {
     }
     unsafe {
         let _ = PostThreadMessageW(tid, WM_APP_REPAINT, WPARAM(0), LPARAM(0));
+    }
+}
+
+pub fn request_hide() {
+    let tid = UI_THREAD_ID.load(Ordering::Acquire);
+    if tid == 0 {
+        return;
+    }
+    unsafe {
+        let _ = PostThreadMessageW(tid, WM_APP_HIDE, WPARAM(0), LPARAM(0));
     }
 }
 
@@ -316,8 +318,12 @@ fn remove_winevent_hooks() {
 }
 
 fn ui_show(attach: VkAttach) {
-    // Drop RefCell borrow before DestroyWindow — wndproc re-enters and must not borrow UI.
-    let old = UI.with(|ui| ui.borrow_mut().hwnd.take());
+    // Capture the app that currently has focus BEFORE we create our (NOACTIVATE)
+    // window, so we can shrink it to make room for the keyboard.
+    let prev_fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+    // Read the HWND only; destroy_vk_window clears state + drops the renderer in order.
+    // The borrow is released here, so the synchronous WM_DESTROY can re-borrow safely.
+    let old = UI.with(|ui| ui.borrow().hwnd);
     if let Some(h) = old {
         unsafe {
             destroy_vk_window(h);
@@ -338,10 +344,31 @@ fn ui_show(attach: VkAttach) {
         }
     };
     VK_HWND.store(hwnd.0 as isize, Ordering::Release);
-    UI.with(|ui| ui.borrow_mut().hwnd = Some(hwnd));
+    match unsafe { VkRenderer::create(hwnd) } {
+        Ok(r) => {
+            UI.with(|ui| {
+                let mut state = ui.borrow_mut();
+                state.hwnd = Some(hwnd);
+                state.renderer = Some(r);
+            });
+        }
+        Err(e) => {
+            vk_log::log(&format!("D2D/DComp renderer init failed: {e}"));
+            unsafe {
+                destroy_vk_window(hwnd);
+            }
+            VK_VISIBLE.store(false, Ordering::SeqCst);
+            return;
+        }
+    }
     vk_nav::reset_selection();
     unsafe {
         show_and_place(hwnd);
+        // Shrink the previously-focused app so the keyboard doesn't cover it.
+        let (_, dock_top, _, _) = vk_dock_rect();
+        let reserved = reserve_app_space(prev_fg, dock_top);
+        UI.with(|ui| ui.borrow_mut().reserved = reserved);
+        render_frame();
     }
     let visible = unsafe { IsWindowVisible(hwnd).as_bool() };
     VK_VISIBLE.store(visible, Ordering::SeqCst);
@@ -353,28 +380,91 @@ fn ui_show(attach: VkAttach) {
 }
 
 fn ui_repaint() {
-    UI.with(|ui| {
-        if let Some(h) = ui.borrow().hwnd {
-            unsafe {
-                ensure_topmost(h);
-                let _ = InvalidateRect(h, None, true);
-                let _ = RedrawWindow(h, None, None, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
-            }
+    // Copy the HWND out and drop the borrow before calling render_frame, which takes
+    // its own borrow_mut on UI — holding this borrow across it panics ("already borrowed").
+    let hwnd = UI.with(|ui| ui.borrow().hwnd);
+    if let Some(h) = hwnd {
+        unsafe {
+            ensure_topmost(h);
         }
-    });
+        render_frame();
+    }
 }
 
 fn ui_hide() {
-    let hwnd = UI.with(|ui| ui.borrow_mut().hwnd.take());
+    // Read the HWND only; destroy_vk_window owns clearing state + dropping the renderer
+    // so teardown order (renderer before DestroyWindow) stays correct.
+    let hwnd = UI.with(|ui| ui.borrow().hwnd);
     let Some(h) = hwnd else {
         return;
     };
+    // Restore the app window we shrank on show.
+    let reserved = UI.with(|ui| ui.borrow_mut().reserved.take());
     unsafe {
+        restore_app_space(reserved);
         destroy_vk_window(h);
     }
     VK_HWND.store(0, Ordering::Release);
     VK_VISIBLE.store(false, Ordering::SeqCst);
     vk_log::log("WarmupXboxVkWindow hidden");
+}
+
+/// Shrink `app` so its bottom sits at `dock_top`, freeing the keyboard's strip.
+/// Returns the original rect to restore later. Skips our own window and shell/system
+/// windows (don't reflow the desktop or sign-in UI).
+unsafe fn reserve_app_space(
+    app: HWND,
+    dock_top: i32,
+) -> Option<(HWND, windows::Win32::Foundation::RECT)> {
+    if app.0.is_null() {
+        return None;
+    }
+    let mut cls = [0u16; 64];
+    let n = windows::Win32::UI::WindowsAndMessaging::GetClassNameW(app, &mut cls);
+    let name = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
+    let blocked = [
+        "WarmupXboxVkWindow",
+        "Shell_TrayWnd",
+        "Shell_SecondaryTrayWnd",
+        "Progman",
+        "WorkerW",
+        "Windows.UI.Core.CoreWindow",
+        "LogonUI",
+    ];
+    if blocked.iter().any(|b| name == *b) {
+        return None;
+    }
+    let mut r = windows::Win32::Foundation::RECT::default();
+    if GetWindowRect(app, &mut r).is_err() || r.bottom <= dock_top {
+        return None;
+    }
+    let new_h = (dock_top - r.top).max(120);
+    let _ = SetWindowPos(
+        app,
+        HWND::default(),
+        r.left,
+        r.top,
+        r.right - r.left,
+        new_h,
+        SWP_NOACTIVATE | SWP_NOZORDER,
+    );
+    vk_log::log(&format!("reserved space: shrank '{name}' to bottom={dock_top}"));
+    Some((app, r))
+}
+
+/// Restore a window shrunk by [`reserve_app_space`].
+unsafe fn restore_app_space(saved: Option<(HWND, windows::Win32::Foundation::RECT)>) {
+    if let Some((app, r)) = saved {
+        let _ = SetWindowPos(
+            app,
+            HWND::default(),
+            r.left,
+            r.top,
+            r.right - r.left,
+            r.bottom - r.top,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        );
+    }
 }
 
 /// EVENT_SYSTEM_DESKTOPSWITCH callback. Joyxoff `FUN_0041ece0` re-attaches the VK
@@ -430,7 +520,8 @@ unsafe extern "system" fn vk_wndproc(
 ) -> LRESULT {
     match msg {
         WM_PAINT => {
-            paint_keys(hwnd);
+            render_frame();
+            let _ = ValidateRect(hwnd, None);
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
@@ -442,8 +533,10 @@ unsafe extern "system" fn vk_wndproc(
             LRESULT(0)
         }
         WM_TIMER => {
-            if _wparam.0 == VK_ZORDER_TIMER_ID {
-                ensure_topmost(hwnd);
+            match _wparam.0 {
+                VK_ZORDER_TIMER_ID => ensure_topmost(hwnd),
+                VK_RENDER_TIMER_ID => render_frame(),
+                _ => {}
             }
             LRESULT(0)
         }
@@ -459,11 +552,12 @@ unsafe extern "system" fn vk_wndproc(
             LRESULT(0)
         }
         WM_DESTROY => {
-            stop_zorder_timer(hwnd);
+            stop_timers(hwnd);
             let _ = UI.try_with(|ui| {
                 if let Ok(mut state) = ui.try_borrow_mut() {
                     if state.hwnd == Some(hwnd) {
                         state.hwnd = None;
+                        state.renderer = None;
                     }
                 }
             });
@@ -486,40 +580,45 @@ fn window_style() -> windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE {
 }
 
 fn window_ex_style() -> windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE {
-    // Joyxoff `JoyXboxVkWindow` ex_style 0x8280088 = TOPMOST|TOOLWINDOW|NOACTIVATE|LAYERED
-    // (+NOREDIRECTIONBITMAP 0x200000 omitted here — not exposed by `windows-rs` 0.58).
-    WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED
+    // Joyxoff `JoyXboxVkWindow` ex_style is 0x8280088, but its LAYERED bit is dropped
+    // here: DirectComposition owns the surface via NOREDIRECTIONBITMAP, and a LAYERED
+    // window stays invisible until SetLayeredWindowAttributes/UpdateLayeredWindow — which
+    // can't apply with no redirection bitmap. NOREDIRECTIONBITMAP is the required flag.
+    WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP
 }
 
-unsafe fn outer_window_size() -> (i32, i32) {
-    (VK_WIDTH, VK_HEIGHT)
-}
-
-unsafe fn work_area_bottom_center(outer_w: i32, outer_h: i32) -> (i32, i32) {
-    let mut work = windows::Win32::Foundation::RECT::default();
-    let _ = SystemParametersInfoW(
-        SPI_GETWORKAREA,
-        0,
-        Some(&mut work as *mut _ as *mut _),
-        windows::Win32::UI::WindowsAndMessaging::SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-    );
-    let (w, h) = if work.right > work.left && work.bottom > work.top {
-        (work.right - work.left, work.bottom - work.top)
-    } else {
-        let sw = GetSystemMetrics(SM_CXSCREEN);
-        let sh = GetSystemMetrics(SM_CYSCREEN);
-        vk_log::log(&format!("SPI_GETWORKAREA empty; using screen {sw}x{sh}"));
-        (sw, sh)
+/// Full bounds of the monitor that hosts the foreground window (Joyxoff
+/// `FUN_00467190`: `MonitorFromWindow` + `GetMonitorInfo`, full `rcMonitor`).
+unsafe fn target_monitor_rect() -> windows::Win32::Foundation::RECT {
+    let fg = windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
+    let mon = MonitorFromWindow(fg, MONITOR_DEFAULTTOPRIMARY);
+    let mut mi = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
     };
-    let x = work.left + (w - outer_w) / 2;
-    let y = work.top + h - outer_h - 12;
-    (x, y)
+    if GetMonitorInfoW(mon, &mut mi).as_bool() {
+        return mi.rcMonitor;
+    }
+    let sw = GetSystemMetrics(SM_CXSCREEN);
+    let sh = GetSystemMetrics(SM_CYSCREEN);
+    vk_log::log(&format!("GetMonitorInfo failed; using screen {sw}x{sh}"));
+    windows::Win32::Foundation::RECT { left: 0, top: 0, right: sw, bottom: sh }
+}
+
+/// Joyxoff geometry: full monitor width, docked at the screen bottom, with
+/// height = `monitorHeight * 384/1080`. Returns `(x, y, width, height)`.
+unsafe fn vk_dock_rect() -> (i32, i32, i32, i32) {
+    let m = target_monitor_rect();
+    let full_w = (m.right - m.left).max(1);
+    let full_h = (m.bottom - m.top).max(1);
+    let h = ((full_h as f32) * VK_KB_REF_H / VK_REF_MONITOR_H).round() as i32;
+    let h = h.clamp(160, full_h);
+    (m.left, m.bottom - h, full_w, h)
 }
 
 unsafe fn create_vk_window() -> Result<HWND, String> {
     let instance = GetModuleHandleW(None).map_err(|e| format!("GetModuleHandleW: {e}"))?;
-    let (outer_w, outer_h) = outer_window_size();
-    let (x, y) = work_area_bottom_center(outer_w, outer_h);
+    let (x, y, outer_w, outer_h) = vk_dock_rect();
     let hwnd = CreateWindowExW(
         window_ex_style(),
         WINDOW_CLASS,
@@ -535,13 +634,8 @@ unsafe fn create_vk_window() -> Result<HWND, String> {
         None,
     )
     .map_err(|e| format!("CreateWindowExW: {e}"))?;
-    // WS_EX_LAYERED window is invisible until alpha is set. Fully opaque (255).
-    let _ = SetLayeredWindowAttributes(
-        hwnd,
-        windows::Win32::Foundation::COLORREF(0),
-        255,
-        LWA_ALPHA,
-    );
+    // No SetLayeredWindowAttributes: with NOREDIRECTIONBITMAP there is no GDI surface;
+    // the DirectComposition swapchain (premultiplied alpha) supplies all pixels.
     Ok(hwnd)
 }
 
@@ -562,17 +656,18 @@ unsafe fn ensure_topmost(hwnd: HWND) {
     let _ = SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, TOPMOST_FLAGS);
 }
 
-unsafe fn start_zorder_timer(hwnd: HWND) {
+unsafe fn start_timers(hwnd: HWND) {
     let _ = SetTimer(hwnd, VK_ZORDER_TIMER_ID, VK_ZORDER_TIMER_MS, None);
+    let _ = SetTimer(hwnd, VK_RENDER_TIMER_ID, VK_RENDER_TIMER_MS, None);
 }
 
-unsafe fn stop_zorder_timer(hwnd: HWND) {
+unsafe fn stop_timers(hwnd: HWND) {
     let _ = KillTimer(hwnd, VK_ZORDER_TIMER_ID);
+    let _ = KillTimer(hwnd, VK_RENDER_TIMER_ID);
 }
 
 unsafe fn show_and_place(hwnd: HWND) {
-    let (outer_w, outer_h) = outer_window_size();
-    let (x, y) = work_area_bottom_center(outer_w, outer_h);
+    let (x, y, outer_w, outer_h) = vk_dock_rect();
     // Never activate. Joyxoff's `JoyXboxVkWindow` is NOACTIVATE and shown without
     // taking foreground, so the focused control (winlogon password edit) keeps focus
     // and Windows never auto-invokes the native touch keyboard.
@@ -587,14 +682,66 @@ unsafe fn show_and_place(hwnd: HWND) {
     );
     let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     ensure_topmost(hwnd);
-    start_zorder_timer(hwnd);
-    let _ = RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+    start_timers(hwnd);
     log_window_rect(hwnd);
 }
 
 unsafe fn destroy_vk_window(hwnd: HWND) {
-    stop_zorder_timer(hwnd);
+    stop_timers(hwnd);
+    // Release the renderer (D3D/D2D/DirectComposition, all bound to this HWND) BEFORE
+    // DestroyWindow. Dropping the composition target after its HWND is gone crashes.
+    // The borrow is dropped before DestroyWindow, so the synchronous WM_DESTROY can
+    // re-borrow UI safely.
+    let renderer = UI.with(|ui| {
+        let mut state = ui.borrow_mut();
+        if state.hwnd == Some(hwnd) {
+            state.hwnd = None;
+            state.renderer.take()
+        } else {
+            None
+        }
+    });
+    drop(renderer);
     let _ = DestroyWindow(hwnd);
+}
+
+fn render_frame() {
+    UI.with(|ui| {
+        let mut state = ui.borrow_mut();
+        let Some(hwnd) = state.hwnd else {
+            return;
+        };
+        let Some(renderer) = state.renderer.as_mut() else {
+            return;
+        };
+        unsafe {
+            if let Err(e) = renderer.resize(hwnd) {
+                vk_log::log(&format!("renderer resize: {e}"));
+            }
+            let pal = vk_palette(is_dark_theme());
+            let rows = vk_nav::rows_snapshot();
+            let sel = vk_nav::selection();
+            let candidates = crate::vk_predict::strip_view();
+            let top_inset = vk_renderer::top_chrome_inset(candidates.is_some());
+            let legend = if candidates.is_some() {
+                VK_LEGEND_PREDICT
+            } else {
+                VK_LEGEND
+            };
+            if let Err(e) = renderer.draw(
+                &pal,
+                &rows,
+                sel,
+                key_glyph,
+                key_hint,
+                legend,
+                top_inset,
+                candidates.as_ref(),
+            ) {
+                vk_log::log(&format!("renderer draw: {e}"));
+            }
+        }
+    });
 }
 
 unsafe fn log_window_rect(hwnd: HWND) {
@@ -623,123 +770,23 @@ pub fn wait_until_visible(timeout: Duration) -> bool {
     is_vk_visible()
 }
 
-fn paint_keys(hwnd: HWND) {
-    use windows::Win32::Foundation::{COLORREF, RECT};
-    unsafe {
-        let mut ps = PAINTSTRUCT::default();
-        let hdc = BeginPaint(hwnd, &mut ps);
-        if hdc.0.is_null() {
-            return;
-        }
-        let mut client = RECT::default();
-        let _ = GetClientRect(hwnd, &mut client);
-        let pal = palette(is_dark_theme());
-        let sel = vk_nav::selection();
-        let rows = vk_nav::rows_snapshot();
-
-        // Themed background.
-        let bg = CreateSolidBrush(COLORREF(pal.bg));
-        let _ = FillRect(hdc, &client, bg);
-        let _ = DeleteObject(HGDIOBJ(bg.0));
-
-        let (kw, kh) = key_metrics(client.right, client.bottom, &rows);
-
-        // Brushes + pens: key body (borderless) and the accent selection ring.
-        let key_brush = CreateSolidBrush(COLORREF(pal.key));
-        let sel_brush = CreateSolidBrush(COLORREF(pal.sel_fill));
-        let key_pen: HPEN = CreatePen(PS_SOLID, 1, COLORREF(pal.key));
-        let accent_pen: HPEN = CreatePen(PS_SOLID, 2, COLORREF(pal.accent));
-
-        // Bold labels in Segoe UI; special-key glyphs in Segoe UI Symbol.
-        let text_font = make_font(-(kh * 9 / 20), 600, "Segoe UI");
-        let glyph_font = make_font(-(kh / 2), 400, "Segoe UI Symbol");
-
-        let _ = SetBkMode(hdc, BACKGROUND_MODE(1)); // TRANSPARENT
-        let _ = SetTextColor(hdc, COLORREF(pal.text));
-
-        let mut y = ROW_TOP;
-        for (ri, row) in rows.iter().enumerate() {
-            let row_w = kw * row.len() as i32 + 4 * (row.len().saturating_sub(1) as i32);
-            let mut x = (client.right - row_w) / 2;
-            for (ci, key) in row.iter().enumerate() {
-                let selected = sel.row == ri && sel.col == ci;
-                let (left, top, right, bottom) = (x, y, x + kw, y + kh);
-
-                // Key body: rounded rect filled with the key colour, no visible border.
-                let prev_brush = SelectObject(hdc, HGDIOBJ(key_brush.0));
-                let prev_pen = SelectObject(hdc, HGDIOBJ(key_pen.0));
-                let _ = RoundRect(hdc, left, top, right, bottom, KEY_RADIUS, KEY_RADIUS);
-
-                // Selection: accent-tinted fill + 2px accent border (Joyxoff FUN_00464480).
-                if selected {
-                    let _ = SelectObject(hdc, HGDIOBJ(sel_brush.0));
-                    let _ = SelectObject(hdc, HGDIOBJ(accent_pen.0));
-                    let _ = RoundRect(hdc, left, top, right, bottom, KEY_RADIUS, KEY_RADIUS);
-                }
-                let _ = SelectObject(hdc, prev_brush);
-                let _ = SelectObject(hdc, prev_pen);
-
-                // Label or glyph.
-                let (glyph, symbol_font) = key_glyph(key);
-                if !glyph.is_empty() {
-                    let font = if symbol_font { glyph_font } else { text_font };
-                    let prev_font = SelectObject(hdc, HGDIOBJ(font.0));
-                    let mut label: Vec<u16> = glyph.encode_utf16().collect();
-                    let mut text_rect = RECT { left, top, right, bottom };
-                    let _ = DrawTextW(
-                        hdc,
-                        &mut label,
-                        &mut text_rect,
-                        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                    );
-                    let _ = SelectObject(hdc, prev_font);
-                }
-                x += kw + 4;
-            }
-            y += kh + ROW_GAP;
-        }
-
-        let _ = DeleteObject(HGDIOBJ(key_brush.0));
-        let _ = DeleteObject(HGDIOBJ(sel_brush.0));
-        let _ = DeleteObject(HGDIOBJ(key_pen.0));
-        let _ = DeleteObject(HGDIOBJ(accent_pen.0));
-        let _ = DeleteObject(HGDIOBJ(text_font.0));
-        let _ = DeleteObject(HGDIOBJ(glyph_font.0));
-        let _ = EndPaint(hwnd, &ps);
-    }
-}
-
-const ROW_GAP: i32 = 6;
-const ROW_TOP: i32 = 8;
-
-fn key_metrics(client_w: i32, client_h: i32, rows: &[Vec<KeyCell>]) -> (i32, i32) {
-    let max_cols = rows.iter().map(|r| r.len()).max().unwrap_or(10).max(1) as i32;
-    let kw = ((client_w - 32) / max_cols).clamp(48, 72);
-    // Shrink key height so every row of the active locale/layer fits the window.
-    let n = rows.len().max(1) as i32;
-    let avail = client_h - ROW_TOP * 2 - (n - 1) * ROW_GAP;
-    let kh = (avail / n).clamp(28, 48);
-    (kw, kh)
-}
-
 fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<KeyCell> {
     let mut client = windows::Win32::Foundation::RECT::default();
     unsafe {
         let _ = GetClientRect(hwnd, &mut client);
     }
     let rows = vk_nav::rows_snapshot();
-    let (kw, kh) = key_metrics(client.right, client.bottom, &rows);
-    let mut row_y = ROW_TOP;
-    for row in &rows {
-        let row_w = kw * row.len() as i32 + 4 * (row.len().saturating_sub(1) as i32);
-        let mut row_x = (client.right - row_w) / 2;
-        for key in row {
-            if x >= row_x && x < row_x + kw && y >= row_y && y < row_y + kh {
-                return Some(key.clone());
-            }
-            row_x += kw + 4;
+    let (xf, yf) = (x as f32, y as f32);
+    // Same layout the renderer draws with, so clicks always match the visible keys.
+    let top_inset = vk_renderer::top_chrome_inset(crate::vk_predict::strip_active());
+    for kr in vk_renderer::key_rects(client.right as f32, client.bottom as f32, &rows, top_inset)
+    {
+        if xf >= kr.left && xf < kr.right && yf >= kr.top && yf < kr.bottom {
+            return rows
+                .get(kr.pos.row)
+                .and_then(|r| r.keys.get(kr.pos.col))
+                .cloned();
         }
-        row_y += kh + ROW_GAP;
     }
     None
 }

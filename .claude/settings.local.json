@@ -53,7 +53,10 @@
       "mcp__ghidra__get_function_call_graph",
       "mcp__ghidra__batch_decompile",
       "Bash(ls -1 src src/win)",
-      "Bash(ls -1 tools)"
+      "Bash(ls -1 tools)",
+      "Bash(grep -rnA30 \"pub enum Button\" crates/warmup-gamepad/src/)",
+      "Bash(sed -i 's/        HWND_TOP,/        HWND::default\\(\\),/' src/win/vk_ui.rs)",
+      "Read(//c/c/Users/jonas/warmup-keyboard/src/win/**)"
     ]
   },
   "enabledMcpjsonServers": [

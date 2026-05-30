@@ -85,6 +85,23 @@ fn active() -> bool {
     ON_WINLOGON.load(Ordering::SeqCst)
 }
 
+/// Userland personal-dictionary gate (ADR 0001). `None` => conservative skip.
+pub fn focused_is_password_field() -> Option<bool> {
+    if active() {
+        return Some(false);
+    }
+    if unsafe { GetCurrentThreadId() } != LOOP_TID.load(Ordering::SeqCst) {
+        return None;
+    }
+    let auto = automation()?;
+    let el = unsafe { auto.GetFocusedElement().ok()? };
+    Some(unsafe {
+        el.CurrentIsPassword()
+            .map(|b| b.as_bool())
+            .unwrap_or(false)
+    })
+}
+
 /// Drop the cached password element (winlogon exit, VK close, account switch).
 pub fn clear_cache() {
     let _ = PWD_ELEMENT.try_with(|s| *s.borrow_mut() = None);
