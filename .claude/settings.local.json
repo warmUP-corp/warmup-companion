@@ -56,7 +56,14 @@
       "Bash(ls -1 tools)",
       "Bash(grep -rnA30 \"pub enum Button\" crates/warmup-gamepad/src/)",
       "Bash(sed -i 's/        HWND_TOP,/        HWND::default\\(\\),/' src/win/vk_ui.rs)",
-      "Read(//c/c/Users/jonas/warmup-keyboard/src/win/**)"
+      "Read(//c/c/Users/jonas/warmup-keyboard/src/win/**)",
+      "Bash(echo \"g=$?\")",
+      "Bash(awk 'NR>=625 && NR<=632' mod.rs)",
+      "Bash(awk 'NR>=963 && NR<=970' mod.rs)",
+      "PowerShell(Test-Path *)",
+      "PowerShell(Out-Null *)",
+      "Bash(/c/Users/jonas/AppData/Local/Microsoft/WindowsApps/cdbX64.exe -z 'C:\\\\ProgramData\\\\WarmupVk\\\\worker-crash-36876.dmp' -y 'srv*C:\\\\symbols*https://msdl.microsoft.com/download/symbols' -c '.symfix; .reload; !analyze -v; .ecxr; kP; ~*kb; q')",
+      "Bash(/c/Users/jonas/AppData/Local/Microsoft/WindowsApps/cdbX64.exe -z 'C:\\\\ProgramData\\\\WarmupVk\\\\worker-crash-32080.dmp' -y 'srv*C:\\\\symbols*https://msdl.microsoft.com/download/symbols' -c '.ecxr; kP; q')"
     ]
   },
   "enabledMcpjsonServers": [

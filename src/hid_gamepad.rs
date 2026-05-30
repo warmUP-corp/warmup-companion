@@ -582,22 +582,32 @@ fn device_vid_pid_name(hdevice: isize) -> Option<(u16, u16, String)> {
     let hid = unsafe { info.Anonymous.hid };
     let vid = hid.dwVendorId as u16;
     let pid = hid.dwProductId as u16;
-    let mut name_bytes = 0u32;
+    // RIDI_DEVICENAME reports the size in CHARACTERS, NOT bytes (unlike
+    // RIDI_PREPARSEDDATA / RIDI_DEVICEINFO above, which are byte counts).
+    // Sizing the u16 buffer as `count / 2` allocated HALF the space needed; the
+    // second call then wrote the full UTF-16 device-interface path — which
+    // contains the HID interface GUID "{...-11cf-...}" — past the end of the
+    // Vec, smashing the next heap allocation's pointer field. That corruption
+    // surfaced later as random AVs in combase's class cache (XInput device
+    // re-enum) and the NVIDIA UMD. Treat the count as characters end to end.
+    let mut name_chars = 0u32;
     unsafe {
-        GetRawInputDeviceInfoW(handle, RIDI_DEVICENAME, None, &mut name_bytes);
+        GetRawInputDeviceInfoW(handle, RIDI_DEVICENAME, None, &mut name_chars);
     }
-    let name = if name_bytes > 2 {
-        let mut buf = vec![0u16; name_bytes as usize / 2 + 1];
+    let name = if name_chars > 1 {
+        let mut buf = vec![0u16; name_chars as usize + 1];
+        let mut cap = buf.len() as u32;
         let got = unsafe {
             GetRawInputDeviceInfoW(
                 handle,
                 RIDI_DEVICENAME,
                 Some(buf.as_mut_ptr().cast()),
-                &mut name_bytes,
+                &mut cap,
             )
         };
         if got != u32::MAX && got > 0 {
-            let len = (got as usize / 2).min(buf.len()).saturating_sub(1);
+            let written = (got as usize).min(buf.len());
+            let len = buf[..written].iter().position(|&c| c == 0).unwrap_or(written);
             String::from_utf16_lossy(&buf[..len])
         } else {
             String::new()

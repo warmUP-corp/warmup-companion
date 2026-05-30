@@ -5,6 +5,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use crate::predict_ngram;
+
 const MIN_PREFIX_LEN: usize = 2;
 const MAX_CANDIDATES: usize = 5;
 const VISIBLE: usize = 3;
@@ -16,8 +18,8 @@ fn new_state() -> PredictState {
         partial: String::new(),
         ranked: Vec::new(),
         highlight: 0,
+        candidate_engaged: false,
         personal: HashSet::new(),
-        personal_dirty: false,
     }
 }
 
@@ -30,26 +32,29 @@ struct PredictState {
     partial: String,
     ranked: Vec<String>,
     highlight: usize,
+    /// True after LB/RB cycle while the strip is showing (A may commit).
+    candidate_engaged: bool,
     personal: HashSet<String>,
-    personal_dirty: bool,
 }
 
 /// Snapshot for the candidate strip renderer.
 pub struct StripView {
     pub visible: [String; VISIBLE],
     pub highlight_slot: usize,
+    pub engaged: bool,
 }
 
 fn lexicon() -> &'static [&'static str] {
-    static WORDS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
-    WORDS.get_or_init(|| {
-        include_str!("predict_lexicon.txt")
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .collect()
-    })
-    .as_slice()
+    predict_ngram::LEXICON
+}
+
+fn words_with_prefix<'a>(prefix: &'a str) -> impl Iterator<Item = &'a str> {
+    let lex = lexicon();
+    let start = lex.partition_point(|w| *w < prefix);
+    lex[start..]
+        .iter()
+        .copied()
+        .take_while(move |w| w.starts_with(prefix))
 }
 
 fn personal_dict_path() -> Option<PathBuf> {
@@ -111,64 +116,48 @@ pub fn reset() {
     s.partial.clear();
     s.ranked.clear();
     s.highlight = 0;
+    s.candidate_engaged = false;
     s.enabled = predictions_enabled();
     load_personal(&mut s.personal);
-    s.personal_dirty = false;
 }
 
 fn refresh_ranked(s: &mut PredictState) {
     s.ranked.clear();
     s.highlight = 0;
+    s.candidate_engaged = false;
     if !s.enabled || s.partial.len() < MIN_PREFIX_LEN {
         return;
     }
     let prefix = s.partial.as_str();
-    let prev = s.words.last().map(|w| w.as_str());
-    let mut scored: Vec<(i32, String)> = Vec::new();
-    for &word in lexicon() {
-        if !word.starts_with(prefix) {
+    let prev = s.words.last().and_then(|w| predict_ngram::word_id(w));
+    let prev2 = s
+        .words
+        .get(s.words.len().saturating_sub(2))
+        .and_then(|w| predict_ngram::word_id(w));
+
+    let mut scored: Vec<(u32, String)> = Vec::new();
+    for word in words_with_prefix(prefix) {
+        let Some(id) = predict_ngram::word_id(word) else {
             continue;
-        }
-        let mut score = lexicon_priority(word);
-        if s.personal.contains(word) {
-            score += 10_000;
-        }
-        if prev.is_some_and(|p| bigram_boost(p, word) > 0) {
-            score += 5_000;
-        }
+        };
+        let personal = s.personal.contains(word);
+        let score = predict_ngram::rank_score(prev, prev2, id, personal);
         scored.push((score, word.to_string()));
     }
     for word in &s.personal {
         if word.starts_with(prefix) && !scored.iter().any(|(_, w)| w == word) {
-            scored.push((10_000 + lexicon_priority(word), word.clone()));
+            let score = predict_ngram::rank_score(
+                prev,
+                prev2,
+                predict_ngram::word_id(word).unwrap_or(0),
+                true,
+            );
+            scored.push((score, word.clone()));
         }
     }
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     for (_, w) in scored.into_iter().take(MAX_CANDIDATES) {
         s.ranked.push(w);
-    }
-}
-
-fn lexicon_priority(word: &str) -> i32 {
-    lexicon()
-        .iter()
-        .position(|&w| w == word)
-        .map(|i| (lexicon().len() - i) as i32)
-        .unwrap_or(0)
-}
-
-fn bigram_boost(prev: &str, next: &str) -> i32 {
-    static PAIRS: &[(&str, &str)] = &[
-        ("the", "quick"),
-        ("sign", "in"),
-        ("virtual", "keyboard"),
-        ("text", "prediction"),
-        ("game", "pad"),
-    ];
-    if PAIRS.contains(&(prev, next)) {
-        1
-    } else {
-        0
     }
 }
 
@@ -195,7 +184,15 @@ pub fn strip_view() -> Option<StripView> {
     Some(StripView {
         visible,
         highlight_slot,
+        engaged: s.candidate_engaged,
     })
+}
+
+pub fn candidate_engaged() -> bool {
+    STATE
+        .lock()
+        .map(|s| s.candidate_engaged && strip_active_inner(&s))
+        .unwrap_or(false)
 }
 
 fn strip_active_inner(s: &PredictState) -> bool {
@@ -223,6 +220,7 @@ pub fn cycle_next() -> bool {
         return false;
     }
     s.highlight = (s.highlight + 1) % s.ranked.len();
+    s.candidate_engaged = true;
     true
 }
 
@@ -238,6 +236,7 @@ pub fn cycle_prev() -> bool {
     } else {
         s.highlight - 1
     };
+    s.candidate_engaged = true;
     true
 }
 
@@ -307,6 +306,7 @@ fn finish_word(s: &mut PredictState) {
     }
     s.ranked.clear();
     s.highlight = 0;
+    s.candidate_engaged = false;
 }
 
 fn maybe_learn(s: &mut PredictState, word: &str) {
@@ -319,9 +319,7 @@ fn maybe_learn(s: &mut PredictState, word: &str) {
         Some(false) => {}
     }
     if s.personal.insert(w) {
-        s.personal_dirty = true;
         flush_personal(&s.personal);
-        s.personal_dirty = false;
     }
 }
 
@@ -355,11 +353,13 @@ pub fn commit_highlighted() -> bool {
     s.partial.clear();
     s.ranked.clear();
     s.highlight = 0;
+    s.candidate_engaged = false;
     true
 }
 
-pub fn commit_if_strip_active() -> bool {
-    if strip_active() {
+/// Commit only when the user picked a chip with LB/RB first.
+pub fn commit_if_engaged() -> bool {
+    if candidate_engaged() {
         commit_highlighted()
     } else {
         false
@@ -369,20 +369,58 @@ pub fn commit_if_strip_active() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn type_word(s: &str) {
+        for c in s.chars() {
+            on_char(c);
+        }
+        on_space();
+    }
 
     #[test]
     fn prefix_finds_keyboard() {
+        let _g = TEST_LOCK.lock().unwrap();
         reset();
-        on_char('k');
-        on_char('e');
+        for c in "keyb".chars() {
+            on_char(c);
+        }
         assert!(strip_active());
-        let view = strip_view().unwrap();
-        assert!(view.visible.iter().any(|w| w == "keyboard"));
+        let ranked = STATE.lock().unwrap().ranked.clone();
+        assert!(ranked.iter().any(|w| w == "keyboard"));
+    }
+
+    #[test]
+    fn bigram_prefers_in_after_the() {
+        let _g = TEST_LOCK.lock().unwrap();
+        reset();
+        type_word("the");
+        on_char('i');
+        on_char('n');
+        let ranked = STATE.lock().unwrap().ranked.clone();
+        assert!(!ranked.is_empty(), "ranked: {ranked:?}");
+        assert_eq!(ranked[0], "in", "ranked: {ranked:?}");
     }
 
     #[test]
     fn viewport_at_end() {
         assert_eq!(viewport_start(4, 5), 2);
         assert_eq!(viewport_start(0, 5), 0);
+    }
+
+    #[test]
+    fn a_does_not_commit_until_shoulder_cycle() {
+        let _g = TEST_LOCK.lock().unwrap();
+        reset();
+        for c in "keyb".chars() {
+            on_char(c);
+        }
+        assert!(strip_active());
+        assert!(!candidate_engaged());
+        assert!(!commit_if_engaged());
+        cycle_next();
+        assert!(candidate_engaged());
     }
 }

@@ -27,7 +27,7 @@ use super::vk_renderer::VkRenderer;
 const WINDOW_CLASS: windows::core::PCWSTR = w!("WarmupDebugOverlayWindow");
 
 const PANEL_W: i32 = 900;
-const PANEL_H: i32 = 150;
+const PANEL_H: i32 = 180;
 const REPAINT_TIMER_ID: usize = 11;
 const REPAINT_TIMER_MS: u32 = 250;
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
@@ -78,6 +78,7 @@ thread_local! {
     static DBG_RENDERER: RefCell<Option<VkRenderer>> = const { RefCell::new(None) };
     static F10_DOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static F9_DOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static F8_DOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 static CONTROLLER: OnceLock<Mutex<DebugOverlayController>> = OnceLock::new();
@@ -284,6 +285,17 @@ fn poll_debug_shortcut() {
             service_log("debug shortcut: F9 UIA foreground dump requested");
         }
     });
+    // F8: stop the service outright (escape hatch when the VK is interfering with
+    // sign-in). Asks the SCM to stop WarmupVkSvc; the launcher then kills the worker.
+    let f8 = unsafe { GetAsyncKeyState(0x77) < 0 }; // VK_F8
+    F8_DOWN.with(|was_down| {
+        let pressed = f8 && !was_down.get();
+        was_down.set(f8);
+        if pressed {
+            service_log("debug shortcut: F8 stop service requested");
+            crate::install::request_service_stop();
+        }
+    });
 }
 
 /// Render the panel through the shared D3D11/D2D/DComp renderer. Colours are GDI
@@ -309,6 +321,7 @@ fn render_debug(hwnd: HWND) {
         (0x00FFFFFFu32, format!("input: {input}")),
         (0x00FFFFFFu32, format!("desktop: {desktop}")),
         (0x0000D0FFu32, detail),
+        (0x00FF8000u32, "F8 stop service  ·  F9 UIA dump  ·  F10 toggle VK".to_string()),
     ];
     // Accent border in COLORREF (R=0x4c,G=0x7b,B=0x99) -> 0x00997b4c.
     DBG_RENDERER.with(|c| {

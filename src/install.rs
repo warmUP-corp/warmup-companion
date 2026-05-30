@@ -67,6 +67,24 @@ pub fn run_stop() {
     }
 }
 
+/// Escape hatch: ask the SCM to stop the service from inside the worker process
+/// (the debug overlay's F8). The worker runs under the duplicated Winlogon
+/// (LocalSystem) token, which has `SERVICE_STOP` rights, so a detached `sc stop`
+/// reaches the launcher's control handler — which tears the worker down. Spawned
+/// with `CREATE_NO_WINDOW` so no console flashes on the secure desktop.
+pub fn request_service_stop() {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    log_line("debug ui: stop service requested (sc stop)");
+    if let Err(e) = Command::new("sc")
+        .args(["stop", SERVICE_NAME])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+    {
+        log_line(&format!("debug ui: sc stop spawn failed: {e}"));
+    }
+}
+
 fn install_inner() -> Result<(), String> {
     require_admin()?;
     remove_legacy_install_artifacts();

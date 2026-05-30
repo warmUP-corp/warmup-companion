@@ -2,6 +2,7 @@
 name = "warmup-vk-prototype"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 [features]
 default = []
@@ -36,9 +37,12 @@ windows = { version = "0.58", features = [
     "Win32_Security_Authorization",
     "Win32_System_Com",
     "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Environment",
+    "Win32_System_Kernel",
     "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
     "Win32_System_Registry",
     "Win32_System_Variant",
     "Win32_System_RemoteDesktop",

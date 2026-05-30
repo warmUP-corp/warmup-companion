@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
-use crate::gamepad_backend::{Button, ButtonChange, GamepadBackend, SdlBackend};
+use crate::gamepad_backend::{Button, ButtonChange, GamepadBackend, SdlBackend, SdlThreadBackend};
 use crate::pc_cursor::PcCursor;
 
 #[cfg(windows)]
@@ -31,7 +31,10 @@ pub enum VkLoopAction {
 }
 
 enum Backend {
-    Sdl(SdlBackend),
+    /// Boxed so it can hold either the on-thread `SdlBackend` (interactive
+    /// `--gamepad`) or the off-thread `SdlThreadBackend` (service worker, where
+    /// the loop thread must own no window so it can `SetThreadDesktop`).
+    Sdl(Box<dyn GamepadBackend>),
     #[cfg(windows)]
     XInput(XInputBackend),
 }
@@ -120,7 +123,7 @@ impl GamepadPoll {
         } else {
             println!("> warmup-gamepad (SDL3): {label}");
         }
-        Ok(Self::new(Backend::Sdl(backend)))
+        Ok(Self::new(Backend::Sdl(Box::new(backend))))
     }
 
     #[cfg(windows)]
@@ -137,13 +140,14 @@ impl GamepadPoll {
             service_log("gamepad backend: HID + XInput (Winlogon)");
             Backend::XInput(XInputBackend::new())
         } else {
-            match SdlBackend::open() {
+            // Service userland: SDL on its own thread (off the loop/SendInput thread).
+            match SdlThreadBackend::open() {
                 Ok(b) => {
                     service_log(&format!(
                         "gamepad backend: SDL3 (userland) — {}",
                         b.controller_label()
                     ));
-                    Backend::Sdl(b)
+                    Backend::Sdl(Box::new(b))
                 }
                 Err(e) => {
                     service_log(&format!(
@@ -192,13 +196,13 @@ impl GamepadPoll {
             if let Err(e) = crate::win::attach_input() {
                 service_log(&format!("loop thread attach input(Default) failed: {e}"));
             }
-            match SdlBackend::open() {
+            match SdlThreadBackend::open() {
                 Ok(b) => {
                     service_log(&format!(
                         "input desktop → Default: switching to SDL3 — {}",
                         b.controller_label()
                     ));
-                    Backend::Sdl(b)
+                    Backend::Sdl(Box::new(b))
                 }
                 Err(e) => {
                     service_log(&format!(
@@ -430,7 +434,7 @@ impl GamepadPoll {
             }
             (Button::A, false) if self.a_down_while_vk => {
                 self.a_down_while_vk = false;
-                if !crate::vk_predict::commit_if_strip_active() {
+                if !crate::vk_predict::commit_if_engaged() {
                     vk_nav::activate_selection();
                 }
                 vk_ui::request_repaint();

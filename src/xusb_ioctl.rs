@@ -236,20 +236,19 @@ fn query_led(handle: HANDLE) -> Option<u8> {
 
 /// Parse the GET_GAMEPAD_STATE output buffer.
 ///
-/// PROVISIONAL LAYOUT — verify against `XusbReport.raw` on real hardware:
-/// the request returns a small header followed by a structure that mirrors
-/// XINPUT_STATE (DWORD packet + XINPUT_GAMEPAD). Reported reports are 29 bytes;
-/// the gamepad payload is assumed to begin after a 2-byte header:
-///   [0]      status
-///   [1]      size (0x14 = 20)
-///   [2..6]   dwPacketNumber  (u32 LE)
-///   [6..8]   wButtons        (u16 LE)
-///   [8]      bLeftTrigger
-///   [9]      bRightTrigger
-///   [10..12] sThumbLX        (i16 LE)
-///   [12..14] sThumbLY
-///   [14..16] sThumbRX
-///   [16..18] sThumbRY
+/// CONFIRMED LAYOUT (decoded from real `XusbReport.raw` dumps cross-checked
+/// against the XInput DLL's `btn/lx/ly/rx/ry` on the same frame). The report is
+/// 29 bytes: a header, then an XINPUT_GAMEPAD-shaped payload at offset 11. Byte
+/// 10 is `0x13` while a packet is valid (0x00 on an empty/neutral read):
+///   [4..8]   packet/sequence (low byte at [5] increments per poll)
+///   [10]     valid marker (0x13 = payload present)
+///   [11..13] wButtons        (u16 LE, XINPUT bit layout)
+///   [13]     bLeftTrigger
+///   [14]     bRightTrigger
+///   [15..17] sThumbLX        (i16 LE)
+///   [17..19] sThumbLY
+///   [19..21] sThumbRX
+///   [21..23] sThumbRY
 fn parse_report(raw: &[u8]) -> XusbReport {
     let r = |off: usize, len: usize| -> Option<&[u8]> {
         raw.get(off..off + len)
@@ -260,20 +259,16 @@ fn parse_report(raw: &[u8]) -> XusbReport {
     let i16le = |off: usize| -> i16 {
         r(off, 2).map_or(0, |b| i16::from_le_bytes([b[0], b[1]]))
     };
-    let u32le = |off: usize| -> u32 {
-        r(off, 4)
-            .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    };
 
     XusbReport {
-        packet: u32le(2),
-        buttons: u16le(6),
-        left_trigger: raw.get(8).copied().unwrap_or(0),
-        right_trigger: raw.get(9).copied().unwrap_or(0),
-        thumb_lx: i16le(10),
-        thumb_ly: i16le(12),
-        thumb_rx: i16le(14),
-        thumb_ry: i16le(16),
+        packet: raw.get(5).copied().unwrap_or(0) as u32,
+        buttons: u16le(11),
+        left_trigger: raw.get(13).copied().unwrap_or(0),
+        right_trigger: raw.get(14).copied().unwrap_or(0),
+        thumb_lx: i16le(15),
+        thumb_ly: i16le(17),
+        thumb_rx: i16le(19),
+        thumb_ry: i16le(21),
         raw: raw.to_vec(),
     }
 }

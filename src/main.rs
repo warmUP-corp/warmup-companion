@@ -4,6 +4,8 @@ mod vk_gate;
 
 #[cfg(windows)]
 mod install;
+#[cfg(windows)]
+mod crash;
 #[cfg(all(windows, feature = "service"))]
 mod service;
 
@@ -11,6 +13,8 @@ mod service;
 mod debug_state;
 #[cfg(windows)]
 mod vk_nav;
+#[cfg(windows)]
+mod predict_ngram;
 #[cfg(windows)]
 mod vk_predict;
 #[cfg(windows)]

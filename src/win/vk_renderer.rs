@@ -6,12 +6,15 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
-    D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_ROUNDED_RECT, ID2D1Bitmap1, ID2D1Device,
+    D2D1CreateFactory, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
+    D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, ID2D1Bitmap1, ID2D1Device,
     ID2D1DeviceContext, ID2D1Factory1, ID2D1SolidColorBrush,
 };
-use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
+use windows::Win32::Graphics::Direct3D::{
+    D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_11_0,
+};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, ID3D11Device,
 };
@@ -49,6 +52,97 @@ fn colorref(c: u32) -> D2D1_COLOR_F {
     }
 }
 
+fn colorref_alpha(c: u32, alpha: f32) -> D2D1_COLOR_F {
+    let mut col = colorref(c);
+    col.a = alpha;
+    col
+}
+
+fn configure_d2d_quality(ctx: &ID2D1DeviceContext) {
+    // Default D2D text path can look aliased on our DXGI composition target.
+    let _ = unsafe { ctx.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE) };
+    let _ = unsafe { ctx.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+}
+
+fn chip_width(word: &str) -> f32 {
+    let n = word.chars().count() as f32;
+    (n * 7.8 + CHIP_PAD_X * 2.0).clamp(CHIP_MIN_W, 200.0)
+}
+
+unsafe fn draw_candidate_strip(
+    ctx: &ID2D1DeviceContext,
+    cw: f32,
+    strip: &crate::vk_predict::StripView,
+    key_brush: &ID2D1SolidColorBrush,
+    accent_brush: &ID2D1SolidColorBrush,
+    text_brush: &ID2D1SolidColorBrush,
+    sel_text_brush: &ID2D1SolidColorBrush,
+    chip_format: &IDWriteTextFormat,
+    pal: &VkPalette,
+) -> Result<(), String> {
+    let mut widths = [0.0f32; 3];
+    let mut count = 0usize;
+    for (i, word) in strip.visible.iter().enumerate() {
+        if word.is_empty() {
+            continue;
+        }
+        widths[i] = chip_width(word);
+        count += 1;
+    }
+    if count == 0 {
+        return Ok(());
+    }
+
+    let total_w: f32 = widths.iter().sum::<f32>() + CHIP_GAP * (count.saturating_sub(1) as f32);
+    let mut x = (cw - total_w) / 2.0;
+    let outline = solid_brush(&ctx, colorref_alpha(pal.text, 0.28))?;
+    let radius = CHIP_H * 0.42;
+
+    for (i, word) in strip.visible.iter().enumerate() {
+        if word.is_empty() {
+            continue;
+        }
+        let w = widths[i];
+        let selected = strip.engaged && i == strip.highlight_slot;
+        let rect = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: x,
+                top: CHIP_TOP,
+                right: x + w,
+                bottom: CHIP_TOP + CHIP_H,
+            },
+            radiusX: radius,
+            radiusY: radius,
+        };
+        let (fill, label) = if selected {
+            (accent_brush, sel_text_brush)
+        } else {
+            (key_brush, text_brush)
+        };
+        ctx.FillRoundedRectangle(&rect, fill);
+        if !selected {
+            ctx.DrawRoundedRectangle(&rect, &outline, 1.25, None);
+        }
+        let label_rect = D2D_RECT_F {
+            left: rect.rect.left + CHIP_LABEL_INSET_X,
+            top: rect.rect.top + CHIP_LABEL_INSET_Y,
+            right: rect.rect.right - CHIP_LABEL_INSET_X,
+            bottom: rect.rect.bottom - CHIP_LABEL_INSET_Y,
+        };
+        let wide: Vec<u16> = word.encode_utf16().collect();
+        ctx.DrawText(
+            &wide,
+            chip_format,
+            &label_rect,
+            label,
+            D2D1_DRAW_TEXT_OPTIONS_CLIP,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
+        x += w + CHIP_GAP;
+    }
+    Ok(())
+}
+
 pub struct VkPalette {
     pub bg: u32,
     pub key: u32,
@@ -69,6 +163,8 @@ pub struct VkRenderer {
     glyph_format: IDWriteTextFormat,
     /// Small font for sublabels, badges, and the legend strip.
     hint_format: IDWriteTextFormat,
+    /// Fixed-size labels on prediction chips (not scaled with key height).
+    chip_format: IDWriteTextFormat,
     sublabel_format: IDWriteTextFormat,
     _d3d: ID3D11Device,
     _d2d_device: ID2D1Device,
@@ -87,18 +183,22 @@ const KEY_ASPECT: f32 = 68.0 / 92.0;
 const REF_GAP: f32 = 4.0;
 /// Corner radius as a fraction of key height (Joyxoff 6.8/68).
 const RADIUS_FRAC: f32 = 6.8 / 68.0;
-/// Height of the top legend strip (button→action hints).
-const LEGEND_STRIP_H: f32 = 30.0;
-/// Prefix-completion candidate row above the legend.
-pub const CANDIDATE_STRIP_H: f32 = 34.0;
+/// Prefix-completion candidate strip (reclaims former legend/tooltip row).
+pub const CANDIDATE_STRIP_H: f32 = 70.0;
 
-/// Top chrome (legend + optional candidates) — keeps keys aligned with paint.
-pub fn top_chrome_inset(candidates: bool) -> f32 {
-    if candidates {
-        LEGEND_STRIP_H + CANDIDATE_STRIP_H
-    } else {
-        LEGEND_STRIP_H
-    }
+const CHIP_H: f32 = 48.0;
+const CHIP_GAP: f32 = 10.0;
+const CHIP_PAD_X: f32 = 14.0;
+const CHIP_MIN_W: f32 = 58.0;
+const CHIP_TOP: f32 = 11.0;
+const CHIP_LABEL_INSET_X: f32 = 8.0;
+const CHIP_LABEL_INSET_Y: f32 = 4.0;
+/// Chip label size in DIPs — independent of key label scaling.
+const CHIP_FONT_PX: f32 = 14.0;
+
+/// Top chrome always reserved so keys do not shift when chips appear.
+pub fn top_chrome_inset() -> f32 {
+    CANDIDATE_STRIP_H
 }
 /// Key width in px for a span of `n` key-units (`FUN_00463bd0`: span×keyW + (span−1)×gap).
 fn key_width(kw: f32, gap: f32, span: f32) -> f32 {
@@ -139,7 +239,7 @@ fn row_stretch_key(row_index: usize, key_count: usize) -> usize {
 }
 
 pub fn key_rects(client_w: f32, client_h: f32, rows: &[KeyRow], top_inset: f32) -> Vec<KeyRect> {
-    let (kw, kh, gap) = key_metrics(client_w, client_h, rows);
+    let (kw, kh, gap) = key_metrics(client_w, client_h, rows, top_inset);
     let n = rows.len() as f32;
     let block_h = n * kh + (n - 1.0).max(0.0) * gap;
     let mut top = top_inset + ((client_h - top_inset - block_h) / 2.0).max(0.0);
@@ -183,22 +283,15 @@ impl VkRenderer {
         let width = (client.right - client.left).max(1) as u32;
         let height = (client.bottom - client.top).max(1) as u32;
 
-        // Joyxoff `FUN_0041e670`: D3D11CreateDevice(NULL, HARDWARE, NULL, BGRA, NULL, 0, SDK=7, …).
-        let feature_levels = [D3D_FEATURE_LEVEL_11_0];
-        let mut d3d: Option<ID3D11Device> = None;
-        D3D11CreateDevice(
-            None,
-            D3D_DRIVER_TYPE_HARDWARE,
-            None,
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            Some(&feature_levels),
-            D3D11_SDK_VERSION,
-            Some(&mut d3d as *mut _),
-            None,
-            None,
-        )
-        .map_err(|e| format!("D3D11CreateDevice: {e}"))?;
-        let d3d = d3d.ok_or("D3D11CreateDevice returned null")?;
+        // NVIDIA's D3D11 user-mode driver (nvwgf2umx.dll) faults with 0xC0000005
+        // when driven on the Winlogon secure desktop — the GPU context there is
+        // unreliable (confirmed via minidump). On the secure desktop, render with
+        // the WARP software rasterizer, which never loads the vendor UMD. Userland
+        // keeps hardware for perf. Either way, fall back to the other on failure.
+        let on_secure = crate::win::current_desktop_name()
+            .map(|n| n.eq_ignore_ascii_case("Winlogon"))
+            .unwrap_or(false);
+        let d3d = create_d3d_device(on_secure)?;
         let dxgi_device: IDXGIDevice = d3d.cast().map_err(|e| format!("IDXGIDevice: {e}"))?;
 
         let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))
@@ -231,6 +324,7 @@ impl VkRenderer {
         let d2d_context = d2d_device
             .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)
             .map_err(|e| format!("CreateDeviceContext: {e}"))?;
+        configure_d2d_quality(&d2d_context);
 
         let d2d_target = bind_d2d_target(&d2d_context, &swapchain)?;
 
@@ -294,6 +388,17 @@ impl VkRenderer {
                 &locale,
             )
             .map_err(|e| format!("CreateTextFormat (hint): {e}"))?;
+        let chip_format = dwrite
+            .CreateTextFormat(
+                w!("Segoe UI"),
+                &fonts,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                CHIP_FONT_PX,
+                &locale,
+            )
+            .map_err(|e| format!("CreateTextFormat (chip): {e}"))?;
         let sublabel_format = dwrite
             .CreateTextFormat(
                 w!("Segoe UI"),
@@ -314,6 +419,8 @@ impl VkRenderer {
         // Badges/legend: horizontally centred, anchored to the top of their rect.
         let _ = hint_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         let _ = hint_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        let _ = chip_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        let _ = chip_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         let _ = sublabel_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         let _ = sublabel_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
 
@@ -327,6 +434,7 @@ impl VkRenderer {
             text_format,
             glyph_format,
             hint_format,
+            chip_format,
             sublabel_format,
             _d3d: d3d,
             _d2d_device: d2d_device,
@@ -362,7 +470,6 @@ impl VkRenderer {
         sel: KeyPos,
         key_glyph: fn(&KeyCell) -> (String, bool),
         key_hint: fn(&KeyCell) -> Option<&'static str>,
-        legend: &str,
         top_inset: f32,
         candidates: Option<&crate::vk_predict::StripView>,
     ) -> Result<(), String> {
@@ -378,41 +485,17 @@ impl VkRenderer {
         let sel_text_brush = solid_brush(&self.d2d_context, colorref(pal.sel_text))?;
 
         if let Some(strip) = candidates {
-            let slot_w = cw / 3.0;
-            for (i, word) in strip.visible.iter().enumerate() {
-                if word.is_empty() {
-                    continue;
-                }
-                let selected = i == strip.highlight_slot;
-                let left = i as f32 * slot_w + 4.0;
-                let rect = D2D_RECT_F {
-                    left,
-                    top: 4.0,
-                    right: left + slot_w - 8.0,
-                    bottom: 4.0 + CANDIDATE_STRIP_H - 6.0,
-                };
-                let radius = 6.0;
-                let rounded = D2D1_ROUNDED_RECT {
-                    rect,
-                    radiusX: radius,
-                    radiusY: radius,
-                };
-                let (fill, label_brush) = if selected {
-                    (&accent_brush, &sel_text_brush)
-                } else {
-                    (&key_brush, &text_brush)
-                };
-                self.d2d_context.FillRoundedRectangle(&rounded, fill);
-                let w: Vec<u16> = word.encode_utf16().collect();
-                self.d2d_context.DrawText(
-                    &w,
-                    &self.text_format,
-                    &rect,
-                    label_brush,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    DWRITE_MEASURING_MODE_NATURAL,
-                );
-            }
+            draw_candidate_strip(
+                &self.d2d_context,
+                cw,
+                strip,
+                &key_brush,
+                &accent_brush,
+                &text_brush,
+                &sel_text_brush,
+                &self.chip_format,
+                pal,
+            )?;
         }
 
         for kr in key_rects(cw, ch, rows, top_inset) {
@@ -508,30 +591,6 @@ impl VkRenderer {
             }
         }
 
-        // Legend strip below candidates (button -> action key).
-        if !legend.is_empty() {
-            let w: Vec<u16> = legend.encode_utf16().collect();
-            let legend_top = if candidates.is_some() {
-                CANDIDATE_STRIP_H + 2.0
-            } else {
-                4.0
-            };
-            let strip = D2D_RECT_F {
-                left: 0.0,
-                top: legend_top,
-                right: cw,
-                bottom: legend_top + 28.0,
-            };
-            self.d2d_context.DrawText(
-                &w,
-                &self.hint_format,
-                &strip,
-                &text_brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
-        }
-
         drop(key_brush);
         drop(accent_brush);
         drop(text_brush);
@@ -614,6 +673,50 @@ impl VkRenderer {
     }
 }
 
+/// Create the D3D11 device, preferring WARP (software) on the secure desktop to
+/// dodge the NVIDIA UMD crash, hardware otherwise. Falls back to the other driver
+/// type if the preferred one fails to create.
+unsafe fn create_d3d_device(prefer_warp: bool) -> Result<ID3D11Device, String> {
+    let order: [D3D_DRIVER_TYPE; 2] = if prefer_warp {
+        [D3D_DRIVER_TYPE_WARP, D3D_DRIVER_TYPE_HARDWARE]
+    } else {
+        [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP]
+    };
+    let feature_levels = [D3D_FEATURE_LEVEL_11_0];
+    let mut last = String::from("no driver attempted");
+    for driver in order {
+        let mut d3d: Option<ID3D11Device> = None;
+        match D3D11CreateDevice(
+            None,
+            driver,
+            None,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            Some(&feature_levels),
+            D3D11_SDK_VERSION,
+            Some(&mut d3d as *mut _),
+            None,
+            None,
+        ) {
+            Ok(()) => {
+                if let Some(d) = d3d {
+                    let kind = if driver == D3D_DRIVER_TYPE_WARP {
+                        "WARP (software)"
+                    } else {
+                        "hardware"
+                    };
+                    if crate::config::service_mode() {
+                        crate::install::log_line(&format!("vk renderer: D3D11 device = {kind}"));
+                    }
+                    return Ok(d);
+                }
+                last = "D3D11CreateDevice returned null".to_string();
+            }
+            Err(e) => last = format!("{e}"),
+        }
+    }
+    Err(format!("D3D11CreateDevice (all driver types): {last}"))
+}
+
 unsafe fn bind_d2d_target(
     ctx: &ID2D1DeviceContext,
     swapchain: &IDXGISwapChain1,
@@ -665,14 +768,14 @@ fn user_locale_name() -> windows::core::HSTRING {
 /// Returns `(key_width, key_height, gap)` in px. Keys are sized from the window
 /// width at the Joyxoff 92px reference (scaled by `client_w/1920`), holding the
 /// 92:68 aspect, then shrunk to fit all rows in the docked bar's height.
-fn key_metrics(client_w: f32, client_h: f32, rows: &[KeyRow]) -> (f32, f32, f32) {
+fn key_metrics(client_w: f32, client_h: f32, rows: &[KeyRow], top_inset: f32) -> (f32, f32, f32) {
     let scale = (client_w / REF_MON_W).max(0.05);
     let mut kw = REF_KEY_W * scale;
     let mut gap = REF_GAP * scale;
     let mut kh = kw * KEY_ASPECT;
     let n = rows.len().max(1) as f32;
-    // Fit below the legend strip with a little breathing room; shrink if rows overflow.
-    let avail = (client_h - LEGEND_STRIP_H - kh * 0.25).max(1.0);
+    // Fit below top chrome (chips when active); shrink if rows overflow.
+    let avail = (client_h - top_inset - kh * 0.25).max(1.0);
     let block = n * kh + (n - 1.0) * gap;
     if block > avail {
         let s = avail / block;

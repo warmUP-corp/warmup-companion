@@ -10,7 +10,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem::size_of;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -376,6 +376,16 @@ const ANCHOR_CLASS: windows::core::PCWSTR = w!("WarmupXInputAnchorWindow");
 const POLL_TIMER_ID: usize = 21;
 #[allow(dead_code)]
 const POLL_TIMER_MS: u32 = 8;
+/// Degraded-mode foreground sampling: when NO XUSB pad is open the DLL is the only
+/// button source and it zeroes off-foreground, so claim foreground once every N
+/// ticks while the VK is closed (held-open button still caught within one window).
+const FG_SAMPLE_EVERY: u32 = 60;
+static FG_SAMPLE_TICK: AtomicU32 = AtomicU32::new(0);
+/// Set each poll: true when a physical XUSB pad is open (buttons read directly,
+/// foreground-independent). While true the anchor NEVER claims foreground, so
+/// LogonUI / the userland app keeps input focus. False => fall back to the
+/// foreground claim so the gamepad still works (the pre-XUSB behaviour).
+static XUSB_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[allow(dead_code)]
 struct PollState {
@@ -403,6 +413,10 @@ struct PollState {
     xusb: Vec<XusbDevice>,
     /// Most recent XUSB report (for the probe dump + offset verification).
     last_xusb: Option<XusbReport>,
+    /// Throttle for re-enumerating XUSB pads: `open_all` runs once at startup, but a
+    /// pad plugged in later (or present only after the secure desktop appears) must
+    /// be picked up, else we have 0 devices and fall back to the foreground-gated DLL.
+    last_xusb_scan: Instant,
     prev_trigger_left: bool,
     prev_trigger_right: bool,
     /// Step-C diagnostic: side-by-side xinput1_3 vs xinput1_4 GetStateEx.
@@ -877,13 +891,13 @@ fn secure_poll_main(
         };
         // RegisterClassW returns 0 if class already exists; ignore.
         RegisterClassW(&wc);
-        // EXPERIMENT: XInput 1.4 background-zeroes wButtons unless our process owns a
-        // foreground-eligible window. The invisible/NOACTIVATE anchor never qualifies,
-        // and the XUSB IOCTL returns a stub (no buttons) on this driver — so we make
-        // the anchor foreground-eligible: WS_VISIBLE, off-screen (-10000), 1x1, alpha 0
-        // (never seen), and drop NOACTIVATE so SetForegroundWindow can take it.
+        // Passive anchor: the process needs a window on the input desktop for HID /
+        // WM_INPUT delivery and the XUSB device handle, but buttons are read directly
+        // from the XUSB driver, so the window never needs foreground. NOACTIVATE keeps
+        // it from ever stealing focus from LogonUI or the userland app. Off-screen
+        // (-10000), 1x1, alpha 0 so it is never visible.
         match CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE,
             ANCHOR_CLASS,
             w!("Warmup XInput Anchor"),
             WS_POPUP | WS_VISIBLE,
@@ -906,14 +920,15 @@ fn secure_poll_main(
         }
     };
 
-    // Fully transparent (alpha 0) so the off-screen 1x1 anchor is never visible, then
-    // claim foreground so XInput stops zeroing buttons.
+    // Fully transparent (alpha 0) so the off-screen 1x1 anchor is never visible. We
+    // intentionally do NOT call SetForegroundWindow: buttons come from the direct
+    // XUSB read (foreground-independent), and stealing foreground here would yank
+    // focus off the LogonUI password box / the userland app the user is typing in.
     unsafe {
         let _ = SetLayeredWindowAttributes(hwnd, windows::Win32::Foundation::COLORREF(0), 0, LWA_ALPHA);
-        let _ = SetForegroundWindow(hwnd);
     }
     let _ = tx.send(SecureMsg::Error(
-        "anchor window created foreground-eligible (XInput button-gate experiment)".into(),
+        "anchor window created (XUSB-direct buttons; foreground not claimed)".into(),
     ));
     let _ = tx.send(SecureMsg::Error(probe_self_identity()));
 
@@ -945,6 +960,7 @@ fn secure_poll_main(
             last_raw_report: Vec::new(),
             xusb: Vec::new(),
             last_xusb: None,
+            last_xusb_scan: Instant::now() - Duration::from_secs(60),
             prev_trigger_left: false,
             prev_trigger_right: false,
             probe: XInputProbe::load(),
@@ -1015,10 +1031,24 @@ unsafe extern "system" fn anchor_wndproc(
     lparam: LPARAM,
 ) -> LRESULT {
     if msg == WM_TIMER && wparam.0 == POLL_TIMER_ID {
-        // Re-claim foreground each tick — LogonUI keeps grabbing it, and XInput only
-        // returns buttons while our process owns the foreground window.
-        unsafe {
-            let _ = SetForegroundWindow(hwnd);
+        // Foreground claim ONLY in degraded mode (no XUSB pad open). When XUSB is
+        // feeding buttons directly we never claim foreground, so LogonUI / the
+        // userland app keeps input focus and the user can type. When XUSB is
+        // unavailable the DLL is the only source and zeroes off-foreground, so we
+        // restore the old claim (gamepad works; typing into the box won't, but that
+        // is strictly the pre-XUSB behaviour, not a regression).
+        if !XUSB_ACTIVE.load(Ordering::Relaxed) {
+            let vk_open = crate::win::vk_ui::is_vk_visible();
+            unsafe {
+                if vk_open {
+                    let _ = SetForegroundWindow(hwnd);
+                } else {
+                    let n = FG_SAMPLE_TICK.fetch_add(1, Ordering::Relaxed);
+                    if n % FG_SAMPLE_EVERY == 0 {
+                        let _ = SetForegroundWindow(hwnd);
+                    }
+                }
+            }
         }
         POLL_STATE.with(|s| {
             if let Some(state) = s.borrow_mut().as_mut() {
@@ -1173,6 +1203,21 @@ fn poll_xinput_tick(state: &mut PollState) {
     // thread. Disjoint field borrows (probe is &mut, tx is &) are allowed.
     state.probe.tick(0, &state.tx);
 
+    // Re-enumerate XUSB pads while we have none — a controller connected after the
+    // worker started (common at the lock screen) was missed by the one-shot
+    // `open_all`, leaving only the foreground-gated DLL (always zeroed here).
+    // Throttled to ~1s; only log on success so an empty scan doesn't spam.
+    if state.xusb.is_empty() && state.last_xusb_scan.elapsed() >= Duration::from_secs(1) {
+        state.last_xusb_scan = Instant::now();
+        let (devices, log) = XusbDevice::open_all();
+        if !devices.is_empty() {
+            state.xusb = devices;
+            for line in log {
+                let _ = state.tx.send(SecureMsg::Error(line));
+            }
+        }
+    }
+
     let mut connected = [false; 4];
     let mut states: [Option<XINPUT_GAMEPAD>; 4] = [None; 4];
     let mut errs = [0u32; 4];
@@ -1190,9 +1235,15 @@ fn poll_xinput_tick(state: &mut PollState) {
                 .tx
                 .send(SecureMsg::Error(format!("XInputGetState({slot}) error {err}")));
         }
-        if let Some(get_keystroke) = state.get_keystroke {
-            state.keystroke_events +=
-                secure_poll_keystrokes(&state.tx, get_keystroke, slot, &mut state.prev_buttons);
+        // XInputGetKeystroke is foreground-gated like GetState. When physical XUSB
+        // pads are open we read buttons directly from the driver below (no
+        // foreground needed), so skip the gated path entirely — otherwise it would
+        // fight `prev_buttons` with the XUSB edges.
+        if state.xusb.is_empty() {
+            if let Some(get_keystroke) = state.get_keystroke {
+                state.keystroke_events +=
+                    secure_poll_keystrokes(&state.tx, get_keystroke, slot, &mut state.prev_buttons);
+            }
         }
     }
 
@@ -1213,7 +1264,15 @@ fn poll_xinput_tick(state: &mut PollState) {
             connected[i] = true;
         }
     }
-    state.last_xusb = xusb_rep;
+    // Keep the last good report: a connected pad occasionally returns no bytes for
+    // a single poll; replacing with None would flash a neutral (all-released) frame
+    // and emit spurious button-up edges.
+    if xusb_rep.is_some() {
+        state.last_xusb = xusb_rep;
+    }
+    // Tell the wndproc whether buttons are coming from XUSB-direct. True => stay
+    // passive (no foreground steal); false => degraded fallback claims foreground.
+    XUSB_ACTIVE.store(!state.xusb.is_empty(), Ordering::Relaxed);
 
     // Surface the raw XUSB report in the debug overlay so byte offsets can be
     // confirmed against live presses on Winlogon (the parsed `buttons` offset is
@@ -1311,12 +1370,25 @@ fn poll_xinput_tick(state: &mut PollState) {
         return;
     };
 
-    let pad = states[slot as usize].expect("connected slot has state");
-    let (lt, rt) = state
-        .last_xusb
-        .as_ref()
-        .map(|r| (r.left_trigger, r.right_trigger))
-        .unwrap_or((pad.bLeftTrigger, pad.bRightTrigger));
+    // The DLL state may be absent (slot connected only via the direct XUSB read,
+    // which the foreground gate doesn't touch) — default to neutral, never panic.
+    let pad = states[slot as usize].unwrap_or_default();
+
+    // Authoritative input source. When a physical XUSB pad is open its driver read
+    // is real regardless of foreground; the DLL `pad` is zeroed off-foreground, so
+    // prefer XUSB and fall back to the DLL only when no pad is open.
+    let xusb = state.last_xusb.clone().filter(|_| !state.xusb.is_empty());
+    let (buttons, lx, ly, rx, ry, lt, rt) = match &xusb {
+        Some(r) => (
+            r.buttons, r.thumb_lx, r.thumb_ly, r.thumb_rx, r.thumb_ry, r.left_trigger,
+            r.right_trigger,
+        ),
+        None => (
+            pad.wButtons.0, pad.sThumbLX, pad.sThumbLY, pad.sThumbRX, pad.sThumbRY,
+            pad.bLeftTrigger, pad.bRightTrigger,
+        ),
+    };
+
     let mut trigger_edges = Vec::new();
     poll_trigger_edges(
         &mut state.prev_trigger_left,
@@ -1328,24 +1400,24 @@ fn poll_xinput_tick(state: &mut PollState) {
     for edge in trigger_edges {
         let _ = state.tx.send(SecureMsg::Trigger(edge));
     }
-    let xinput_stick = pad.sThumbLX.abs() > LEFT_DEADZONE || pad.sThumbLY.abs() > LEFT_DEADZONE;
-    // Button edges come from WM_INPUT (HID) and XInputGetKeystroke only. Merging
-    // last_hid into GetState when wButtons==0 stuck false masks (HidP 0xb200).
-    let cur = pad.wButtons.0;
-    if cur != 0 {
-        let idx = slot as usize;
-        let prev = state.prev_buttons[idx];
-        if prev != cur {
-            state.prev_buttons[idx] = cur;
-            let _ = state.tx.send(SecureMsg::Buttons { slot, prev, cur });
-        }
+
+    // Button edges from the authoritative source — handles press AND release, so it
+    // owns `prev_buttons` outright (the foreground-gated keystroke path is skipped
+    // above whenever an XUSB pad is open).
+    let idx = slot as usize;
+    let prev = state.prev_buttons[idx];
+    if prev != buttons {
+        state.prev_buttons[idx] = buttons;
+        let _ = state.tx.send(SecureMsg::Buttons { slot, prev, cur: buttons });
     }
-    let axes = if xinput_stick {
+
+    let stick_active = lx.abs() > LEFT_DEADZONE || ly.abs() > LEFT_DEADZONE;
+    let axes = if stick_active {
         (
-            XInputBackend::norm_thumb(pad.sThumbLX, LEFT_DEADZONE),
-            XInputBackend::norm_thumb(pad.sThumbLY, LEFT_DEADZONE),
-            XInputBackend::norm_thumb(pad.sThumbRX, RIGHT_DEADZONE),
-            XInputBackend::norm_thumb(pad.sThumbRY, RIGHT_DEADZONE),
+            XInputBackend::norm_thumb(lx, LEFT_DEADZONE),
+            XInputBackend::norm_thumb(ly, LEFT_DEADZONE),
+            XInputBackend::norm_thumb(rx, RIGHT_DEADZONE),
+            XInputBackend::norm_thumb(ry, RIGHT_DEADZONE),
         )
     } else {
         (

@@ -5,9 +5,8 @@
 
 use std::cell::RefCell;
 
-use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::StationsAndDesktops::{
     CloseDesktop, CloseWindowStation, GetThreadDesktop, GetUserObjectInformationW, OpenDesktopW,
     OpenInputDesktop, OpenWindowStationW, SetProcessWindowStation, SetThreadDesktop,
@@ -15,10 +14,6 @@ use windows::Win32::System::StationsAndDesktops::{
     USER_OBJECT_INFORMATION_INDEX,
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, RegisterClassW, HMENU, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-};
 
 /// Same access mask as decompiled Joyxoff (`0x2000000`).
 const DESKTOP_ALL: u32 = 0x200_0000;
@@ -117,50 +112,6 @@ pub fn current_desktop_name() -> Option<String> {
         let h = GetThreadDesktop(GetCurrentThreadId()).ok()?;
         desktop_name(h)
     }
-}
-
-/// Create the worker-thread anchor window on whatever desktop the calling
-/// thread is currently attached to. Joyxoff `+0xd9` creates `JoyXoffMWindow`
-/// on the Winlogon desktop right after `SetThreadDesktop("winlogon")`; without
-/// it, XInput / HID input directed at the input desktop never reaches the
-/// process. The returned HWND must outlive the polling loop — leak it for the
-/// process lifetime (worker exits when SCM stops the service).
-pub unsafe fn create_main_anchor() -> Result<HWND, String> {
-    unsafe extern "system" fn anchor_wndproc(
-        hwnd: HWND,
-        msg: u32,
-        w: WPARAM,
-        l: LPARAM,
-    ) -> LRESULT {
-        DefWindowProcW(hwnd, msg, w, l)
-    }
-
-    let instance = GetModuleHandleW(None).map_err(|e| format!("GetModuleHandleW: {e}"))?;
-    let class = w!("WarmupWorkerAnchor");
-    let wc = WNDCLASSW {
-        lpfnWndProc: Some(anchor_wndproc),
-        hInstance: instance.into(),
-        lpszClassName: class,
-        ..Default::default()
-    };
-    // RegisterClassW returns 0 if class already exists; tolerate the second worker.
-    RegisterClassW(&wc);
-    // Joyxoff `JoyXoffMWindow` ex_style 0x8080088 = TOPMOST|TOOLWINDOW|NOACTIVATE|LAYERED.
-    CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
-        class,
-        w!("Warmup Worker Anchor"),
-        WS_POPUP,
-        0,
-        0,
-        1,
-        1,
-        None,
-        HMENU::default(),
-        HINSTANCE(instance.0),
-        None,
-    )
-    .map_err(|e| format!("CreateWindowExW(anchor): {e}"))
 }
 
 unsafe fn desktop_name(h: HDESK) -> Option<String> {

@@ -144,12 +144,6 @@ fn key_hint(key: &KeyCell) -> Option<&'static str> {
     }
 }
 
-/// Top legend — must match `handle_vk_open_button` bindings.
-const VK_LEGEND: &str =
-    "A: Select     B: Backspace     X: Space     RB: Enter     LT: Shift     RT: Caps     L3: Close";
-const VK_LEGEND_PREDICT: &str =
-    "A: Commit word     LB/RB: Cycle     B: Backspace     X: Space     L3: Close";
-
 #[derive(Clone, Copy, Debug)]
 pub enum VkAttach {
     Current,
@@ -722,19 +716,13 @@ fn render_frame() {
             let rows = vk_nav::rows_snapshot();
             let sel = vk_nav::selection();
             let candidates = crate::vk_predict::strip_view();
-            let top_inset = vk_renderer::top_chrome_inset(candidates.is_some());
-            let legend = if candidates.is_some() {
-                VK_LEGEND_PREDICT
-            } else {
-                VK_LEGEND
-            };
+            let top_inset = vk_renderer::top_chrome_inset();
             if let Err(e) = renderer.draw(
                 &pal,
                 &rows,
                 sel,
                 key_glyph,
                 key_hint,
-                legend,
                 top_inset,
                 candidates.as_ref(),
             ) {
@@ -778,7 +766,7 @@ fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<KeyCell> {
     let rows = vk_nav::rows_snapshot();
     let (xf, yf) = (x as f32, y as f32);
     // Same layout the renderer draws with, so clicks always match the visible keys.
-    let top_inset = vk_renderer::top_chrome_inset(crate::vk_predict::strip_active());
+    let top_inset = vk_renderer::top_chrome_inset();
     for kr in vk_renderer::key_rects(client.right as f32, client.bottom as f32, &rows, top_inset)
     {
         if xf >= kr.left && xf < kr.right && yf >= kr.top && yf < kr.bottom {

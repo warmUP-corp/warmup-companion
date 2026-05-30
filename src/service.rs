@@ -140,6 +140,9 @@ pub fn run_worker() -> Result<(), String> {
         install::log_line(&format!("WORKER PANIC: {info}"));
     }));
     std::env::set_var("WARMUP_VK_SERVICE", "1");
+    // Catch native access violations (0xC0000005) the panic hook can't see: logs
+    // module+rva and writes a minidump before the worker dies. See src/crash.rs.
+    crate::crash::install();
     install::log_line("service worker starting (XInput + VK UI)");
     install::log_line(r"service log file: C:\ProgramData\WarmupVk\service.log");
 
@@ -148,22 +151,13 @@ pub fn run_worker() -> Result<(), String> {
     app.configure_boot_service();
     install::log_line("boot path active; tap Y on sign-in / UAC to open VK");
 
-    // Joyxoff parity: after attaching the main thread to Winlogon
-    // (`configure_boot_service`), create the anchor window on that desktop. HID /
-    // XInput delivery requires the process to own a window on the input desktop.
-    // The handle is intentionally leaked — it lives for the worker's lifetime.
-    let _anchor = unsafe {
-        match crate::win::create_main_anchor() {
-            Ok(hwnd) => {
-                install::log_line(&format!("worker anchor hwnd={:?} on winlogon", hwnd.0));
-                Some(hwnd)
-            }
-            Err(e) => {
-                install::log_line(&format!("worker anchor failed: {e}"));
-                None
-            }
-        }
-    };
+    // NOTE: do NOT create an anchor window on this (loop) thread. The loop thread
+    // calls SetThreadDesktop via sync_service_backend on every desktop transition;
+    // owning a window pins it to Winlogon (SetThreadDesktop -> ERROR_BUSY 0x800700AA),
+    // so SendInput / desktop migration breaks for the worker's lifetime. The window
+    // required for HID/XInput delivery on Winlogon lives on the XInput backend's own
+    // dedicated poll thread (WarmupXInputAnchorWindow, xinput_backend.rs), which never
+    // migrates desktops.
 
     let vk_open = std::cell::Cell::new(false);
     let gamepad_result = run_boot_gamepad_loop(&mut app, &vk_open, true);
