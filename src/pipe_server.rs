@@ -9,7 +9,57 @@
 
 use crate::protocol::{ButtonPayload, ConnectionPayload};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
+
+/// Cursor mode (A → OS left-click). `false` = focus/D-pad mode (buttons only). Default true;
+/// the connected desktop pushes the real value via `config` frames (#349).
+static CLICKS_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Coalesced visual-cursor hint accumulated since the last send: `(dx, dy, dirty)`.
+static CURSOR_ACC: OnceLock<Mutex<(f64, f64, bool)>> = OnceLock::new();
+
+fn cursor_acc() -> &'static Mutex<(f64, f64, bool)> {
+    CURSOR_ACC.get_or_init(|| Mutex::new((0.0, 0.0, false)))
+}
+
+/// Whether A should inject an OS left-click (cursor mode). Read by the gamepad loop.
+pub fn clicks_enabled() -> bool {
+    CLICKS_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Accumulate a visual-cursor hint. The companion has already injected the OS move; this
+/// only keeps the webview's visual cursor in sync. Coalesced; the server sends it throttled.
+pub fn publish_cursor_moved(dx: f64, dy: f64) {
+    if let Ok(mut a) = cursor_acc().lock() {
+        a.0 += dx;
+        a.1 += dy;
+        a.2 = true;
+    }
+}
+
+/// Take the accumulated cursor hint, if any, resetting the accumulator.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn take_cursor_moved() -> Option<crate::protocol::CursorMovedPayload> {
+    let mut a = cursor_acc().lock().ok()?;
+    if !a.2 {
+        return None;
+    }
+    let payload = crate::protocol::CursorMovedPayload { dx: a.0, dy: a.1 };
+    *a = (0.0, 0.0, false);
+    Some(payload)
+}
+
+/// Apply a pushed `config`: write through to the companion's cursor settings (read live by
+/// `pc_cursor`) and set the clicks-enabled mode. Maps desktop fields → companion params.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn apply_config(p: &crate::protocol::ConfigPayload) {
+    CLICKS_ENABLED.store(p.clicks_enabled, Ordering::Relaxed);
+    let _ = crate::config::set_gamepad_setting("cursor_deadzone", &p.deadzone.to_string());
+    let _ = crate::config::set_gamepad_setting("cursor_speed", &p.sensitivity.to_string());
+    let _ = crate::config::set_gamepad_setting("cursor_accel", &p.acceleration_exp.to_string());
+    let _ = crate::config::set_gamepad_setting("scroll_speed", &p.scroll_sensitivity.to_string());
+}
 
 /// Latest connection snapshot, published by the gamepad loop and read by the server.
 static STATE: OnceLock<Mutex<ConnectionPayload>> = OnceLock::new();
@@ -150,7 +200,7 @@ pub fn spawn() {}
 
 #[cfg(windows)]
 mod server {
-    use super::{current, drain_buttons, reset_button_stream};
+    use super::{apply_config, current, drain_buttons, reset_button_stream, take_cursor_moved};
     use crate::protocol::{ConnectionPayload, DownFrame, Hello, UpFrame, PROTOCOL_VERSION};
     use std::time::{Duration, Instant};
     use windows::core::PCWSTR;
@@ -161,7 +211,7 @@ mod server {
     use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile, PIPE_ACCESS_DUPLEX};
     use windows::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PeekNamedPipe, PIPE_READMODE_BYTE,
         PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
 
@@ -171,6 +221,9 @@ mod server {
     /// Re-send the current snapshot at least this often so a dropped idle client is noticed
     /// (the write fails) and the server loops back to accept a new one.
     const KEEPALIVE: Duration = Duration::from_secs(1);
+    /// Throttle for outbound `cursor_moved` hints (the OS cursor already moved; this just
+    /// keeps the webview's visual cursor in sync).
+    const CURSOR_HINT_INTERVAL: Duration = Duration::from_millis(100);
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -269,18 +322,34 @@ mod server {
         write_all(pipe, reply.to_ndjson_line().as_bytes())
     }
 
-    /// Stream button edges (low latency) and connection snapshots (on change, plus a
-    /// keepalive so a dropped idle client is noticed via the write error and we re-accept).
+    /// Full-duplex session: drain inbound `config` (non-blocking), and write button edges
+    /// (low latency), `cursor_moved` hints (throttled), and connection snapshots (on change
+    /// plus a keepalive so a dropped idle client is noticed via the write error).
     fn stream(pipe: HANDLE) {
         let mut last: Option<ConnectionPayload> = None;
         let mut last_conn_write = Instant::now()
             .checked_sub(KEEPALIVE)
             .unwrap_or_else(Instant::now);
+        let mut last_cursor_write = Instant::now();
         loop {
+            // Inbound config — never block the writer; only read a line that is fully buffered.
+            if drain_inbound_config(pipe).is_err() {
+                return;
+            }
             for edge in drain_buttons() {
                 if write_all(pipe, UpFrame::Button(edge).to_ndjson_line().as_bytes()).is_err() {
                     return; // client gone — return to accept a new one
                 }
+            }
+            if last_cursor_write.elapsed() >= CURSOR_HINT_INTERVAL {
+                if let Some(hint) = take_cursor_moved() {
+                    if write_all(pipe, UpFrame::CursorMoved(hint).to_ndjson_line().as_bytes())
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                last_cursor_write = Instant::now();
             }
             let cur = current();
             if last.as_ref() != Some(&cur) || last_conn_write.elapsed() >= KEEPALIVE {
@@ -294,6 +363,41 @@ mod server {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// Read and apply any fully-buffered `config` lines without blocking the write side.
+    fn drain_inbound_config(pipe: HANDLE) -> std::io::Result<()> {
+        while peek_has_newline(pipe)? {
+            let line = read_line(pipe)?;
+            let trimmed = line.trim_end();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(DownFrame::Config(p)) = DownFrame::parse_line(trimmed) {
+                apply_config(&p);
+            }
+        }
+        Ok(())
+    }
+
+    /// True when the inbound buffer already contains a complete line (so [`read_line`] will
+    /// not block). Uses `PeekNamedPipe` to inspect without consuming.
+    fn peek_has_newline(pipe: HANDLE) -> std::io::Result<bool> {
+        let mut buf = [0u8; 4096];
+        let mut read = 0u32;
+        let mut avail = 0u32;
+        unsafe {
+            PeekNamedPipe(
+                pipe,
+                Some(buf.as_mut_ptr() as *mut core::ffi::c_void),
+                buf.len() as u32,
+                Some(&mut read),
+                Some(&mut avail),
+                None,
+            )
+        }
+        .map_err(to_io)?;
+        Ok(buf[..read as usize].contains(&b'\n'))
     }
 
     fn read_line(pipe: HANDLE) -> std::io::Result<String> {

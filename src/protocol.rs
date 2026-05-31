@@ -52,6 +52,29 @@ pub struct ButtonPayload {
     pub controller_type: String,
 }
 
+/// `cursor_moved` frame payload — visual-cursor hint (pixels this frame). Shape matches
+/// the desktop `gamepad:cursor_moved` webview event 1:1.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorMovedPayload {
+    pub dx: f64,
+    pub dy: f64,
+}
+
+/// `config` down-frame payload — cursor-relevant tuning the companion applies, plus the
+/// `clicksEnabled` mode (cursor vs focus/D-pad). Device features (LED/rumble/gyro) ride
+/// later frames (#352).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigPayload {
+    pub deadzone: f32,
+    pub sensitivity: f32,
+    pub acceleration_exp: f32,
+    pub scroll_sensitivity: f32,
+    pub enabled: bool,
+    pub clicks_enabled: bool,
+}
+
 /// Up frames (companion → desktop). This slice (#347) knows `hello` + `connection`;
 /// any other frame type deserializes to [`UpFrame::Unknown`] so the client tolerates
 /// frames added by later slices.
@@ -61,17 +84,19 @@ pub enum UpFrame {
     Hello(Hello),
     Connection(ConnectionPayload),
     Button(ButtonPayload),
+    CursorMoved(CursorMovedPayload),
     /// A frame whose `type` this slice does not know (added by a later slice).
     /// Never serialized; produced only by [`UpFrame::parse_line`].
     #[serde(skip)]
     Unknown,
 }
 
-/// Down frames (desktop → companion). This slice sends only `hello`.
+/// Down frames (desktop → companion): `hello` handshake + live `config` push.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum DownFrame {
     Hello(Hello),
+    Config(ConfigPayload),
     #[serde(skip)]
     Unknown,
 }
@@ -99,7 +124,7 @@ impl UpFrame {
     pub fn parse_line(line: &str) -> Result<Self, serde_json::Error> {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
-            "hello" | "connection" | "button" => serde_json::from_str(line),
+            "hello" | "connection" | "button" | "cursor_moved" => serde_json::from_str(line),
             _ => Ok(Self::Unknown),
         }
     }
@@ -112,7 +137,7 @@ impl DownFrame {
     pub fn parse_line(line: &str) -> Result<Self, serde_json::Error> {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
-            "hello" => serde_json::from_str(line),
+            "hello" | "config" => serde_json::from_str(line),
             _ => Ok(Self::Unknown),
         }
     }
@@ -163,6 +188,34 @@ mod tests {
         assert_eq!(json["payload"]["button"], "GUIDE");
         assert_eq!(json["payload"]["pressed"], true);
         assert_eq!(json["payload"]["controllerType"], "xbox");
+        assert_eq!(UpFrame::parse_line(line.trim_end()).unwrap(), frame);
+    }
+
+    #[test]
+    fn config_down_frame_round_trips() {
+        let frame = DownFrame::Config(ConfigPayload {
+            deadzone: 0.15,
+            sensitivity: 15.0,
+            acceleration_exp: 2.0,
+            scroll_sensitivity: 5.0,
+            enabled: true,
+            clicks_enabled: false,
+        });
+        let line = frame.to_ndjson_line();
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["type"], "config");
+        assert_eq!(json["payload"]["clicksEnabled"], false);
+        assert_eq!(json["payload"]["accelerationExp"], 2.0);
+        assert_eq!(DownFrame::parse_line(line.trim_end()).unwrap(), frame);
+    }
+
+    #[test]
+    fn cursor_moved_up_frame_round_trips() {
+        let frame = UpFrame::CursorMoved(CursorMovedPayload { dx: 1.5, dy: -2.0 });
+        let line = frame.to_ndjson_line();
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["type"], "cursor_moved");
+        assert_eq!(json["payload"]["dx"], 1.5);
         assert_eq!(UpFrame::parse_line(line.trim_end()).unwrap(), frame);
     }
 

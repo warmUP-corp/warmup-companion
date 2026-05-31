@@ -358,7 +358,15 @@ impl GamepadPoll {
             if change.button == Button::A {
                 // Joyxoff-style hold: A down -> mouse-left down, A up -> up, so
                 // the PIN keypad sees a real press duration (not an instant click).
-                cursor.set_left_button(change.pressed);
+                // Gate the *press* by cursor mode (#349); always forward the release so a
+                // click can't get stuck down if the mode flips while A is held.
+                if change.pressed {
+                    if crate::pipe_server::clicks_enabled() {
+                        cursor.set_left_button(true);
+                    }
+                } else {
+                    cursor.set_left_button(false);
+                }
             }
             if change.button != VK_BUTTON {
                 continue;
@@ -462,7 +470,7 @@ impl GamepadPoll {
             return None;
         }
 
-        // A=activate, B=backspace, X=space, LB=page, RB=Enter, LT=shift, RT=caps, L3=close,
+        // A=activate, B=backspace, X=space, Y=dictation, LB=page, RB=Enter, LT=shift, RT=caps, L3=close,
         // D-pad/L-stick axis=move focus.
         match (change.button, change.pressed) {
             (VK_BUTTON, true) => {
@@ -506,6 +514,11 @@ impl GamepadPoll {
             }
             (Button::X, true) => {
                 vk_nav::space();
+                vk_ui::request_repaint();
+                None
+            }
+            (Button::Y, true) => {
+                vk_nav::start_voice_input();
                 vk_ui::request_repaint();
                 None
             }

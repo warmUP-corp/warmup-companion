@@ -136,6 +136,8 @@ impl PcCursor {
         self.remainder_y = total_y - int_y as f32;
         if int_x != 0 || int_y != 0 {
             self.dispatch(Cmd::Move(int_x, int_y));
+            // Hint the warmUP desktop so its visual cursor tracks the OS cursor (#349).
+            crate::pipe_server::publish_cursor_moved(int_x as f64, int_y as f64);
         }
     }
 
