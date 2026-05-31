@@ -10,9 +10,9 @@ use std::time::Duration;
 use crate::gamepad_backend::Button;
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyboardLayout, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_END, VK_RETURN, VK_SPACE,
-    VK_TAB,
+    GetKeyState, GetKeyboardLayout, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_END,
+    VK_RETURN, VK_SPACE, VK_TAB,
 };
 
 #[derive(Clone)]
@@ -252,11 +252,15 @@ fn clamp_pos(nav: &mut NavState) {
     }
 }
 
+fn caps_lock_on() -> bool {
+    unsafe { GetKeyState(VK_CAPITAL.0 as i32) & 1 != 0 }
+}
+
 /// Reset focus when the keyboard opens.
 pub fn reset_selection() {
     if let Ok(mut nav) = NAV.lock() {
         nav.shift = false;
-        nav.caps = false;
+        nav.caps = caps_lock_on();
         nav.pos = KeyPos { row: 2, col: 4 };
         #[cfg(feature = "gamepad")]
         {
