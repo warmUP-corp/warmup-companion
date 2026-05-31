@@ -9,7 +9,7 @@ use crate::gamepad_backend::Button;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, GetKeyboardLayout, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
     KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_END,
-    VK_LWIN, VK_RETURN, VK_SPACE, VK_TAB,
+    VK_RETURN, VK_SPACE, VK_TAB,
 };
 
 #[derive(Clone)]
@@ -22,7 +22,7 @@ pub enum KeyAction {
     CapsLock,
     /// Ctrl+V paste.
     Paste,
-    /// Start Windows voice dictation.
+    /// Start background Windows speech recognition.
     VoiceInput,
     /// Dismiss the on-screen keyboard.
     CloseVk,
@@ -292,6 +292,13 @@ pub fn voice_input_active() -> bool {
     NAV.lock().map(|n| n.voice_input).unwrap_or(false)
 }
 
+pub fn set_voice_input_active(active: bool) {
+    if let Ok(mut nav) = NAV.lock() {
+        nav.voice_input = active;
+    }
+    request_ui_repaint();
+}
+
 pub fn modifier_state() -> (bool, bool) {
     NAV.lock().map(|n| (n.shift, n.caps)).unwrap_or_default()
 }
@@ -463,6 +470,11 @@ pub fn send_char_direct(c: char) {
     send_unicode(&[c as u16]);
 }
 
+pub fn send_text_direct(text: &str) {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    send_unicode(&units);
+}
+
 fn notify_vk_key(vk: VIRTUAL_KEY) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_RETURN, VK_SPACE};
     if vk == VK_BACK {
@@ -522,22 +534,21 @@ pub fn start_voice_input() {
         crate::install::log_line("vk voice input ignored on Winlogon");
         return;
     }
-    if let Ok(mut nav) = NAV.lock() {
-        nav.voice_input = !nav.voice_input;
+
+    if crate::win::speech_input::is_active() && voice_input_active() {
+        crate::win::speech_input::stop();
+        set_voice_input_active(false);
+        return;
     }
-    let collapse = focus_for_inject();
-    let h = VIRTUAL_KEY(b'H' as u16);
-    let mut batch: Vec<INPUT> = Vec::with_capacity(6);
-    push_collapse(&mut batch, collapse);
-    batch.push(vk_event(VK_LWIN, false));
-    batch.push(vk_event(h, false));
-    batch.push(vk_event(h, true));
-    batch.push(vk_event(VK_LWIN, true));
-    unsafe {
-        let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
+    if crate::win::speech_input::is_active() {
+        crate::win::speech_input::stop();
     }
-    suppress_native_keyboard_after_winlogon_inject(collapse);
-    request_ui_repaint();
+
+    set_voice_input_active(true);
+    if let Err(e) = crate::win::speech_input::start() {
+        set_voice_input_active(false);
+        crate::install::log_line(&format!("speech input start failed: {e}"));
+    }
 }
 
 /// Focus the credential field for an inject. Returns true on Winlogon, where the

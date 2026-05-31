@@ -352,12 +352,6 @@ impl GamepadPoll {
             // Forward every edge to the warmUP desktop over the pipe so the launcher grid
             // is gamepad-navigable (#348). The companion still drives its own VK/cursor below.
             crate::pipe_server::publish_button(change.button.as_str(), change.pressed);
-            if crate::pipe_server::native_vk_suppressed() {
-                continue;
-            }
-            if self.update_launch_hotkey(change) {
-                edges.push(VkLoopAction::LaunchWarmup);
-            }
             if change.button == Button::A {
                 // Joyxoff-style hold: A down -> mouse-left down, A up -> up, so
                 // the PIN keypad sees a real press duration (not an instant click).
@@ -370,6 +364,12 @@ impl GamepadPoll {
                 } else {
                     cursor.set_left_button(false);
                 }
+            }
+            if crate::pipe_server::native_vk_suppressed() {
+                continue;
+            }
+            if self.update_launch_hotkey(change) {
+                edges.push(VkLoopAction::LaunchWarmup);
             }
             if change.button != VK_BUTTON {
                 continue;
@@ -473,7 +473,7 @@ impl GamepadPoll {
             return None;
         }
 
-        // A=activate, B=backspace, X=space, Y=dictation, LB=page, RB=Enter, LT=shift, RT=caps, L3=close,
+        // A=activate, B=backspace, X=space, Y=voice input, LB=page, RB=Enter, LT=shift, RT=caps, L3=close,
         // D-pad/L-stick axis=move focus.
         match (change.button, change.pressed) {
             (VK_BUTTON, true) => {
