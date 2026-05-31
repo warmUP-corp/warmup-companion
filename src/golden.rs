@@ -120,10 +120,10 @@ mod tests {
             !fx.cases.is_empty(),
             "fixture should carry at least one case"
         );
-        // No parity values are asserted in this slice (#346) — expected is unpopulated until #349.
+        // #349 populated the reference outputs; the parity test asserts the math matches them.
         assert!(
-            fx.cases.iter().all(|c| c.expected.is_none()),
-            "expected outputs are populated in #349, not here"
+            fx.cases.iter().all(|c| c.expected.is_some()),
+            "every golden case should carry a reference (dx, dy)"
         );
         let centered = fx
             .cases
