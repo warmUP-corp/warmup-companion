@@ -7,14 +7,32 @@
 //! controller label; the server thread streams the latest connection snapshot to the
 //! connected client. The pipe is ACL'd to the interactive user.
 
-use crate::protocol::ConnectionPayload;
+use crate::protocol::{ButtonPayload, ConnectionPayload};
+use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
 
 /// Latest connection snapshot, published by the gamepad loop and read by the server.
 static STATE: OnceLock<Mutex<ConnectionPayload>> = OnceLock::new();
 
+/// Outbound button-edge queue (drained by the server). Bounded so a slow/absent client
+/// cannot grow it without bound; oldest edges are dropped first.
+static BUTTONS: OnceLock<Mutex<VecDeque<ButtonPayload>>> = OnceLock::new();
+const BUTTON_QUEUE_CAP: usize = 256;
+
+/// Last published `GUIDE` edge state, for consecutive-Guide-edge dedupe (SDL3 can emit
+/// duplicate Guide edges on some firmware) — preserves the desktop's old behaviour.
+static LAST_GUIDE: OnceLock<Mutex<Option<bool>>> = OnceLock::new();
+
 fn state() -> &'static Mutex<ConnectionPayload> {
     STATE.get_or_init(|| Mutex::new(disconnected()))
+}
+
+fn buttons() -> &'static Mutex<VecDeque<ButtonPayload>> {
+    BUTTONS.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn last_guide() -> &'static Mutex<Option<bool>> {
+    LAST_GUIDE.get_or_init(|| Mutex::new(None))
 }
 
 fn disconnected() -> ConnectionPayload {
@@ -71,6 +89,52 @@ fn current() -> ConnectionPayload {
         .unwrap_or_else(|_| disconnected())
 }
 
+/// Queue one button press/release edge for the connected desktop client. `button` is the
+/// canonical name (`A`/`GUIDE`/`LT`/…). Consecutive identical `GUIDE` edges are dropped.
+/// The `controller_type` rides along from the current connection snapshot.
+pub fn publish_button(button: &str, pressed: bool) {
+    if button == "GUIDE" {
+        if let Ok(mut last) = last_guide().lock() {
+            if *last == Some(pressed) {
+                return; // consecutive identical Guide edge — drop
+            }
+            *last = Some(pressed);
+        }
+    }
+    let payload = ButtonPayload {
+        button: button.to_string(),
+        pressed,
+        controller_type: current().controller_type,
+    };
+    if let Ok(mut q) = buttons().lock() {
+        if q.len() >= BUTTON_QUEUE_CAP {
+            q.pop_front();
+        }
+        q.push_back(payload);
+    }
+}
+
+/// Drain all queued button edges in order (oldest first).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn drain_buttons() -> Vec<ButtonPayload> {
+    buttons()
+        .lock()
+        .map(|mut q| q.drain(..).collect())
+        .unwrap_or_default()
+}
+
+/// Drop any edges queued before a client connected (they are stale to the new client),
+/// and reset Guide-dedupe state so the first post-connect Guide edge always sends.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn reset_button_stream() {
+    if let Ok(mut q) = buttons().lock() {
+        q.clear();
+    }
+    if let Ok(mut last) = last_guide().lock() {
+        *last = None;
+    }
+}
+
 /// Start the pipe server on its own thread. No-op on non-Windows (there the desktop
 /// owns input in-process, so there is no companion to serve).
 #[cfg(windows)]
@@ -86,19 +150,19 @@ pub fn spawn() {}
 
 #[cfg(windows)]
 mod server {
-    use super::current;
-    use crate::protocol::{DownFrame, Hello, UpFrame, PROTOCOL_VERSION};
+    use super::{current, drain_buttons, reset_button_stream};
+    use crate::protocol::{ConnectionPayload, DownFrame, Hello, UpFrame, PROTOCOL_VERSION};
     use std::time::{Duration, Instant};
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
-        CloseHandle, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree,
+        CloseHandle, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
     };
     use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
     use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile, PIPE_ACCESS_DUPLEX};
     use windows::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
-        PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
+        PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
 
     const PIPE_NAME: &str = r"\\.\pipe\warmup-input";
@@ -181,6 +245,8 @@ mod server {
         // Block until a client connects. ERROR_PIPE_CONNECTED (client beat us to it) is fine.
         let _ = unsafe { ConnectNamedPipe(pipe, None) };
         if handshake(pipe).is_ok() {
+            // Drop edges queued before this client connected (stale to it).
+            reset_button_stream();
             stream(pipe);
         }
         unsafe {
@@ -203,46 +269,30 @@ mod server {
         write_all(pipe, reply.to_ndjson_line().as_bytes())
     }
 
-    /// Stream connection snapshots: on change immediately, plus a keepalive so a dropped
-    /// idle client is detected via the write error.
+    /// Stream button edges (low latency) and connection snapshots (on change, plus a
+    /// keepalive so a dropped idle client is noticed via the write error and we re-accept).
     fn stream(pipe: HANDLE) {
-        let mut last: Option<ConnectionPayloadOwned> = None;
-        let mut last_write = Instant::now()
+        let mut last: Option<ConnectionPayload> = None;
+        let mut last_conn_write = Instant::now()
             .checked_sub(KEEPALIVE)
             .unwrap_or_else(Instant::now);
         loop {
-            let cur = current();
-            let changed = last.as_ref().map(|p| !p.eq(&cur)).unwrap_or(true);
-            if changed || last_write.elapsed() >= KEEPALIVE {
-                let frame = UpFrame::Connection(cur.clone());
-                if write_all(pipe, frame.to_ndjson_line().as_bytes()).is_err() {
-                    break; // client gone — return to accept a new one
+            for edge in drain_buttons() {
+                if write_all(pipe, UpFrame::Button(edge).to_ndjson_line().as_bytes()).is_err() {
+                    return; // client gone — return to accept a new one
                 }
-                last = Some(ConnectionPayloadOwned::from(&cur));
-                last_write = Instant::now();
             }
-            std::thread::sleep(Duration::from_millis(150));
-        }
-    }
-
-    /// Local copy for change detection (avoids holding the global lock across the loop).
-    struct ConnectionPayloadOwned {
-        connected: bool,
-        controller_type: String,
-        controller_name: String,
-    }
-    impl ConnectionPayloadOwned {
-        fn from(p: &crate::protocol::ConnectionPayload) -> Self {
-            Self {
-                connected: p.connected,
-                controller_type: p.controller_type.clone(),
-                controller_name: p.controller_name.clone(),
+            let cur = current();
+            if last.as_ref() != Some(&cur) || last_conn_write.elapsed() >= KEEPALIVE {
+                if write_all(pipe, UpFrame::Connection(cur.clone()).to_ndjson_line().as_bytes())
+                    .is_err()
+                {
+                    return;
+                }
+                last = Some(cur);
+                last_conn_write = Instant::now();
             }
-        }
-        fn eq(&self, p: &crate::protocol::ConnectionPayload) -> bool {
-            self.connected == p.connected
-                && self.controller_type == p.controller_type
-                && self.controller_name == p.controller_name
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -318,5 +368,32 @@ mod tests {
         assert!(current().connected);
         publish_from_label("none");
         assert!(!current().connected);
+    }
+
+    #[test]
+    fn button_stream_dedupes_guide_and_preserves_order() {
+        reset_button_stream();
+        publish_button("A", true);
+        publish_button("GUIDE", true);
+        publish_button("GUIDE", true); // consecutive identical Guide → dropped
+        publish_button("GUIDE", false);
+        publish_button("A", true); // non-Guide repeats are kept
+        let edges: Vec<(String, bool)> = drain_buttons()
+            .into_iter()
+            .map(|e| (e.button, e.pressed))
+            .collect();
+        assert_eq!(
+            edges,
+            vec![
+                ("A".into(), true),
+                ("GUIDE".into(), true),
+                ("GUIDE".into(), false),
+                ("A".into(), true),
+            ]
+        );
+        // A fresh client connect clears any queued edges.
+        publish_button("B", true);
+        reset_button_stream();
+        assert!(drain_buttons().is_empty());
     }
 }

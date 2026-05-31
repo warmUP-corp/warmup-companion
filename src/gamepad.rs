@@ -17,6 +17,7 @@ use crate::xinput_backend::XInputBackend;
 const VK_BUTTON: Button = Button::L3;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(8);
+const WARMUP_LAUNCH_DEBOUNCE: Duration = Duration::from_secs(2);
 /// Ignore L3 release right after opening VK (same press must not instantly close).
 const VK_TOGGLE_RELEASE_GRACE: Duration = Duration::from_millis(550);
 /// Ignore spurious X/dpad from misaligned HID for a moment after VK opens.
@@ -28,6 +29,7 @@ pub enum VkLoopAction {
     Toggle,
     Close,
     Reopen,
+    LaunchWarmup,
 }
 
 enum Backend {
@@ -107,6 +109,11 @@ pub struct GamepadPoll {
     vk_toggle_ignore_until: Option<Instant>,
     vk_nav_grace_until: Option<Instant>,
     stick_nav: Option<Button>,
+    launch_select_down: bool,
+    launch_lb_down: bool,
+    launch_x_down: bool,
+    launch_armed: bool,
+    last_launch: Instant,
     last_desktop_log: Instant,
     #[cfg(windows)]
     last_input_desktop: Option<String>,
@@ -228,6 +235,11 @@ impl GamepadPoll {
             vk_toggle_ignore_until: None,
             vk_nav_grace_until: None,
             stick_nav: None,
+            launch_select_down: false,
+            launch_lb_down: false,
+            launch_x_down: false,
+            launch_armed: true,
+            last_launch: crate::time_util::stale(WARMUP_LAUNCH_DEBOUNCE),
             last_desktop_log: crate::time_util::stale(DESKTOP_SYNC_LOG_INTERVAL),
             #[cfg(windows)]
             last_input_desktop: None,
@@ -243,6 +255,7 @@ impl GamepadPoll {
         self.vk_toggle_ignore_until = None;
         self.vk_nav_grace_until = None;
         self.stick_nav = None;
+        self.reset_launch_hotkey();
         self.last_vk_open = false;
         #[cfg(windows)]
         {
@@ -336,6 +349,12 @@ impl GamepadPoll {
             edges.push(edge);
         }
         for change in changes {
+            // Forward every edge to the warmUP desktop over the pipe so the launcher grid
+            // is gamepad-navigable (#348). The companion still drives its own VK/cursor below.
+            crate::pipe_server::publish_button(change.button.as_str(), change.pressed);
+            if self.update_launch_hotkey(change) {
+                edges.push(VkLoopAction::LaunchWarmup);
+            }
             if change.button == Button::A {
                 // Joyxoff-style hold: A down -> mouse-left down, A up -> up, so
                 // the PIN keypad sees a real press duration (not an instant click).
@@ -360,6 +379,40 @@ impl GamepadPoll {
             }
         }
         Ok(edges)
+    }
+
+    fn update_launch_hotkey(&mut self, change: ButtonChange) -> bool {
+        #[cfg(windows)]
+        if Self::service_signin_desktop() {
+            self.reset_launch_hotkey();
+            return false;
+        }
+
+        match change.button {
+            Button::Select => self.launch_select_down = change.pressed,
+            Button::Lb => self.launch_lb_down = change.pressed,
+            Button::X => self.launch_x_down = change.pressed,
+            _ => {}
+        }
+
+        let combo_down = self.launch_select_down && self.launch_lb_down && self.launch_x_down;
+        if !combo_down {
+            self.launch_armed = true;
+            return false;
+        }
+        if !self.launch_armed || self.last_launch.elapsed() < WARMUP_LAUNCH_DEBOUNCE {
+            return false;
+        }
+        self.launch_armed = false;
+        self.last_launch = Instant::now();
+        true
+    }
+
+    fn reset_launch_hotkey(&mut self) {
+        self.launch_select_down = false;
+        self.launch_lb_down = false;
+        self.launch_x_down = false;
+        self.launch_armed = true;
     }
 
     #[cfg(windows)]
@@ -719,6 +772,7 @@ where
                                 poll.reset_vk_controls();
                             }
                         }
+                        VkLoopAction::LaunchWarmup => on_action(action),
                     }
                 }
             }

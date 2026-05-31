@@ -42,6 +42,16 @@ pub struct ConnectionPayload {
     pub controller_name: String,
 }
 
+/// `button` frame payload — one press/release edge (incl. synthesised LT/RT).
+/// Shape matches the desktop `gamepad:button` webview event 1:1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ButtonPayload {
+    pub button: String,
+    pub pressed: bool,
+    pub controller_type: String,
+}
+
 /// Up frames (companion → desktop). This slice (#347) knows `hello` + `connection`;
 /// any other frame type deserializes to [`UpFrame::Unknown`] so the client tolerates
 /// frames added by later slices.
@@ -50,6 +60,7 @@ pub struct ConnectionPayload {
 pub enum UpFrame {
     Hello(Hello),
     Connection(ConnectionPayload),
+    Button(ButtonPayload),
     /// A frame whose `type` this slice does not know (added by a later slice).
     /// Never serialized; produced only by [`UpFrame::parse_line`].
     #[serde(skip)]
@@ -88,7 +99,7 @@ impl UpFrame {
     pub fn parse_line(line: &str) -> Result<Self, serde_json::Error> {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
-            "hello" | "connection" => serde_json::from_str(line),
+            "hello" | "connection" | "button" => serde_json::from_str(line),
             _ => Ok(Self::Unknown),
         }
     }
@@ -137,6 +148,22 @@ mod tests {
         let line = frame.to_ndjson_line();
         let parsed = UpFrame::parse_line(line.trim_end()).unwrap();
         assert_eq!(parsed, frame);
+    }
+
+    #[test]
+    fn button_frame_round_trips_and_is_adjacently_tagged() {
+        let frame = UpFrame::Button(ButtonPayload {
+            button: "GUIDE".into(),
+            pressed: true,
+            controller_type: "xbox".into(),
+        });
+        let line = frame.to_ndjson_line();
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["type"], "button");
+        assert_eq!(json["payload"]["button"], "GUIDE");
+        assert_eq!(json["payload"]["pressed"], true);
+        assert_eq!(json["payload"]["controllerType"], "xbox");
+        assert_eq!(UpFrame::parse_line(line.trim_end()).unwrap(), frame);
     }
 
     #[test]
