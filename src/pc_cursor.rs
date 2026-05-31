@@ -12,10 +12,6 @@ use enigo::{Axis, Coordinate, Direction, Enigo, Mouse, Settings};
 
 const BASE_SPEED: f32 = 100.0;
 const BASE_SCROLL_SPEED: f32 = 20.0;
-const DEADZONE: f32 = 0.15;
-const SENSITIVITY: f32 = 15.0;
-const ACCEL_EXP: f32 = 2.0;
-const SCROLL_SENSITIVITY: f32 = 5.0;
 
 /// Joyxoff's reference resolution: its sensitivity constants are tuned for
 /// 1080p and scaled by `actual/reference` per axis (`FUN_00422dd0`).
@@ -115,7 +111,15 @@ impl PcCursor {
     }
 
     pub fn move_stick(&mut self, stick_x: f32, stick_y: f32, dt_secs: f32) {
-        let (dx, dy) = stick_delta(stick_x, stick_y, SENSITIVITY, dt_secs);
+        let settings = crate::config::gamepad_settings();
+        let (dx, dy) = stick_delta(
+            stick_x,
+            stick_y,
+            settings.cursor_deadzone,
+            settings.cursor_speed,
+            settings.cursor_accel,
+            dt_secs,
+        );
         // Joyxoff normalizes velocity to actual/1080p so the throw feels the
         // same at any resolution (`FUN_00422dd0`).
         let (dx, dy) = (dx * self.scale_x, dy * self.scale_y);
@@ -136,7 +140,15 @@ impl PcCursor {
     }
 
     pub fn scroll_stick(&mut self, stick_x: f32, stick_y: f32, dt_secs: f32) {
-        let (sx, sy) = scroll_delta(stick_x, stick_y, dt_secs);
+        let settings = crate::config::gamepad_settings();
+        let (sx, sy) = scroll_delta(
+            stick_x,
+            stick_y,
+            settings.scroll_deadzone,
+            settings.scroll_speed,
+            settings.scroll_accel,
+            dt_secs,
+        );
         if sx == 0.0 && sy == 0.0 {
             self.scroll_remainder_x = 0.0;
             self.scroll_remainder_y = 0.0;
@@ -252,28 +264,42 @@ fn injector_main(rx: std::sync::mpsc::Receiver<Cmd>) {
     }
 }
 
-fn scroll_delta(stick_x: f32, stick_y: f32, dt_secs: f32) -> (f32, f32) {
+fn scroll_delta(
+    stick_x: f32,
+    stick_y: f32,
+    deadzone: f32,
+    sensitivity: f32,
+    accel_exp: f32,
+    dt_secs: f32,
+) -> (f32, f32) {
     let magnitude = (stick_x * stick_x + stick_y * stick_y).sqrt();
-    if magnitude < DEADZONE || magnitude == 0.0 {
+    if magnitude < deadzone || magnitude == 0.0 {
         return (0.0, 0.0);
     }
-    let denom = (1.0 - DEADZONE).max(1e-6);
-    let effective = ((magnitude - DEADZONE) / denom).min(1.0);
-    let accelerated = effective.powf(ACCEL_EXP);
+    let denom = (1.0 - deadzone).max(1e-6);
+    let effective = ((magnitude - deadzone) / denom).min(1.0);
+    let accelerated = effective.powf(accel_exp);
     let norm_x = stick_x / magnitude;
     let norm_y = stick_y / magnitude;
-    let speed = accelerated * SCROLL_SENSITIVITY * BASE_SCROLL_SPEED * dt_secs;
+    let speed = accelerated * sensitivity * BASE_SCROLL_SPEED * dt_secs;
     (norm_x * speed, norm_y * speed)
 }
 
-fn stick_delta(stick_x: f32, stick_y: f32, sensitivity: f32, dt_secs: f32) -> (f32, f32) {
+fn stick_delta(
+    stick_x: f32,
+    stick_y: f32,
+    deadzone: f32,
+    sensitivity: f32,
+    accel_exp: f32,
+    dt_secs: f32,
+) -> (f32, f32) {
     let magnitude = (stick_x * stick_x + stick_y * stick_y).sqrt();
-    if magnitude < DEADZONE || magnitude == 0.0 {
+    if magnitude < deadzone || magnitude == 0.0 {
         return (0.0, 0.0);
     }
-    let denom = (1.0 - DEADZONE).max(1e-6);
-    let effective = ((magnitude - DEADZONE) / denom).min(1.0);
-    let accelerated = effective.powf(ACCEL_EXP);
+    let denom = (1.0 - deadzone).max(1e-6);
+    let effective = ((magnitude - deadzone) / denom).min(1.0);
+    let accelerated = effective.powf(accel_exp);
     let norm_x = stick_x / magnitude;
     let norm_y = stick_y / magnitude;
     let speed = accelerated * sensitivity * BASE_SPEED * dt_secs;

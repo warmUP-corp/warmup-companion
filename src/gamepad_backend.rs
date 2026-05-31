@@ -6,7 +6,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-pub use warmup_gamepad::{Button, ButtonChange, GamepadInput};
+pub use warmup_gamepad::{Button, ButtonChange, GamepadInput, PollMode};
 
 /// Polls physical controller state and produces normalized axes + button edges.
 pub trait GamepadBackend {
@@ -35,7 +35,8 @@ impl SdlBackend {
 
 impl GamepadBackend for SdlBackend {
     fn poll(&mut self) -> Result<(), String> {
-        self.input.poll_events();
+        self.input
+            .poll_events_with_mode(crate::config::userland_gamepad_poll_mode());
         self.pending = self.input.detect_button_changes();
         Ok(())
     }
@@ -45,7 +46,10 @@ impl GamepadBackend for SdlBackend {
     }
 
     fn axes(&self) -> (f32, f32, f32, f32) {
-        self.input.axes()
+        match crate::config::userland_gamepad_poll_mode() {
+            PollMode::Full => self.input.axes(),
+            PollMode::Sleep => (0.0, 0.0, 0.0, 0.0),
+        }
     }
 
     fn controller_label(&self) -> String {
@@ -55,7 +59,10 @@ impl GamepadBackend for SdlBackend {
     }
 
     fn live_input_summary(&self) -> String {
-        self.input.live_input_summary()
+        match crate::config::userland_gamepad_poll_mode() {
+            PollMode::Full => self.input.live_input_summary(),
+            PollMode::Sleep => "sleep (guide only)".to_string(),
+        }
     }
 }
 
@@ -134,7 +141,8 @@ fn sdl_thread_main(
         }
     };
     while !stop.load(Ordering::Relaxed) {
-        input.poll_events();
+        let mode = crate::config::userland_gamepad_poll_mode();
+        input.poll_events_with_mode(mode);
         let changes = input.detect_button_changes();
         if !changes.is_empty() {
             if let Ok(mut q) = shared.changes.lock() {
@@ -142,7 +150,10 @@ fn sdl_thread_main(
             }
         }
         if let Ok(mut a) = shared.axes.lock() {
-            *a = input.axes();
+            *a = match mode {
+                PollMode::Full => input.axes(),
+                PollMode::Sleep => (0.0, 0.0, 0.0, 0.0),
+            };
         }
         if let Ok(mut l) = shared.label.lock() {
             *l = input
@@ -150,7 +161,10 @@ fn sdl_thread_main(
                 .unwrap_or_else(|| "none".to_string());
         }
         if let Ok(mut s) = shared.summary.lock() {
-            *s = input.live_input_summary();
+            *s = match mode {
+                PollMode::Full => input.live_input_summary(),
+                PollMode::Sleep => "sleep (guide only)".to_string(),
+            };
         }
         std::thread::sleep(Duration::from_millis(4));
     }

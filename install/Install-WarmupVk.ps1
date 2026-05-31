@@ -1,25 +1,29 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-  Build and install WarmupVkSvc (sign-in / UAC gamepad keyboard).
+  Build and install Warmup Companion (sign-in / UAC gamepad keyboard).
 
 .DESCRIPTION
   Same gamepad-enabled binary as:
     cargo build --release --features gamepad,service
   Desktop test (after install or from target\release):
-    warmup-vk-prototype.exe --gamepad --real
+    warmup-companion.exe --gamepad --real
 
-  Service binary (SCM): C:\ProgramData\WarmupVk\bin\warmup-vk-prototype.exe
+  Service binary (SCM): C:\ProgramData\WarmupVk\bin\warmup-companion.exe
   Log: C:\ProgramData\WarmupVk\service.log
 
   C:\Program Files\WarmupVk\ is NOT used (legacy manual copies only).
 #>
+param(
+    [switch]$DebugUi
+)
+
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
 $BinDir = "C:\ProgramData\WarmupVk\bin"
-$BinExe = Join-Path $BinDir "warmup-vk-prototype.exe"
+$BinExe = Join-Path $BinDir "warmup-companion.exe"
 $LogFile = "C:\ProgramData\WarmupVk\service.log"
 $LegacyExe = "C:\Program Files\WarmupVk\warmup-vk-prototype.exe"
 
@@ -27,7 +31,7 @@ Write-Host "Building release (--features gamepad,service)..."
 cargo build --release --features "gamepad,service"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-$Exe = Join-Path $Root "target\release\warmup-vk-prototype.exe"
+$Exe = Join-Path $Root "target\release\warmup-companion.exe"
 if (-not (Test-Path $Exe)) {
     throw "Missing $Exe"
 }
@@ -39,7 +43,11 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "OK: gamepad feature present in $Exe"
 
 Write-Host "Installing service..."
-& $Exe install
+$InstallArgs = @("install")
+if ($DebugUi) {
+    $InstallArgs += "--debug-ui"
+}
+& $Exe @InstallArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 if (-not (Test-Path $BinExe)) {
@@ -56,6 +64,7 @@ Write-Host ""
 Write-Host "=== Install OK ===" -ForegroundColor Green
 Write-Host "Service binary: $BinExe"
 Write-Host "Log file:       $LogFile"
+Write-Host "Debug UI:       $(if ($DebugUi) { 'enabled' } else { 'disabled' })"
 if (Test-Path $LegacyExe) {
     Write-Host "WARNING: legacy copy still exists (not used by service): $LegacyExe" -ForegroundColor Yellow
     Write-Host "         You can remove that folder to avoid confusion."

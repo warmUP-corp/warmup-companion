@@ -435,14 +435,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
-name = "warmup-gamepad"
-version = "0.1.0"
-dependencies = [
- "sdl3",
-]
-
-[[package]]
-name = "warmup-vk-prototype"
+name = "warmup-companion"
 version = "0.1.0"
 dependencies = [
  "ctrlc",
@@ -450,6 +443,13 @@ dependencies = [
  "warmup-gamepad",
  "windows",
  "windows-service",
+]
+
+[[package]]
+name = "warmup-gamepad"
+version = "0.1.0"
+dependencies = [
+ "sdl3",
 ]
 
 [[package]]

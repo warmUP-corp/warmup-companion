@@ -1,4 +1,4 @@
-//! Install / uninstall WarmupVk Windows service (`WarmupVkSvc`).
+//! Install / uninstall Warmup Companion Windows service (`WarmupVkSvc`).
 
 #![cfg(windows)]
 
@@ -8,15 +8,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const SERVICE_NAME: &str = "WarmupVkSvc";
-const DISPLAY_NAME: &str = "Warmup Xbox VK sign-in";
+const DISPLAY_NAME: &str = "Warmup Companion";
 const DESCRIPTION: &str =
-    "Gamepad on-screen keyboard at Windows sign-in, lock screen, and UAC (Warmup prototype).";
+    "Companion service for Warmup gamepad input, sign-in keyboard, and UAC support.";
 
 /// No spaces — `sc.exe` breaks on quoted paths under Program Files.
 pub const INSTALL_DIR: &str = r"C:\ProgramData\WarmupVk\bin";
 pub const DATA_DIR: &str = r"C:\ProgramData\WarmupVk";
-const EXE_NAME: &str = "warmup-vk-prototype.exe";
+const EXE_NAME: &str = "warmup-companion.exe";
+const LEGACY_EXE_NAME: &str = "warmup-vk-prototype.exe";
 const LOG_NAME: &str = "service.log";
+const DEBUG_UI_FLAG: &str = r"C:\ProgramData\WarmupVk\debug-ui.enabled";
 
 /// Leftover names from manual `sc create` debugging — removed on install/uninstall.
 const TEST_SERVICE_NAMES: &[&str] = &[
@@ -28,17 +30,21 @@ const TEST_SERVICE_NAMES: &[&str] = &[
     "WarmupVkTest6",
 ];
 
-pub fn run_install() {
-    if let Err(e) = install_inner() {
+pub fn run_install(debug_ui: bool) {
+    if let Err(e) = install_inner(debug_ui) {
         eprintln!("install failed: {e}");
         std::process::exit(1);
     }
     let bin = Path::new(INSTALL_DIR).join(EXE_NAME);
-    println!("Installed. Service {SERVICE_NAME} started.");
+    println!("Installed Warmup Companion. Service {SERVICE_NAME} started.");
     println!("Binary (SCM uses this): {}", bin.display());
     println!("NOT C:\\Program Files\\WarmupVk\\ — that path is legacy only.");
     println!("Reboot or Win+L, then tap Y on the controller at the password screen.");
     println!("Log: {DATA_DIR}\\{LOG_NAME}");
+    println!(
+        "Debug UI: {}",
+        if debug_ui { "enabled" } else { "disabled" }
+    );
 }
 
 pub fn run_uninstall() {
@@ -85,18 +91,23 @@ pub fn request_service_stop() {
     }
 }
 
-fn install_inner() -> Result<(), String> {
+fn install_inner(debug_ui: bool) -> Result<(), String> {
     require_admin()?;
     remove_legacy_install_artifacts();
     let src = std::env::current_exe().map_err(|e| e.to_string())?;
     fs::create_dir_all(INSTALL_DIR).map_err(|e| e.to_string())?;
     fs::create_dir_all(DATA_DIR).map_err(|e| e.to_string())?;
+    set_debug_ui_flag(debug_ui)?;
 
     // Stop + delete BEFORE copying — old exe is locked by the running service.
     remove_test_services();
     uninstall_service_quiet();
 
     let dest = Path::new(INSTALL_DIR).join(EXE_NAME);
+    let legacy_dest = Path::new(INSTALL_DIR).join(LEGACY_EXE_NAME);
+    if legacy_dest.exists() {
+        let _ = fs::remove_file(&legacy_dest);
+    }
     fs::copy(&src, &dest).map_err(|e| format!("copy exe to {INSTALL_DIR}: {e}"))?;
     if !dest.is_file() {
         return Err(format!(
@@ -117,7 +128,7 @@ fn install_inner() -> Result<(), String> {
     sc(&["start", SERVICE_NAME])?;
     verify_service_running()?;
     log_line(&format!(
-        "installed from {} -> {}",
+        "installed from {} -> {} (debug_ui={debug_ui})",
         src.display(),
         dest.display()
     ));
@@ -132,12 +143,29 @@ fn uninstall_inner() -> Result<(), String> {
     if exe.exists() {
         fs::remove_file(&exe).ok();
     }
+    let old_exe = Path::new(INSTALL_DIR).join(LEGACY_EXE_NAME);
+    if old_exe.exists() {
+        fs::remove_file(&old_exe).ok();
+    }
     // Legacy path from earlier installer attempts.
-    let legacy = Path::new(r"C:\Program Files\WarmupVk").join(EXE_NAME);
+    let legacy = Path::new(r"C:\Program Files\WarmupVk").join(LEGACY_EXE_NAME);
     if legacy.exists() {
         fs::remove_file(&legacy).ok();
     }
+    let _ = fs::remove_file(DEBUG_UI_FLAG);
     log_line("uninstalled");
+    Ok(())
+}
+
+fn set_debug_ui_flag(enabled: bool) -> Result<(), String> {
+    let flag = Path::new(DEBUG_UI_FLAG);
+    if enabled {
+        fs::write(flag, b"1\n").map_err(|e| format!("write debug UI flag: {e}"))?;
+        log_line("debug ui enabled by installer flag");
+    } else {
+        let _ = fs::remove_file(flag);
+        log_line("debug ui disabled (no installer flag)");
+    }
     Ok(())
 }
 

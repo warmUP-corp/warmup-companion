@@ -183,6 +183,14 @@ pub struct ButtonChange {
     pub pressed: bool,
 }
 
+/// Userland SDL polling level. `Sleep` keeps only the guide button hot so the
+/// shell can wake Warmup without letting normal controls affect cursor/VK state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PollMode {
+    Full,
+    Sleep,
+}
+
 /// Raw touchpad finger data read from SDL3 in a single poll cycle.
 pub struct TouchpadSample {
     pub index: u8,
@@ -205,6 +213,7 @@ pub struct GamepadInput {
     prev_trigger_right: bool,
     pending_button_changes: Vec<ButtonChange>,
     touchpad_samples: Vec<TouchpadSample>,
+    poll_mode: PollMode,
     /// Last known position of touchpad 0 finger 0 while it was down; used for delta computation.
     prev_touchpad_pos: Option<(f32, f32)>,
 }
@@ -242,6 +251,7 @@ impl GamepadInput {
             prev_trigger_right: false,
             pending_button_changes: Vec::with_capacity(TRACKED_BUTTONS.len() + 2),
             touchpad_samples: Vec::new(),
+            poll_mode: PollMode::Full,
             prev_touchpad_pos: None,
         };
         // Baseline all buttons to suppress press storms on startup (Xbox triggers at rest = pressed).
@@ -252,8 +262,18 @@ impl GamepadInput {
     /// Updates SDL3 controller state, detects hotplug, and captures button/trigger changes.
     /// Returns `true` if a connect or disconnect occurred.
     pub fn poll_events(&mut self) -> bool {
+        self.poll_events_with_mode(PollMode::Full)
+    }
+
+    /// Updates SDL3 controller state according to a userland polling mode.
+    pub fn poll_events_with_mode(&mut self, mode: PollMode) -> bool {
         self.gc_sub.update();
         let mut any_change = false;
+
+        if self.poll_mode != mode {
+            self.poll_mode = mode;
+            self.sync_prev_buttons_to_current();
+        }
 
         // Detect disconnection.
         if let Some(ref gp) = self.active_gamepad {
@@ -289,7 +309,11 @@ impl GamepadInput {
 
         // Poll button state changes on the active pad.
         if let Some(ref gp) = self.active_gamepad {
-            for &btn in TRACKED_BUTTONS {
+            let tracked = match mode {
+                PollMode::Full => TRACKED_BUTTONS,
+                PollMode::Sleep => &[SdlButton::Guide][..],
+            };
+            for &btn in tracked {
                 let pressed = gp.button(btn);
                 let was = self.prev_buttons.get(&btn).copied().unwrap_or(false);
                 if pressed != was {
@@ -298,6 +322,9 @@ impl GamepadInput {
                         self.pending_button_changes.push(ButtonChange { button, pressed });
                     }
                 }
+            }
+            if mode == PollMode::Sleep {
+                return false;
             }
             // Synthesise LT/RT from trigger axes.
             let lt_pressed = gp.axis(Axis::TriggerLeft) > TRIGGER_THRESHOLD;

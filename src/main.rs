@@ -772,7 +772,8 @@ fn has_interactive_console() -> bool {
 fn dispatch_install_or_service(args: &[String]) {
     match args.get(1).map(String::as_str) {
         Some("install") => {
-            install::run_install();
+            let debug_ui = args.iter().any(|a| a == "--debug-ui" || a == "--debug");
+            install::run_install(debug_ui);
             std::process::exit(0);
         }
         Some("uninstall") => {
@@ -781,6 +782,11 @@ fn dispatch_install_or_service(args: &[String]) {
         }
         Some("stop") => {
             install::run_stop();
+            std::process::exit(0);
+        }
+        #[cfg(feature = "gamepad")]
+        Some("settings") => {
+            run_settings_command(args);
             std::process::exit(0);
         }
         _ => {}
@@ -814,6 +820,99 @@ fn dispatch_install_or_service(args: &[String]) {
     }
 }
 
+#[cfg(all(windows, feature = "gamepad"))]
+fn run_settings_command(args: &[String]) {
+    let usage = "usage:
+  warmup-companion.exe settings get
+  warmup-companion.exe settings path
+  warmup-companion.exe settings set <key> <value>
+  warmup-companion.exe settings userland-poll <get|full|sleep|path>";
+    match args.get(2).map(String::as_str) {
+        Some("get") | None => print_gamepad_settings(),
+        Some("path") => match crate::config::settings_path() {
+            Some(path) => println!("{}", path.display()),
+            None => {
+                eprintln!("LOCALAPPDATA is not set");
+                std::process::exit(1);
+            }
+        },
+        Some("set") => {
+            let Some(key) = args.get(3) else {
+                eprintln!("{usage}");
+                std::process::exit(2);
+            };
+            let Some(value) = args.get(4) else {
+                eprintln!("{usage}");
+                std::process::exit(2);
+            };
+            if let Err(e) = crate::config::set_gamepad_setting(key, value) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+            println!("{key}={value}");
+        }
+        Some("userland-poll") => match args.get(3).map(String::as_str) {
+            Some("get") | None => {
+                let mode = crate::config::userland_gamepad_poll_mode();
+                println!("{}", poll_mode_name(mode));
+            }
+            Some("full") => {
+                if let Err(e) =
+                    crate::config::set_userland_gamepad_poll_mode(warmup_gamepad::PollMode::Full)
+                {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                println!("full");
+            }
+            Some("sleep") | Some("guide") | Some("guide-only") => {
+                if let Err(e) =
+                    crate::config::set_userland_gamepad_poll_mode(warmup_gamepad::PollMode::Sleep)
+                {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                println!("sleep");
+            }
+            Some("path") => match crate::config::settings_path() {
+                Some(path) => println!("{}", path.display()),
+                None => {
+                    eprintln!("LOCALAPPDATA is not set");
+                    std::process::exit(1);
+                }
+            },
+            Some(_) => {
+                eprintln!("{usage}");
+                std::process::exit(2);
+            }
+        },
+        Some(_) => {
+            eprintln!("{usage}");
+            std::process::exit(2);
+        }
+    }
+}
+
+#[cfg(all(windows, feature = "gamepad"))]
+fn poll_mode_name(mode: warmup_gamepad::PollMode) -> &'static str {
+    match mode {
+        warmup_gamepad::PollMode::Full => "full",
+        warmup_gamepad::PollMode::Sleep => "sleep",
+    }
+}
+
+#[cfg(all(windows, feature = "gamepad"))]
+fn print_gamepad_settings() {
+    let s = crate::config::gamepad_settings();
+    println!("userland_poll={}", poll_mode_name(s.userland_poll_mode));
+    println!("cursor_deadzone={}", s.cursor_deadzone);
+    println!("cursor_speed={}", s.cursor_speed);
+    println!("cursor_accel={}", s.cursor_accel);
+    println!("scroll_deadzone={}", s.scroll_deadzone);
+    println!("scroll_speed={}", s.scroll_speed);
+    println!("scroll_accel={}", s.scroll_accel);
+}
+
 #[cfg(feature = "gamepad")]
 fn run_gamepad_mode() {
     let use_real = env::args().any(|a| a == "--real")
@@ -836,7 +935,7 @@ fn run_gamepad_mode() {
             app.attach_named(Desktop::Winlogon);
         }
     }
-    println!("Warmup gamepad mode — sticks move mouse; L3 (stick click) toggles VK");
+    println!("Warmup Companion gamepad mode — sticks move mouse; L3 toggles VK");
     if use_real {
         println!("real Win32 VK enabled (WarmupXboxVkWindow)");
     }

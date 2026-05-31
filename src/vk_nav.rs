@@ -353,7 +353,9 @@ pub fn tick_dpad_hold(now: Instant) -> bool {
     nav.hold_count += 1;
     nav.hold_deadline = Some(now + HOLD_REPEAT);
     drop(nav);
-    move_selection(btn)
+    let moved = move_selection(btn);
+    refocus_after_nav_move();
+    moved
 }
 
 #[cfg(feature = "gamepad")]
@@ -367,6 +369,7 @@ pub fn dpad_pressed(dir: Button) {
     nav.hold_deadline = Some(Instant::now() + HOLD_INITIAL);
     drop(nav);
     let _ = move_selection(dir);
+    refocus_after_nav_move();
 }
 
 #[cfg(feature = "gamepad")]
@@ -506,6 +509,11 @@ fn send_paste() {
 /// the selection. False off Winlogon, where normal caret rules apply.
 fn focus_for_inject() -> bool {
     crate::win::logon_focus::focus_password_field()
+}
+
+#[cfg(feature = "gamepad")]
+fn refocus_after_nav_move() {
+    let _ = crate::win::logon_focus::focus_password_field();
 }
 
 /// Build a virtual-key down (or up) `INPUT`.

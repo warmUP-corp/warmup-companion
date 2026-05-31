@@ -29,8 +29,8 @@ use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnviron
 use windows::Win32::System::RemoteDesktop::{ProcessIdToSessionId, WTSGetActiveConsoleSessionId};
 use windows::Win32::System::Threading::{
     CreateProcessAsUserW, GetExitCodeProcess, OpenProcess, OpenProcessToken, TerminateProcess,
-    WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
-    PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOW,
+    WaitForSingleObject, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, PROCESS_CREATION_FLAGS,
+    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOW,
 };
 use windows_service::service::{
     ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
@@ -447,11 +447,14 @@ unsafe fn create_worker_process(token: HANDLE) -> Result<WorkerProcess, String> 
     if !env_created {
         install::log_line("CreateEnvironmentBlock failed; launching without custom env");
     }
-    let flags = if env_created {
+    let mut flags = if env_created {
         CREATE_UNICODE_ENVIRONMENT
     } else {
         PROCESS_CREATION_FLAGS(0)
     };
+    if !crate::config::debug_ui_enabled() {
+        flags |= CREATE_NO_WINDOW;
+    }
 
     let created = CreateProcessAsUserW(
         token,

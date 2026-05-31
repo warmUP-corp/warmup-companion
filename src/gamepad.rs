@@ -731,15 +731,19 @@ where
 
         #[cfg(windows)]
         if service_mode {
-            crate::win::debug_overlay::tick();
-            poll.log_desktop_sync_if_due(true);
-            if crate::win::debug_overlay::take_vk_toggle_request() {
-                on_action(VkLoopAction::Toggle);
+            if crate::config::debug_ui_enabled() {
+                crate::win::debug_overlay::tick();
             }
-            // Loop thread owns the UIA/COM apartment and (on winlogon) is
-            // attached there, so the foreground dump must run here.
-            if crate::win::logon_focus::take_dump_request() {
-                crate::win::logon_focus::dump_foreground_tree();
+            poll.log_desktop_sync_if_due(true);
+            if crate::config::debug_ui_enabled() {
+                if crate::win::debug_overlay::take_vk_toggle_request() {
+                    on_action(VkLoopAction::Toggle);
+                }
+                // Loop thread owns the UIA/COM apartment and (on winlogon) is
+                // attached there, so the foreground dump must run here.
+                if crate::win::logon_focus::take_dump_request() {
+                    crate::win::logon_focus::dump_foreground_tree();
+                }
             }
         }
 

@@ -8,6 +8,7 @@
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::vk_nav::{self, KeyAction, KeyCell};
@@ -50,6 +51,8 @@ const VK_ZORDER_TIMER_MS: u32 = 200;
 /// Joyxoff `FUN_00466970` drives frames from a timer (id 100); we use 16 ms (~60 Hz).
 const VK_RENDER_TIMER_ID: usize = 2;
 const VK_RENDER_TIMER_MS: u32 = 16;
+const VK_SHOW_ANIMATION_MS: u64 = 180;
+const VK_HIDE_ANIMATION_MS: u64 = 130;
 
 static VK_VISIBLE: AtomicBool = AtomicBool::new(false);
 static UI_THREAD_ID: AtomicU32 = AtomicU32::new(0);
@@ -393,8 +396,9 @@ fn ui_hide() {
     // Restore the app window we shrank on show.
     let reserved = UI.with(|ui| ui.borrow_mut().reserved.take());
     unsafe {
-        restore_app_space(reserved);
+        animate_hide(h);
         destroy_vk_window(h);
+        restore_app_space(reserved);
     }
     VK_HWND.store(0, Ordering::Release);
     VK_VISIBLE.store(false, Ordering::SeqCst);
@@ -621,7 +625,7 @@ unsafe fn create_vk_window() -> Result<HWND, String> {
     let hwnd = CreateWindowExW(
         window_ex_style(),
         WINDOW_CLASS,
-        w!("Warmup Xbox VK"),
+        w!("Warmup Companion"),
         window_style(),
         x,
         y,
@@ -667,6 +671,7 @@ unsafe fn stop_timers(hwnd: HWND) {
 
 unsafe fn show_and_place(hwnd: HWND) {
     let (x, y, outer_w, outer_h) = vk_dock_rect();
+    let start_y = y + outer_h;
     // Never activate. Joyxoff's `JoyXboxVkWindow` is NOACTIVATE and shown without
     // taking foreground, so the focused control (winlogon password edit) keeps focus
     // and Windows never auto-invokes the native touch keyboard.
@@ -674,15 +679,66 @@ unsafe fn show_and_place(hwnd: HWND) {
         hwnd,
         HWND_TOPMOST,
         x,
-        y,
+        start_y,
         outer_w,
         outer_h,
         SWP_SHOWWINDOW | SWP_NOACTIVATE,
     );
     let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     ensure_topmost(hwnd);
+    animate_window_y(hwnd, x, start_y, y, outer_w, outer_h, VK_SHOW_ANIMATION_MS);
     start_timers(hwnd);
     log_window_rect(hwnd);
+}
+
+unsafe fn animate_hide(hwnd: HWND) {
+    let (x, y, outer_w, outer_h) = vk_dock_rect();
+    animate_window_y(
+        hwnd,
+        x,
+        y,
+        y + outer_h,
+        outer_w,
+        outer_h,
+        VK_HIDE_ANIMATION_MS,
+    );
+}
+
+unsafe fn animate_window_y(
+    hwnd: HWND,
+    x: i32,
+    from_y: i32,
+    to_y: i32,
+    width: i32,
+    height: i32,
+    duration_ms: u64,
+) {
+    let started = Instant::now();
+    let duration = Duration::from_millis(duration_ms.max(1));
+    loop {
+        let t = (started.elapsed().as_secs_f32() / duration.as_secs_f32()).min(1.0);
+        let eased = ease_out_cubic(t);
+        let y = from_y as f32 + (to_y - from_y) as f32 * eased;
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            x,
+            y.round() as i32,
+            width,
+            height,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+        ensure_topmost(hwnd);
+        render_frame();
+        if t >= 1.0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(VK_RENDER_TIMER_MS as u64));
+    }
+}
+
+fn ease_out_cubic(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
 }
 
 unsafe fn destroy_vk_window(hwnd: HWND) {
