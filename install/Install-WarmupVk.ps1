@@ -5,7 +5,7 @@
 
 .DESCRIPTION
   Same gamepad-enabled binary as:
-    cargo build --release --features gamepad,service
+    cargo build --release
   Desktop test (after install or from target\release):
     warmup-companion.exe --gamepad --real
 
@@ -27,8 +27,8 @@ $BinExe = Join-Path $BinDir "warmup-companion.exe"
 $LogFile = "C:\ProgramData\WarmupVk\service.log"
 $LegacyExe = "C:\Program Files\WarmupVk\warmup-vk-prototype.exe"
 
-Write-Host "Building release (--features gamepad,service)..."
-cargo build --release --features "gamepad,service"
+Write-Host "Building release (default service + gamepad features)..."
+cargo build --release
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $Exe = Join-Path $Root "target\release\warmup-companion.exe"
@@ -41,6 +41,12 @@ if ($LASTEXITCODE -ne 0) {
     throw "Built exe is missing gamepad support. Re-run this script."
 }
 Write-Host "OK: gamepad feature present in $Exe"
+
+cmd /c "findstr /C:`"ds4-usb`" /C:`"ds5-usb`" /C:`"ds5-bt`" `"$Exe`" >nul 2>&1"
+if ($LASTEXITCODE -ne 0) {
+    throw "Built exe is missing PlayStation Winlogon HID support. Re-run this script."
+}
+Write-Host "OK: PlayStation Winlogon HID support present in $Exe"
 
 Write-Host "Installing service..."
 $InstallArgs = @("install")
