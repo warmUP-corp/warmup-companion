@@ -1,4 +1,8 @@
 mod config;
+/// Cursor/scroll golden-fixture loader (#346). Pure serde; used by tests and the
+/// math-parity slice (#349). Unused in the normal binary build for now.
+#[allow(dead_code)]
+mod golden;
 mod symbols;
 mod time_util;
 mod vk_gate;
@@ -620,7 +624,7 @@ fn main() {
         }
         #[cfg(not(feature = "gamepad"))]
         {
-            eprintln!("Rebuild with: cargo run --features gamepad -- --gamepad");
+            eprintln!("Rebuild with: cargo run -- --gamepad");
             std::process::exit(1);
         }
     }
@@ -633,7 +637,7 @@ fn main() {
     }
     println!("Type `help` for commands. State prints after each command.");
     #[cfg(feature = "gamepad")]
-    println!("Gamepad: `pad` or `cargo run --features gamepad -- --gamepad` (warmUP SDL3 crate)");
+    println!("Gamepad: `pad` or `cargo run -- --gamepad` (warmUP SDL3 crate)");
     repl_scroll::enable(true);
     repl_scroll::paint_state_panel(&app);
 
@@ -742,7 +746,7 @@ fn main() {
                 #[cfg(feature = "gamepad")]
                 if other == "gamepad" {
                     repl_scroll::note_line();
-                    println!("> use: cargo run --features gamepad -- --gamepad");
+                    println!("> use: cargo run -- --gamepad");
                 } else {
                     repl_scroll::note_line();
                     println!("> unknown command: {other}");
@@ -815,7 +819,7 @@ fn dispatch_install_or_service(args: &[String]) {
     }
     #[cfg(not(feature = "service"))]
     if args.iter().any(|a| a == "--service") {
-        eprintln!("Rebuild with: cargo build --release --features service");
+        eprintln!("Rebuild with default features enabled: cargo build --release");
         std::process::exit(1);
     }
 }
@@ -939,7 +943,7 @@ fn run_gamepad_mode() {
     if use_real {
         println!("real Win32 VK enabled (WarmupXboxVkWindow)");
     }
-    println!("Sign-in service: build with --features service, then `install` as Admin");
+    println!("Sign-in service: build default release, then `install` as Admin");
     repl_scroll::paint_state_panel(&app);
     let vk_open = std::cell::Cell::new(false);
     let result = run_boot_gamepad_loop(&mut app, &vk_open, false);

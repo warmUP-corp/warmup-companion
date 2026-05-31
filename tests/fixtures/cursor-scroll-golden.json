@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "configFieldMapping": {
+    "sensitivity": "cursor_speed",
+    "accelerationExp": "cursor_accel",
+    "deadzone": "cursor_deadzone",
+    "scrollSensitivity": "scroll_speed"
+  },
+  "cases": [
+    {
+      "name": "centered stick produces no movement",
+      "input": {
+        "stickX": 0.0,
+        "stickY": 0.0,
+        "dt": 0.016,
+        "config": { "deadzone": 0.15, "sensitivity": 15.0, "accelerationExp": 2.0, "scrollSensitivity": 5.0 }
+      },
+      "expected": null
+    },
+    {
+      "name": "inside deadzone produces no movement",
+      "input": {
+        "stickX": 0.1,
+        "stickY": -0.05,
+        "dt": 0.016,
+        "config": { "deadzone": 0.15, "sensitivity": 15.0, "accelerationExp": 2.0, "scrollSensitivity": 5.0 }
+      },
+      "expected": null
+    },
+    {
+      "name": "full right deflection moves cursor right",
+      "input": {
+        "stickX": 1.0,
+        "stickY": 0.0,
+        "dt": 0.016,
+        "config": { "deadzone": 0.15, "sensitivity": 15.0, "accelerationExp": 2.0, "scrollSensitivity": 5.0 }
+      },
+      "expected": null
+    },
+    {
+      "name": "diagonal deflection moves on both axes",
+      "input": {
+        "stickX": 0.7,
+        "stickY": 0.7,
+        "dt": 0.016,
+        "config": { "deadzone": 0.15, "sensitivity": 15.0, "accelerationExp": 2.0, "scrollSensitivity": 5.0 }
+      },
+      "expected": null
+    }
+  ]
+}
