@@ -122,6 +122,7 @@ fn key_glyph(key: &KeyCell) -> (String, bool) {
     match &key.action {
         KeyAction::Shift | KeyAction::CapsLock => (key.label.clone(), false),
         KeyAction::CloseVk => ("\u{2325}".to_string(), true), // keyboard dismiss
+        KeyAction::VoiceInput => (String::new(), false),
         KeyAction::Paste => (key.label.clone(), false),
         KeyAction::Vk(vk) if *vk == VK_BACK => (key.label.clone(), false),
         KeyAction::Vk(vk) if *vk == VK_RETURN => (key.label.clone(), false),
@@ -140,6 +141,7 @@ fn key_hint(key: &KeyCell) -> Option<&'static str> {
         KeyAction::Vk(vk) if *vk == VK_SPACE => Some("X"),
         KeyAction::Shift => Some("LT"),
         KeyAction::CapsLock => Some("RT"),
+        KeyAction::VoiceInput => Some("Y"),
         KeyAction::CloseVk => Some("L3"),
         _ => None,
     }

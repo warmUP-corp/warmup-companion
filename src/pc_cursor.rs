@@ -353,6 +353,9 @@ mod parity_tests {
                 None => missing = true,
             }
         }
-        assert!(!missing, "fixture has unpopulated expected values:\n{report}");
+        assert!(
+            !missing,
+            "fixture has unpopulated expected values:\n{report}"
+        );
     }
 }

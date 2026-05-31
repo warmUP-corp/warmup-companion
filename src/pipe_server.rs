@@ -353,8 +353,11 @@ mod server {
             }
             let cur = current();
             if last.as_ref() != Some(&cur) || last_conn_write.elapsed() >= KEEPALIVE {
-                if write_all(pipe, UpFrame::Connection(cur.clone()).to_ndjson_line().as_bytes())
-                    .is_err()
+                if write_all(
+                    pipe,
+                    UpFrame::Connection(cur.clone()).to_ndjson_line().as_bytes(),
+                )
+                .is_err()
                 {
                     return;
                 }

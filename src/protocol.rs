@@ -160,7 +160,10 @@ mod tests {
         assert_eq!(json["type"], "connection");
         assert_eq!(json["payload"]["connected"], true);
         assert_eq!(json["payload"]["controllerType"], "xbox");
-        assert_eq!(json["payload"]["controllerName"], "Xbox Wireless Controller");
+        assert_eq!(
+            json["payload"]["controllerName"],
+            "Xbox Wireless Controller"
+        );
     }
 
     #[test]

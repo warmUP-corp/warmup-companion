@@ -12,7 +12,7 @@ use crate::gamepad_backend::Button;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, GetKeyboardLayout, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
     KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_END,
-    VK_RETURN, VK_SPACE, VK_TAB,
+    VK_LWIN, VK_RETURN, VK_SPACE, VK_TAB,
 };
 
 #[derive(Clone)]
@@ -25,6 +25,8 @@ pub enum KeyAction {
     CapsLock,
     /// Ctrl+V paste.
     Paste,
+    /// Start Windows voice dictation.
+    VoiceInput,
     /// Dismiss the on-screen keyboard.
     CloseVk,
 }
@@ -121,6 +123,7 @@ struct NavState {
     pos: KeyPos,
     shift: bool,
     caps: bool,
+    voice_input: bool,
     rows: Vec<KeyRow>,
     #[cfg(feature = "gamepad")]
     hold_button: Option<Button>,
@@ -132,6 +135,7 @@ static NAV: Mutex<NavState> = Mutex::new(NavState {
     pos: KeyPos { row: 0, col: 0 },
     shift: false,
     caps: false,
+    voice_input: false,
     rows: Vec::new(),
     #[cfg(feature = "gamepad")]
     hold_button: None,
@@ -223,7 +227,8 @@ fn build_pc_layout(shift: bool, caps: bool) -> Vec<KeyRow> {
         },
         KeyRow {
             keys: vec![
-                KeyCell::vk("", VK_SPACE, GRID_UNITS - 1.5 - 1.5),
+                KeyCell::vk("", VK_SPACE, GRID_UNITS - 1.5 - 1.5 - 1.5),
+                KeyCell::named("Mic", KeyAction::VoiceInput, 1.5),
                 KeyCell::named("Paste", KeyAction::Paste, 1.5),
                 KeyCell::named("", KeyAction::CloseVk, 1.5),
             ],
@@ -284,6 +289,10 @@ pub fn rows_snapshot() -> Vec<KeyRow> {
 pub fn selected_key() -> Option<KeyCell> {
     let nav = NAV.lock().ok()?;
     nav.rows.get(nav.pos.row)?.keys.get(nav.pos.col).cloned()
+}
+
+pub fn voice_input_active() -> bool {
+    NAV.lock().map(|n| n.voice_input).unwrap_or(false)
 }
 
 #[cfg(feature = "gamepad")]
@@ -443,6 +452,7 @@ pub fn activate_key(key: &KeyCell) {
         KeyAction::Shift => toggle_shift(),
         KeyAction::CapsLock => toggle_caps(),
         KeyAction::Paste => send_paste(),
+        KeyAction::VoiceInput => start_voice_input(),
         KeyAction::CloseVk => crate::win::vk_ui::request_hide(),
     }
 }
@@ -503,6 +513,24 @@ fn send_paste() {
     unsafe {
         let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
     }
+}
+
+pub fn start_voice_input() {
+    if let Ok(mut nav) = NAV.lock() {
+        nav.voice_input = !nav.voice_input;
+    }
+    let collapse = focus_for_inject();
+    let h = VIRTUAL_KEY(b'H' as u16);
+    let mut batch: Vec<INPUT> = Vec::with_capacity(6);
+    push_collapse(&mut batch, collapse);
+    batch.push(vk_event(VK_LWIN, false));
+    batch.push(vk_event(h, false));
+    batch.push(vk_event(h, true));
+    batch.push(vk_event(VK_LWIN, true));
+    unsafe {
+        let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
+    }
+    request_ui_repaint();
 }
 
 /// Focus the credential field for an inject. Returns true on Winlogon, where the
