@@ -4,15 +4,43 @@
 //! retargeted. Warmup owns the visible VK, so hide any native panel windows that
 //! appear on the current desktop.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClassNameW, GetWindowTextW, IsWindowVisible, PostMessageW, ShowWindow, SW_HIDE,
     WM_CLOSE,
 };
 
+static SUPPRESSING: AtomicBool = AtomicBool::new(false);
+
 pub fn suppress() {
     unsafe {
         let _ = EnumWindows(Some(enum_window), LPARAM(0));
+    }
+}
+
+pub fn suppress_for(duration: Duration) {
+    if SUPPRESSING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if thread::Builder::new()
+        .name("warmup-native-keyboard-suppress".into())
+        .spawn(move || {
+            let _ = super::desktop::attach_input();
+            let deadline = Instant::now() + duration;
+            while Instant::now() < deadline {
+                suppress();
+                thread::sleep(Duration::from_millis(25));
+            }
+            suppress();
+            SUPPRESSING.store(false, Ordering::SeqCst);
+        })
+        .is_err()
+    {
+        SUPPRESSING.store(false, Ordering::SeqCst);
     }
 }
 

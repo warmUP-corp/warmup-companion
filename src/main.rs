@@ -1044,14 +1044,8 @@ pub(crate) fn run_boot_gamepad_loop(
 
 #[cfg(feature = "gamepad")]
 fn launch_warmup_exe() -> Result<(), String> {
-    use std::process::Command;
-
     let exe = warmup_exe_path()?;
-    let mut cmd = Command::new(&exe);
-    if let Some(parent) = exe.parent() {
-        cmd.current_dir(parent);
-    }
-    spawn_warmup(&mut cmd).map_err(|e| format!("{}: {e}", exe.display()))
+    spawn_warmup(&exe).map_err(|e| format!("{}: {e}", exe.display()))
 }
 
 #[cfg(feature = "gamepad")]
@@ -1112,9 +1106,16 @@ fn warmup_exe_path() -> Result<std::path::PathBuf, String> {
 }
 
 #[cfg(all(feature = "gamepad", windows))]
-fn spawn_warmup(cmd: &mut std::process::Command) -> std::io::Result<()> {
-    use std::os::windows::process::CommandExt;
+fn spawn_warmup(exe: &std::path::Path) -> std::io::Result<()> {
+    if crate::config::service_mode() {
+        return spawn_warmup_as_active_user(exe);
+    }
 
+    use std::os::windows::process::CommandExt;
+    let mut cmd = std::process::Command::new(exe);
+    if let Some(parent) = exe.parent() {
+        cmd.current_dir(parent);
+    }
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
@@ -1123,8 +1124,93 @@ fn spawn_warmup(cmd: &mut std::process::Command) -> std::io::Result<()> {
         .map(|_| ())
 }
 
+#[cfg(all(feature = "gamepad", windows))]
+fn spawn_warmup_as_active_user(exe: &std::path::Path) -> std::io::Result<()> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
+    use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
+    use windows::Win32::System::Threading::{
+        CreateProcessAsUserW, CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT,
+        DETACHED_PROCESS, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW,
+    };
+
+    fn wide_os(s: &OsStr) -> Vec<u16> {
+        s.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    fn wide(s: &str) -> Vec<u16> {
+        OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    unsafe {
+        let session_id = WTSGetActiveConsoleSessionId();
+        let mut token = Default::default();
+        WTSQueryUserToken(session_id, &mut token)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+        let exe_w = wide_os(exe.as_os_str());
+        let mut cmd_w = wide(&format!("\"{}\"", exe.display()));
+        let cwd_w = exe.parent().map(|parent| wide_os(parent.as_os_str()));
+        let mut desktop = wide("winsta0\\default");
+        let mut startup = STARTUPINFOW {
+            cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+            lpDesktop: PWSTR(desktop.as_mut_ptr()),
+            ..Default::default()
+        };
+        let mut info = PROCESS_INFORMATION::default();
+        let mut env = std::ptr::null_mut();
+        let env_created = CreateEnvironmentBlock(&mut env, token, false).is_ok();
+        let env_arg = if env_created {
+            Some(env.cast_const().cast())
+        } else {
+            None
+        };
+        let cwd_arg = cwd_w
+            .as_ref()
+            .map(|cwd| PCWSTR(cwd.as_ptr()))
+            .unwrap_or_else(PCWSTR::null);
+        let mut flags = CREATE_UNICODE_ENVIRONMENT
+            | PROCESS_CREATION_FLAGS(DETACHED_PROCESS.0 | CREATE_NEW_PROCESS_GROUP.0);
+        if !env_created {
+            flags = PROCESS_CREATION_FLAGS(DETACHED_PROCESS.0 | CREATE_NEW_PROCESS_GROUP.0);
+        }
+
+        let created = CreateProcessAsUserW(
+            token,
+            PCWSTR(exe_w.as_ptr()),
+            PWSTR(cmd_w.as_mut_ptr()),
+            None,
+            None,
+            false,
+            flags,
+            env_arg,
+            cwd_arg,
+            &mut startup,
+            &mut info,
+        );
+        if env_created {
+            let _ = DestroyEnvironmentBlock(env);
+        }
+        let _ = CloseHandle(token);
+        created.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        let _ = CloseHandle(info.hThread);
+        let _ = CloseHandle(info.hProcess);
+    }
+    Ok(())
+}
+
 #[cfg(all(feature = "gamepad", not(windows)))]
-fn spawn_warmup(cmd: &mut std::process::Command) -> std::io::Result<()> {
+fn spawn_warmup(exe: &std::path::Path) -> std::io::Result<()> {
+    let mut cmd = std::process::Command::new(exe);
+    if let Some(parent) = exe.parent() {
+        cmd.current_dir(parent);
+    }
     cmd.spawn().map(|_| ())
 }
 

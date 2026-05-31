@@ -18,6 +18,8 @@ static CLICKS_ENABLED: AtomicBool = AtomicBool::new(true);
 /// WarmUp webview text entry is active. While true, the companion must not open
 /// or drive the native VK; button edges keep flowing to the desktop web VK.
 static LAUNCHER_OWNS_TEXT_INPUT: AtomicBool = AtomicBool::new(false);
+/// A game session is active. While true, the companion polls only Guide edges.
+static GAME_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Coalesced visual-cursor hint accumulated since the last send: `(dx, dy, dirty)`.
 static CURSOR_ACC: OnceLock<Mutex<(f64, f64, bool)>> = OnceLock::new();
@@ -34,6 +36,17 @@ pub fn clicks_enabled() -> bool {
 /// Whether WarmUp's webview VK currently owns controller text entry.
 pub fn launcher_owns_text_input() -> bool {
     LAUNCHER_OWNS_TEXT_INPUT.load(Ordering::Relaxed)
+}
+
+/// Whether the companion native VK should be suppressed because warmUP owns text
+/// entry or an active game handoff is running.
+pub fn native_vk_suppressed() -> bool {
+    LAUNCHER_OWNS_TEXT_INPUT.load(Ordering::Relaxed) || GAME_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Whether the companion should only observe Guide button edges.
+pub fn game_active() -> bool {
+    GAME_ACTIVE.load(Ordering::Relaxed)
 }
 
 /// Accumulate a visual-cursor hint. The companion has already injected the OS move; this
@@ -73,6 +86,13 @@ fn apply_config(p: &crate::protocol::ConfigPayload) {
 fn apply_mode(p: &ModeSnapshot) {
     CLICKS_ENABLED.store(p.clicks_enabled, Ordering::Relaxed);
     LAUNCHER_OWNS_TEXT_INPUT.store(p.launcher_owns_text_input, Ordering::Relaxed);
+    GAME_ACTIVE.store(p.game_active, Ordering::Relaxed);
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn clear_desktop_mode() {
+    LAUNCHER_OWNS_TEXT_INPUT.store(false, Ordering::Relaxed);
+    GAME_ACTIVE.store(false, Ordering::Relaxed);
 }
 
 /// Latest connection snapshot, published by the gamepad loop and read by the server.
@@ -215,7 +235,8 @@ pub fn spawn() {}
 #[cfg(windows)]
 mod server {
     use super::{
-        apply_config, apply_mode, current, drain_buttons, reset_button_stream, take_cursor_moved,
+        apply_config, apply_mode, clear_desktop_mode, current, drain_buttons, reset_button_stream,
+        take_cursor_moved,
     };
     use crate::protocol::{ConnectionPayload, DownFrame, Hello, UpFrame, PROTOCOL_VERSION};
     use std::time::{Duration, Instant};
@@ -317,6 +338,7 @@ mod server {
             // Drop edges queued before this client connected (stale to it).
             reset_button_stream();
             stream(pipe);
+            clear_desktop_mode();
         }
         unsafe {
             let _ = DisconnectNamedPipe(pipe);
@@ -327,7 +349,16 @@ mod server {
     fn handshake(pipe: HANDLE) -> std::io::Result<()> {
         let line = read_line(pipe)?;
         match DownFrame::parse_line(line.trim_end()) {
-            Ok(DownFrame::Hello(h)) if h.protocol_version == PROTOCOL_VERSION => {}
+            Ok(DownFrame::Hello(h)) if h.protocol_version == PROTOCOL_VERSION => {
+                if let Some(config) = h.config {
+                    if let Ok(p) = serde_json::from_value(config) {
+                        apply_config(&p);
+                    }
+                }
+                if let Some(mode) = h.mode {
+                    apply_mode(&mode);
+                }
+            }
             _ => return Err(io_err("hello rejected (missing or version mismatch)")),
         }
         let reply = UpFrame::Hello(Hello {

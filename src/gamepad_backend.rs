@@ -8,6 +8,14 @@ use std::time::Duration;
 
 pub use warmup_gamepad::{Button, ButtonChange, GamepadInput, PollMode};
 
+fn effective_userland_poll_mode() -> PollMode {
+    if crate::pipe_server::game_active() {
+        PollMode::Sleep
+    } else {
+        crate::config::userland_gamepad_poll_mode()
+    }
+}
+
 /// Polls physical controller state and produces normalized axes + button edges.
 pub trait GamepadBackend {
     fn poll(&mut self) -> Result<(), String>;
@@ -36,7 +44,7 @@ impl SdlBackend {
 impl GamepadBackend for SdlBackend {
     fn poll(&mut self) -> Result<(), String> {
         self.input
-            .poll_events_with_mode(crate::config::userland_gamepad_poll_mode());
+            .poll_events_with_mode(effective_userland_poll_mode());
         self.pending = self.input.detect_button_changes();
         Ok(())
     }
@@ -46,7 +54,7 @@ impl GamepadBackend for SdlBackend {
     }
 
     fn axes(&self) -> (f32, f32, f32, f32) {
-        match crate::config::userland_gamepad_poll_mode() {
+        match effective_userland_poll_mode() {
             PollMode::Full => self.input.axes(),
             PollMode::Sleep => (0.0, 0.0, 0.0, 0.0),
         }
@@ -59,7 +67,7 @@ impl GamepadBackend for SdlBackend {
     }
 
     fn live_input_summary(&self) -> String {
-        match crate::config::userland_gamepad_poll_mode() {
+        match effective_userland_poll_mode() {
             PollMode::Full => self.input.live_input_summary(),
             PollMode::Sleep => "sleep (guide only)".to_string(),
         }
@@ -141,7 +149,7 @@ fn sdl_thread_main(
         }
     };
     while !stop.load(Ordering::Relaxed) {
-        let mode = crate::config::userland_gamepad_poll_mode();
+        let mode = effective_userland_poll_mode();
         input.poll_events_with_mode(mode);
         let changes = input.detect_button_changes();
         if !changes.is_empty() {

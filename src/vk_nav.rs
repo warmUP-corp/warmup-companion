@@ -1,10 +1,7 @@
 //! Gamepad-driven VK focus + full PC QWERTY grid (Joyxoff settings-style layout).
 
 use std::sync::Mutex;
-use std::time::Instant;
-
-#[cfg(feature = "gamepad")]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "gamepad")]
 use crate::gamepad_backend::Button;
@@ -517,6 +514,7 @@ fn send_paste() {
     unsafe {
         let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
     }
+    suppress_native_keyboard_after_winlogon_inject(collapse);
 }
 
 pub fn start_voice_input() {
@@ -538,6 +536,7 @@ pub fn start_voice_input() {
     unsafe {
         let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
     }
+    suppress_native_keyboard_after_winlogon_inject(collapse);
     request_ui_repaint();
 }
 
@@ -615,6 +614,7 @@ fn inject_vk(vk: VIRTUAL_KEY) {
     unsafe {
         let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
     }
+    suppress_native_keyboard_after_winlogon_inject(collapse);
 }
 
 fn send_unicode(units: &[u16]) {
@@ -626,6 +626,7 @@ fn send_unicode(units: &[u16]) {
         batch.push(unicode_event(unit, true));
     }
     let sent = unsafe { SendInput(&batch, std::mem::size_of::<INPUT>() as i32) };
+    suppress_native_keyboard_after_winlogon_inject(collapse);
     // Userland-typing diagnostic: when off Winlogon, SendInput should land in the
     // foreground app. Log the event count actually inserted + the loop thread's
     // desktop + foreground window so a misrouted inject (wrong desktop /
@@ -639,6 +640,12 @@ fn send_unicode(units: &[u16]) {
             units.len(),
             fg.0 as usize
         ));
+    }
+}
+
+fn suppress_native_keyboard_after_winlogon_inject(on_winlogon: bool) {
+    if on_winlogon {
+        crate::win::native_keyboard::suppress_for(Duration::from_millis(300));
     }
 }
 
