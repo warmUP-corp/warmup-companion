@@ -278,6 +278,31 @@ fn launch_worker_in_active_session() -> Result<WorkerProcess, String> {
     }
 }
 
+/// Token logon-session LUID (`TOKEN_STATISTICS.AuthenticationId`) as a u64.
+/// 0 on failure. Used only for the secure-desktop diagnostic.
+unsafe fn token_auth_id(token: HANDLE) -> u64 {
+    use windows::Win32::Security::{GetTokenInformation, TokenStatistics, TOKEN_STATISTICS};
+    let mut len = 0u32;
+    let _ = GetTokenInformation(token, TokenStatistics, None, 0, &mut len);
+    if len == 0 {
+        return 0;
+    }
+    let mut buf = vec![0u8; len as usize];
+    if GetTokenInformation(
+        token,
+        TokenStatistics,
+        Some(buf.as_mut_ptr().cast()),
+        len,
+        &mut len,
+    )
+    .is_err()
+    {
+        return 0;
+    }
+    let st = &*(buf.as_ptr() as *const TOKEN_STATISTICS);
+    ((st.AuthenticationId.HighPart as u64) << 32) | st.AuthenticationId.LowPart as u64
+}
+
 unsafe fn duplicate_primary_token_for_session(
     process: HANDLE,
     session_id: u32,
@@ -285,6 +310,13 @@ unsafe fn duplicate_primary_token_for_session(
     let mut token = HANDLE::default();
     OpenProcessToken(process, TOKEN_ACCESS_MASK(0x201eb), &mut token)
         .map_err(|e| format!("OpenProcessToken(winlogon): {e}"))?;
+    // Reference value for the diagnostic: winlogon's own token logon-session LUID.
+    // The worker's SELF probe logs its token's `authid`; if it matches this, the
+    // dup carried winlogon's context (else CreateProcessAsUserW lost it).
+    install::log_line(&format!(
+        "winlogon token authid=0x{:x}",
+        token_auth_id(token)
+    ));
 
     let mut admin_sid = PSID::default();
     AllocateAndInitializeSid(

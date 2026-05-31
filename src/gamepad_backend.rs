@@ -145,7 +145,9 @@ fn sdl_thread_main(
             *a = input.axes();
         }
         if let Ok(mut l) = shared.label.lock() {
-            *l = input.active_controller_name().unwrap_or_else(|| "none".to_string());
+            *l = input
+                .active_controller_name()
+                .unwrap_or_else(|| "none".to_string());
         }
         if let Ok(mut s) = shared.summary.lock() {
             *s = input.live_input_summary();

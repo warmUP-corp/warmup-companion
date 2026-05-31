@@ -18,30 +18,32 @@ use std::time::{Duration, Instant};
 use windows::core::{w, PCSTR};
 use windows::Win32::Foundation::{HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryA};
-use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId};
-use windows::Win32::UI::Input::{
-    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
-    RID_INPUT, RIDEV_INPUTSINK,
+use windows::Win32::System::Threading::{
+    AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
 };
 use windows::Win32::UI::Input::XboxController::{
     XINPUT_CAPABILITIES, XINPUT_GAMEPAD, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B,
     XINPUT_GAMEPAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT,
-    XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_LEFT_THUMB, XINPUT_GAMEPAD_LEFT_SHOULDER,
-    XINPUT_GAMEPAD_RIGHT_THUMB, XINPUT_GAMEPAD_RIGHT_SHOULDER, XINPUT_GAMEPAD_X,
-    XINPUT_GAMEPAD_Y, XINPUT_STATE,
+    XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_LEFT_THUMB,
+    XINPUT_GAMEPAD_RIGHT_SHOULDER, XINPUT_GAMEPAD_RIGHT_THUMB, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y,
+    XINPUT_STATE,
+};
+use windows::Win32::UI::Input::{
+    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
+    RIDEV_INPUTSINK, RID_INPUT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClassNameW,
     GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, KillTimer, PostThreadMessageW,
     RegisterClassW, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, TranslateMessage,
     HMENU, LWA_ALPHA, MSG, WM_DESTROY, WM_INPUT, WM_NULL, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
+use crate::gamepad_backend::mapping_db_path;
 use crate::gamepad_backend::Button;
 use crate::gamepad_backend::ButtonChange;
 use crate::gamepad_backend::GamepadBackend;
-use crate::gamepad_backend::mapping_db_path;
 use crate::hid_gamepad::{self, PadSample};
 use crate::xusb_ioctl::{XusbDevice, XusbReport};
 
@@ -55,8 +57,7 @@ const RIGHT_DEADZONE: i16 = 8689;
 
 type XInputGetStateFn = unsafe extern "system" fn(u32, *mut XINPUT_STATE) -> u32;
 type XInputGetKeystrokeFn = unsafe extern "system" fn(u32, u32, *mut XInputKeystroke) -> u32;
-type XInputGetCapabilitiesFn =
-    unsafe extern "system" fn(u32, u32, *mut XINPUT_CAPABILITIES) -> u32;
+type XInputGetCapabilitiesFn = unsafe extern "system" fn(u32, u32, *mut XINPUT_CAPABILITIES) -> u32;
 
 /// One independently-loaded XInput DLL, used only by the winlogon diagnostic
 /// probe (step C). We load `xinput1_4.dll` and `xinput1_3.dll` side-by-side and
@@ -106,7 +107,7 @@ impl XInputProbe {
             dlls,
             last_combined: 0,
             logged_caps: false,
-            last_heartbeat: Instant::now() - Duration::from_secs(60),
+            last_heartbeat: crate::time_util::stale(Duration::from_secs(60)),
         }
     }
 
@@ -126,8 +127,14 @@ impl XInputProbe {
             };
             per_dll.push(format!(
                 "{}:err={} btn=0x{:04x} pkt={} lt={} rt={} lx={} ly={}",
-                dll.label, err, btn, pkt, s.Gamepad.bLeftTrigger, s.Gamepad.bRightTrigger,
-                s.Gamepad.sThumbLX, s.Gamepad.sThumbLY,
+                dll.label,
+                err,
+                btn,
+                pkt,
+                s.Gamepad.bLeftTrigger,
+                s.Gamepad.bRightTrigger,
+                s.Gamepad.sThumbLX,
+                s.Gamepad.sThumbLY,
             ));
         }
 
@@ -141,7 +148,11 @@ impl XInputProbe {
             self.last_heartbeat = Instant::now();
         }
 
-        let mut line = format!("XPROBE slot{slot} [{}] {}", per_dll.join(" | "), probe_foreground());
+        let mut line = format!(
+            "XPROBE slot{slot} [{}] {}",
+            per_dll.join(" | "),
+            probe_foreground()
+        );
 
         // Capabilities once (subtype/flags identify the real device behind slot 0).
         if !self.logged_caps {
@@ -164,21 +175,71 @@ impl XInputProbe {
 }
 
 /// One-shot identity of THIS worker process: session, token user SID, integrity
-/// level RID, thread desktop. Joyxoff's worker reads the pad on the secure
-/// desktop and ours does not despite byte-identical launch code — so the gate
-/// must be a process attribute. This logs ours; compare against Joyxoff.exe in
-/// Process Explorer (Session / User / Integrity). Integrity RIDs: System=0x4000,
-/// High=0x3000, Medium=0x2000.
+/// level RID, thread desktop, PLUS the fields that actually distinguish
+/// winlogon's duplicated token from our own service's LocalSystem token (both
+/// are S-1-5-18, so the SID alone is useless): the token's logon-session LUID
+/// (`authid`), its origin logon session (`origin`), token type / impersonation
+/// level, and the parent process. If `authid`/`origin` don't match winlogon's
+/// logon session, our `CreateProcessAsUserW` launch is not in winlogon's context
+/// — the leading hypothesis for why our plain XInput read zeros while Joyxoff's
+/// (identical recipe) reads live. Integrity RIDs: System=0x4000, High=0x3000.
 fn probe_self_identity() -> String {
     use windows::core::PWSTR;
     use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
     use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
     use windows::Win32::Security::{
         GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
-        TokenUser, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER,
+        TokenOrigin, TokenStatistics, TokenUser, TOKEN_MANDATORY_LABEL, TOKEN_ORIGIN, TOKEN_QUERY,
+        TOKEN_STATISTICS, TOKEN_USER,
+    };
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
     };
     use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    /// Find `pid`'s parent PID and the parent's image name via a process snapshot.
+    /// Returns `(0, "?")` if not found. Runs once at helper spawn, not per poll.
+    unsafe fn parent_process_of(pid: u32) -> (u32, String) {
+        let find = |want: u32| -> Option<PROCESSENTRY32W> {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
+            let mut e = PROCESSENTRY32W {
+                dwSize: size_of::<PROCESSENTRY32W>() as u32,
+                ..Default::default()
+            };
+            let mut found = None;
+            if Process32FirstW(snap, &mut e).is_ok() {
+                loop {
+                    if e.th32ProcessID == want {
+                        found = Some(e);
+                        break;
+                    }
+                    if Process32NextW(snap, &mut e).is_err() {
+                        break;
+                    }
+                }
+            }
+            let _ = CloseHandle(snap);
+            found
+        };
+        let Some(me) = find(pid) else {
+            return (0, "?".into());
+        };
+        let ppid = me.th32ParentProcessID;
+        let name = find(ppid)
+            .map(|e| {
+                let len = e
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(e.szExeFile.len());
+                String::from_utf16_lossy(&e.szExeFile[..len])
+            })
+            .unwrap_or_else(|| "?".into());
+        (ppid, name)
+    }
+
     unsafe {
         let pid = GetCurrentProcessId();
         let mut proc_sess = 0u32;
@@ -195,7 +256,8 @@ fn probe_self_identity() -> String {
                 return Vec::new();
             }
             let mut buf = vec![0u8; len as usize];
-            if GetTokenInformation(tok, class, Some(buf.as_mut_ptr().cast()), len, &mut len).is_err()
+            if GetTokenInformation(tok, class, Some(buf.as_mut_ptr().cast()), len, &mut len)
+                .is_err()
             {
                 return Vec::new();
             }
@@ -227,9 +289,44 @@ fn probe_self_identity() -> String {
             "?".into()
         };
 
+        // Logon-session LUID + token type/impersonation level. AuthenticationId is
+        // the LUID of the logon session the token belongs to; winlogon's token
+        // carries the SYSTEM logon session (0x3e7). If ours differs, the dup didn't
+        // give us winlogon's context. TokenType: 1=Primary, 2=Impersonation.
+        let stats_buf = read(TokenStatistics);
+        let (auth_id, tok_type, imp_level) = if stats_buf.len() >= size_of::<TOKEN_STATISTICS>() {
+            let st = &*(stats_buf.as_ptr() as *const TOKEN_STATISTICS);
+            let luid =
+                ((st.AuthenticationId.HighPart as u64) << 32) | st.AuthenticationId.LowPart as u64;
+            (luid, st.TokenType.0, st.ImpersonationLevel.0)
+        } else {
+            (0u64, 0i32, 0i32)
+        };
+
+        // TokenOrigin.OriginatingLogonSession — the logon session that created the
+        // token (CreateProcessAsUserW preserves the source token's origin).
+        let origin_buf = read(TokenOrigin);
+        let origin = if origin_buf.len() >= size_of::<TOKEN_ORIGIN>() {
+            let o = &*(origin_buf.as_ptr() as *const TOKEN_ORIGIN);
+            ((o.OriginatingLogonSession.HighPart as u64) << 32)
+                | o.OriginatingLogonSession.LowPart as u64
+        } else {
+            0u64
+        };
+
         let _ = CloseHandle(tok);
+
+        // Parent process PID + image. Our worker's parent is our service; if the
+        // driver gate keys on parent==winlogon (reparenting), this confirms whether
+        // we'd need PROC_THREAD_ATTRIBUTE_PARENT_PROCESS.
+        let (parent_pid, parent_name) = parent_process_of(pid);
+
         let desk = crate::win::current_desktop_name().unwrap_or_else(|| "?".into());
-        format!("SELF pid={pid} proc_sess={proc_sess} user={user} integrity={integ} desktop={desk}")
+        format!(
+            "SELF pid={pid} parent={parent_pid}({parent_name}) proc_sess={proc_sess} user={user} \
+             integrity={integ} authid=0x{auth_id:x} origin=0x{origin:x} toktype={tok_type} \
+             implevel={imp_level} desktop={desk}"
+        )
     }
 }
 
@@ -252,7 +349,10 @@ fn probe_foreground() -> String {
         } else {
             "?".into()
         };
-        format!("fg=0x{:x} pid={pid} ours={ours} class={class}", hwnd.0 as usize)
+        format!(
+            "fg=0x{:x} pid={pid} ours={ours} class={class}",
+            hwnd.0 as usize
+        )
     }
 }
 
@@ -392,6 +492,7 @@ static LOGON_FG_HWND: AtomicIsize = AtomicIsize::new(0);
 /// inject burst (focus + SendInput on the loop thread) keeps LogonUI foreground
 /// long enough for its keys to land. Decremented once per ~8ms poll tick.
 static INJECT_HOLD_TICKS: AtomicU32 = AtomicU32::new(0);
+static INJECT_HOLD_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Poll ticks to suppress the reclaim per committed key (~8ms each ⇒ ~48ms).
 const INJECT_HOLD_WINDOW: u32 = 6;
 
@@ -407,6 +508,7 @@ pub fn logon_credential_window() -> Option<HWND> {
 /// thread can foreground LogonUI and SendInput uninterrupted. Called from the
 /// inject path; the poll tick reclaims foreground once the window elapses.
 pub fn begin_inject_hold() {
+    INJECT_HOLD_ACTIVE.store(true, Ordering::Relaxed);
     INJECT_HOLD_TICKS.store(INJECT_HOLD_WINDOW, Ordering::Relaxed);
 }
 
@@ -415,6 +517,10 @@ pub fn begin_inject_hold() {
 /// foreground-lock and loses the tug-of-war; attaching our input queue to the
 /// current foreground thread lifts that restriction for the duration of the call.
 /// Self-limiting: once we win, the next tick sees `cur == hwnd` and skips this.
+///
+/// Retained (dead) after the Joyxoff-style no-foreground switch: the inject path
+/// may still want a one-shot foreground hand-off to LogonUI for keystroke sends.
+#[allow(dead_code)]
 unsafe fn force_foreground(hwnd: HWND, current_fg: HWND) {
     let our_tid = GetCurrentThreadId();
     let fg_tid = GetWindowThreadProcessId(current_fg, None);
@@ -494,10 +600,10 @@ impl XInputBackend {
             prev_trigger_left: false,
             prev_trigger_right: false,
             axes: (0.0, 0.0, 0.0, 0.0),
-            last_status_log: Instant::now() - Duration::from_secs(60),
-            last_no_pad_log: Instant::now() - Duration::from_secs(60),
-            last_raw_log: Instant::now() - Duration::from_secs(60),
-            last_secure_check: Instant::now() - Duration::from_secs(60),
+            last_status_log: crate::time_util::stale(Duration::from_secs(60)),
+            last_no_pad_log: crate::time_util::stale(Duration::from_secs(60)),
+            last_raw_log: crate::time_util::stale(Duration::from_secs(60)),
+            last_secure_check: crate::time_util::stale(Duration::from_secs(60)),
             secure_leave_winlogon_streak: 0,
         }
     }
@@ -933,17 +1039,19 @@ fn secure_poll_main(
         };
         // RegisterClassW returns 0 if class already exists; ignore.
         RegisterClassW(&wc);
-        // Foreground-eligible anchor: the pad is only readable while our process
-        // owns the foreground window (the XInput DLL and XUSB IOCTL both return
-        // neutral/frozen state to a background process here), so the anchor MUST be
-        // able to take foreground. WS_VISIBLE + NO WS_EX_NOACTIVATE makes
-        // SetForegroundWindow succeed; off-screen (-10000), 1x1, alpha 0 keeps it
-        // invisible. The inject path briefly yields foreground to LogonUI for typing.
+        // Joyxoff-style anchor (exstyle 0x08080088 = NOACTIVATE|TOOLWINDOW|LAYERED
+        // |TOPMOST, WS_POPUP): a non-activating tool window that NEVER takes
+        // foreground. Stealing foreground was confirmed harmful — it broke manual
+        // PIN entry (yanked focus from LogonUI every tick) and no longer earned a
+        // live pad read on this Windows build (gate denies even with fg=ours; see
+        // service.log zero-path). Off-screen (-10000), 1x1, alpha 0 keeps it
+        // invisible. The pad-read grant is being pursued via the focus-owner
+        // mechanism instead (xusb22 FUN_140016af0), not foreground.
         match CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
+            WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
             ANCHOR_CLASS,
             w!("Warmup XInput Anchor"),
-            WS_POPUP | WS_VISIBLE,
+            WS_POPUP,
             -10000,
             -10000,
             1,
@@ -964,13 +1072,14 @@ fn secure_poll_main(
     };
 
     // Fully transparent (alpha 0) so the off-screen 1x1 anchor is never visible.
-    // The poll tick claims foreground each tick so the pad stays readable; the
-    // inject path yields it to LogonUI briefly so typed keys reach the PIN box.
+    // The anchor never takes foreground (Joyxoff-style); the pad-read grant is
+    // pursued via the focus-owner mechanism, not foreground ownership.
     unsafe {
-        let _ = SetLayeredWindowAttributes(hwnd, windows::Win32::Foundation::COLORREF(0), 0, LWA_ALPHA);
+        let _ =
+            SetLayeredWindowAttributes(hwnd, windows::Win32::Foundation::COLORREF(0), 0, LWA_ALPHA);
     }
     let _ = tx.send(SecureMsg::Error(
-        "anchor window created (foreground-eligible; claims fg to read pad)".into(),
+        "anchor window created (NOACTIVATE; no foreground steal, Joyxoff-style)".into(),
     ));
     let _ = tx.send(SecureMsg::Error(probe_self_identity()));
 
@@ -990,9 +1099,9 @@ fn secure_poll_main(
             prev_buttons: [0; 4],
             active_slot: None,
             connected_prev: [false; 4],
-            last_status: Instant::now() - Duration::from_secs(60),
-            last_no_pad: Instant::now() - Duration::from_secs(60),
-            last_probe_log: Instant::now() - Duration::from_secs(60),
+            last_status: crate::time_util::stale(Duration::from_secs(60)),
+            last_no_pad: crate::time_util::stale(Duration::from_secs(60)),
+            last_probe_log: crate::time_util::stale(Duration::from_secs(60)),
             iter_count: 0,
             hid_devices: HashMap::new(),
             last_hid: PadSample::default(),
@@ -1002,7 +1111,7 @@ fn secure_poll_main(
             last_raw_report: Vec::new(),
             xusb: Vec::new(),
             last_xusb: None,
-            last_xusb_scan: Instant::now() - Duration::from_secs(60),
+            last_xusb_scan: crate::time_util::stale(Duration::from_secs(60)),
             prev_trigger_left: false,
             prev_trigger_right: false,
             probe: XInputProbe::load(),
@@ -1073,24 +1182,13 @@ unsafe extern "system" fn anchor_wndproc(
     lparam: LPARAM,
 ) -> LRESULT {
     if msg == WM_TIMER && wparam.0 == POLL_TIMER_ID {
-        // The pad is only readable while we own the foreground window — the XInput
-        // DLL and the XUSB IOCTL both return neutral/frozen state to a background
-        // process on this stack (confirmed by the service-log A/B). So claim
-        // foreground every tick on Winlogon, EXCEPT during an inject burst, when we
-        // stand down so the user's keystrokes reach LogonUI's PIN field.
+        // Joyxoff-style: never touch foreground. We only record the credential
+        // window LogonUI owns (for the inject path's SetFocus), then poll. Stealing
+        // foreground broke manual entry and did not earn a live read on this build.
         unsafe {
-            // Remember the credential window while we are NOT foreground; the
-            // inject path hands foreground back to it for SendInput.
             let cur = GetForegroundWindow();
             if cur != hwnd && !cur.0.is_null() {
                 LOGON_FG_HWND.store(cur.0 as isize, Ordering::Relaxed);
-            }
-            if INJECT_HOLD_TICKS.load(Ordering::Relaxed) > 0 {
-                INJECT_HOLD_TICKS.fetch_sub(1, Ordering::Relaxed);
-            } else if cur != hwnd {
-                // Lost foreground (LogonUI keeps grabbing it). Reclaim reliably via
-                // the AttachThreadInput trick, not a throttled bare SetForegroundWindow.
-                force_foreground(hwnd, cur);
             }
         }
         POLL_STATE.with(|s| {
@@ -1222,7 +1320,9 @@ fn poll_raw_hid_input(state: &mut PollState, raw_handle: HRAWINPUT) {
         let _ = state.tx.send(SecureMsg::Buttons { slot: 0, prev, cur });
     } else if cur != 0 && state.hid_diag_count < 4 {
         state.hid_diag_count = state.hid_diag_count.saturating_add(1);
-        service_log(&format!("HID secure: held 0x{cur:04x} [{src}] raw={raw_hex} ({dev})"));
+        service_log(&format!(
+            "HID secure: held 0x{cur:04x} [{src}] raw={raw_hex} ({dev})"
+        ));
     }
 }
 
@@ -1274,9 +1374,9 @@ fn poll_xinput_tick(state: &mut PollState) {
             states[slot as usize] = Some(s.Gamepad);
             packets[slot as usize] = s.dwPacketNumber;
         } else if err != ERROR_DEVICE_NOT_CONNECTED {
-            let _ = state
-                .tx
-                .send(SecureMsg::Error(format!("XInputGetState({slot}) error {err}")));
+            let _ = state.tx.send(SecureMsg::Error(format!(
+                "XInputGetState({slot}) error {err}"
+            )));
         }
         // XInputGetKeystroke is foreground-gated like GetState. When physical XUSB
         // pads are open we read buttons directly from the driver below (no
@@ -1312,6 +1412,31 @@ fn poll_xinput_tick(state: &mut PollState) {
     // and emit spurious button-up edges.
     if xusb_rep.is_some() {
         state.last_xusb = xusb_rep;
+    }
+
+    if INJECT_HOLD_ACTIVE.load(Ordering::Relaxed) {
+        let ticks = INJECT_HOLD_TICKS.load(Ordering::Relaxed);
+        if ticks > 0 {
+            INJECT_HOLD_TICKS.store(ticks - 1, Ordering::Relaxed);
+            let _ = state.tx.send(SecureMsg::Axes((0.0, 0.0, 0.0, 0.0)));
+            return;
+        }
+
+        INJECT_HOLD_ACTIVE.store(false, Ordering::Relaxed);
+        state.last_xusb = None;
+        for (slot, prev) in state.prev_buttons.iter_mut().enumerate() {
+            if *prev != 0 {
+                let old = *prev;
+                *prev = 0;
+                let _ = state.tx.send(SecureMsg::Buttons {
+                    slot: slot as u32,
+                    prev: old,
+                    cur: 0,
+                });
+            }
+        }
+        let _ = state.tx.send(SecureMsg::Axes((0.0, 0.0, 0.0, 0.0)));
+        return;
     }
 
     // Surface the raw XUSB report in the debug overlay so byte offsets can be
@@ -1445,12 +1570,22 @@ fn poll_xinput_tick(state: &mut PollState) {
     let xusb = state.last_xusb.clone().filter(|_| !state.xusb.is_empty());
     let (buttons, lx, ly, rx, ry, lt, rt) = match &xusb {
         Some(r) => (
-            r.buttons, r.thumb_lx, r.thumb_ly, r.thumb_rx, r.thumb_ry, r.left_trigger,
+            r.buttons,
+            r.thumb_lx,
+            r.thumb_ly,
+            r.thumb_rx,
+            r.thumb_ry,
+            r.left_trigger,
             r.right_trigger,
         ),
         None => (
-            pad.wButtons.0, pad.sThumbLX, pad.sThumbLY, pad.sThumbRX, pad.sThumbRY,
-            pad.bLeftTrigger, pad.bRightTrigger,
+            pad.wButtons.0,
+            pad.sThumbLX,
+            pad.sThumbLY,
+            pad.sThumbRX,
+            pad.sThumbRY,
+            pad.bLeftTrigger,
+            pad.bRightTrigger,
         ),
     };
 
@@ -1473,7 +1608,11 @@ fn poll_xinput_tick(state: &mut PollState) {
     let prev = state.prev_buttons[idx];
     if prev != buttons {
         state.prev_buttons[idx] = buttons;
-        let _ = state.tx.send(SecureMsg::Buttons { slot, prev, cur: buttons });
+        let _ = state.tx.send(SecureMsg::Buttons {
+            slot,
+            prev,
+            cur: buttons,
+        });
     }
 
     let stick_active = lx.abs() > LEFT_DEADZONE || ly.abs() > LEFT_DEADZONE;

@@ -16,23 +16,163 @@ pub struct Layout {
 }
 
 pub const LAYOUTS: &[Layout] = &[
-    Layout { langid: 0x0416, abc_start: 2, layers: &["qwertyuiopasdfghjklçzxcvbnm,.\";:'", "!@ªº$*()-_=+\\;:'?/•·©%₡€½<>[]{}|#&°~^,.\"", "abcçdefghijklmnopqrstuvwxyz,.\"':;"] }, // idx 0
-    Layout { langid: 0x0409, abc_start: 2, layers: &["qwertyuiopasdfghjkl'zxcvbnm,.?\";:!", "!@#$%&()-_=+\\;:\"*/•©€£µ½<>[]{}|¦¶°~^',.?", "abcdefghijklmnopqrstuvwxyz',.?!:;\""] }, // idx 1
-    Layout { langid: 0x0809, abc_start: 2, layers: &["qwertyuiopasdfghjkl'zxcvbnm,.?\";:!", "!@#$£&()-_=+\\;:\"*/•©%€µ½<>[]{}|¦¶°~^',.?", "abcdefghijklmnopqrstuvwxyz',.?!:;\""] }, // idx 2
-    Layout { langid: 0x0407, abc_start: 2, layers: &["ßqwertzuiopüasdfghjklöäyxcvbnm,.-?;:\"!", "!@#$€%&()<>=*+\\;:\"_-/•©¥£¢½[]{}~°^¿¡|'¶×÷.-?", "aäbcdefghijklmnoöpqrsßtuüvwxyz,.-?!\":;"] }, // idx 3
-    Layout { langid: 0x040c, abc_start: 2, layers: &["!azertyuiopéqsdfghjklmùwxcvbnèà,.';:?", "!@#$€%&()-_~=+\\;:\"?*/•©¥£¢µ½¿<>[]{}¡|¦¶°¬^,.", "aàbcçdeéèfghijklmnopqrstuùvwxyz,.'?:;"] }, // idx 4
-    Layout { langid: 0x1009, abc_start: 2, layers: &["!qwertyuiopàasdfghjklèùzxcvbnmé,.';:?", "!@#$€%&()-_~=+\\;:\"?*/•©¥£¢µ½¿<>[]{}¡|¦¶°¬^,.", "aàbcçdeéèfghijklmnopqrstuùvwxyz,.'?:;"] }, // idx 5
-    Layout { langid: 0x0419, abc_start: 3, layers: &["@#йцукенгшщзхъфывапролджэ?ячсмитьбюё,.!-:", "@#№$₽&*=<>«»()_-\\;:'\"!+/•©®£₸€–½¿{}[]%π±¡|¦¶°¬~^", "@#qwertyuiop•©asdfghjkl'¿{zxcvbnm,.?¡|\"¿{;:!¡|", "абвгдеёжзийклмнопрстуфхцчшщъыьэюя@#,.?!:-", "abcdefghijklmnopqrstuvwxyz@#•©'¿{,.?¡||¡!:;{¿\""] }, // idx 6
-    Layout { langid: 0x040a, abc_start: 2, layers: &["qwertyuiopasdfghjklñzxcvbnm,.\";:'", "!@ª$€*()-_=+\\;:'?/•·©%£µ½<>[]{}|#&°~^,.\"", "abcdefghijklmnñopqrstuvwxyz,.\"':;"] }, // idx 7
-    Layout { langid: 0x080a, abc_start: 2, layers: &["qwertyuiopasdfghjklñzxcvbnm,.\";:'", "!@ªº$*()-_=+\\;:'?/•·©%₡€½<>[]{}|#&°~^,.\"", "abcdefghijklmnñopqrstuvwxyz,.\"':;"] }, // idx 8
-    Layout { langid: 0x0816, abc_start: 2, layers: &["qwertyuiopasdfghjklçzxcvbnm,.\";:'", "!@ª$€*()-_=+\\;:'?/•·©%£µ½<>[]{}|#&°~^,.\"", "abcçdefghijklmnopqrstuvwxyz,.\"':;"] }, // idx 9
-    Layout { langid: 0x040b, abc_start: 2, layers: &["@qwertyuiopåasdfghjklöäzxcvbnm,.?!;:-\"", "@#$€%&*()«»_-+\\;:\"'=/•©¥£¢µ½¿<>[]{}¡|¦¶°~^?!", "aåäbcdefghijklmnoöpqrstuvwxyz,.?!\"-:;"] }, // idx 10
-    Layout { langid: 0x0410, abc_start: 2, layers: &["!qwertyuiopèasdfghjklòàzxcvbnmù,.';:\"", "!@#$€%&()-_~=+\\;:\"?*/•©¥£¢µ½¿<>[]{}¡|¦¶°¬^,.", "aàbcdeèfghijklmnooòqrstuùvwxyz,.'\":;"] }, // idx 11
-    Layout { langid: 0x0414, abc_start: 2, layers: &["§qwertyuiopåasdfghjkløæzxcvbnm,.?!;:-\"", "@#$€%&*()«»_-+\\;:\"'=/•©¥£¢µ½¿<>[]{}¡|¦¶°~^?!", "aåæbcdefghijklmnøopqrstuvwxyz,.?!\"-:;"] }, // idx 12
-    Layout { langid: 0x1809, abc_start: 2, layers: &["qwertyuiopasdfghjkl'zxcvbnm,.?\";:!", "!@#$€&()-_=+\\;:\"*/•©%£µ½<>[]{}|¦¶°~^',.?", "abcdefghijklmnopqrstuvwxyz',.?!:;\""] }, // idx 13
-    Layout { langid: 0x0415, abc_start: 2, layers: &["qwertyuiopasdfghjkl-zxcvbnm,.?@;:!", "!©#$&*()-_=+\\;:\"'/•©€£µ½<>[]„”|¦%°~^-,.?", "abcdefghijklmnopqrstuvwxyz-,.?!:;@"] }, // idx 14
-    Layout { langid: 0x0408, abc_start: 3, layers: &[";ςερτυθιοπασδφγηξκλ!ζχψωβνμ,.?\"«»':@", "!@#$€%()_-=+\\&:\"*/•©®£µ½<>[]{}|¦¶°~^;'.?", "qwertyuiopasdfghjkl'zxcvbnm,.?\";:!", "αβγδεζηθικλμνξοπρστυφχψω;ς!,.?'»«\"@:", "abcdefghijklmnopqrstuvwxyz',.?!:;\""] }, // idx 15
-    Layout { langid: 0x041f, abc_start: 2, layers: &["@#qwertyuıopğüasdfghjklşi'zxcvbnmöç,.?\";:!", "!@$€₺&+=()[]°%_-\\;:\"?!*/•¶£₹©¥–½¡¿{}<>π±|¦®™¬~µ^", "abcçdefgğhıijklmnoöprsştuüvyzqwx',.?!:;\""] }, // idx 16
+    Layout {
+        langid: 0x0416,
+        abc_start: 2,
+        layers: &[
+            "qwertyuiopasdfghjklçzxcvbnm,.\";:'",
+            "!@ªº$*()-_=+\\;:'?/•·©%₡€½<>[]{}|#&°~^,.\"",
+            "abcçdefghijklmnopqrstuvwxyz,.\"':;",
+        ],
+    }, // idx 0
+    Layout {
+        langid: 0x0409,
+        abc_start: 2,
+        layers: &[
+            "qwertyuiopasdfghjkl'zxcvbnm,.?\";:!",
+            "!@#$%&()-_=+\\;:\"*/•©€£µ½<>[]{}|¦¶°~^',.?",
+            "abcdefghijklmnopqrstuvwxyz',.?!:;\"",
+        ],
+    }, // idx 1
+    Layout {
+        langid: 0x0809,
+        abc_start: 2,
+        layers: &[
+            "qwertyuiopasdfghjkl'zxcvbnm,.?\";:!",
+            "!@#$£&()-_=+\\;:\"*/•©%€µ½<>[]{}|¦¶°~^',.?",
+            "abcdefghijklmnopqrstuvwxyz',.?!:;\"",
+        ],
+    }, // idx 2
+    Layout {
+        langid: 0x0407,
+        abc_start: 2,
+        layers: &[
+            "ßqwertzuiopüasdfghjklöäyxcvbnm,.-?;:\"!",
+            "!@#$€%&()<>=*+\\;:\"_-/•©¥£¢½[]{}~°^¿¡|'¶×÷.-?",
+            "aäbcdefghijklmnoöpqrsßtuüvwxyz,.-?!\":;",
+        ],
+    }, // idx 3
+    Layout {
+        langid: 0x040c,
+        abc_start: 2,
+        layers: &[
+            "!azertyuiopéqsdfghjklmùwxcvbnèà,.';:?",
+            "!@#$€%&()-_~=+\\;:\"?*/•©¥£¢µ½¿<>[]{}¡|¦¶°¬^,.",
+            "aàbcçdeéèfghijklmnopqrstuùvwxyz,.'?:;",
+        ],
+    }, // idx 4
+    Layout {
+        langid: 0x1009,
+        abc_start: 2,
+        layers: &[
+            "!qwertyuiopàasdfghjklèùzxcvbnmé,.';:?",
+            "!@#$€%&()-_~=+\\;:\"?*/•©¥£¢µ½¿<>[]{}¡|¦¶°¬^,.",
+            "aàbcçdeéèfghijklmnopqrstuùvwxyz,.'?:;",
+        ],
+    }, // idx 5
+    Layout {
+        langid: 0x0419,
+        abc_start: 3,
+        layers: &[
+            "@#йцукенгшщзхъфывапролджэ?ячсмитьбюё,.!-:",
+            "@#№$₽&*=<>«»()_-\\;:'\"!+/•©®£₸€–½¿{}[]%π±¡|¦¶°¬~^",
+            "@#qwertyuiop•©asdfghjkl'¿{zxcvbnm,.?¡|\"¿{;:!¡|",
+            "абвгдеёжзийклмнопрстуфхцчшщъыьэюя@#,.?!:-",
+            "abcdefghijklmnopqrstuvwxyz@#•©'¿{,.?¡||¡!:;{¿\"",
+        ],
+    }, // idx 6
+    Layout {
+        langid: 0x040a,
+        abc_start: 2,
+        layers: &[
+            "qwertyuiopasdfghjklñzxcvbnm,.\";:'",
+            "!@ª$€*()-_=+\\;:'?/•·©%£µ½<>[]{}|#&°~^,.\"",
+            "abcdefghijklmnñopqrstuvwxyz,.\"':;",
+        ],
+    }, // idx 7
+    Layout {
+        langid: 0x080a,
+        abc_start: 2,
+        layers: &[
+            "qwertyuiopasdfghjklñzxcvbnm,.\";:'",
+            "!@ªº$*()-_=+\\;:'?/•·©%₡€½<>[]{}|#&°~^,.\"",
+            "abcdefghijklmnñopqrstuvwxyz,.\"':;",
+        ],
+    }, // idx 8
+    Layout {
+        langid: 0x0816,
+        abc_start: 2,
+        layers: &[
+            "qwertyuiopasdfghjklçzxcvbnm,.\";:'",
+            "!@ª$€*()-_=+\\;:'?/•·©%£µ½<>[]{}|#&°~^,.\"",
+            "abcçdefghijklmnopqrstuvwxyz,.\"':;",
+        ],
+    }, // idx 9
+    Layout {
+        langid: 0x040b,
+        abc_start: 2,
+        layers: &[
+            "@qwertyuiopåasdfghjklöäzxcvbnm,.?!;:-\"",
+            "@#$€%&*()«»_-+\\;:\"'=/•©¥£¢µ½¿<>[]{}¡|¦¶°~^?!",
+            "aåäbcdefghijklmnoöpqrstuvwxyz,.?!\"-:;",
+        ],
+    }, // idx 10
+    Layout {
+        langid: 0x0410,
+        abc_start: 2,
+        layers: &[
+            "!qwertyuiopèasdfghjklòàzxcvbnmù,.';:\"",
+            "!@#$€%&()-_~=+\\;:\"?*/•©¥£¢µ½¿<>[]{}¡|¦¶°¬^,.",
+            "aàbcdeèfghijklmnooòqrstuùvwxyz,.'\":;",
+        ],
+    }, // idx 11
+    Layout {
+        langid: 0x0414,
+        abc_start: 2,
+        layers: &[
+            "§qwertyuiopåasdfghjkløæzxcvbnm,.?!;:-\"",
+            "@#$€%&*()«»_-+\\;:\"'=/•©¥£¢µ½¿<>[]{}¡|¦¶°~^?!",
+            "aåæbcdefghijklmnøopqrstuvwxyz,.?!\"-:;",
+        ],
+    }, // idx 12
+    Layout {
+        langid: 0x1809,
+        abc_start: 2,
+        layers: &[
+            "qwertyuiopasdfghjkl'zxcvbnm,.?\";:!",
+            "!@#$€&()-_=+\\;:\"*/•©%£µ½<>[]{}|¦¶°~^',.?",
+            "abcdefghijklmnopqrstuvwxyz',.?!:;\"",
+        ],
+    }, // idx 13
+    Layout {
+        langid: 0x0415,
+        abc_start: 2,
+        layers: &[
+            "qwertyuiopasdfghjkl-zxcvbnm,.?@;:!",
+            "!©#$&*()-_=+\\;:\"'/•©€£µ½<>[]„”|¦%°~^-,.?",
+            "abcdefghijklmnopqrstuvwxyz-,.?!:;@",
+        ],
+    }, // idx 14
+    Layout {
+        langid: 0x0408,
+        abc_start: 3,
+        layers: &[
+            ";ςερτυθιοπασδφγηξκλ!ζχψωβνμ,.?\"«»':@",
+            "!@#$€%()_-=+\\&:\"*/•©®£µ½<>[]{}|¦¶°~^;'.?",
+            "qwertyuiopasdfghjkl'zxcvbnm,.?\";:!",
+            "αβγδεζηθικλμνξοπρστυφχψω;ς!,.?'»«\"@:",
+            "abcdefghijklmnopqrstuvwxyz',.?!:;\"",
+        ],
+    }, // idx 15
+    Layout {
+        langid: 0x041f,
+        abc_start: 2,
+        layers: &[
+            "@#qwertyuıopğüasdfghjklşi'zxcvbnmöç,.?\";:!",
+            "!@$€₺&+=()[]°%_-\\;:\"?!*/•¶£₹©¥–½¡¿{}<>π±|¦®™¬~µ^",
+            "abcçdefgğhıijklmnoöprsştuüvyzqwx',.?!:;\"",
+        ],
+    }, // idx 16
 ];
 
 /// Port of Joyxoff `FUN_00429790`: active keyboard LANGID -> LAYOUTS index.
@@ -61,30 +201,50 @@ pub fn index_for_langid(langid: u32) -> usize {
     if l < 0x300b {
         if l != 0x300a {
             if l < 0x180a {
-                if l == 0x1809 { return 0xd; }
+                if l == 0x1809 {
+                    return 0xd;
+                }
                 if l > 0xc0c {
-                    if l == 0x1009 { return 1; }
-                    if l == 0x100a || l == 0x140a { return 8; }
+                    if l == 0x1009 {
+                        return 1;
+                    }
+                    if l == 0x100a || l == 0x140a {
+                        return 8;
+                    }
                     return 1;
                 }
-                if l == 0xc0c { return 5; }
-                if l == 0x809 { return 2; }
-                if l == 0x80a { return 8; }
-                if l == 0x816 { return 9; }
+                if l == 0xc0c {
+                    return 5;
+                }
+                if l == 0x809 {
+                    return 2;
+                }
+                if l == 0x80a {
+                    return 8;
+                }
+                if l == 0x816 {
+                    return 9;
+                }
                 return 1;
             }
             if l < 0x240b {
-                if matches!(l, 0x240a | 0x180a | 0x1c0a | 0x200a) { return 8; }
+                if matches!(l, 0x240a | 0x180a | 0x1c0a | 0x200a) {
+                    return 8;
+                }
                 return 1;
             }
-            if matches!(l, 0x280a | 0x2c0a) { return 8; }
+            if matches!(l, 0x280a | 0x2c0a) {
+                return 8;
+            }
             return 1;
         }
         return 8; // 0x300a
     }
     if l > 0x4c0a {
         if l > 0x10419 {
-            if l == 0x1041f { return 0x10; }
+            if l == 0x1041f {
+                return 0x10;
+            }
             return 1;
         }
         return match l {
@@ -96,10 +256,14 @@ pub fn index_for_langid(langid: u32) -> usize {
     }
     if l != 0x4c0a {
         if l < 0x400b {
-            if matches!(l, 0x400a | 0x340a | 0x380a | 0x3c0a) { return 8; }
+            if matches!(l, 0x400a | 0x340a | 0x380a | 0x3c0a) {
+                return 8;
+            }
             return 1;
         }
-        if matches!(l, 0x440a | 0x480a) { return 8; }
+        if matches!(l, 0x440a | 0x480a) {
+            return 8;
+        }
         return 1;
     }
     8 // 0x4c0a

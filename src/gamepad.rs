@@ -228,7 +228,7 @@ impl GamepadPoll {
             vk_toggle_ignore_until: None,
             vk_nav_grace_until: None,
             stick_nav: None,
-            last_desktop_log: Instant::now() - DESKTOP_SYNC_LOG_INTERVAL,
+            last_desktop_log: crate::time_util::stale(DESKTOP_SYNC_LOG_INTERVAL),
             #[cfg(windows)]
             last_input_desktop: None,
             #[cfg(windows)]
@@ -287,6 +287,10 @@ impl GamepadPoll {
         #[cfg(windows)]
         if crate::config::service_mode() {
             self.sync_service_backend();
+            // Route cursor injection to the secure desktop while locked: on Winlogon
+            // the loop thread is attached there, so inline SendInput reaches the PIN
+            // keypad; post-login the Default-desktop injector thread is used.
+            cursor.set_on_winlogon(Self::input_desktop_is_winlogon());
         }
 
         let PadFrame { changes, axes } = self.backend.poll_frame()?;
@@ -332,8 +336,10 @@ impl GamepadPoll {
             edges.push(edge);
         }
         for change in changes {
-            if change.button == Button::A && change.pressed {
-                cursor.left_click();
+            if change.button == Button::A {
+                // Joyxoff-style hold: A down -> mouse-left down, A up -> up, so
+                // the PIN keypad sees a real press duration (not an instant click).
+                cursor.set_left_button(change.pressed);
             }
             if change.button != VK_BUTTON {
                 continue;
@@ -499,7 +505,11 @@ impl GamepadPoll {
         let dir = if lx.abs().max(ly.abs()) < THRESH {
             None
         } else if lx.abs() > ly.abs() {
-            Some(if lx > 0.0 { Button::Right } else { Button::Left })
+            Some(if lx > 0.0 {
+                Button::Right
+            } else {
+                Button::Left
+            })
         } else {
             Some(if ly > 0.0 { Button::Up } else { Button::Down })
         };

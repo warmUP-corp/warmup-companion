@@ -103,11 +103,7 @@ pub fn focused_is_password_field() -> Option<bool> {
     }
     let auto = automation()?;
     let el = unsafe { auto.GetFocusedElement().ok()? };
-    Some(unsafe {
-        el.CurrentIsPassword()
-            .map(|b| b.as_bool())
-            .unwrap_or(false)
-    })
+    Some(unsafe { el.CurrentIsPassword().map(|b| b.as_bool()).unwrap_or(false) })
 }
 
 /// Drop the cached password element (winlogon exit, VK close, account switch).
@@ -202,7 +198,11 @@ pub fn focus_password_field() -> bool {
         Some(el) => {
             let ok = unsafe { el.SetFocus() }.is_ok();
             PWD_ELEMENT.with(|s| *s.borrow_mut() = Some(el));
-            log_status(if ok { "focused" } else { "found, SetFocus failed" });
+            log_status(if ok {
+                "focused"
+            } else {
+                "found, SetFocus failed"
+            });
             ok
         }
         None => {
@@ -222,7 +222,10 @@ fn ensure_com() -> bool {
         // SAFETY: one-shot per thread; the loop thread has no other apartment.
         let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         if hr.is_err() {
-            log(&format!("logon focus: CoInitializeEx failed hr=0x{:08x}", hr.0));
+            log(&format!(
+                "logon focus: CoInitializeEx failed hr=0x{:08x}",
+                hr.0
+            ));
             return false;
         }
         *ready.borrow_mut() = true;
@@ -248,7 +251,9 @@ fn automation() -> Option<IUIAutomation> {
                 Some(a)
             }
             Err(e) => {
-                log(&format!("logon focus: CoCreateInstance(CUIAutomation) failed: {e}"));
+                log(&format!(
+                    "logon focus: CoCreateInstance(CUIAutomation) failed: {e}"
+                ));
                 None
             }
         }
@@ -291,8 +296,14 @@ pub fn dump_foreground_tree() {
                 return;
             }
         };
-        let root_name = root.CurrentName().map(|b| b.to_string()).unwrap_or_default();
-        let root_class = root.CurrentClassName().map(|b| b.to_string()).unwrap_or_default();
+        let root_name = root
+            .CurrentName()
+            .map(|b| b.to_string())
+            .unwrap_or_default();
+        let root_class = root
+            .CurrentClassName()
+            .map(|b| b.to_string())
+            .unwrap_or_default();
         log(&format!(
             "logon focus: dump foreground hwnd=0x{:x} class='{root_class}' name='{root_name}'",
             fg.0 as usize
@@ -324,8 +335,14 @@ pub fn dump_foreground_tree() {
                 .map(|b| b.as_bool())
                 .unwrap_or(false);
             let name = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
-            let autoid = el.CurrentAutomationId().map(|b| b.to_string()).unwrap_or_default();
-            let class = el.CurrentClassName().map(|b| b.to_string()).unwrap_or_default();
+            let autoid = el
+                .CurrentAutomationId()
+                .map(|b| b.to_string())
+                .unwrap_or_default();
+            let class = el
+                .CurrentClassName()
+                .map(|b| b.to_string())
+                .unwrap_or_default();
             log(&format!(
                 "  [{i}] ct={ct}({}) pwd={is_pwd} focusable={focusable} name='{name}' autoid='{autoid}' class='{class}'",
                 control_type_label(ct)

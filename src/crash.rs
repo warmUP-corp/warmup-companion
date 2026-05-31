@@ -72,9 +72,7 @@ unsafe fn module_for(addr: usize) -> String {
 
 unsafe fn write_minidump(info: *const EXCEPTION_POINTERS) {
     let pid = GetCurrentProcessId();
-    let path = wide(&format!(
-        r"C:\ProgramData\WarmupVk\worker-crash-{pid}.dmp"
-    ));
+    let path = wide(&format!(r"C:\ProgramData\WarmupVk\worker-crash-{pid}.dmp"));
     let file = match CreateFileW(
         PCWSTR(path.as_ptr()),
         GENERIC_WRITE,
@@ -96,8 +94,9 @@ unsafe fn write_minidump(info: *const EXCEPTION_POINTERS) {
         ExceptionPointers: info as *mut EXCEPTION_POINTERS,
         ClientPointers: false.into(),
     };
-    let dump_type =
-        MINIDUMP_TYPE(MiniDumpWithFullMemory.0 | MiniDumpWithHandleData.0 | MiniDumpWithThreadInfo.0);
+    let dump_type = MINIDUMP_TYPE(
+        MiniDumpWithFullMemory.0 | MiniDumpWithHandleData.0 | MiniDumpWithThreadInfo.0,
+    );
     let res = MiniDumpWriteDump(
         GetCurrentProcess(),
         pid,
@@ -112,7 +111,9 @@ unsafe fn write_minidump(info: *const EXCEPTION_POINTERS) {
         Ok(()) => crate::install::log_line(&format!(
             r"crash handler: minidump written -> C:\ProgramData\WarmupVk\worker-crash-{pid}.dmp"
         )),
-        Err(e) => crate::install::log_line(&format!("crash handler: MiniDumpWriteDump failed: {e}")),
+        Err(e) => {
+            crate::install::log_line(&format!("crash handler: MiniDumpWriteDump failed: {e}"))
+        }
     }
 }
 

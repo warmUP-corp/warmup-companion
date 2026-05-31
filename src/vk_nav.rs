@@ -11,8 +11,8 @@ use crate::gamepad_backend::Button;
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyboardLayout, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_END, VK_RETURN,
-    VK_SPACE, VK_TAB,
+    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_END, VK_RETURN, VK_SPACE,
+    VK_TAB,
 };
 
 #[derive(Clone)]

@@ -69,7 +69,16 @@
       "mcp__ghidra__search_byte_patterns",
       "mcp__ghidra__get_function_by_address",
       "mcp__ghidra__disassemble_function",
-      "mcp__ghidra__disassemble_bytes"
+      "mcp__ghidra__disassemble_bytes",
+      "mcp__ghidra__list_data_items_by_xrefs",
+      "mcp__ghidra__analysis_status",
+      "mcp__ghidra__reanalyze",
+      "Bash(git -C C:/Users/jonas/warmup-keyboard ls-files src)",
+      "Bash(git rm *)",
+      "Bash(git checkout *)",
+      "mcp__ghidra__get_metadata",
+      "mcp__ghidra__list_data_items",
+      "mcp__ghidra__list_project_files"
     ]
   },
   "enabledMcpjsonServers": [

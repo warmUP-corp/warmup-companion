@@ -16,8 +16,9 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, KillTimer, SetTimer, SetWindowPos, ShowWindow,
-    HMENU, HWND_TOPMOST, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, WM_DESTROY, WM_PAINT,
-    WM_TIMER, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    HMENU, HWND_TOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, WM_DESTROY, WM_PAINT,
+    WM_TIMER, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 
 use super::desktop;
@@ -45,7 +46,7 @@ impl Default for DebugOverlayController {
     fn default() -> Self {
         Self {
             thread: None,
-            last_tick: Instant::now() - TICK_INTERVAL,
+            last_tick: crate::time_util::stale(TICK_INTERVAL),
             last_on_winlogon: false,
             input_probe_failures: 0,
             off_winlogon_streak: 0,
@@ -303,7 +304,11 @@ fn poll_debug_shortcut() {
 /// confirms the composition pipeline works on the Winlogon desktop.
 fn render_debug(hwnd: HWND) {
     let snapshot = crate::debug_state::snapshot();
-    let connected = if snapshot.connected { "connected" } else { "not connected" };
+    let connected = if snapshot.connected {
+        "connected"
+    } else {
+        "not connected"
+    };
     let input = if snapshot.input.is_empty() {
         "—".to_string()
     } else {
@@ -321,7 +326,10 @@ fn render_debug(hwnd: HWND) {
         (0x00FFFFFFu32, format!("input: {input}")),
         (0x00FFFFFFu32, format!("desktop: {desktop}")),
         (0x0000D0FFu32, detail),
-        (0x00FF8000u32, "F8 stop service  ·  F9 UIA dump  ·  F10 toggle VK".to_string()),
+        (
+            0x00FF8000u32,
+            "F8 stop service  ·  F9 UIA dump  ·  F10 toggle VK".to_string(),
+        ),
     ];
     // Accent border in COLORREF (R=0x4c,G=0x7b,B=0x99) -> 0x00997b4c.
     DBG_RENDERER.with(|c| {

@@ -1,20 +1,21 @@
 mod config;
 mod symbols;
+mod time_util;
 mod vk_gate;
 
 #[cfg(windows)]
-mod install;
-#[cfg(windows)]
 mod crash;
+#[cfg(windows)]
+mod install;
 #[cfg(all(windows, feature = "service"))]
 mod service;
 
 #[cfg(windows)]
 mod debug_state;
 #[cfg(windows)]
-mod vk_nav;
-#[cfg(windows)]
 mod predict_ngram;
+#[cfg(windows)]
+mod vk_nav;
 #[cfg(windows)]
 mod vk_predict;
 #[cfg(windows)]
@@ -27,10 +28,10 @@ mod win;
 mod gamepad;
 #[cfg(feature = "gamepad")]
 mod gamepad_backend;
-#[cfg(feature = "gamepad")]
-mod pc_cursor;
 #[cfg(all(windows, feature = "gamepad"))]
 mod hid_gamepad;
+#[cfg(feature = "gamepad")]
+mod pc_cursor;
 #[cfg(all(windows, feature = "gamepad"))]
 mod xinput_backend;
 #[cfg(all(windows, feature = "gamepad"))]

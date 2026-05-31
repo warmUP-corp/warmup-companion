@@ -17,25 +17,23 @@ use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, ValidateRect, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
 };
-use windows::Win32::System::Registry::{
-    RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD,
-};
-use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics, GetWindowRect,
-    IsWindowVisible, KillTimer, PostThreadMessageW,
-    EVENT_SYSTEM_DESKTOPSWITCH, EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT,
-    SetTimer, SetWindowPos, ShowWindow, SM_CXSCREEN, SM_CYSCREEN,
-    HMENU, HWND_NOTOPMOST, HWND_TOPMOST,
-    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SWP_SHOWWINDOW, WINDOWPOS, WM_DESTROY, WM_LBUTTONDOWN, WM_PAINT, WM_TIMER,
-    WM_WINDOWPOSCHANGING, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOPMOST, WS_EX_TOOLWINDOW, WS_POPUP,
+    IsWindowVisible, KillTimer, PostThreadMessageW, SetTimer, SetWindowPos, ShowWindow,
+    EVENT_SYSTEM_DESKTOPSWITCH, EVENT_SYSTEM_FOREGROUND, HMENU, HWND_NOTOPMOST, HWND_TOPMOST,
+    SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    SW_SHOWNOACTIVATE, WINDOWPOS, WINEVENT_OUTOFCONTEXT, WM_DESTROY, WM_LBUTTONDOWN, WM_PAINT,
+    WM_TIMER, WM_WINDOWPOSCHANGING, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 use super::desktop;
-use super::desktop_window::{self, DesktopApp, DesktopWindowThread, WM_APP_HIDE, WM_APP_REPAINT, WM_APP_SHOW};
+use super::desktop_window::{
+    self, DesktopApp, DesktopWindowThread, WM_APP_HIDE, WM_APP_REPAINT, WM_APP_SHOW,
+};
 use super::vk_log;
 use super::vk_renderer::{self, VkPalette, VkRenderer};
 
@@ -442,7 +440,9 @@ unsafe fn reserve_app_space(
         new_h,
         SWP_NOACTIVATE | SWP_NOZORDER,
     );
-    vk_log::log(&format!("reserved space: shrank '{name}' to bottom={dock_top}"));
+    vk_log::log(&format!(
+        "reserved space: shrank '{name}' to bottom={dock_top}"
+    ));
     Some((app, r))
 }
 
@@ -596,7 +596,12 @@ unsafe fn target_monitor_rect() -> windows::Win32::Foundation::RECT {
     let sw = GetSystemMetrics(SM_CXSCREEN);
     let sh = GetSystemMetrics(SM_CYSCREEN);
     vk_log::log(&format!("GetMonitorInfo failed; using screen {sw}x{sh}"));
-    windows::Win32::Foundation::RECT { left: 0, top: 0, right: sw, bottom: sh }
+    windows::Win32::Foundation::RECT {
+        left: 0,
+        top: 0,
+        right: sw,
+        bottom: sh,
+    }
 }
 
 /// Joyxoff geometry: full monitor width, docked at the screen bottom, with
@@ -767,8 +772,7 @@ fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<KeyCell> {
     let (xf, yf) = (x as f32, y as f32);
     // Same layout the renderer draws with, so clicks always match the visible keys.
     let top_inset = vk_renderer::top_chrome_inset();
-    for kr in vk_renderer::key_rects(client.right as f32, client.bottom as f32, &rows, top_inset)
-    {
+    for kr in vk_renderer::key_rects(client.right as f32, client.bottom as f32, &rows, top_inset) {
         if xf >= kr.left && xf < kr.right && yf >= kr.top && yf < kr.bottom {
             return rows
                 .get(kr.pos.row)

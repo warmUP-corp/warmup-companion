@@ -1,4 +1,12 @@
 //! OS mouse cursor from sticks (same math as warmUP `gamepad/cursor.rs`).
+//!
+//! Cursor model matches Joyxoff (RE'd from `Joyxoff.exe`): relative-velocity
+//! `MOUSEEVENTF_MOVE` from the left stick, and the action button drives a real
+//! mouse-button HOLD (down on press-edge, up on release-edge — Joyxoff's
+//! `FUN_004512b0` tracks a held-mask at `this+0x10` and emits DOWN/UP on edges,
+//! not an instant click). Stick velocity is normalized to a 1080p reference
+//! (`screenW/1920`, `screenH/1080`) like Joyxoff's `FUN_00422dd0`, so the feel
+//! is resolution-independent.
 
 use enigo::{Axis, Coordinate, Direction, Enigo, Mouse, Settings};
 
@@ -9,6 +17,28 @@ const SENSITIVITY: f32 = 15.0;
 const ACCEL_EXP: f32 = 2.0;
 const SCROLL_SENSITIVITY: f32 = 5.0;
 
+/// Joyxoff's reference resolution: its sensitivity constants are tuned for
+/// 1080p and scaled by `actual/reference` per axis (`FUN_00422dd0`).
+const REF_WIDTH: f32 = 1920.0;
+const REF_HEIGHT: f32 = 1080.0;
+
+/// Per-axis velocity scale = actual screen size / Joyxoff's 1080p reference.
+/// 1.0 on a 1080p display; >1 on higher-res so the cursor crosses the screen in
+/// the same physical stick-throw regardless of resolution. Falls back to 1.0
+/// off Windows / if the metrics query fails.
+fn screen_scale() -> (f32, f32) {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+        let w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+        let h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+        if w > 0 && h > 0 {
+            return (w as f32 / REF_WIDTH, h as f32 / REF_HEIGHT);
+        }
+    }
+    (1.0, 1.0)
+}
+
 pub struct PcCursor {
     enigo: Option<Enigo>,
     /// Service worker only: dedicated SendInput thread on the Default desktop.
@@ -18,10 +48,21 @@ pub struct PcCursor {
     /// the user's desktop with no SetThreadDesktop (which fails ERROR_BUSY on a
     /// thread that owns windows).
     injector: Option<Injector>,
+    /// When set (service worker on the Winlogon/lock desktop), inject on the
+    /// CALLING thread instead of the default-desktop injector. The gamepad loop
+    /// thread is attached to "winlogon" there, so its `SendInput` lands on the
+    /// secure desktop — where the native PIN keypad lives. The default-desktop
+    /// injector would target `winsta0\default` (invisible on the lock screen).
+    on_winlogon: bool,
     remainder_x: f32,
     remainder_y: f32,
     scroll_remainder_x: f32,
     scroll_remainder_y: f32,
+    /// Resolution normalization (Joyxoff `FUN_00422dd0`): velocity * actual/1080p.
+    scale_x: f32,
+    scale_y: f32,
+    /// Left mouse button currently held (edge-tracked, Joyxoff `FUN_004512b0`).
+    left_held: bool,
 }
 
 impl PcCursor {
@@ -31,36 +72,53 @@ impl PcCursor {
         Ok(Self::with_enigo(Some(enigo)))
     }
 
-    /// Service worker (user session, not session 0). Cursor injection runs on a
-    /// dedicated Default-desktop thread; falls back to inline Enigo if the thread
-    /// can't spawn.
+    /// Service worker (user session, not session 0). Holds BOTH an inline Enigo
+    /// (used on the Winlogon desktop, where the calling loop thread is attached)
+    /// and a dedicated Default-desktop injector thread (used post-login). The
+    /// active path is chosen per-frame by [`set_on_winlogon`].
     pub fn new_service() -> Self {
-        match Injector::spawn() {
-            Some(injector) => Self {
-                enigo: None,
-                injector: Some(injector),
-                remainder_x: 0.0,
-                remainder_y: 0.0,
-                scroll_remainder_x: 0.0,
-                scroll_remainder_y: 0.0,
-            },
-            None => Self::with_enigo(Enigo::new(&Settings::default()).ok()),
-        }
-    }
-
-    fn with_enigo(enigo: Option<Enigo>) -> Self {
+        let (scale_x, scale_y) = screen_scale();
         Self {
-            enigo,
-            injector: None,
+            enigo: Enigo::new(&Settings::default()).ok(),
+            injector: Injector::spawn(),
+            on_winlogon: false,
             remainder_x: 0.0,
             remainder_y: 0.0,
             scroll_remainder_x: 0.0,
             scroll_remainder_y: 0.0,
+            scale_x,
+            scale_y,
+            left_held: false,
         }
+    }
+
+    fn with_enigo(enigo: Option<Enigo>) -> Self {
+        let (scale_x, scale_y) = screen_scale();
+        Self {
+            enigo,
+            injector: None,
+            on_winlogon: false,
+            remainder_x: 0.0,
+            remainder_y: 0.0,
+            scroll_remainder_x: 0.0,
+            scroll_remainder_y: 0.0,
+            scale_x,
+            scale_y,
+            left_held: false,
+        }
+    }
+
+    /// Published each poll by the service loop: true while the input desktop is
+    /// Winlogon. Routes injection to the calling (winlogon-attached) thread.
+    pub fn set_on_winlogon(&mut self, on_winlogon: bool) {
+        self.on_winlogon = on_winlogon;
     }
 
     pub fn move_stick(&mut self, stick_x: f32, stick_y: f32, dt_secs: f32) {
         let (dx, dy) = stick_delta(stick_x, stick_y, SENSITIVITY, dt_secs);
+        // Joyxoff normalizes velocity to actual/1080p so the throw feels the
+        // same at any resolution (`FUN_00422dd0`).
+        let (dx, dy) = (dx * self.scale_x, dy * self.scale_y);
         if dx == 0.0 && dy == 0.0 {
             self.remainder_x = 0.0;
             self.remainder_y = 0.0;
@@ -98,32 +156,57 @@ impl PcCursor {
         }
     }
 
-    pub fn left_click(&mut self) {
-        self.dispatch(Cmd::Click);
+    /// Drive the left mouse button as a real HOLD, edge-tracked like Joyxoff's
+    /// `FUN_004512b0` (DOWN on press-edge, UP on release-edge) instead of an
+    /// instant click. Giving XAML/LogonUI a genuine press duration is what makes
+    /// the native PIN keypad register the tap reliably on the secure desktop.
+    /// Idempotent: repeated same-state calls are dropped.
+    pub fn set_left_button(&mut self, down: bool) {
+        if down == self.left_held {
+            return;
+        }
+        self.left_held = down;
+        self.dispatch(if down { Cmd::ButtonDown } else { Cmd::ButtonUp });
     }
 
-    /// Route a command to the injector thread (service) or inline Enigo.
+    /// Route a command. On Winlogon: inline on the calling (winlogon-attached) loop
+    /// thread so `SendInput` reaches the secure desktop. Otherwise: the Default-
+    /// desktop injector thread (service post-login), else inline Enigo.
     fn dispatch(&mut self, cmd: Cmd) {
+        if self.on_winlogon {
+            if let Some(enigo) = self.enigo.as_mut() {
+                apply_cmd(enigo, cmd);
+            }
+            return;
+        }
         if let Some(injector) = &self.injector {
             injector.send(cmd);
             return;
         }
-        let Some(enigo) = self.enigo.as_mut() else {
-            return;
-        };
-        match cmd {
-            Cmd::Move(dx, dy) => {
-                let _ = enigo.move_mouse(dx, dy, Coordinate::Rel);
-            }
-            Cmd::ScrollV(v) => {
-                let _ = enigo.scroll(v, Axis::Vertical);
-            }
-            Cmd::ScrollH(h) => {
-                let _ = enigo.scroll(h, Axis::Horizontal);
-            }
-            Cmd::Click => {
-                let _ = enigo.button(enigo::Button::Left, Direction::Click);
-            }
+        if let Some(enigo) = self.enigo.as_mut() {
+            apply_cmd(enigo, cmd);
+        }
+    }
+}
+
+/// Apply one cursor command through an Enigo instance (SendInput on the calling
+/// thread's desktop). Shared by the inline path and the injector thread.
+fn apply_cmd(enigo: &mut Enigo, cmd: Cmd) {
+    match cmd {
+        Cmd::Move(dx, dy) => {
+            let _ = enigo.move_mouse(dx, dy, Coordinate::Rel);
+        }
+        Cmd::ScrollV(v) => {
+            let _ = enigo.scroll(v, Axis::Vertical);
+        }
+        Cmd::ScrollH(h) => {
+            let _ = enigo.scroll(h, Axis::Horizontal);
+        }
+        Cmd::ButtonDown => {
+            let _ = enigo.button(enigo::Button::Left, Direction::Press);
+        }
+        Cmd::ButtonUp => {
+            let _ = enigo.button(enigo::Button::Left, Direction::Release);
         }
     }
 }
@@ -133,7 +216,8 @@ enum Cmd {
     Move(i32, i32),
     ScrollV(i32),
     ScrollH(i32),
-    Click,
+    ButtonDown,
+    ButtonUp,
 }
 
 /// Dedicated cursor-injection thread. Owns its own Enigo and runs on whatever
@@ -164,20 +248,7 @@ fn injector_main(rx: std::sync::mpsc::Receiver<Cmd>) {
         let Some(enigo) = enigo.as_mut() else {
             continue;
         };
-        match cmd {
-            Cmd::Move(dx, dy) => {
-                let _ = enigo.move_mouse(dx, dy, Coordinate::Rel);
-            }
-            Cmd::ScrollV(v) => {
-                let _ = enigo.scroll(v, Axis::Vertical);
-            }
-            Cmd::ScrollH(h) => {
-                let _ = enigo.scroll(h, Axis::Horizontal);
-            }
-            Cmd::Click => {
-                let _ = enigo.button(enigo::Button::Left, Direction::Click);
-            }
-        }
+        apply_cmd(enigo, cmd);
     }
 }
 

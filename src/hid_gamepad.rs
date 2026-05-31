@@ -19,7 +19,7 @@ use windows::Win32::UI::Input::XboxController::{
     XINPUT_GAMEPAD_RIGHT_SHOULDER, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y,
 };
 use windows::Win32::UI::Input::{
-    GetRawInputDeviceInfoW, RIDI_DEVICEINFO, RIDI_DEVICENAME, RIDI_PREPARSEDDATA, RAWINPUT,
+    GetRawInputDeviceInfoW, RAWINPUT, RIDI_DEVICEINFO, RIDI_DEVICENAME, RIDI_PREPARSEDDATA,
     RID_DEVICE_INFO, RIM_TYPEHID,
 };
 
@@ -97,7 +97,7 @@ impl DeviceState {
             return None;
         }
         Some(PHIDP_PREPARSED_DATA(
-            self.preparsed_storage.as_mut_ptr() as isize,
+            self.preparsed_storage.as_mut_ptr() as isize
         ))
     }
 
@@ -454,7 +454,12 @@ fn sticks_for_profile(profile: HidProfile, report: &[u8]) -> (f32, f32, f32, f32
             let ly = (report[off + 1] as i16 - 128) as f32 / 128.0;
             let rx = (report[off + 2] as i16 - 128) as f32 / 128.0;
             let ry = (report[off + 3] as i16 - 128) as f32 / 128.0;
-            (deadzone_f(lx), deadzone_f(-ly), deadzone_f(rx), deadzone_f(-ry))
+            (
+                deadzone_f(lx),
+                deadzone_f(-ly),
+                deadzone_f(rx),
+                deadzone_f(-ry),
+            )
         }
         HidProfile::GenericHidP => (0.0, 0.0, 0.0, 0.0),
     }
@@ -607,7 +612,10 @@ fn device_vid_pid_name(hdevice: isize) -> Option<(u16, u16, String)> {
         };
         if got != u32::MAX && got > 0 {
             let written = (got as usize).min(buf.len());
-            let len = buf[..written].iter().position(|&c| c == 0).unwrap_or(written);
+            let len = buf[..written]
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(written);
             String::from_utf16_lossy(&buf[..len])
         } else {
             String::new()
@@ -748,7 +756,13 @@ pub fn process_raw_input(
         } else {
             String::new()
         };
-        return Some((key, last, "open", format!("{open} | {dev}{off_note}"), last_report));
+        return Some((
+            key,
+            last,
+            "open",
+            format!("{open} | {dev}{off_note}"),
+            last_report,
+        ));
     }
     Some((key, last, last_src, dev, last_report))
 }
@@ -771,5 +785,4 @@ mod tests {
         assert!(plausible_mask(0x000f).is_none());
         assert!(plausible_mask(0x005f).is_none());
     }
-
 }

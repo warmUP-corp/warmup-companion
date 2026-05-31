@@ -59,7 +59,11 @@ fn words_with_prefix<'a>(prefix: &'a str) -> impl Iterator<Item = &'a str> {
 
 fn personal_dict_path() -> Option<PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA")?;
-    Some(PathBuf::from(base).join("WarmupKeyboard").join("personal.dict"))
+    Some(
+        PathBuf::from(base)
+            .join("WarmupKeyboard")
+            .join("personal.dict"),
+    )
 }
 
 fn load_personal(into: &mut HashSet<String>) {
@@ -241,10 +245,7 @@ pub fn cycle_prev() -> bool {
 }
 
 pub fn partial_len() -> usize {
-    STATE
-        .lock()
-        .map(|s| s.partial.len())
-        .unwrap_or(0)
+    STATE.lock().map(|s| s.partial.len()).unwrap_or(0)
 }
 
 pub fn on_char(c: char) {

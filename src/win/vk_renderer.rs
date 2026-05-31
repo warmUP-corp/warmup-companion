@@ -2,40 +2,40 @@
 
 use windows::core::{w, Interface};
 use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+    D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
+    ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
     D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
     D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, ID2D1Bitmap1, ID2D1Device,
-    ID2D1DeviceContext, ID2D1Factory1, ID2D1SolidColorBrush,
+    D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_11_0,
 };
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, ID3D11Device,
+    D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
 };
 use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
-    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
-    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, IDWriteFactory,
-    IDWriteFontCollection, IDWriteTextFormat,
+    DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL,
+    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
+    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
 };
-use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, DXGI_PRESENT, DXGI_SWAP_CHAIN_DESC1,
-    DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
-    IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1,
+    CreateDXGIFactory2, IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1,
+    DXGI_CREATE_FACTORY_FLAGS, DXGI_PRESENT, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
+    DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
@@ -278,8 +278,7 @@ impl VkRenderer {
     pub unsafe fn create(hwnd: HWND) -> Result<Self, String> {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let mut client = RECT::default();
-        GetClientRect(hwnd, &mut client)
-            .map_err(|e| format!("GetClientRect: {e}"))?;
+        GetClientRect(hwnd, &mut client).map_err(|e| format!("GetClientRect: {e}"))?;
         let width = (client.right - client.left).max(1) as u32;
         let height = (client.bottom - client.top).max(1) as u32;
 
@@ -315,9 +314,8 @@ impl VkRenderer {
             .CreateSwapChainForComposition(&dxgi_device, &desc, None)
             .map_err(|e| format!("CreateSwapChainForComposition: {e}"))?;
 
-        let d2d_factory: ID2D1Factory1 =
-            D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)
-                .map_err(|e| format!("D2D1CreateFactory: {e}"))?;
+        let d2d_factory: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)
+            .map_err(|e| format!("D2D1CreateFactory: {e}"))?;
         let d2d_device = d2d_factory
             .CreateDevice(&dxgi_device)
             .map_err(|e| format!("ID2D1Factory1::CreateDevice: {e}"))?;
@@ -328,8 +326,8 @@ impl VkRenderer {
 
         let d2d_target = bind_d2d_target(&d2d_context, &swapchain)?;
 
-        let dcomp_device: IDCompositionDevice =
-            DCompositionCreateDevice(&dxgi_device).map_err(|e| format!("DCompositionCreateDevice: {e}"))?;
+        let dcomp_device: IDCompositionDevice = DCompositionCreateDevice(&dxgi_device)
+            .map_err(|e| format!("DCompositionCreateDevice: {e}"))?;
         let comp_target = dcomp_device
             .CreateTargetForHwnd(hwnd, true)
             .map_err(|e| format!("CreateTargetForHwnd: {e}"))?;
@@ -342,7 +340,9 @@ impl VkRenderer {
         comp_target
             .SetRoot(&visual)
             .map_err(|e| format!("SetRoot: {e}"))?;
-        dcomp_device.Commit().map_err(|e| format!("DComp Commit: {e}"))?;
+        dcomp_device
+            .Commit()
+            .map_err(|e| format!("DComp Commit: {e}"))?;
 
         let dwrite = create_dwrite()?;
         let mut fonts: Option<IDWriteFontCollection> = None;
@@ -446,8 +446,7 @@ impl VkRenderer {
 
     pub unsafe fn resize(&mut self, hwnd: HWND) -> Result<(), String> {
         let mut client = RECT::default();
-        GetClientRect(hwnd, &mut client)
-            .map_err(|e| format!("GetClientRect: {e}"))?;
+        GetClientRect(hwnd, &mut client).map_err(|e| format!("GetClientRect: {e}"))?;
         let width = (client.right - client.left).max(1) as u32;
         let height = (client.bottom - client.top).max(1) as u32;
         if width == self.width && height == self.height {
@@ -455,7 +454,13 @@ impl VkRenderer {
         }
         self.d2d_context.SetTarget(None);
         self.swapchain
-            .ResizeBuffers(0, width, height, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SWAP_CHAIN_FLAG(0))
+            .ResizeBuffers(
+                0,
+                width,
+                height,
+                DXGI_FORMAT_B8G8R8A8_UNORM,
+                DXGI_SWAP_CHAIN_FLAG(0),
+            )
             .map_err(|e| format!("ResizeBuffers: {e}"))?;
         self.width = width;
         self.height = height;
@@ -578,7 +583,11 @@ impl VkRenderer {
                     right: kr.right - 2.0,
                     bottom: kr.top + kh * 0.5,
                 };
-                let badge_brush = if selected { &sel_text_brush } else { &accent_brush };
+                let badge_brush = if selected {
+                    &sel_text_brush
+                } else {
+                    &accent_brush
+                };
                 let w: Vec<u16> = hint.encode_utf16().collect();
                 self.d2d_context.DrawText(
                     &w,
@@ -619,7 +628,9 @@ impl VkRenderer {
         let cw = self.width as f32;
         let ch = self.height as f32;
         // Left-align text for the panel (the keyboard path centres it).
-        let _ = self.text_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        let _ = self
+            .text_format
+            .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         let _ = self
             .text_format
             .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
@@ -748,8 +759,7 @@ unsafe fn solid_brush(
 }
 
 unsafe fn create_dwrite() -> Result<IDWriteFactory, String> {
-    DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)
-        .map_err(|e| format!("DWriteCreateFactory: {e}"))
+    DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).map_err(|e| format!("DWriteCreateFactory: {e}"))
 }
 
 /// `CreateTextFormat` rejects a null locale on some builds; use the user default.

@@ -158,15 +158,11 @@ impl Drop for XusbDevice {
 
 /// Open one enumerated interface; also queries GET_INFORMATION to recover the
 /// LED ordinal the state IOCTL expects. Returns (handle, led_ordinal).
-fn open_interface(
-    hdev: HDEVINFO,
-    ifd: &SP_DEVICE_INTERFACE_DATA,
-) -> Result<(HANDLE, u8), String> {
+fn open_interface(hdev: HDEVINFO, ifd: &SP_DEVICE_INTERFACE_DATA) -> Result<(HANDLE, u8), String> {
     // Two-call pattern: first call reports the required detail-buffer size.
     let mut required = 0u32;
-    let _ = unsafe {
-        SetupDiGetDeviceInterfaceDetailW(hdev, ifd, None, 0, Some(&mut required), None)
-    };
+    let _ =
+        unsafe { SetupDiGetDeviceInterfaceDetailW(hdev, ifd, None, 0, Some(&mut required), None) };
     if required == 0 {
         return Err("detail size query returned 0".into());
     }
@@ -250,15 +246,9 @@ fn query_led(handle: HANDLE) -> Option<u8> {
 ///   [19..21] sThumbRX
 ///   [21..23] sThumbRY
 fn parse_report(raw: &[u8]) -> XusbReport {
-    let r = |off: usize, len: usize| -> Option<&[u8]> {
-        raw.get(off..off + len)
-    };
-    let u16le = |off: usize| -> u16 {
-        r(off, 2).map_or(0, |b| u16::from_le_bytes([b[0], b[1]]))
-    };
-    let i16le = |off: usize| -> i16 {
-        r(off, 2).map_or(0, |b| i16::from_le_bytes([b[0], b[1]]))
-    };
+    let r = |off: usize, len: usize| -> Option<&[u8]> { raw.get(off..off + len) };
+    let u16le = |off: usize| -> u16 { r(off, 2).map_or(0, |b| u16::from_le_bytes([b[0], b[1]])) };
+    let i16le = |off: usize| -> i16 { r(off, 2).map_or(0, |b| i16::from_le_bytes([b[0], b[1]])) };
 
     XusbReport {
         packet: raw.get(5).copied().unwrap_or(0) as u32,

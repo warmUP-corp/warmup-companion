@@ -116,7 +116,11 @@ fn install_inner() -> Result<(), String> {
     // LocalSystem (default) — required for winlogon / sign-in desktop.
     sc(&["start", SERVICE_NAME])?;
     verify_service_running()?;
-    log_line(&format!("installed from {} -> {}", src.display(), dest.display()));
+    log_line(&format!(
+        "installed from {} -> {}",
+        src.display(),
+        dest.display()
+    ));
     Ok(())
 }
 
@@ -187,10 +191,7 @@ fn query_service_state() -> Result<Option<String>, String> {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("STATE") {
             // "STATE              : 4  RUNNING"
-            return Ok(rest
-                .split_whitespace()
-                .last()
-                .map(|tok| tok.to_string()));
+            return Ok(rest.split_whitespace().last().map(|tok| tok.to_string()));
         }
     }
     Ok(None)
@@ -268,7 +269,10 @@ fn verify_service_running() -> Result<(), String> {
         return Ok(());
     }
     let hint = if !Path::new(INSTALL_DIR).join(EXE_NAME).is_file() {
-        format!(" (missing {})", Path::new(INSTALL_DIR).join(EXE_NAME).display())
+        format!(
+            " (missing {})",
+            Path::new(INSTALL_DIR).join(EXE_NAME).display()
+        )
     } else {
         String::new()
     };
