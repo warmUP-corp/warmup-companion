@@ -1057,14 +1057,58 @@ fn launch_warmup_exe() -> Result<(), String> {
 #[cfg(feature = "gamepad")]
 fn warmup_exe_path() -> Result<std::path::PathBuf, String> {
     if let Some(path) = std::env::var_os("WARMUP_EXE") {
-        return Ok(std::path::PathBuf::from(path));
+        let path = std::path::PathBuf::from(path);
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err(format!("WARMUP_EXE does not exist: {}", path.display()));
+    }
+
+    if let Ok(raw) = std::fs::read_to_string(r"C:\ProgramData\WarmupVk\warmup-exe.path") {
+        let path = std::path::PathBuf::from(raw.trim().trim_matches('"'));
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err(format!(
+            r"C:\ProgramData\WarmupVk\warmup-exe.path points to missing exe: {}",
+            path.display()
+        ));
     }
 
     let current = std::env::current_exe().map_err(|e| format!("current exe: {e}"))?;
     let dir = current
         .parent()
         .ok_or_else(|| format!("current exe has no parent: {}", current.display()))?;
-    Ok(dir.join("warmup.exe"))
+    let mut candidates = Vec::new();
+    candidates.push(dir.join("warmup.exe"));
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        candidates.push(std::path::PathBuf::from(program_files).join(r"warmUP\warmup.exe"));
+    }
+    if let Some(program_files_x86) = std::env::var_os("ProgramFiles(x86)") {
+        candidates.push(std::path::PathBuf::from(program_files_x86).join(r"warmUP\warmup.exe"));
+    }
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        let local_app_data = std::path::PathBuf::from(local_app_data);
+        candidates.push(local_app_data.join(r"dev.warmup.console\warmup.exe"));
+        candidates.push(local_app_data.join(r"warmUP\warmup.exe"));
+        candidates.push(local_app_data.join(r"Programs\warmUP\warmup.exe"));
+    }
+    if let Some(user_profile) = std::env::var_os("USERPROFILE") {
+        candidates.push(
+            std::path::PathBuf::from(user_profile)
+                .join(r"warmUp\apps\desktop\src-tauri\target\debug\warmup.exe"),
+        );
+    }
+
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            format!(
+                "warmup.exe not found; set WARMUP_EXE or write the full path to {}",
+                r"C:\ProgramData\WarmupVk\warmup-exe.path"
+            )
+        })
 }
 
 #[cfg(all(feature = "gamepad", windows))]

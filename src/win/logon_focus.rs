@@ -182,12 +182,14 @@ pub fn focus_password_field() -> bool {
         unsafe {
             let _ = SetForegroundWindow(cred);
         }
+        crate::win::native_keyboard::suppress();
     }
 
     // Cached element first; SetFocus error => stale, drop and refind.
     let cached = PWD_ELEMENT.with(|s| s.borrow().clone());
     if let Some(el) = cached {
         if unsafe { el.SetFocus() }.is_ok() {
+            crate::win::native_keyboard::suppress();
             log_status("focused (cached)");
             return true;
         }
@@ -198,6 +200,9 @@ pub fn focus_password_field() -> bool {
         Some(el) => {
             let ok = unsafe { el.SetFocus() }.is_ok();
             PWD_ELEMENT.with(|s| *s.borrow_mut() = Some(el));
+            if ok {
+                crate::win::native_keyboard::suppress();
+            }
             log_status(if ok {
                 "focused"
             } else {

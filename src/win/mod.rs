@@ -2,6 +2,7 @@ pub mod debug_overlay;
 pub mod desktop;
 pub mod desktop_window;
 pub mod logon_focus;
+pub mod native_keyboard;
 pub mod vk_layouts;
 mod vk_log;
 mod vk_renderer;

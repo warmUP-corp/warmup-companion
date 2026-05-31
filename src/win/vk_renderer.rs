@@ -217,7 +217,9 @@ enum VkIcon {
     Space,
     Paste,
     Shift,
+    ShiftFilled,
     Caps,
+    CapsFilled,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -251,8 +253,14 @@ impl VkIcon {
             VkIcon::Shift => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 16a1 1 0 0 0 1-1v-2a1 1 0 0 1 1-1h3.293a.707.707 0 0 0 .5-1.207l-6.939-6.939a1.207 1.207 0 0 0-1.708 0l-6.94 6.94a.707.707 0 0 0 .5 1.206H8a1 1 0 0 1 1 1v2a1 1 0 0 0 1 1z"/><path d="M9 20h6"/></svg>"#
             }
+            VkIcon::ShiftFilled => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 16a1 1 0 0 0 1-1v-2a1 1 0 0 1 1-1h3.293a.707.707 0 0 0 .5-1.207l-6.939-6.939a1.207 1.207 0 0 0-1.708 0l-6.94 6.94a.707.707 0 0 0 .5 1.206H8a1 1 0 0 1 1 1v2a1 1 0 0 0 1 1z"/><path d="M9 20h6" fill="none"/></svg>"#
+            }
             VkIcon::Caps => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1v-6a1 1 0 0 1 1-1h3.293a.707.707 0 0 0 .5-1.207l-7.086-7.086a1 1 0 0 0-1.414 0l-7.086 7.086a.707.707 0 0 0 .5 1.207H8a1 1 0 0 1 1 1z"/></svg>"#
+            }
+            VkIcon::CapsFilled => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1v-6a1 1 0 0 1 1-1h3.293a.707.707 0 0 0 .5-1.207l-7.086-7.086a1 1 0 0 0-1.414 0l-7.086 7.086a.707.707 0 0 0 .5 1.207H8a1 1 0 0 1 1 1z"/></svg>"#
             }
         }
     }
@@ -701,9 +709,21 @@ impl VkRenderer {
             } else if matches!(key.action, KeyAction::Paste) {
                 self.draw_svg_icon(VkIcon::Paste, rect.rect, label_color)?;
             } else if matches!(key.action, KeyAction::Shift) {
-                self.draw_svg_icon(VkIcon::Shift, rect.rect, label_color)?;
+                let (shift, _) = crate::vk_nav::modifier_state();
+                let icon = if shift {
+                    VkIcon::ShiftFilled
+                } else {
+                    VkIcon::Shift
+                };
+                self.draw_svg_icon(icon, rect.rect, label_color)?;
             } else if matches!(key.action, KeyAction::CapsLock) {
-                self.draw_svg_icon(VkIcon::Caps, rect.rect, label_color)?;
+                let (_, caps) = crate::vk_nav::modifier_state();
+                let icon = if caps {
+                    VkIcon::CapsFilled
+                } else {
+                    VkIcon::Caps
+                };
+                self.draw_svg_icon(icon, rect.rect, label_color)?;
             } else {
                 let (glyph, symbol_font) = key_glyph(key);
                 if !glyph.is_empty() {

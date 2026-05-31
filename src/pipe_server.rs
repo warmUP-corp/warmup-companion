@@ -7,7 +7,7 @@
 //! controller label; the server thread streams the latest connection snapshot to the
 //! connected client. The pipe is ACL'd to the interactive user.
 
-use crate::protocol::{ButtonPayload, ConnectionPayload};
+use crate::protocol::{ButtonPayload, ConnectionPayload, ModeSnapshot};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -15,6 +15,9 @@ use std::sync::{Mutex, OnceLock};
 /// Cursor mode (A → OS left-click). `false` = focus/D-pad mode (buttons only). Default true;
 /// the connected desktop pushes the real value via `config` frames (#349).
 static CLICKS_ENABLED: AtomicBool = AtomicBool::new(true);
+/// WarmUp webview text entry is active. While true, the companion must not open
+/// or drive the native VK; button edges keep flowing to the desktop web VK.
+static LAUNCHER_OWNS_TEXT_INPUT: AtomicBool = AtomicBool::new(false);
 
 /// Coalesced visual-cursor hint accumulated since the last send: `(dx, dy, dirty)`.
 static CURSOR_ACC: OnceLock<Mutex<(f64, f64, bool)>> = OnceLock::new();
@@ -26,6 +29,11 @@ fn cursor_acc() -> &'static Mutex<(f64, f64, bool)> {
 /// Whether A should inject an OS left-click (cursor mode). Read by the gamepad loop.
 pub fn clicks_enabled() -> bool {
     CLICKS_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Whether WarmUp's webview VK currently owns controller text entry.
+pub fn launcher_owns_text_input() -> bool {
+    LAUNCHER_OWNS_TEXT_INPUT.load(Ordering::Relaxed)
 }
 
 /// Accumulate a visual-cursor hint. The companion has already injected the OS move; this
@@ -59,6 +67,12 @@ fn apply_config(p: &crate::protocol::ConfigPayload) {
     let _ = crate::config::set_gamepad_setting("cursor_speed", &p.sensitivity.to_string());
     let _ = crate::config::set_gamepad_setting("cursor_accel", &p.acceleration_exp.to_string());
     let _ = crate::config::set_gamepad_setting("scroll_speed", &p.scroll_sensitivity.to_string());
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn apply_mode(p: &ModeSnapshot) {
+    CLICKS_ENABLED.store(p.clicks_enabled, Ordering::Relaxed);
+    LAUNCHER_OWNS_TEXT_INPUT.store(p.launcher_owns_text_input, Ordering::Relaxed);
 }
 
 /// Latest connection snapshot, published by the gamepad loop and read by the server.
@@ -200,7 +214,9 @@ pub fn spawn() {}
 
 #[cfg(windows)]
 mod server {
-    use super::{apply_config, current, drain_buttons, reset_button_stream, take_cursor_moved};
+    use super::{
+        apply_config, apply_mode, current, drain_buttons, reset_button_stream, take_cursor_moved,
+    };
     use crate::protocol::{ConnectionPayload, DownFrame, Hello, UpFrame, PROTOCOL_VERSION};
     use std::time::{Duration, Instant};
     use windows::core::PCWSTR;
@@ -376,8 +392,10 @@ mod server {
             if trimmed.is_empty() {
                 continue;
             }
-            if let Ok(DownFrame::Config(p)) = DownFrame::parse_line(trimmed) {
-                apply_config(&p);
+            match DownFrame::parse_line(trimmed) {
+                Ok(DownFrame::Config(p)) => apply_config(&p),
+                Ok(DownFrame::Mode(p)) => apply_mode(&p),
+                _ => {}
             }
         }
         Ok(())
@@ -502,5 +520,26 @@ mod tests {
         publish_button("B", true);
         reset_button_stream();
         assert!(drain_buttons().is_empty());
+    }
+
+    #[test]
+    fn mode_tracks_launcher_text_input_owner() {
+        apply_mode(&ModeSnapshot {
+            game_active: false,
+            launcher_foreground_nav: false,
+            clicks_enabled: false,
+            launcher_owns_text_input: true,
+        });
+        assert!(!clicks_enabled());
+        assert!(launcher_owns_text_input());
+
+        apply_mode(&ModeSnapshot {
+            game_active: false,
+            launcher_foreground_nav: false,
+            clicks_enabled: true,
+            launcher_owns_text_input: false,
+        });
+        assert!(clicks_enabled());
+        assert!(!launcher_owns_text_input());
     }
 }

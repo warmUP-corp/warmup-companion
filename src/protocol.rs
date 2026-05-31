@@ -17,6 +17,10 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub struct ModeSnapshot {
     pub game_active: bool,
     pub launcher_foreground_nav: bool,
+    #[serde(default)]
+    pub clicks_enabled: bool,
+    #[serde(default)]
+    pub launcher_owns_text_input: bool,
 }
 
 /// `hello` handshake payload. The client (desktop) includes its config/mode
@@ -97,6 +101,7 @@ pub enum UpFrame {
 pub enum DownFrame {
     Hello(Hello),
     Config(ConfigPayload),
+    Mode(ModeSnapshot),
     #[serde(skip)]
     Unknown,
 }
@@ -137,7 +142,7 @@ impl DownFrame {
     pub fn parse_line(line: &str) -> Result<Self, serde_json::Error> {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
-            "hello" | "config" => serde_json::from_str(line),
+            "hello" | "config" | "mode" => serde_json::from_str(line),
             _ => Ok(Self::Unknown),
         }
     }
@@ -213,6 +218,21 @@ mod tests {
     }
 
     #[test]
+    fn mode_down_frame_round_trips() {
+        let frame = DownFrame::Mode(ModeSnapshot {
+            game_active: false,
+            launcher_foreground_nav: true,
+            clicks_enabled: false,
+            launcher_owns_text_input: true,
+        });
+        let line = frame.to_ndjson_line();
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["type"], "mode");
+        assert_eq!(json["payload"]["launcherOwnsTextInput"], true);
+        assert_eq!(DownFrame::parse_line(line.trim_end()).unwrap(), frame);
+    }
+
+    #[test]
     fn cursor_moved_up_frame_round_trips() {
         let frame = UpFrame::CursorMoved(CursorMovedPayload { dx: 1.5, dy: -2.0 });
         let line = frame.to_ndjson_line();
@@ -237,6 +257,8 @@ mod tests {
             mode: Some(ModeSnapshot {
                 game_active: false,
                 launcher_foreground_nav: false,
+                clicks_enabled: true,
+                launcher_owns_text_input: false,
             }),
         });
         let line = hello.to_ndjson_line();

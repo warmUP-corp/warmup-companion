@@ -295,6 +295,10 @@ pub fn voice_input_active() -> bool {
     NAV.lock().map(|n| n.voice_input).unwrap_or(false)
 }
 
+pub fn modifier_state() -> (bool, bool) {
+    NAV.lock().map(|n| (n.shift, n.caps)).unwrap_or_default()
+}
+
 #[cfg(feature = "gamepad")]
 pub fn move_selection(dir: Button) -> bool {
     let mut nav = match NAV.lock() {
@@ -516,6 +520,10 @@ fn send_paste() {
 }
 
 pub fn start_voice_input() {
+    if crate::win::logon_focus::is_active() {
+        crate::install::log_line("vk voice input ignored on Winlogon");
+        return;
+    }
     if let Ok(mut nav) = NAV.lock() {
         nav.voice_input = !nav.voice_input;
     }
