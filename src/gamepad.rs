@@ -692,6 +692,9 @@ where
         let dt = now.duration_since(last_tick).as_secs_f32();
         last_tick = now;
 
+        // Publish the current controller connection state to the pipe server (#347).
+        crate::pipe_server::publish_from_label(&poll.controller_label());
+
         match poll.poll_frame(&mut cursor, dt, vk_open()) {
             Ok(actions) => {
                 for action in actions {

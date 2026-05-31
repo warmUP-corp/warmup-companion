@@ -6,6 +6,8 @@ mod golden;
 /// Companion IPC wire frames (#347). Pure serde; used by the pipe server and tests.
 #[allow(dead_code)]
 mod protocol;
+/// Named-pipe server (#347): streams gamepad connection state to the warmUP desktop.
+mod pipe_server;
 mod symbols;
 mod time_util;
 mod vk_gate;
@@ -968,6 +970,9 @@ pub(crate) fn run_boot_gamepad_loop(
     vk_open: &std::cell::Cell<bool>,
     service_mode: bool,
 ) -> Result<(), String> {
+    // The companion owns the device; host the pipe so the warmUP desktop can read
+    // connection state over IPC (#347). No-op on non-Windows.
+    crate::pipe_server::spawn();
     let on_action = |action: gamepad::VkLoopAction| match action {
         gamepad::VkLoopAction::Toggle => {
             app.toggle_virtual_keyboard_combo();
