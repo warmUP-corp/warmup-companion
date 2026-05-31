@@ -1020,12 +1020,68 @@ pub(crate) fn run_boot_gamepad_loop(
                 }
             }
         }
+        gamepad::VkLoopAction::LaunchWarmup => {
+            if let Err(e) = launch_warmup_exe() {
+                eprintln!("launch warmup.exe: {e}");
+                #[cfg(windows)]
+                if service_mode {
+                    install::log_line(&format!("launch warmup.exe failed: {e}"));
+                }
+            } else {
+                #[cfg(windows)]
+                if service_mode {
+                    install::log_line("launched warmup.exe from controller hotkey");
+                }
+            }
+        }
     };
     if service_mode {
         gamepad::run_watch_loop_service(|| vk_open.get(), on_action)
     } else {
         gamepad::run_watch_loop(|| vk_open.get(), on_action)
     }
+}
+
+#[cfg(feature = "gamepad")]
+fn launch_warmup_exe() -> Result<(), String> {
+    use std::process::Command;
+
+    let exe = warmup_exe_path()?;
+    let mut cmd = Command::new(&exe);
+    if let Some(parent) = exe.parent() {
+        cmd.current_dir(parent);
+    }
+    spawn_warmup(&mut cmd).map_err(|e| format!("{}: {e}", exe.display()))
+}
+
+#[cfg(feature = "gamepad")]
+fn warmup_exe_path() -> Result<std::path::PathBuf, String> {
+    if let Some(path) = std::env::var_os("WARMUP_EXE") {
+        return Ok(std::path::PathBuf::from(path));
+    }
+
+    let current = std::env::current_exe().map_err(|e| format!("current exe: {e}"))?;
+    let dir = current
+        .parent()
+        .ok_or_else(|| format!("current exe has no parent: {}", current.display()))?;
+    Ok(dir.join("warmup.exe"))
+}
+
+#[cfg(all(feature = "gamepad", windows))]
+fn spawn_warmup(cmd: &mut std::process::Command) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(all(feature = "gamepad", not(windows)))]
+fn spawn_warmup(cmd: &mut std::process::Command) -> std::io::Result<()> {
+    cmd.spawn().map(|_| ())
 }
 
 fn help_screen_rows(help: &str) -> u32 {
