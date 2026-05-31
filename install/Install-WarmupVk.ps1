@@ -8,6 +8,8 @@
     cargo build --release
   Desktop test (after install or from target\release):
     warmup-companion.exe --gamepad --real
+  Install with debug overlays/hotkeys enabled:
+    .\install\Install-WarmupVk.ps1 -Debug
 
   Service binary (SCM): C:\ProgramData\WarmupVk\bin\warmup-companion.exe
   Log: C:\ProgramData\WarmupVk\service.log
@@ -15,6 +17,7 @@
   C:\Program Files\WarmupVk\ is NOT used (legacy manual copies only).
 #>
 param(
+    [Alias("Debug")]
     [switch]$DebugUi
 )
 
