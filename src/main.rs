@@ -3,6 +3,9 @@ mod config;
 /// math-parity slice (#349). Unused in the normal binary build for now.
 #[allow(dead_code)]
 mod golden;
+/// Companion IPC wire frames (#347). Pure serde; used by the pipe server and tests.
+#[allow(dead_code)]
+mod protocol;
 mod symbols;
 mod time_util;
 mod vk_gate;
