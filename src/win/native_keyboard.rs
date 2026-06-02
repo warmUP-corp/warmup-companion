@@ -16,7 +16,8 @@ use windows::Win32::System::Registry::{
     HKEY_USERS, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_VALUE_TYPE,
 };
 use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    OpenProcess, QueryFullProcessImageNameW, TerminateProcess, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClassNameW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
@@ -181,16 +182,64 @@ unsafe extern "system" fn enum_window(hwnd: HWND, _param: LPARAM) -> BOOL {
 
     let class = window_class(hwnd);
     let title = window_title(hwnd);
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
     let process = window_process_image(hwnd);
+    let image = process
+        .as_deref()
+        .and_then(|p| p.rsplit(['\\', '/']).next())
+        .unwrap_or_default()
+        .to_string();
+    let on_winlogon = crate::win::logon_focus::is_active();
     if is_native_keyboard_window(&class, &title, process.as_deref()) {
         crate::install::log_line(&format!(
-            "native keyboard suppress: class='{class}' title='{title}' process='{}'",
-            process.as_deref().unwrap_or("")
+            "native keyboard suppress: class='{class}' title='{title}' process='{image}' winlogon={on_winlogon}"
         ));
         let _ = ShowWindow(hwnd, SW_HIDE);
         let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+        // Hide+close doesn't stick: TextInputHost re-shows faster than the sweep,
+        // and once the shell's gamepad text-input is armed (after an XInput pad)
+        // it keeps summoning it. On the secure desktop, kill the host outright —
+        // it's not needed for PIN entry there and the OS relaunches it later.
+        if on_winlogon && is_killable_keyboard_image(&image) {
+            terminate_pid(pid);
+        }
+    } else if on_winlogon && looks_input_related(&class, &image) {
+        // Diagnostic: a popup the predicate missed. Log its identity so the match
+        // list / kill list can be widened to whatever the shell actually spawns.
+        crate::install::log_line(&format!(
+            "native kbd seen (unmatched): class='{class}' title='{title}' process='{image}'"
+        ));
     }
     true.into()
+}
+
+/// Process images safe to terminate on the secure desktop to kill the touch
+/// keyboard. PIN entry there uses physical keys / mouse clicks, not these.
+fn is_killable_keyboard_image(image: &str) -> bool {
+    image.eq_ignore_ascii_case("TextInputHost.exe")
+        || image.eq_ignore_ascii_case("TabTip.exe")
+        || image.eq_ignore_ascii_case("osk.exe")
+}
+
+/// Loose net for the diagnostic branch: anything that smells like a text-input
+/// surface, so a missed popup gets logged for identification.
+fn looks_input_related(class: &str, image: &str) -> bool {
+    is_killable_keyboard_image(image)
+        || class.contains("IPTip")
+        || class == "Windows.UI.Core.CoreWindow"
+        || class == "ApplicationFrameWindow"
+}
+
+unsafe fn terminate_pid(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, pid) {
+        let _ = TerminateProcess(handle, 1);
+        let _ = CloseHandle(handle);
+        crate::install::log_line(&format!("native kbd: terminated touch-keyboard host pid={pid}"));
+    }
 }
 
 fn window_class(hwnd: HWND) -> String {
