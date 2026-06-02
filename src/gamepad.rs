@@ -183,6 +183,15 @@ impl GamepadPoll {
         // Publish each poll so the per-keystroke UIA focus redirect (vk_nav send
         // path) gates correctly and records this loop thread's apartment.
         crate::win::logon_focus::set_active(on_winlogon);
+        // Keep a hide sweep alive the whole time we're on the secure desktop.
+        // `EnableDesktopModeAutoInvoke` is already 0 on some machines yet the
+        // touch keyboard is still summoned by the shell's CoreWindow gamepad
+        // navigation when an XInput (Xbox) pad drives the lock screen — the
+        // registry switch doesn't gate that path, so the panel must be hidden
+        // on sight. Idempotent: `suppress_for` no-ops while a sweep is running.
+        if on_winlogon {
+            crate::win::native_keyboard::suppress_for(std::time::Duration::from_secs(3));
+        }
         let using_xinput = matches!(self.backend, Backend::XInput(_));
         if on_winlogon == using_xinput {
             return;
