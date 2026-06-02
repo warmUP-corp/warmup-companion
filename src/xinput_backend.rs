@@ -22,15 +22,16 @@ use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
 };
 use windows::Win32::UI::Input::XboxController::{
-    XINPUT_CAPABILITIES, XINPUT_GAMEPAD, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B,
+    XINPUT_CAPABILITIES, XINPUT_GAMEPAD, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_BACK,
     XINPUT_GAMEPAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT,
     XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_LEFT_THUMB,
-    XINPUT_GAMEPAD_RIGHT_SHOULDER, XINPUT_GAMEPAD_RIGHT_THUMB, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y,
-    XINPUT_STATE,
+    XINPUT_GAMEPAD_RIGHT_SHOULDER, XINPUT_GAMEPAD_RIGHT_THUMB, XINPUT_GAMEPAD_START,
+    XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y, XINPUT_STATE,
 };
 use windows::Win32::UI::Input::{
-    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
-    RIDEV_INPUTSINK, RID_INPUT,
+    GetRawInputData, GetRawInputDeviceInfoW, GetRawInputDeviceList, RegisterRawInputDevices,
+    HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTDEVICELIST, RAWINPUTHEADER, RIDEV_INPUTSINK,
+    RIDEV_PAGEONLY, RIDI_DEVICEINFO, RID_INPUT, RID_DEVICE_INFO, RIM_TYPEHID,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClassNameW,
@@ -54,6 +55,7 @@ const ERROR_EMPTY: u32 = 4306;
 
 const LEFT_DEADZONE: i16 = 7849;
 const RIGHT_DEADZONE: i16 = 8689;
+const GUIDE_BUTTON_MASK: u16 = 0x0400;
 
 type XInputGetStateFn = unsafe extern "system" fn(u32, *mut XINPUT_STATE) -> u32;
 type XInputGetKeystrokeFn = unsafe extern "system" fn(u32, u32, *mut XInputKeystroke) -> u32;
@@ -421,8 +423,11 @@ const BUTTON_MASKS: &[(Button, u16)] = &[
     (Button::Y, XINPUT_GAMEPAD_Y.0),
     (Button::Lb, XINPUT_GAMEPAD_LEFT_SHOULDER.0),
     (Button::Rb, XINPUT_GAMEPAD_RIGHT_SHOULDER.0),
+    (Button::Select, XINPUT_GAMEPAD_BACK.0),
+    (Button::Start, XINPUT_GAMEPAD_START.0),
     (Button::L3, XINPUT_GAMEPAD_LEFT_THUMB.0),
     (Button::R3, XINPUT_GAMEPAD_RIGHT_THUMB.0),
+    (Button::Guide, GUIDE_BUTTON_MASK),
 ];
 
 /// XInput mask bit for a button, if it has one.
@@ -448,6 +453,7 @@ pub struct XInputBackend {
     get_keystroke: Option<XInputGetKeystrokeFn>,
     secure: Option<SecurePollThread>,
     active_slot: Option<u32>,
+    active_secure_hid: bool,
     prev_buttons: [u16; 4],
     slot_connected: [bool; 4],
     pending: Vec<ButtonChange>,
@@ -548,6 +554,13 @@ struct PollState {
     last_probe_log: Instant,
     iter_count: u64,
     hid_devices: HashMap<usize, hid_gamepad::DeviceState>,
+    /// Direct HID input-report readers (PlayStation / generic pads). Windowed
+    /// Raw Input (`WM_INPUT`) is never delivered on the secure desktop, so these
+    /// CreateFile/ReadFile handles are the only working source for vendor pads —
+    /// the HID analogue of the `xusb` DeviceIoControl bypass for Xbox.
+    hid_readers: Vec<crate::hid_reader::HidReader>,
+    /// Throttle for re-enumerating HID readers (pad plugged in after spawn).
+    last_hid_scan: Instant,
     last_hid: PadSample,
     hid_diag_count: u32,
     suppress_until_zero: bool,
@@ -561,6 +574,7 @@ struct PollState {
     xusb: Vec<XusbDevice>,
     /// Most recent XUSB report (for the probe dump + offset verification).
     last_xusb: Option<XusbReport>,
+    hid_active_prev: bool,
     /// Throttle for re-enumerating XUSB pads: `open_all` runs once at startup, but a
     /// pad plugged in later (or present only after the secure desktop appears) must
     /// be picked up, else we have 0 devices and fall back to the foreground-gated DLL.
@@ -580,6 +594,7 @@ enum SecureMsg {
     Slots([bool; 4]),
     Buttons { slot: u32, prev: u16, cur: u16 },
     Trigger(ButtonChange),
+    HidActive(bool),
     Axes((f32, f32, f32, f32)),
     NoController,
     Error(String),
@@ -594,6 +609,7 @@ impl XInputBackend {
             get_keystroke,
             secure: None,
             active_slot: None,
+            active_secure_hid: false,
             prev_buttons: [0; 4],
             slot_connected: [false; 4],
             pending: Vec::new(),
@@ -771,6 +787,7 @@ impl XInputBackend {
                 (false, true) => {
                     service_log("XInput secure helper: stopping");
                     self.secure.take();
+                    self.clear_secure_state();
                     self.secure_leave_winlogon_streak = 0;
                 }
                 _ => {}
@@ -797,6 +814,9 @@ impl XInputBackend {
                     // controller_label()/is_connected() and the debug overlay see the
                     // pad the helper is reading on Winlogon.
                     let _ = self.pick_active_slot(&connected);
+                    if self.active_slot != Some(0) {
+                        self.active_secure_hid = false;
+                    }
                 }
                 SecureMsg::Buttons { slot, prev, cur } => {
                     self.log_button_change(slot, prev, cur);
@@ -808,10 +828,24 @@ impl XInputBackend {
                     }
                     self.pending.extend(Self::edges(prev, cur));
                 }
-                SecureMsg::Trigger(edge) => self.pending.push(edge),
+                SecureMsg::Trigger(edge) => {
+                    match edge.button {
+                        Button::Lt => self.prev_trigger_left = edge.pressed,
+                        Button::Rt => self.prev_trigger_right = edge.pressed,
+                        _ => {}
+                    }
+                    self.pending.push(edge);
+                }
+                SecureMsg::HidActive(active) => {
+                    self.active_secure_hid = active;
+                    if active {
+                        self.active_slot = Some(0);
+                    }
+                }
                 SecureMsg::Axes(axes) => self.axes = axes,
                 SecureMsg::NoController => {
                     self.active_slot = None;
+                    self.clear_secure_state();
                     self.axes = (0.0, 0.0, 0.0, 0.0);
                     self.log_no_controller();
                 }
@@ -819,6 +853,12 @@ impl XInputBackend {
             }
         }
         got_msg || self.secure.is_some()
+    }
+
+    fn clear_secure_state(&mut self) {
+        self.active_secure_hid = false;
+        self.prev_trigger_left = false;
+        self.prev_trigger_right = false;
     }
 }
 
@@ -928,6 +968,9 @@ impl GamepadBackend for XInputBackend {
     }
 
     fn controller_label(&self) -> String {
+        if self.active_secure_hid {
+            return "HID slot 0".to_string();
+        }
         match self.active_slot {
             Some(i) => format!("XInput slot {i}"),
             None => "none".to_string(),
@@ -939,10 +982,16 @@ impl GamepadBackend for XInputBackend {
             return String::new();
         };
         let mask = self.prev_buttons[slot as usize];
-        let pressed: Vec<&str> = BUTTON_MASKS
+        let mut pressed: Vec<&str> = BUTTON_MASKS
             .iter()
             .filter_map(|(b, m)| (mask & *m != 0).then_some(b.as_str()))
             .collect();
+        if self.prev_trigger_left {
+            pressed.push("LT");
+        }
+        if self.prev_trigger_right {
+            pressed.push("RT");
+        }
         warmup_gamepad::live_input_format(&pressed, self.axes)
     }
 }
@@ -1104,6 +1153,8 @@ fn secure_poll_main(
             last_probe_log: crate::time_util::stale(Duration::from_secs(60)),
             iter_count: 0,
             hid_devices: HashMap::new(),
+            hid_readers: Vec::new(),
+            last_hid_scan: crate::time_util::stale(Duration::from_secs(60)),
             last_hid: PadSample::default(),
             hid_diag_count: 0,
             suppress_until_zero: false,
@@ -1111,6 +1162,7 @@ fn secure_poll_main(
             last_raw_report: Vec::new(),
             xusb: Vec::new(),
             last_xusb: None,
+            hid_active_prev: false,
             last_xusb_scan: crate::time_util::stale(Duration::from_secs(60)),
             prev_trigger_left: false,
             prev_trigger_right: false,
@@ -1123,9 +1175,16 @@ fn secure_poll_main(
     for line in xusb_log {
         let _ = tx.send(SecureMsg::Error(line));
     }
+    // Open vendor HID pads (PlayStation / generic) for direct reads — windowed
+    // Raw Input is dead on the secure desktop, so this is their only source.
+    let (hid_readers, hid_log) = crate::hid_reader::HidReader::open_all();
+    for line in hid_log {
+        let _ = tx.send(SecureMsg::Error(line));
+    }
     POLL_STATE.with(|s| {
         if let Some(state) = s.borrow_mut().as_mut() {
             state.xusb = xusb_devices;
+            state.hid_readers = hid_readers;
         }
     });
 
@@ -1217,6 +1276,12 @@ fn register_raw_gamepad(hwnd: HWND, tx: &mpsc::Sender<SecureMsg>) {
     let devices = [
         RAWINPUTDEVICE {
             usUsagePage: 0x01,
+            usUsage: 0x00,
+            dwFlags: RIDEV_INPUTSINK | RIDEV_PAGEONLY,
+            hwndTarget: hwnd,
+        },
+        RAWINPUTDEVICE {
+            usUsagePage: 0x01,
             usUsage: 0x05,
             dwFlags: RIDEV_INPUTSINK,
             hwndTarget: hwnd,
@@ -1227,15 +1292,74 @@ fn register_raw_gamepad(hwnd: HWND, tx: &mpsc::Sender<SecureMsg>) {
             dwFlags: RIDEV_INPUTSINK,
             hwndTarget: hwnd,
         },
+        RAWINPUTDEVICE {
+            usUsagePage: 0x01,
+            usUsage: 0x08,
+            dwFlags: RIDEV_INPUTSINK,
+            hwndTarget: hwnd,
+        },
     ];
     match unsafe { RegisterRawInputDevices(&devices, size_of::<RAWINPUTDEVICE>() as u32) } {
         Ok(()) => {
             let _ = tx.send(SecureMsg::Error(
-                "HID: raw input sink registered (gamepad + joystick)".into(),
+                "HID: raw input sink registered (generic-desktop page + gamepad + joystick + multi-axis)".into(),
             ));
+            log_raw_input_devices(tx);
         }
         Err(e) => {
             let _ = tx.send(SecureMsg::Error(format!("raw HID register failed: {e}")));
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn log_raw_input_devices(tx: &mpsc::Sender<SecureMsg>) {
+    let mut count = 0u32;
+    let item_size = size_of::<RAWINPUTDEVICELIST>() as u32;
+    let first = unsafe { GetRawInputDeviceList(None, &mut count, item_size) };
+    if first == u32::MAX || count == 0 {
+        let _ = tx.send(SecureMsg::Error("HID: raw device list empty".into()));
+        return;
+    }
+
+    let mut devices = vec![RAWINPUTDEVICELIST::default(); count as usize];
+    let got = unsafe { GetRawInputDeviceList(Some(devices.as_mut_ptr()), &mut count, item_size) };
+    if got == u32::MAX {
+        let _ = tx.send(SecureMsg::Error("HID: raw device list failed".into()));
+        return;
+    }
+
+    let mut logged = 0usize;
+    for item in devices.into_iter().take(count as usize) {
+        if item.dwType != RIM_TYPEHID {
+            continue;
+        }
+
+        let mut info = RID_DEVICE_INFO {
+            cbSize: size_of::<RID_DEVICE_INFO>() as u32,
+            ..Default::default()
+        };
+        let mut size = size_of::<RID_DEVICE_INFO>() as u32;
+        let ok = unsafe {
+            GetRawInputDeviceInfoW(
+                item.hDevice,
+                RIDI_DEVICEINFO,
+                Some((&mut info as *mut RID_DEVICE_INFO).cast()),
+                &mut size,
+            )
+        };
+        if ok == u32::MAX {
+            continue;
+        }
+
+        let hid = unsafe { info.Anonymous.hid };
+        let is_sony = hid.dwVendorId == 0x054c;
+        if logged < 12 || is_sony {
+            logged += 1;
+            let _ = tx.send(SecureMsg::Error(format!(
+                "HID: raw dev vid={:04x} pid={:04x} page=0x{:04x} usage=0x{:04x}",
+                hid.dwVendorId, hid.dwProductId, hid.usUsagePage, hid.usUsage,
+            )));
         }
     }
 }
@@ -1361,6 +1485,41 @@ fn poll_xinput_tick(state: &mut PollState) {
         }
     }
 
+    // Drop unplugged HID readers, and re-enumerate while we have none (a pad
+    // connected after spawn — common at the lock screen — was missed by the
+    // one-shot open in secure_poll_main).
+    state.hid_readers.retain(|r| !r.is_dead());
+    if state.hid_readers.is_empty() && state.last_hid_scan.elapsed() >= Duration::from_secs(1) {
+        state.last_hid_scan = Instant::now();
+        let (readers, log) = crate::hid_reader::HidReader::open_all();
+        if !readers.is_empty() {
+            state.hid_readers = readers;
+            for line in log {
+                let _ = state.tx.send(SecureMsg::Error(line));
+            }
+        }
+    }
+
+    // Drain each reader's overlapped read; keep the freshest non-neutral sample
+    // (a pad streaming neutral frames shouldn't blank a just-pressed button from
+    // another). `last_hid` then feeds the hid_authoritative slot-0 path below.
+    let mut hid_sample: Option<PadSample> = None;
+    for reader in state.hid_readers.iter_mut() {
+        if let Some(sample) = reader.poll() {
+            let replace = match hid_sample {
+                None => true,
+                Some(prev) => prev.buttons == 0 && prev.lt == 0 && prev.rt == 0,
+            };
+            if replace {
+                hid_sample = Some(sample);
+            }
+        }
+    }
+    if let Some(sample) = hid_sample {
+        state.last_hid = sample;
+    }
+    state.hid_readers.retain(|r| !r.is_dead());
+
     let mut connected = [false; 4];
     let mut states: [Option<XINPUT_GAMEPAD>; 4] = [None; 4];
     let mut errs = [0u32; 4];
@@ -1412,6 +1571,17 @@ fn poll_xinput_tick(state: &mut PollState) {
     // and emit spurious button-up edges.
     if xusb_rep.is_some() {
         state.last_xusb = xusb_rep;
+    }
+    // HID is authoritative for PlayStation/non-XUSB pads. Xbox controllers can
+    // also surface Raw Input HID devices; do not let that shadow the direct XUSB
+    // path, which is the reliable secure-desktop source for Xbox.
+    let hid_authoritative = hid_is_authoritative(state.hid_readers.len(), state.xusb.len());
+    if hid_authoritative {
+        connected[0] = true;
+    }
+    if hid_authoritative != state.hid_active_prev {
+        state.hid_active_prev = hid_authoritative;
+        let _ = state.tx.send(SecureMsg::HidActive(hid_authoritative));
     }
 
     if INJECT_HOLD_ACTIVE.load(Ordering::Relaxed) {
@@ -1469,8 +1639,16 @@ fn poll_xinput_tick(state: &mut PollState) {
             ),
             None => (0u16, 0u32),
         };
+        let hid = state.last_hid;
         crate::debug_state::set_detail(format!(
-            "xinput=0x{xin:04x} xusb=0x{xusb_btn:04x} xfp=0x{xfp:08x} fg={}",
+            "xinput=0x{xin:04x} xusb=0x{xusb_btn:04x} xfp=0x{xfp:08x} hid=0x{:04x}/{}:{} L({:.2},{:.2}) R({:.2},{:.2}) fg={}",
+            hid.buttons,
+            hid.lt,
+            hid.rt,
+            hid.lx,
+            hid.ly,
+            hid.rx,
+            hid.ry,
             if ours { "ours" } else { "LogonUI" }
         ));
     }
@@ -1522,11 +1700,25 @@ fn poll_xinput_tick(state: &mut PollState) {
             None => " xusb:none".into(),
         };
         let _ = state.tx.send(SecureMsg::Error(format!(
-            "probe iter={} errs=[{}]{raw} keystroke_events={} hid_raw=[{}]{xusb_str}",
+            "probe iter={} errs=[{}]{raw} keystroke_events={} hid:btn=0x{:04x} lt={} rt={} lx={:.2} ly={:.2} rx={:.2} ry={:.2} raw=[{}]{xusb_str}",
             state.iter_count,
             summary.join(","),
             state.keystroke_events,
-            report_hex(&state.last_raw_report),
+            state.last_hid.buttons,
+            state.last_hid.lt,
+            state.last_hid.rt,
+            state.last_hid.lx,
+            state.last_hid.ly,
+            state.last_hid.rx,
+            state.last_hid.ry,
+            // Prefer the direct-read bytes (the working secure-desktop path);
+            // fall back to the WM_INPUT report, which never arrives on Winlogon.
+            state
+                .hid_readers
+                .first()
+                .map(|r| report_hex(r.last_report()))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| report_hex(&state.last_raw_report)),
         )));
     }
 
@@ -1555,6 +1747,37 @@ fn poll_xinput_tick(state: &mut PollState) {
         }
         return;
     };
+
+    if hid_authoritative && slot == 0 {
+        let prev = state.prev_buttons[0];
+        let buttons = state.last_hid.buttons;
+        if prev != buttons {
+            state.prev_buttons[0] = buttons;
+            let _ = state.tx.send(SecureMsg::Buttons {
+                slot: 0,
+                prev,
+                cur: buttons,
+            });
+        }
+        let mut trigger_edges = Vec::new();
+        poll_trigger_edges(
+            &mut state.prev_trigger_left,
+            &mut state.prev_trigger_right,
+            state.last_hid.lt,
+            state.last_hid.rt,
+            &mut trigger_edges,
+        );
+        for edge in trigger_edges {
+            let _ = state.tx.send(SecureMsg::Trigger(edge));
+        }
+        let _ = state.tx.send(SecureMsg::Axes((
+            state.last_hid.lx,
+            state.last_hid.ly,
+            state.last_hid.rx,
+            state.last_hid.ry,
+        )));
+        return;
+    }
 
     // The DLL state may be absent (slot connected only via the direct XUSB read,
     // which the foreground gate doesn't touch) — default to neutral, never panic.
@@ -1634,6 +1857,10 @@ fn poll_xinput_tick(state: &mut PollState) {
     let _ = state.tx.send(SecureMsg::Axes(axes));
 }
 
+fn hid_is_authoritative(hid_device_count: usize, xusb_device_count: usize) -> bool {
+    hid_device_count > 0 && xusb_device_count == 0
+}
+
 #[allow(dead_code)]
 fn secure_poll_keystrokes(
     tx: &mpsc::Sender<SecureMsg>,
@@ -1682,5 +1909,91 @@ fn secure_poll_keystrokes(
 fn service_log(msg: &str) {
     if crate::config::service_mode() {
         crate::install::log_line(msg);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn xinput_mask_edges_include_system_and_stick_buttons() {
+        let cur = XINPUT_GAMEPAD_BACK.0
+            | XINPUT_GAMEPAD_START.0
+            | XINPUT_GAMEPAD_LEFT_THUMB.0
+            | XINPUT_GAMEPAD_RIGHT_THUMB.0
+            | GUIDE_BUTTON_MASK;
+        let edges = XInputBackend::edges(0, cur);
+        let pressed: Vec<Button> = edges
+            .into_iter()
+            .filter_map(|edge| edge.pressed.then_some(edge.button))
+            .collect();
+
+        assert_eq!(
+            pressed,
+            vec![
+                Button::Select,
+                Button::Start,
+                Button::L3,
+                Button::R3,
+                Button::Guide,
+            ]
+        );
+        assert_eq!(button_mask(Button::Select), Some(XINPUT_GAMEPAD_BACK.0));
+        assert_eq!(button_mask(Button::Start), Some(XINPUT_GAMEPAD_START.0));
+        assert_eq!(button_mask(Button::Guide), Some(GUIDE_BUTTON_MASK));
+    }
+
+    #[test]
+    fn controller_label_identifies_secure_hid_source() {
+        let mut backend = XInputBackend::new();
+        backend.active_slot = Some(0);
+        backend.active_secure_hid = true;
+
+        assert_eq!(backend.controller_label(), "HID slot 0");
+    }
+
+    #[test]
+    fn clear_secure_state_removes_hid_label() {
+        let mut backend = XInputBackend::new();
+        backend.active_slot = Some(0);
+        backend.active_secure_hid = true;
+
+        backend.clear_secure_state();
+
+        assert_eq!(backend.controller_label(), "XInput slot 0");
+    }
+
+    #[test]
+    fn live_input_summary_includes_held_triggers() {
+        let mut backend = XInputBackend::new();
+        backend.active_slot = Some(0);
+        backend.prev_trigger_left = true;
+        backend.prev_trigger_right = true;
+
+        let summary = backend.live_input_summary();
+        let parts: Vec<&str> = summary.split_whitespace().collect();
+        assert!(parts.contains(&"LT"));
+        assert!(parts.contains(&"RT"));
+    }
+
+    #[test]
+    fn clear_secure_state_removes_trigger_summary_state() {
+        let mut backend = XInputBackend::new();
+        backend.active_slot = Some(0);
+        backend.prev_trigger_left = true;
+        backend.prev_trigger_right = true;
+
+        backend.clear_secure_state();
+
+        assert!(!backend.live_input_summary().contains("LT"));
+        assert!(!backend.live_input_summary().contains("RT"));
+    }
+
+    #[test]
+    fn xusb_presence_keeps_hid_from_shadowing_slot_zero() {
+        assert!(hid_is_authoritative(1, 0));
+        assert!(!hid_is_authoritative(1, 1));
+        assert!(!hid_is_authoritative(0, 1));
     }
 }

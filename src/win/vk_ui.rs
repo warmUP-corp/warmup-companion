@@ -315,6 +315,9 @@ fn remove_winevent_hooks() {
 }
 
 fn ui_show(attach: VkAttach) {
+    if matches!(attach, VkAttach::Input) {
+        super::native_keyboard::suppress_for(Duration::from_secs(10));
+    }
     // Capture the app that currently has focus BEFORE we create our (NOACTIVATE)
     // window, so we can shrink it to make room for the keyboard.
     let prev_fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
@@ -508,6 +511,7 @@ unsafe extern "system" fn on_foreground(
     }
     let tid = UI_THREAD_ID.load(Ordering::Acquire);
     if tid != 0 {
+        super::native_keyboard::suppress();
         let _ = PostThreadMessageW(tid, WM_APP_REPAINT, WPARAM(0), LPARAM(0));
     }
 }
@@ -535,7 +539,10 @@ unsafe extern "system" fn vk_wndproc(
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_TIMER => {
             match _wparam.0 {
-                VK_ZORDER_TIMER_ID => ensure_topmost(hwnd),
+                VK_ZORDER_TIMER_ID => {
+                    ensure_topmost(hwnd);
+                    super::native_keyboard::suppress();
+                }
                 VK_RENDER_TIMER_ID => render_frame(),
                 _ => {}
             }

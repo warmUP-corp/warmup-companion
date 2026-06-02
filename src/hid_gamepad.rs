@@ -14,9 +14,10 @@ use windows::Win32::Devices::HumanInterfaceDevice::{
 };
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::UI::Input::XboxController::{
-    XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_LEFT,
-    XINPUT_GAMEPAD_DPAD_RIGHT, XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_LEFT_SHOULDER,
-    XINPUT_GAMEPAD_RIGHT_SHOULDER, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y,
+    XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_BACK, XINPUT_GAMEPAD_DPAD_DOWN,
+    XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT, XINPUT_GAMEPAD_DPAD_UP,
+    XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_LEFT_THUMB, XINPUT_GAMEPAD_RIGHT_SHOULDER,
+    XINPUT_GAMEPAD_RIGHT_THUMB, XINPUT_GAMEPAD_START, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y,
 };
 use windows::Win32::UI::Input::{
     GetRawInputDeviceInfoW, RAWINPUT, RIDI_DEVICEINFO, RIDI_DEVICENAME, RIDI_PREPARSEDDATA,
@@ -27,6 +28,8 @@ use windows::Win32::UI::Input::{
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PadSample {
     pub buttons: u16,
+    pub lt: u8,
+    pub rt: u8,
     pub lx: f32,
     pub ly: f32,
     pub rx: f32,
@@ -208,37 +211,49 @@ pub fn profile_for_vid_pid(vid: u16, pid: u16, name: &str) -> HidProfile {
 
 pub fn decode_report_logged(device: &mut DeviceState, report: &[u8]) -> (PadSample, &'static str) {
     let preparsed = device.preparsed();
-    let (buttons, source) = match device.profile {
+    let (buttons, lt, rt, source) = match device.profile {
         // Xbox XUSB: use bytes 2–3 only. HidP on Winlogon often reports every
         // button usage at once (e.g. 0xb200) on the first report after open.
         HidProfile::Xusb => {
             let off = device.xusb_button_offset(report);
             let b = parse_xusb_mask_at(report, off).unwrap_or(0);
-            (b, if b != 0 { "xusb" } else { "" })
+            (b, 0, 0, if b != 0 { "xusb" } else { "" })
         }
         HidProfile::XusbButtonByte => {
             let _ = report;
-            (0, "")
+            (0, 0, 0, "")
         }
         HidProfile::SonyDs4Usb => {
-            let b = parse_sony_mask(report, 0x01, 5, 6).unwrap_or(0);
-            (b, if b != 0 { "ds4-usb" } else { "" })
+            let (b, lt, rt) = parse_sony_mask(report, 0x01, 5, 6, Some(7))
+                .or_else(|| parse_sony_mask(report, 0x11, 6, 7, Some(8)))
+                .or_else(|| parse_sony_mask_without_report_id(report, 4, 5, Some(6)))
+                .or_else(|| parse_sony_mask_without_report_id(report, 5, 6, Some(7)))
+                .unwrap_or((0, 0, 0));
+            (b, lt, rt, if b != 0 { "ds4-usb" } else { "" })
         }
         HidProfile::SonyDs4Bluetooth => {
-            let b = parse_sony_mask(report, 0x11, 6, 7)
-                .or_else(|| parse_sony_mask(report, 0x01, 8, 9))
-                .unwrap_or(0);
-            (b, if b != 0 { "ds4-bt" } else { "" })
+            let (b, lt, rt) = parse_sony_mask(report, 0x11, 6, 7, Some(8))
+                .or_else(|| parse_sony_mask(report, 0x01, 5, 6, Some(7)))
+                .or_else(|| parse_sony_mask_without_report_id(report, 5, 6, Some(7)))
+                .or_else(|| parse_sony_mask_without_report_id(report, 4, 5, Some(6)))
+                .unwrap_or((0, 0, 0));
+            (b, lt, rt, if b != 0 { "ds4-bt" } else { "" })
         }
         HidProfile::SonyDs5Usb => {
-            let b = parse_sony_mask(report, 0x01, 8, 9).unwrap_or(0);
-            (b, if b != 0 { "ds5-usb" } else { "" })
+            let (b, lt, rt) = parse_sony_mask(report, 0x01, 8, 9, Some(10))
+                .or_else(|| parse_sony_mask(report, 0x31, 9, 10, Some(11)))
+                .or_else(|| parse_sony_mask_without_report_id(report, 7, 8, Some(9)))
+                .or_else(|| parse_sony_mask_without_report_id(report, 8, 9, Some(10)))
+                .unwrap_or((0, 0, 0));
+            (b, lt, rt, if b != 0 { "ds5-usb" } else { "" })
         }
         HidProfile::SonyDs5Bluetooth => {
-            let b = parse_sony_mask(report, 0x31, 9, 10)
-                .or_else(|| parse_sony_mask(report, 0x01, 8, 9))
-                .unwrap_or(0);
-            (b, if b != 0 { "ds5-bt" } else { "" })
+            let (b, lt, rt) = parse_sony_mask(report, 0x31, 9, 10, Some(11))
+                .or_else(|| parse_sony_mask(report, 0x01, 8, 9, Some(10)))
+                .or_else(|| parse_sony_mask_without_report_id(report, 8, 9, Some(10)))
+                .or_else(|| parse_sony_mask_without_report_id(report, 7, 8, Some(9)))
+                .unwrap_or((0, 0, 0));
+            (b, lt, rt, if b != 0 { "ds5-bt" } else { "" })
         }
         HidProfile::GenericHidP => {
             let mut b = hidp_button_mask(preparsed, report);
@@ -249,7 +264,7 @@ pub fn decode_report_logged(device: &mut DeviceState, report: &[u8]) -> (PadSamp
                     src = "scan";
                 }
             }
-            (b, src)
+            (b, 0, 0, src)
         }
     };
 
@@ -260,6 +275,8 @@ pub fn decode_report_logged(device: &mut DeviceState, report: &[u8]) -> (PadSamp
     (
         PadSample {
             buttons,
+            lt,
+            rt,
             lx,
             ly,
             rx,
@@ -269,7 +286,8 @@ pub fn decode_report_logged(device: &mut DeviceState, report: &[u8]) -> (PadSamp
     )
 }
 
-const XUSB_BUTTON_MASK: u16 = 0xF3FF;
+const GUIDE_BUTTON_MASK: u16 = 0x0400;
+const XUSB_BUTTON_MASK: u16 = 0xF7FF;
 const STICK_DEADZONE: i16 = 7849;
 
 fn default_xusb_button_offset(report: &[u8]) -> u8 {
@@ -359,17 +377,43 @@ fn is_dualsense_pid(pid: u16) -> bool {
     matches!(pid, 0x0ce6 | 0x0df2)
 }
 
-fn parse_sony_mask(report: &[u8], report_id: u8, buttons: usize, shoulders: usize) -> Option<u16> {
+fn parse_sony_mask(
+    report: &[u8],
+    report_id: u8,
+    buttons: usize,
+    shoulders: usize,
+    system: Option<usize>,
+) -> Option<(u16, u8, u8)> {
     if report.len() <= shoulders {
         return None;
     }
     if !report.is_empty() && report[0] != report_id {
         return None;
     }
-    Some(sony_buttons_from_pair(report[buttons], report[shoulders]))
+    Some(sony_buttons_from_pair(
+        report[buttons],
+        report[shoulders],
+        system.and_then(|idx| report.get(idx).copied()),
+    ))
 }
 
-fn sony_buttons_from_pair(b5: u8, b6: u8) -> u16 {
+fn parse_sony_mask_without_report_id(
+    report: &[u8],
+    buttons: usize,
+    shoulders: usize,
+    system: Option<usize>,
+) -> Option<(u16, u8, u8)> {
+    if report.len() <= shoulders {
+        return None;
+    }
+    Some(sony_buttons_from_pair(
+        report[buttons],
+        report[shoulders],
+        system.and_then(|idx| report.get(idx).copied()),
+    ))
+}
+
+fn sony_buttons_from_pair(b5: u8, b6: u8, b7: Option<u8>) -> (u16, u8, u8) {
     let mut mask = ds4_dpad_hat(b5 & 0x0f);
     if b5 & 0x10 != 0 {
         mask |= XINPUT_GAMEPAD_X.0;
@@ -389,7 +433,24 @@ fn sony_buttons_from_pair(b5: u8, b6: u8) -> u16 {
     if b6 & 0x02 != 0 {
         mask |= XINPUT_GAMEPAD_RIGHT_SHOULDER.0;
     }
-    mask & XUSB_BUTTON_MASK
+    let lt = if b6 & 0x04 != 0 { 255 } else { 0 };
+    let rt = if b6 & 0x08 != 0 { 255 } else { 0 };
+    if b6 & 0x10 != 0 {
+        mask |= XINPUT_GAMEPAD_BACK.0;
+    }
+    if b6 & 0x20 != 0 {
+        mask |= XINPUT_GAMEPAD_START.0;
+    }
+    if b6 & 0x40 != 0 {
+        mask |= XINPUT_GAMEPAD_LEFT_THUMB.0;
+    }
+    if b6 & 0x80 != 0 {
+        mask |= XINPUT_GAMEPAD_RIGHT_THUMB.0;
+    }
+    if b7.is_some_and(|b| b & 0x01 != 0) {
+        mask |= GUIDE_BUTTON_MASK;
+    }
+    (mask & XUSB_BUTTON_MASK, lt, rt)
 }
 
 fn ds4_dpad_hat(hat: u8) -> u16 {
@@ -434,10 +495,38 @@ fn xusb_stick_active(report: &[u8]) -> bool {
 fn sony_stick_offset(profile: HidProfile, report: &[u8]) -> Option<usize> {
     match profile {
         HidProfile::SonyDs4Usb | HidProfile::SonyDs5Usb => {
-            (report.len() >= 5 && (report[0] == 0x01 || report[0] == 0x00)).then_some(1)
+            if report.len() >= 6 && (report[0] == 0x11 || report[0] == 0x31) {
+                Some(2)
+            } else if report.len() >= 5 && (report[0] == 0x01 || report[0] == 0x00) {
+                Some(1)
+            } else if report.len() >= 4 {
+                Some(0)
+            } else {
+                None
+            }
         }
-        HidProfile::SonyDs4Bluetooth => (report.len() >= 10 && report[0] == 0x11).then_some(2),
-        HidProfile::SonyDs5Bluetooth => (report.len() >= 13 && report[0] == 0x31).then_some(2),
+        HidProfile::SonyDs4Bluetooth => {
+            if report.len() >= 10 && report[0] == 0x11 {
+                Some(2)
+            } else if report.len() >= 5 && (report[0] == 0x01 || report[0] == 0x00) {
+                Some(1)
+            } else if report.len() >= 9 {
+                Some(1)
+            } else {
+                None
+            }
+        }
+        HidProfile::SonyDs5Bluetooth => {
+            if report.len() >= 13 && report[0] == 0x31 {
+                Some(2)
+            } else if report.len() >= 5 && (report[0] == 0x01 || report[0] == 0x00) {
+                Some(1)
+            } else if report.len() >= 12 {
+                Some(1)
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -824,14 +913,36 @@ mod tests {
     }
 
     #[test]
+    fn xusb_button_mask_preserves_system_and_stick_buttons() {
+        let system_and_sticks = XINPUT_GAMEPAD_BACK.0
+            | XINPUT_GAMEPAD_START.0
+            | XINPUT_GAMEPAD_LEFT_THUMB.0
+            | XINPUT_GAMEPAD_RIGHT_THUMB.0
+            | GUIDE_BUTTON_MASK;
+
+        assert_eq!(system_and_sticks & XUSB_BUTTON_MASK, system_and_sticks);
+    }
+
+    #[test]
     fn ds4_usb_buttons_use_report_1_pair_5_6() {
         let mut report = [0u8; 10];
         report[0] = 0x01;
         report[1..5].copy_from_slice(&[128, 128, 128, 128]);
         report[5] = 0x88; // hat neutral + triangle/north
         assert_eq!(
-            parse_sony_mask(&report, 0x01, 5, 6),
-            Some(XINPUT_GAMEPAD_Y.0)
+            parse_sony_mask(&report, 0x01, 5, 6, Some(7)),
+            Some((XINPUT_GAMEPAD_Y.0, 0, 0))
+        );
+    }
+
+    #[test]
+    fn ds4_usb_buttons_allow_stripped_report_id_pair_4_5() {
+        let mut report = [0u8; 9];
+        report[0..4].copy_from_slice(&[128, 128, 128, 128]);
+        report[4] = 0x88; // hat neutral + triangle/north
+        assert_eq!(
+            parse_sony_mask_without_report_id(&report, 4, 5, Some(6)),
+            Some((XINPUT_GAMEPAD_Y.0, 0, 0))
         );
     }
 
@@ -842,9 +953,63 @@ mod tests {
         report[2..6].copy_from_slice(&[128, 128, 128, 128]);
         report[6] = 0x28; // hat neutral + cross/south
         assert_eq!(
-            parse_sony_mask(&report, 0x11, 6, 7),
-            Some(XINPUT_GAMEPAD_A.0)
+            parse_sony_mask(&report, 0x11, 6, 7, Some(8)),
+            Some((XINPUT_GAMEPAD_A.0, 0, 0))
         );
+    }
+
+    #[test]
+    fn ds4_bluetooth_buttons_allow_stripped_report_id_pair_5_6() {
+        let mut report = [0u8; 11];
+        report[1..5].copy_from_slice(&[128, 128, 128, 128]);
+        report[5] = 0x28; // hat neutral + cross/south
+        assert_eq!(
+            parse_sony_mask_without_report_id(&report, 5, 6, Some(7)),
+            Some((XINPUT_GAMEPAD_A.0, 0, 0))
+        );
+    }
+
+    #[test]
+    fn ds4_usb_profile_accepts_bluetooth_report_id() {
+        let mut device = sony_device(HidProfile::SonyDs4Usb);
+        let mut report = [0u8; 12];
+        report[0] = 0x11;
+        report[2..6].copy_from_slice(&[255, 128, 128, 128]);
+        report[6] = 0x28; // hat neutral + cross/south
+        let (sample, src) = decode_report_logged(&mut device, &report);
+        assert_eq!(src, "ds4-usb");
+        assert_eq!(sample.buttons, XINPUT_GAMEPAD_A.0);
+        assert!(sample.lx > 0.9);
+        assert_eq!(sample.ly, 0.0);
+    }
+
+    #[test]
+    fn ds4_buttons_map_l3_and_triggers_for_signin_controls() {
+        let mut report = [0u8; 10];
+        report[0] = 0x01;
+        report[1..5].copy_from_slice(&[128, 128, 128, 128]);
+        report[5] = 0x08; // hat neutral
+        report[6] = 0x7c; // L2 + R2 + Share + Options + L3
+        let (sample, src) = decode_report_logged(&mut sony_device(HidProfile::SonyDs4Usb), &report);
+        assert_eq!(src, "ds4-usb");
+        assert_eq!(
+            sample.buttons,
+            XINPUT_GAMEPAD_BACK.0 | XINPUT_GAMEPAD_START.0 | XINPUT_GAMEPAD_LEFT_THUMB.0
+        );
+        assert_eq!(sample.lt, 255);
+        assert_eq!(sample.rt, 255);
+    }
+
+    #[test]
+    fn ds4_maps_ps_button_to_guide() {
+        let mut report = [0u8; 10];
+        report[0] = 0x01;
+        report[1..5].copy_from_slice(&[128, 128, 128, 128]);
+        report[5] = 0x08; // hat neutral
+        report[7] = 0x01; // PS button
+        let (sample, src) = decode_report_logged(&mut sony_device(HidProfile::SonyDs4Usb), &report);
+        assert_eq!(src, "ds4-usb");
+        assert_eq!(sample.buttons, GUIDE_BUTTON_MASK);
     }
 
     #[test]
@@ -854,8 +1019,19 @@ mod tests {
         report[1..5].copy_from_slice(&[128, 128, 128, 128]);
         report[8] = 0x88; // hat neutral + triangle/north
         assert_eq!(
-            parse_sony_mask(&report, 0x01, 8, 9),
-            Some(XINPUT_GAMEPAD_Y.0)
+            parse_sony_mask(&report, 0x01, 8, 9, Some(10)),
+            Some((XINPUT_GAMEPAD_Y.0, 0, 0))
+        );
+    }
+
+    #[test]
+    fn dualsense_usb_buttons_allow_stripped_report_id_pair_7_8() {
+        let mut report = [0u8; 11];
+        report[0..4].copy_from_slice(&[128, 128, 128, 128]);
+        report[7] = 0x88; // hat neutral + triangle/north
+        assert_eq!(
+            parse_sony_mask_without_report_id(&report, 7, 8, Some(9)),
+            Some((XINPUT_GAMEPAD_Y.0, 0, 0))
         );
     }
 
@@ -866,8 +1042,74 @@ mod tests {
         report[2..6].copy_from_slice(&[128, 128, 128, 128]);
         report[9] = 0x18; // hat neutral + square/west
         assert_eq!(
-            parse_sony_mask(&report, 0x31, 9, 10),
-            Some(XINPUT_GAMEPAD_X.0)
+            parse_sony_mask(&report, 0x31, 9, 10, Some(11)),
+            Some((XINPUT_GAMEPAD_X.0, 0, 0))
         );
+    }
+
+    #[test]
+    fn dualsense_usb_profile_accepts_bluetooth_report_id() {
+        let mut device = sony_device(HidProfile::SonyDs5Usb);
+        let mut report = [0u8; 14];
+        report[0] = 0x31;
+        report[2..6].copy_from_slice(&[255, 128, 128, 128]);
+        report[9] = 0x18; // hat neutral + square/west
+        let (sample, src) = decode_report_logged(&mut device, &report);
+        assert_eq!(src, "ds5-usb");
+        assert_eq!(sample.buttons, XINPUT_GAMEPAD_X.0);
+        assert!(sample.lx > 0.9);
+        assert_eq!(sample.ly, 0.0);
+    }
+
+    #[test]
+    fn dualsense_buttons_map_l3_and_triggers_for_signin_controls() {
+        let mut report = [0u8; 12];
+        report[0] = 0x01;
+        report[1..5].copy_from_slice(&[128, 128, 128, 128]);
+        report[8] = 0x08; // hat neutral
+        report[9] = 0x7c; // L2 + R2 + Create + Options + L3
+        let (sample, src) = decode_report_logged(&mut sony_device(HidProfile::SonyDs5Usb), &report);
+        assert_eq!(src, "ds5-usb");
+        assert_eq!(
+            sample.buttons,
+            XINPUT_GAMEPAD_BACK.0 | XINPUT_GAMEPAD_START.0 | XINPUT_GAMEPAD_LEFT_THUMB.0
+        );
+        assert_eq!(sample.lt, 255);
+        assert_eq!(sample.rt, 255);
+    }
+
+    #[test]
+    fn dualsense_maps_ps_button_to_guide() {
+        let mut report = [0u8; 12];
+        report[0] = 0x01;
+        report[1..5].copy_from_slice(&[128, 128, 128, 128]);
+        report[8] = 0x08; // hat neutral
+        report[10] = 0x01; // PS button
+        let (sample, src) = decode_report_logged(&mut sony_device(HidProfile::SonyDs5Usb), &report);
+        assert_eq!(src, "ds5-usb");
+        assert_eq!(sample.buttons, GUIDE_BUTTON_MASK);
+    }
+
+    #[test]
+    fn dualsense_bluetooth_buttons_allow_stripped_report_id_pair_8_9() {
+        let mut report = [0u8; 13];
+        report[1..5].copy_from_slice(&[128, 128, 128, 128]);
+        report[8] = 0x18; // hat neutral + square/west
+        assert_eq!(
+            parse_sony_mask_without_report_id(&report, 8, 9, Some(10)),
+            Some((XINPUT_GAMEPAD_X.0, 0, 0))
+        );
+    }
+
+    fn sony_device(profile: HidProfile) -> DeviceState {
+        DeviceState {
+            handle_key: 1,
+            vid: 0x054c,
+            pid: 0x05c4,
+            profile,
+            name: String::new(),
+            xusb_btn_offset: u8::MAX,
+            preparsed_storage: Vec::new(),
+        }
     }
 }

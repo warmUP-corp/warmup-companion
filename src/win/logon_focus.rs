@@ -78,8 +78,14 @@ pub fn set_active(on_winlogon: bool) {
     let was = ON_WINLOGON.swap(on_winlogon, Ordering::SeqCst);
     if on_winlogon {
         LOOP_TID.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
+        if !was {
+            // Entered the secure desktop: stop the native touch keyboard being
+            // summoned on credential-field focus (the hide loop only flashes it).
+            crate::win::native_keyboard::disable_auto_invoke();
+        }
     } else if was {
         clear_cache();
+        crate::win::native_keyboard::restore_auto_invoke();
     }
 }
 

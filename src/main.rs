@@ -39,6 +39,8 @@ mod gamepad;
 mod gamepad_backend;
 #[cfg(all(windows, feature = "gamepad"))]
 mod hid_gamepad;
+#[cfg(all(windows, feature = "gamepad"))]
+mod hid_reader;
 #[cfg(feature = "gamepad")]
 mod pc_cursor;
 #[cfg(all(windows, feature = "gamepad"))]

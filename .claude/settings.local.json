@@ -78,7 +78,8 @@
       "Bash(git checkout *)",
       "mcp__ghidra__get_metadata",
       "mcp__ghidra__list_data_items",
-      "mcp__ghidra__list_project_files"
+      "mcp__ghidra__list_project_files",
+      "PowerShell(if \\(Test-Path \"C:\\\\ProgramData\\\\WarmupVk\\\\service.log\"\\) { Write-Output \"LOG EXISTS\"; \\(Get-Item \"C:\\\\ProgramData\\\\WarmupVk\\\\service.log\"\\).LastWriteTime; Write-Output \"--- last raw-input/HID lines ---\"; Get-Content \"C:\\\\ProgramData\\\\WarmupVk\\\\service.log\" | Select-String \"raw input sink|raw HID register|raw dev vid|HID secure|hid:btn|input desktop|HID slot\" | Select-Object -Last 40 } else { Write-Output \"NO LOG\" })"
     ]
   },
   "enabledMcpjsonServers": [
