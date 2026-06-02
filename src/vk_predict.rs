@@ -45,7 +45,7 @@ pub struct StripView {
 }
 
 fn lexicon() -> &'static [&'static str] {
-    predict_ngram::LEXICON
+    predict_ngram::lexicon()
 }
 
 fn words_with_prefix<'a>(prefix: &'a str) -> impl Iterator<Item = &'a str> {

@@ -5,7 +5,7 @@ edition = "2021"
 build = "build.rs"
 
 [features]
-default = []
+default = ["service"]
 gamepad = ["dep:warmup-gamepad", "dep:enigo", "dep:ctrlc"]
 service = ["gamepad", "dep:windows-service"]
 
@@ -14,6 +14,9 @@ warmup-gamepad = { path = "crates/warmup-gamepad", optional = true }
 enigo = { version = "0.3", optional = true }
 ctrlc = { version = "3.4", optional = true }
 windows-service = { version = "0.8", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+resvg = "0.47.0"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
@@ -45,13 +48,19 @@ windows = { version = "0.58", features = [
     "Win32_System_Memory",
     "Win32_System_Registry",
     "Win32_System_Variant",
+    "Win32_System_Pipes",
     "Win32_System_RemoteDesktop",
     "Win32_System_StationsAndDesktops",
     "Win32_System_Threading",
+    "Win32_System_WinRT",
     "Win32_UI_Accessibility",
     "Win32_UI_HiDpi",
     "Win32_UI_Input",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Input_XboxController",
     "Win32_UI_WindowsAndMessaging",
+    "Foundation",
+    "Foundation_Collections",
+    "Globalization",
+    "Media_SpeechRecognition",
 ] }

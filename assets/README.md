@@ -1,6 +1,8 @@
 # Prediction corpus (Leipzig Wortschatz)
 
-Warmup’s n-gram tables are built at compile time from [Leipzig Wortschatz](https://wortschatz-leipzig.de/en/download/eng) corpora (CC BY 4.0 — see their terms).
+Warmup’s n-gram tables are generated from [Leipzig Wortschatz](https://wortschatz-leipzig.de/en/download/eng) corpora (CC BY 4.0 — see their terms).
+
+Normal release builds use the checked-in `src/predict_ngram_prebuilt.bin` file and do **not** rebuild the corpus.
 
 ## What to download
 
@@ -34,6 +36,18 @@ WARMUP_MAX_LEXICON=12000
 WARMUP_MAX_SENTENCES=100000
 ```
 
+## Rebuilding the prebuilt table
+
+Only do this when the corpus, `assets/ngram_corpus.txt`, `src/predict_lexicon.txt`, or table limits change:
+
+```powershell
+$env:WARMUP_REBUILD_NGRAM='1'
+$env:WARMUP_WRITE_PREBUILT_NGRAM='1'
+cargo check --release
+```
+
+After that, normal `cargo build --release` and `.\install\Install-WarmupVk.ps1` runs copy the prebuilt binary table into Cargo’s output directory.
+
 ## Git
 
-Large `*-sentences.txt` files are gitignored; keep the tarball or words list in repo if you want reproducible CI without downloading.
+Large `*-sentences.txt` files are gitignored. Commit `src/predict_ngram_prebuilt.bin` for reproducible builds without downloading or reparsing the corpus.

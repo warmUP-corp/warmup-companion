@@ -17,6 +17,7 @@
 //! surfaces the raw bytes (see `XusbReport.raw`) so the offsets can be confirmed
 //! against a real button press before the parse is trusted.
 
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::mem::size_of;
 
@@ -50,7 +51,18 @@ const STATE_OUT_LEN: usize = 64;
 pub struct XusbDevice {
     handle: HANDLE,
     led: u8,
+    /// Consecutive failed polls. A connected pad answers every poll; sustained
+    /// failures mean the pad was unplugged, so the device is pruned (see
+    /// `is_disconnected`) and the slot frees up for a different pad — without
+    /// this, a stale XUSB entry blocks the HID path from taking over on a
+    /// Xbox→PlayStation switch.
+    fail_streak: Cell<u32>,
 }
+
+/// Consecutive failed polls before an `XusbDevice` is considered unplugged.
+/// ~0.5s at the secure-poll tick rate — long enough to ride out the occasional
+/// single-poll empty read a connected pad produces.
+const XUSB_FAIL_LIMIT: u32 = 30;
 
 /// Parsed gamepad snapshot, mirroring the XInput state we already consume, plus
 /// the raw IOCTL bytes for offset verification.
@@ -108,7 +120,11 @@ impl XusbDevice {
             match open_interface(hdev, &ifd) {
                 Ok(path) => {
                     let (handle, led) = path;
-                    devices.push(XusbDevice { handle, led });
+                    devices.push(XusbDevice {
+                        handle,
+                        led,
+                        fail_streak: Cell::new(0),
+                    });
                 }
                 Err(e) => log.push(format!("XUSB: device {index} open failed: {e}")),
             }
@@ -141,10 +157,18 @@ impl XusbDevice {
             )
         };
         if ok.is_err() || returned == 0 {
+            self.fail_streak.set(self.fail_streak.get().saturating_add(1));
             return None;
         }
+        self.fail_streak.set(0);
         let raw = out[..returned as usize].to_vec();
         Some(parse_report(&raw))
+    }
+
+    /// True once the pad has failed enough consecutive polls to be treated as
+    /// unplugged. Caller prunes the device so its slot is released.
+    pub fn is_disconnected(&self) -> bool {
+        self.fail_streak.get() >= XUSB_FAIL_LIMIT
     }
 }
 

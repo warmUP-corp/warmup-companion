@@ -1,4 +1,13 @@
 mod config;
+/// Cursor/scroll golden-fixture loader (#346). Pure serde; used by tests and the
+/// math-parity slice (#349). Unused in the normal binary build for now.
+#[allow(dead_code)]
+mod golden;
+/// Named-pipe server (#347): streams gamepad connection state to the warmUP desktop.
+mod pipe_server;
+/// Companion IPC wire frames (#347). Pure serde; used by the pipe server and tests.
+#[allow(dead_code)]
+mod protocol;
 mod symbols;
 mod time_util;
 mod vk_gate;
@@ -30,6 +39,8 @@ mod gamepad;
 mod gamepad_backend;
 #[cfg(all(windows, feature = "gamepad"))]
 mod hid_gamepad;
+#[cfg(all(windows, feature = "gamepad"))]
+mod hid_reader;
 #[cfg(feature = "gamepad")]
 mod pc_cursor;
 #[cfg(all(windows, feature = "gamepad"))]
@@ -620,7 +631,7 @@ fn main() {
         }
         #[cfg(not(feature = "gamepad"))]
         {
-            eprintln!("Rebuild with: cargo run --features gamepad -- --gamepad");
+            eprintln!("Rebuild with: cargo run -- --gamepad");
             std::process::exit(1);
         }
     }
@@ -633,7 +644,7 @@ fn main() {
     }
     println!("Type `help` for commands. State prints after each command.");
     #[cfg(feature = "gamepad")]
-    println!("Gamepad: `pad` or `cargo run --features gamepad -- --gamepad` (warmUP SDL3 crate)");
+    println!("Gamepad: `pad` or `cargo run -- --gamepad` (warmUP SDL3 crate)");
     repl_scroll::enable(true);
     repl_scroll::paint_state_panel(&app);
 
@@ -742,7 +753,7 @@ fn main() {
                 #[cfg(feature = "gamepad")]
                 if other == "gamepad" {
                     repl_scroll::note_line();
-                    println!("> use: cargo run --features gamepad -- --gamepad");
+                    println!("> use: cargo run -- --gamepad");
                 } else {
                     repl_scroll::note_line();
                     println!("> unknown command: {other}");
@@ -815,7 +826,7 @@ fn dispatch_install_or_service(args: &[String]) {
     }
     #[cfg(not(feature = "service"))]
     if args.iter().any(|a| a == "--service") {
-        eprintln!("Rebuild with: cargo build --release --features service");
+        eprintln!("Rebuild with default features enabled: cargo build --release");
         std::process::exit(1);
     }
 }
@@ -939,7 +950,7 @@ fn run_gamepad_mode() {
     if use_real {
         println!("real Win32 VK enabled (WarmupXboxVkWindow)");
     }
-    println!("Sign-in service: build with --features service, then `install` as Admin");
+    println!("Sign-in service: build default release, then `install` as Admin");
     repl_scroll::paint_state_panel(&app);
     let vk_open = std::cell::Cell::new(false);
     let result = run_boot_gamepad_loop(&mut app, &vk_open, false);
@@ -961,6 +972,9 @@ pub(crate) fn run_boot_gamepad_loop(
     vk_open: &std::cell::Cell<bool>,
     service_mode: bool,
 ) -> Result<(), String> {
+    // The companion owns the device; host the pipe so the warmUP desktop can read
+    // connection state over IPC (#347). No-op on non-Windows.
+    crate::pipe_server::spawn();
     let on_action = |action: gamepad::VkLoopAction| match action {
         gamepad::VkLoopAction::Toggle => {
             app.toggle_virtual_keyboard_combo();
@@ -1008,12 +1022,198 @@ pub(crate) fn run_boot_gamepad_loop(
                 }
             }
         }
+        gamepad::VkLoopAction::LaunchWarmup => {
+            if let Err(e) = launch_warmup_exe() {
+                eprintln!("launch warmup.exe: {e}");
+                #[cfg(windows)]
+                if service_mode {
+                    install::log_line(&format!("launch warmup.exe failed: {e}"));
+                }
+            } else {
+                #[cfg(windows)]
+                if service_mode {
+                    install::log_line("launched warmup.exe from controller hotkey");
+                }
+            }
+        }
     };
     if service_mode {
         gamepad::run_watch_loop_service(|| vk_open.get(), on_action)
     } else {
         gamepad::run_watch_loop(|| vk_open.get(), on_action)
     }
+}
+
+#[cfg(feature = "gamepad")]
+fn launch_warmup_exe() -> Result<(), String> {
+    let exe = warmup_exe_path()?;
+    spawn_warmup(&exe).map_err(|e| format!("{}: {e}", exe.display()))
+}
+
+#[cfg(feature = "gamepad")]
+fn warmup_exe_path() -> Result<std::path::PathBuf, String> {
+    if let Some(path) = std::env::var_os("WARMUP_EXE") {
+        let path = std::path::PathBuf::from(path);
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err(format!("WARMUP_EXE does not exist: {}", path.display()));
+    }
+
+    if let Ok(raw) = std::fs::read_to_string(r"C:\ProgramData\WarmupVk\warmup-exe.path") {
+        let path = std::path::PathBuf::from(raw.trim().trim_matches('"'));
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err(format!(
+            r"C:\ProgramData\WarmupVk\warmup-exe.path points to missing exe: {}",
+            path.display()
+        ));
+    }
+
+    let current = std::env::current_exe().map_err(|e| format!("current exe: {e}"))?;
+    let dir = current
+        .parent()
+        .ok_or_else(|| format!("current exe has no parent: {}", current.display()))?;
+    let mut candidates = Vec::new();
+    candidates.push(dir.join("warmup.exe"));
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        candidates.push(std::path::PathBuf::from(program_files).join(r"warmUP\warmup.exe"));
+    }
+    if let Some(program_files_x86) = std::env::var_os("ProgramFiles(x86)") {
+        candidates.push(std::path::PathBuf::from(program_files_x86).join(r"warmUP\warmup.exe"));
+    }
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        let local_app_data = std::path::PathBuf::from(local_app_data);
+        candidates.push(local_app_data.join(r"dev.warmup.console\warmup.exe"));
+        candidates.push(local_app_data.join(r"warmUP\warmup.exe"));
+        candidates.push(local_app_data.join(r"Programs\warmUP\warmup.exe"));
+    }
+    if let Some(user_profile) = std::env::var_os("USERPROFILE") {
+        candidates.push(
+            std::path::PathBuf::from(user_profile)
+                .join(r"warmUp\apps\desktop\src-tauri\target\debug\warmup.exe"),
+        );
+    }
+
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            format!(
+                "warmup.exe not found; set WARMUP_EXE or write the full path to {}",
+                r"C:\ProgramData\WarmupVk\warmup-exe.path"
+            )
+        })
+}
+
+#[cfg(all(feature = "gamepad", windows))]
+fn spawn_warmup(exe: &std::path::Path) -> std::io::Result<()> {
+    if crate::config::service_mode() {
+        return spawn_warmup_as_active_user(exe);
+    }
+
+    use std::os::windows::process::CommandExt;
+    let mut cmd = std::process::Command::new(exe);
+    if let Some(parent) = exe.parent() {
+        cmd.current_dir(parent);
+    }
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(all(feature = "gamepad", windows))]
+fn spawn_warmup_as_active_user(exe: &std::path::Path) -> std::io::Result<()> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
+    use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
+    use windows::Win32::System::Threading::{
+        CreateProcessAsUserW, CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT,
+        DETACHED_PROCESS, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW,
+    };
+
+    fn wide_os(s: &OsStr) -> Vec<u16> {
+        s.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    fn wide(s: &str) -> Vec<u16> {
+        OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    unsafe {
+        let session_id = WTSGetActiveConsoleSessionId();
+        let mut token = Default::default();
+        WTSQueryUserToken(session_id, &mut token)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+        let exe_w = wide_os(exe.as_os_str());
+        let mut cmd_w = wide(&format!("\"{}\"", exe.display()));
+        let cwd_w = exe.parent().map(|parent| wide_os(parent.as_os_str()));
+        let mut desktop = wide("winsta0\\default");
+        let mut startup = STARTUPINFOW {
+            cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+            lpDesktop: PWSTR(desktop.as_mut_ptr()),
+            ..Default::default()
+        };
+        let mut info = PROCESS_INFORMATION::default();
+        let mut env = std::ptr::null_mut();
+        let env_created = CreateEnvironmentBlock(&mut env, token, false).is_ok();
+        let env_arg = if env_created {
+            Some(env.cast_const().cast())
+        } else {
+            None
+        };
+        let cwd_arg = cwd_w
+            .as_ref()
+            .map(|cwd| PCWSTR(cwd.as_ptr()))
+            .unwrap_or_else(PCWSTR::null);
+        let mut flags = CREATE_UNICODE_ENVIRONMENT
+            | PROCESS_CREATION_FLAGS(DETACHED_PROCESS.0 | CREATE_NEW_PROCESS_GROUP.0);
+        if !env_created {
+            flags = PROCESS_CREATION_FLAGS(DETACHED_PROCESS.0 | CREATE_NEW_PROCESS_GROUP.0);
+        }
+
+        let created = CreateProcessAsUserW(
+            token,
+            PCWSTR(exe_w.as_ptr()),
+            PWSTR(cmd_w.as_mut_ptr()),
+            None,
+            None,
+            false,
+            flags,
+            env_arg,
+            cwd_arg,
+            &mut startup,
+            &mut info,
+        );
+        if env_created {
+            let _ = DestroyEnvironmentBlock(env);
+        }
+        let _ = CloseHandle(token);
+        created.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        let _ = CloseHandle(info.hThread);
+        let _ = CloseHandle(info.hProcess);
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "gamepad", not(windows)))]
+fn spawn_warmup(exe: &std::path::Path) -> std::io::Result<()> {
+    let mut cmd = std::process::Command::new(exe);
+    if let Some(parent) = exe.parent() {
+        cmd.current_dir(parent);
+    }
+    cmd.spawn().map(|_| ())
 }
 
 fn help_screen_rows(help: &str) -> u32 {

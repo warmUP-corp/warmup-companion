@@ -19,8 +19,11 @@ impl fmt::Debug for VkSession {
 
 impl VkSession {
     pub fn open(attach: VkAttach) -> Result<Self, String> {
+        if matches!(attach, VkAttach::Input) {
+            super::native_keyboard::suppress_for(Duration::from_millis(2000));
+        }
         let ui = VkUiThread::spawn(attach)?;
-        ui.show(VkAttach::Current)?;
+        ui.show(attach)?;
         if !vk_ui::wait_until_visible(Duration::from_millis(750)) {
             let _ = ui.hide();
             return Err("VK window did not become visible (desktop attach or Session 0 UI)".into());

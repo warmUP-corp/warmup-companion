@@ -1,17 +1,21 @@
 //! D3D11 + DXGI composition swapchain + D2D + DirectComposition — Joyxoff `FUN_0041e670`.
 
+use std::collections::HashMap;
+use std::mem::ManuallyDrop;
+
 use windows::core::{w, Interface};
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
     ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
-    D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
+    D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
+    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_ROUNDED_RECT,
+    D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_11_0,
@@ -40,7 +44,7 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
-use crate::vk_nav::{KeyCell, KeyPos, KeyRow};
+use crate::vk_nav::{KeyAction, KeyCell, KeyPos, KeyRow};
 
 /// GDI `COLORREF` (`0x00BBGGRR`) -> D2D color.
 fn colorref(c: u32) -> D2D1_COLOR_F {
@@ -56,6 +60,13 @@ fn colorref_alpha(c: u32, alpha: f32) -> D2D1_COLOR_F {
     let mut col = colorref(c);
     col.a = alpha;
     col
+}
+
+fn colorref_hex(c: u32) -> String {
+    let r = c & 0xff;
+    let g = (c >> 8) & 0xff;
+    let b = (c >> 16) & 0xff;
+    format!("#{r:02X}{g:02X}{b:02X}")
 }
 
 fn configure_d2d_quality(ctx: &ID2D1DeviceContext) {
@@ -166,6 +177,7 @@ pub struct VkRenderer {
     /// Fixed-size labels on prediction chips (not scaled with key height).
     chip_format: IDWriteTextFormat,
     sublabel_format: IDWriteTextFormat,
+    icon_cache: HashMap<IconCacheKey, ID2D1Bitmap1>,
     _d3d: ID3D11Device,
     _d2d_device: ID2D1Device,
     _dcomp_device: IDCompositionDevice,
@@ -195,6 +207,64 @@ const CHIP_LABEL_INSET_X: f32 = 8.0;
 const CHIP_LABEL_INSET_Y: f32 = 4.0;
 /// Chip label size in DIPs — independent of key label scaling.
 const CHIP_FONT_PX: f32 = 14.0;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum VkIcon {
+    Backspace,
+    Enter,
+    Mic,
+    MicOff,
+    Space,
+    Paste,
+    Shift,
+    ShiftFilled,
+    Caps,
+    CapsFilled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct IconCacheKey {
+    icon: VkIcon,
+    px: u32,
+    color: u32,
+}
+
+impl VkIcon {
+    fn svg(self) -> &'static str {
+        match self {
+            VkIcon::Backspace => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 5a2 2 0 0 0-1.344.519l-6.328 5.74a1 1 0 0 0 0 1.481l6.328 5.741A2 2 0 0 0 10 19h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z"/><path d="m12 9 6 6"/><path d="m18 9-6 6"/></svg>"#
+            }
+            VkIcon::Enter => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 4v7a4 4 0 0 1-4 4H4"/><path d="m9 10-5 5 5 5"/></svg>"#
+            }
+            VkIcon::Mic => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></svg>"#
+            }
+            VkIcon::MicOff => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M16.95 16.95A7 7 0 0 1 5 12v-2"/><path d="M18.89 13.23A7 7 0 0 0 19 12v-2"/><path d="m2 2 20 20"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/></svg>"#
+            }
+            VkIcon::Space => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 17v1c0 .5-.5 1-1 1H3c-.5 0-1-.5-1-1v-1"/></svg>"#
+            }
+            VkIcon::Paste => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 14h10"/><path d="M16 4h2a2 2 0 0 1 2 2v1.344"/><path d="m17 18 4-4-4-4"/><path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 1.793-1.113"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>"#
+            }
+            VkIcon::Shift => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 16a1 1 0 0 0 1-1v-2a1 1 0 0 1 1-1h3.293a.707.707 0 0 0 .5-1.207l-6.939-6.939a1.207 1.207 0 0 0-1.708 0l-6.94 6.94a.707.707 0 0 0 .5 1.206H8a1 1 0 0 1 1 1v2a1 1 0 0 0 1 1z"/><path d="M9 20h6"/></svg>"#
+            }
+            VkIcon::ShiftFilled => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 16a1 1 0 0 0 1-1v-2a1 1 0 0 1 1-1h3.293a.707.707 0 0 0 .5-1.207l-6.939-6.939a1.207 1.207 0 0 0-1.708 0l-6.94 6.94a.707.707 0 0 0 .5 1.206H8a1 1 0 0 1 1 1v2a1 1 0 0 0 1 1z"/><path d="M9 20h6" fill="none"/></svg>"#
+            }
+            VkIcon::Caps => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1v-6a1 1 0 0 1 1-1h3.293a.707.707 0 0 0 .5-1.207l-7.086-7.086a1 1 0 0 0-1.414 0l-7.086 7.086a.707.707 0 0 0 .5 1.207H8a1 1 0 0 1 1 1z"/></svg>"#
+            }
+            VkIcon::CapsFilled => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1v-6a1 1 0 0 1 1-1h3.293a.707.707 0 0 0 .5-1.207l-7.086-7.086a1 1 0 0 0-1.414 0l-7.086 7.086a.707.707 0 0 0 .5 1.207H8a1 1 0 0 1 1 1z"/></svg>"#
+            }
+        }
+    }
+}
 
 /// Top chrome always reserved so keys do not shift when chips appear.
 pub fn top_chrome_inset() -> f32 {
@@ -436,6 +506,7 @@ impl VkRenderer {
             hint_format,
             chip_format,
             sublabel_format,
+            icon_cache: HashMap::new(),
             _d3d: d3d,
             _d2d_device: d2d_device,
             _dcomp_device: dcomp_device,
@@ -465,6 +536,80 @@ impl VkRenderer {
         self.width = width;
         self.height = height;
         self.d2d_target = bind_d2d_target(&self.d2d_context, &self.swapchain)?;
+        Ok(())
+    }
+
+    unsafe fn draw_svg_icon(
+        &mut self,
+        icon: VkIcon,
+        rect: D2D_RECT_F,
+        color: u32,
+    ) -> Result<(), String> {
+        let h = rect.bottom - rect.top;
+        let px = (h * 0.5).round().clamp(16.0, 96.0) as u32;
+        let key = IconCacheKey { icon, px, color };
+        if !self.icon_cache.contains_key(&key) {
+            let svg = icon.svg().replace("currentColor", &colorref_hex(color));
+            let opt = resvg::usvg::Options::default();
+            let tree = resvg::usvg::Tree::from_data(svg.as_bytes(), &opt)
+                .map_err(|e| format!("parse svg icon {icon:?}: {e}"))?;
+            let mut pixmap = resvg::tiny_skia::Pixmap::new(px, px)
+                .ok_or_else(|| format!("alloc svg icon pixmap {px}x{px}"))?;
+            let scale = px as f32 / 24.0;
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::from_scale(scale, scale),
+                &mut pixmap.as_mut(),
+            );
+
+            let mut bgra = pixmap.data().to_vec();
+            for px in bgra.chunks_exact_mut(4) {
+                px.swap(0, 2);
+            }
+            let props = D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+                colorContext: ManuallyDrop::new(None),
+            };
+            let bitmap = self
+                .d2d_context
+                .CreateBitmap(
+                    D2D_SIZE_U {
+                        width: px,
+                        height: px,
+                    },
+                    Some(bgra.as_ptr() as *const core::ffi::c_void),
+                    px * 4,
+                    &props,
+                )
+                .map_err(|e| format!("CreateBitmap svg icon {icon:?}: {e}"))?;
+            self.icon_cache.insert(key, bitmap);
+        }
+
+        let bitmap = self
+            .icon_cache
+            .get(&key)
+            .ok_or_else(|| format!("missing svg icon cache {icon:?}"))?;
+        let size = px as f32;
+        let dest = D2D_RECT_F {
+            left: (rect.left + rect.right - size) * 0.5,
+            top: (rect.top + rect.bottom - size) * 0.5,
+            right: (rect.left + rect.right + size) * 0.5,
+            bottom: (rect.top + rect.bottom + size) * 0.5,
+        };
+        self.d2d_context.DrawBitmap(
+            bitmap,
+            Some(&dest),
+            1.0,
+            D2D1_INTERPOLATION_MODE_LINEAR,
+            None,
+            None,
+        );
         Ok(())
     }
 
@@ -524,6 +669,7 @@ impl VkRenderer {
             } else {
                 (&key_brush, &text_brush)
             };
+            let label_color = if selected { pal.sel_text } else { pal.text };
             self.d2d_context.FillRoundedRectangle(&rect, fill);
 
             if let Some(sub) = &key.sublabel {
@@ -545,33 +691,68 @@ impl VkRenderer {
                 );
             }
 
-            let (glyph, symbol_font) = key_glyph(key);
-            if !glyph.is_empty() {
-                let format = if symbol_font {
-                    &self.glyph_format
+            if matches!(key.action, KeyAction::VoiceInput) {
+                if crate::vk_nav::voice_input_active() {
+                    self.draw_svg_icon(VkIcon::MicOff, rect.rect, label_color)?;
                 } else {
-                    &self.text_format
-                };
-                let kh = kr.bottom - kr.top;
-                let label_rect = if key.sublabel.is_some() {
-                    D2D_RECT_F {
-                        left: rect.rect.left,
-                        top: kr.top + kh * 0.35,
-                        right: rect.rect.right,
-                        bottom: rect.rect.bottom,
-                    }
+                    self.draw_svg_icon(VkIcon::Mic, rect.rect, label_color)?;
+                }
+            } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE)
+            {
+                self.draw_svg_icon(VkIcon::Space, rect.rect, label_color)?;
+            } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_BACK)
+            {
+                self.draw_svg_icon(VkIcon::Backspace, rect.rect, label_color)?;
+            } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_RETURN)
+            {
+                self.draw_svg_icon(VkIcon::Enter, rect.rect, label_color)?;
+            } else if matches!(key.action, KeyAction::Paste) {
+                self.draw_svg_icon(VkIcon::Paste, rect.rect, label_color)?;
+            } else if matches!(key.action, KeyAction::Shift) {
+                let (shift, _) = crate::vk_nav::modifier_state();
+                let icon = if shift {
+                    VkIcon::ShiftFilled
                 } else {
-                    rect.rect
+                    VkIcon::Shift
                 };
-                let wide: Vec<u16> = glyph.encode_utf16().collect();
-                self.d2d_context.DrawText(
-                    &wide,
-                    format,
-                    &label_rect,
-                    label_brush,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    DWRITE_MEASURING_MODE_NATURAL,
-                );
+                self.draw_svg_icon(icon, rect.rect, label_color)?;
+            } else if matches!(key.action, KeyAction::CapsLock) {
+                let (_, caps) = crate::vk_nav::modifier_state();
+                let icon = if caps {
+                    VkIcon::CapsFilled
+                } else {
+                    VkIcon::Caps
+                };
+                self.draw_svg_icon(icon, rect.rect, label_color)?;
+            } else {
+                let (glyph, symbol_font) = key_glyph(key);
+                if !glyph.is_empty() {
+                    let format = if symbol_font {
+                        &self.glyph_format
+                    } else {
+                        &self.text_format
+                    };
+                    let kh = kr.bottom - kr.top;
+                    let label_rect = if key.sublabel.is_some() {
+                        D2D_RECT_F {
+                            left: rect.rect.left,
+                            top: kr.top + kh * 0.35,
+                            right: rect.rect.right,
+                            bottom: rect.rect.bottom,
+                        }
+                    } else {
+                        rect.rect
+                    };
+                    let wide: Vec<u16> = glyph.encode_utf16().collect();
+                    self.d2d_context.DrawText(
+                        &wide,
+                        format,
+                        &label_rect,
+                        label_brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
             }
 
             // Per-key controller-button badge in the top-left corner.

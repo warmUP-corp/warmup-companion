@@ -136,6 +136,8 @@ impl PcCursor {
         self.remainder_y = total_y - int_y as f32;
         if int_x != 0 || int_y != 0 {
             self.dispatch(Cmd::Move(int_x, int_y));
+            // Hint the warmUP desktop so its visual cursor tracks the OS cursor (#349).
+            crate::pipe_server::publish_cursor_moved(int_x as f64, int_y as f64);
         }
     }
 
@@ -304,4 +306,56 @@ fn stick_delta(
     let norm_y = stick_y / magnitude;
     let speed = accelerated * sensitivity * BASE_SPEED * dt_secs;
     (norm_x * speed, -norm_y * speed)
+}
+
+#[cfg(test)]
+mod parity_tests {
+    //! Golden-vector parity (#349): the companion `stick_delta` must reproduce the
+    //! checked-in `(stick, dt, config) -> (dx, dy)` table that the desktop `cursor.rs`
+    //! also reproduces. The fixture is byte-identical across both repos; if either math
+    //! impl drifts, this test (and the desktop mirror) fails.
+    use super::stick_delta;
+    use crate::golden::GoldenFixture;
+    use std::path::Path;
+
+    /// Max per-axis deviation. Generous for f32 rounding, far tighter than any real
+    /// constant/formula change (a 1% sensitivity drift moves the diagonal case ~0.16px).
+    const TOL: f64 = 1e-3;
+
+    #[test]
+    fn pc_cursor_matches_golden_cursor_vectors() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cursor-scroll-golden.json");
+        let fx = GoldenFixture::load_from_path(&path).expect("golden fixture loads");
+        let mut report = String::new();
+        let mut missing = false;
+        for case in &fx.cases {
+            let c = &case.input.config;
+            let (dx, dy) = stick_delta(
+                case.input.stick_x,
+                case.input.stick_y,
+                c.deadzone,
+                c.sensitivity,
+                c.acceleration_exp,
+                case.input.dt,
+            );
+            report.push_str(&format!("{}: dx={dx} dy={dy}\n", case.name));
+            match &case.expected {
+                Some(e) => {
+                    assert!(
+                        (dx as f64 - e.dx).abs() < TOL && (dy as f64 - e.dy).abs() < TOL,
+                        "case '{}': got ({dx}, {dy}), expected ({}, {})",
+                        case.name,
+                        e.dx,
+                        e.dy
+                    );
+                }
+                None => missing = true,
+            }
+        }
+        assert!(
+            !missing,
+            "fixture has unpopulated expected values:\n{report}"
+        );
+    }
 }

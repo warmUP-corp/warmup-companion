@@ -25,10 +25,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics, GetWindowRect,
     IsWindowVisible, KillTimer, PostThreadMessageW, SetTimer, SetWindowPos, ShowWindow,
     EVENT_SYSTEM_DESKTOPSWITCH, EVENT_SYSTEM_FOREGROUND, HMENU, HWND_NOTOPMOST, HWND_TOPMOST,
-    SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-    SW_SHOWNOACTIVATE, WINDOWPOS, WINEVENT_OUTOFCONTEXT, WM_DESTROY, WM_LBUTTONDOWN, WM_PAINT,
-    WM_TIMER, WM_WINDOWPOSCHANGING, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    MA_NOACTIVATE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, WINDOWPOS, WINEVENT_OUTOFCONTEXT, WM_DESTROY,
+    WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_PAINT, WM_TIMER, WM_WINDOWPOSCHANGING, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use super::desktop;
@@ -122,6 +122,7 @@ fn key_glyph(key: &KeyCell) -> (String, bool) {
     match &key.action {
         KeyAction::Shift | KeyAction::CapsLock => (key.label.clone(), false),
         KeyAction::CloseVk => ("\u{2325}".to_string(), true), // keyboard dismiss
+        KeyAction::VoiceInput => (String::new(), false),
         KeyAction::Paste => (key.label.clone(), false),
         KeyAction::Vk(vk) if *vk == VK_BACK => (key.label.clone(), false),
         KeyAction::Vk(vk) if *vk == VK_RETURN => (key.label.clone(), false),
@@ -140,6 +141,7 @@ fn key_hint(key: &KeyCell) -> Option<&'static str> {
         KeyAction::Vk(vk) if *vk == VK_SPACE => Some("X"),
         KeyAction::Shift => Some("LT"),
         KeyAction::CapsLock => Some("RT"),
+        KeyAction::VoiceInput => Some("Y"),
         KeyAction::CloseVk => Some("L3"),
         _ => None,
     }
@@ -313,6 +315,9 @@ fn remove_winevent_hooks() {
 }
 
 fn ui_show(attach: VkAttach) {
+    if matches!(attach, VkAttach::Input) {
+        super::native_keyboard::suppress_for(Duration::from_secs(10));
+    }
     // Capture the app that currently has focus BEFORE we create our (NOACTIVATE)
     // window, so we can shrink it to make room for the keyboard.
     let prev_fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
@@ -506,6 +511,7 @@ unsafe extern "system" fn on_foreground(
     }
     let tid = UI_THREAD_ID.load(Ordering::Acquire);
     if tid != 0 {
+        super::native_keyboard::suppress();
         let _ = PostThreadMessageW(tid, WM_APP_REPAINT, WPARAM(0), LPARAM(0));
     }
 }
@@ -530,9 +536,13 @@ unsafe extern "system" fn vk_wndproc(
             }
             LRESULT(0)
         }
+        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_TIMER => {
             match _wparam.0 {
-                VK_ZORDER_TIMER_ID => ensure_topmost(hwnd),
+                VK_ZORDER_TIMER_ID => {
+                    ensure_topmost(hwnd);
+                    super::native_keyboard::suppress();
+                }
                 VK_RENDER_TIMER_ID => render_frame(),
                 _ => {}
             }

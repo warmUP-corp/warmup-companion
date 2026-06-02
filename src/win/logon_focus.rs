@@ -78,8 +78,14 @@ pub fn set_active(on_winlogon: bool) {
     let was = ON_WINLOGON.swap(on_winlogon, Ordering::SeqCst);
     if on_winlogon {
         LOOP_TID.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
+        if !was {
+            // Entered the secure desktop: stop the native touch keyboard being
+            // summoned on credential-field focus (the hide loop only flashes it).
+            crate::win::native_keyboard::disable_auto_invoke();
+        }
     } else if was {
         clear_cache();
+        crate::win::native_keyboard::restore_auto_invoke();
     }
 }
 
@@ -182,12 +188,14 @@ pub fn focus_password_field() -> bool {
         unsafe {
             let _ = SetForegroundWindow(cred);
         }
+        crate::win::native_keyboard::suppress();
     }
 
     // Cached element first; SetFocus error => stale, drop and refind.
     let cached = PWD_ELEMENT.with(|s| s.borrow().clone());
     if let Some(el) = cached {
         if unsafe { el.SetFocus() }.is_ok() {
+            crate::win::native_keyboard::suppress();
             log_status("focused (cached)");
             return true;
         }
@@ -198,6 +206,9 @@ pub fn focus_password_field() -> bool {
         Some(el) => {
             let ok = unsafe { el.SetFocus() }.is_ok();
             PWD_ELEMENT.with(|s| *s.borrow_mut() = Some(el));
+            if ok {
+                crate::win::native_keyboard::suppress();
+            }
             log_status(if ok {
                 "focused"
             } else {

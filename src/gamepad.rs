@@ -17,6 +17,7 @@ use crate::xinput_backend::XInputBackend;
 const VK_BUTTON: Button = Button::L3;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(8);
+const WARMUP_LAUNCH_DEBOUNCE: Duration = Duration::from_secs(2);
 /// Ignore L3 release right after opening VK (same press must not instantly close).
 const VK_TOGGLE_RELEASE_GRACE: Duration = Duration::from_millis(550);
 /// Ignore spurious X/dpad from misaligned HID for a moment after VK opens.
@@ -28,6 +29,7 @@ pub enum VkLoopAction {
     Toggle,
     Close,
     Reopen,
+    LaunchWarmup,
 }
 
 enum Backend {
@@ -107,6 +109,11 @@ pub struct GamepadPoll {
     vk_toggle_ignore_until: Option<Instant>,
     vk_nav_grace_until: Option<Instant>,
     stick_nav: Option<Button>,
+    launch_select_down: bool,
+    launch_lb_down: bool,
+    launch_x_down: bool,
+    launch_armed: bool,
+    last_launch: Instant,
     last_desktop_log: Instant,
     #[cfg(windows)]
     last_input_desktop: Option<String>,
@@ -176,6 +183,15 @@ impl GamepadPoll {
         // Publish each poll so the per-keystroke UIA focus redirect (vk_nav send
         // path) gates correctly and records this loop thread's apartment.
         crate::win::logon_focus::set_active(on_winlogon);
+        // Keep a hide sweep alive the whole time we're on the secure desktop.
+        // `EnableDesktopModeAutoInvoke` is already 0 on some machines yet the
+        // touch keyboard is still summoned by the shell's CoreWindow gamepad
+        // navigation when an XInput (Xbox) pad drives the lock screen — the
+        // registry switch doesn't gate that path, so the panel must be hidden
+        // on sight. Idempotent: `suppress_for` no-ops while a sweep is running.
+        if on_winlogon {
+            crate::win::native_keyboard::suppress_for(std::time::Duration::from_secs(3));
+        }
         let using_xinput = matches!(self.backend, Backend::XInput(_));
         if on_winlogon == using_xinput {
             return;
@@ -228,6 +244,11 @@ impl GamepadPoll {
             vk_toggle_ignore_until: None,
             vk_nav_grace_until: None,
             stick_nav: None,
+            launch_select_down: false,
+            launch_lb_down: false,
+            launch_x_down: false,
+            launch_armed: true,
+            last_launch: crate::time_util::stale(WARMUP_LAUNCH_DEBOUNCE),
             last_desktop_log: crate::time_util::stale(DESKTOP_SYNC_LOG_INTERVAL),
             #[cfg(windows)]
             last_input_desktop: None,
@@ -243,6 +264,7 @@ impl GamepadPoll {
         self.vk_toggle_ignore_until = None;
         self.vk_nav_grace_until = None;
         self.stick_nav = None;
+        self.reset_launch_hotkey();
         self.last_vk_open = false;
         #[cfg(windows)]
         {
@@ -336,10 +358,27 @@ impl GamepadPoll {
             edges.push(edge);
         }
         for change in changes {
+            // Forward every edge to the warmUP desktop over the pipe so the launcher grid
+            // is gamepad-navigable (#348). The companion still drives its own VK/cursor below.
+            crate::pipe_server::publish_button(change.button.as_str(), change.pressed);
             if change.button == Button::A {
                 // Joyxoff-style hold: A down -> mouse-left down, A up -> up, so
                 // the PIN keypad sees a real press duration (not an instant click).
-                cursor.set_left_button(change.pressed);
+                // Gate the *press* by cursor mode (#349); always forward the release so a
+                // click can't get stuck down if the mode flips while A is held.
+                if change.pressed {
+                    if crate::pipe_server::clicks_enabled() {
+                        cursor.set_left_button(true);
+                    }
+                } else {
+                    cursor.set_left_button(false);
+                }
+            }
+            if crate::pipe_server::native_vk_suppressed() {
+                continue;
+            }
+            if self.update_launch_hotkey(change) {
+                edges.push(VkLoopAction::LaunchWarmup);
             }
             if change.button != VK_BUTTON {
                 continue;
@@ -360,6 +399,40 @@ impl GamepadPoll {
             }
         }
         Ok(edges)
+    }
+
+    fn update_launch_hotkey(&mut self, change: ButtonChange) -> bool {
+        #[cfg(windows)]
+        if Self::service_signin_desktop() {
+            self.reset_launch_hotkey();
+            return false;
+        }
+
+        match change.button {
+            Button::Select => self.launch_select_down = change.pressed,
+            Button::Lb => self.launch_lb_down = change.pressed,
+            Button::X => self.launch_x_down = change.pressed,
+            _ => {}
+        }
+
+        let combo_down = self.launch_select_down && self.launch_lb_down && self.launch_x_down;
+        if !combo_down {
+            self.launch_armed = true;
+            return false;
+        }
+        if !self.launch_armed || self.last_launch.elapsed() < WARMUP_LAUNCH_DEBOUNCE {
+            return false;
+        }
+        self.launch_armed = false;
+        self.last_launch = Instant::now();
+        true
+    }
+
+    fn reset_launch_hotkey(&mut self) {
+        self.launch_select_down = false;
+        self.launch_lb_down = false;
+        self.launch_x_down = false;
+        self.launch_armed = true;
     }
 
     #[cfg(windows)]
@@ -409,7 +482,7 @@ impl GamepadPoll {
             return None;
         }
 
-        // A=activate, B=backspace, X=space, LB=page, RB=Enter, LT=shift, RT=caps, L3=close,
+        // A=activate, B=backspace, X=space, Y=voice input, LB=page, RB=Enter, LT=shift, RT=caps, L3=close,
         // D-pad/L-stick axis=move focus.
         match (change.button, change.pressed) {
             (VK_BUTTON, true) => {
@@ -453,6 +526,11 @@ impl GamepadPoll {
             }
             (Button::X, true) => {
                 vk_nav::space();
+                vk_ui::request_repaint();
+                None
+            }
+            (Button::Y, true) => {
+                vk_nav::start_voice_input();
                 vk_ui::request_repaint();
                 None
             }
@@ -692,6 +770,9 @@ where
         let dt = now.duration_since(last_tick).as_secs_f32();
         last_tick = now;
 
+        // Publish the current controller connection state to the pipe server (#347).
+        crate::pipe_server::publish_from_label(&poll.controller_label());
+
         match poll.poll_frame(&mut cursor, dt, vk_open()) {
             Ok(actions) => {
                 for action in actions {
@@ -716,6 +797,7 @@ where
                                 poll.reset_vk_controls();
                             }
                         }
+                        VkLoopAction::LaunchWarmup => on_action(action),
                     }
                 }
             }

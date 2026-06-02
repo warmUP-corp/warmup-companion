@@ -1,10 +1,7 @@
 //! Gamepad-driven VK focus + full PC QWERTY grid (Joyxoff settings-style layout).
 
 use std::sync::Mutex;
-use std::time::Instant;
-
-#[cfg(feature = "gamepad")]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "gamepad")]
 use crate::gamepad_backend::Button;
@@ -25,6 +22,8 @@ pub enum KeyAction {
     CapsLock,
     /// Ctrl+V paste.
     Paste,
+    /// Start background Windows speech recognition.
+    VoiceInput,
     /// Dismiss the on-screen keyboard.
     CloseVk,
 }
@@ -121,6 +120,7 @@ struct NavState {
     pos: KeyPos,
     shift: bool,
     caps: bool,
+    voice_input: bool,
     rows: Vec<KeyRow>,
     #[cfg(feature = "gamepad")]
     hold_button: Option<Button>,
@@ -132,6 +132,7 @@ static NAV: Mutex<NavState> = Mutex::new(NavState {
     pos: KeyPos { row: 0, col: 0 },
     shift: false,
     caps: false,
+    voice_input: false,
     rows: Vec::new(),
     #[cfg(feature = "gamepad")]
     hold_button: None,
@@ -223,7 +224,8 @@ fn build_pc_layout(shift: bool, caps: bool) -> Vec<KeyRow> {
         },
         KeyRow {
             keys: vec![
-                KeyCell::vk("", VK_SPACE, GRID_UNITS - 1.5 - 1.5),
+                KeyCell::vk("", VK_SPACE, GRID_UNITS - 1.5 - 1.5 - 1.5),
+                KeyCell::named("Mic", KeyAction::VoiceInput, 1.5),
                 KeyCell::named("Paste", KeyAction::Paste, 1.5),
                 KeyCell::named("", KeyAction::CloseVk, 1.5),
             ],
@@ -284,6 +286,21 @@ pub fn rows_snapshot() -> Vec<KeyRow> {
 pub fn selected_key() -> Option<KeyCell> {
     let nav = NAV.lock().ok()?;
     nav.rows.get(nav.pos.row)?.keys.get(nav.pos.col).cloned()
+}
+
+pub fn voice_input_active() -> bool {
+    NAV.lock().map(|n| n.voice_input).unwrap_or(false)
+}
+
+pub fn set_voice_input_active(active: bool) {
+    if let Ok(mut nav) = NAV.lock() {
+        nav.voice_input = active;
+    }
+    request_ui_repaint();
+}
+
+pub fn modifier_state() -> (bool, bool) {
+    NAV.lock().map(|n| (n.shift, n.caps)).unwrap_or_default()
 }
 
 #[cfg(feature = "gamepad")]
@@ -443,6 +460,7 @@ pub fn activate_key(key: &KeyCell) {
         KeyAction::Shift => toggle_shift(),
         KeyAction::CapsLock => toggle_caps(),
         KeyAction::Paste => send_paste(),
+        KeyAction::VoiceInput => start_voice_input(),
         KeyAction::CloseVk => crate::win::vk_ui::request_hide(),
     }
 }
@@ -450,6 +468,11 @@ pub fn activate_key(key: &KeyCell) {
 /// Inject one character without updating prediction state (candidate commit path).
 pub fn send_char_direct(c: char) {
     send_unicode(&[c as u16]);
+}
+
+pub fn send_text_direct(text: &str) {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    send_unicode(&units);
 }
 
 fn notify_vk_key(vk: VIRTUAL_KEY) {
@@ -502,6 +525,29 @@ fn send_paste() {
     batch.push(vk_event(VK_CONTROL, true));
     unsafe {
         let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
+    }
+    suppress_native_keyboard_after_winlogon_inject(collapse);
+}
+
+pub fn start_voice_input() {
+    if crate::win::logon_focus::is_active() {
+        crate::install::log_line("vk voice input ignored on Winlogon");
+        return;
+    }
+
+    if crate::win::speech_input::is_active() && voice_input_active() {
+        crate::win::speech_input::stop();
+        set_voice_input_active(false);
+        return;
+    }
+    if crate::win::speech_input::is_active() {
+        crate::win::speech_input::stop();
+    }
+
+    set_voice_input_active(true);
+    if let Err(e) = crate::win::speech_input::start() {
+        set_voice_input_active(false);
+        crate::install::log_line(&format!("speech input start failed: {e}"));
     }
 }
 
@@ -579,6 +625,7 @@ fn inject_vk(vk: VIRTUAL_KEY) {
     unsafe {
         let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
     }
+    suppress_native_keyboard_after_winlogon_inject(collapse);
 }
 
 fn send_unicode(units: &[u16]) {
@@ -590,6 +637,7 @@ fn send_unicode(units: &[u16]) {
         batch.push(unicode_event(unit, true));
     }
     let sent = unsafe { SendInput(&batch, std::mem::size_of::<INPUT>() as i32) };
+    suppress_native_keyboard_after_winlogon_inject(collapse);
     // Userland-typing diagnostic: when off Winlogon, SendInput should land in the
     // foreground app. Log the event count actually inserted + the loop thread's
     // desktop + foreground window so a misrouted inject (wrong desktop /
@@ -603,6 +651,12 @@ fn send_unicode(units: &[u16]) {
             units.len(),
             fg.0 as usize
         ));
+    }
+}
+
+fn suppress_native_keyboard_after_winlogon_inject(on_winlogon: bool) {
+    if on_winlogon {
+        crate::win::native_keyboard::suppress_for(Duration::from_millis(300));
     }
 }
 
