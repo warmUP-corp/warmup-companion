@@ -31,6 +31,13 @@ use crate::hid_gamepad::{self, DeviceState, PadSample};
 const GENERIC_READ: u32 = 0x8000_0000;
 /// Input reports top out at 78 bytes (DualSense Bluetooth 0x31); 128 is generous.
 const HID_READ_BUF: usize = 128;
+/// Drain a small burst of already-completed HID reports per secure-poll tick.
+///
+/// PlayStation pads can queue several input reports between 8 ms timer ticks,
+/// especially over Bluetooth. Consuming only one report per tick lets old
+/// neutral/axis frames sit ahead of fresh button edges, which feels sticky.
+/// Keep this bounded so a noisy device cannot monopolize the poll thread.
+const MAX_REPORTS_PER_POLL: usize = 8;
 
 /// One opened HID gamepad we read input reports from directly, plus the decode
 /// state (profile / preparsed data) shared with the raw-input parser.
@@ -156,36 +163,41 @@ impl HidReader {
     }
 
     /// Non-blocking poll: arm an overlapped read if none is in flight, then
-    /// consume it if it has completed. Returns the decoded sample on a fresh
-    /// report, `None` while a read is still pending or on a transient empty read.
+    /// drain already-completed reports up to a small cap. Returns the freshest
+    /// decoded sample, `None` while a read is still pending or on empty reads.
     pub fn poll(&mut self) -> Option<PadSample> {
         if self.dead {
             return None;
         }
-        if !self.pending && !self.arm() {
-            return None;
+        let mut freshest = None;
+        for _ in 0..MAX_REPORTS_PER_POLL {
+            if !self.pending && !self.arm() {
+                break;
+            }
+            let waited = unsafe { WaitForSingleObject(self.event, 0) };
+            if waited != WAIT_OBJECT_0 {
+                break;
+            }
+            let mut transferred = 0u32;
+            let ok = unsafe {
+                GetOverlappedResult(self.handle, &*self.overlapped, &mut transferred, false)
+            };
+            self.pending = false;
+            if ok.is_err() {
+                self.dead = true;
+                break;
+            }
+            if transferred == 0 {
+                continue;
+            }
+            let n = (transferred as usize).min(self.buf.len());
+            self.last_report.clear();
+            self.last_report.extend_from_slice(&self.buf[..n]);
+            let (sample, _src) =
+                hid_gamepad::decode_report_logged(&mut self.device, &self.last_report);
+            freshest = Some(sample);
         }
-        let waited = unsafe { WaitForSingleObject(self.event, 0) };
-        if waited != WAIT_OBJECT_0 {
-            return None;
-        }
-        let mut transferred = 0u32;
-        let ok = unsafe {
-            GetOverlappedResult(self.handle, &*self.overlapped, &mut transferred, false)
-        };
-        self.pending = false;
-        if ok.is_err() {
-            self.dead = true;
-            return None;
-        }
-        if transferred == 0 {
-            return None;
-        }
-        let n = (transferred as usize).min(self.buf.len());
-        self.last_report.clear();
-        self.last_report.extend_from_slice(&self.buf[..n]);
-        let (sample, _src) = hid_gamepad::decode_report_logged(&mut self.device, &self.last_report);
-        Some(sample)
+        freshest
     }
 
     /// Issue an overlapped read into `buf`. Returns false (and marks us dead) on
@@ -196,7 +208,12 @@ impl HidReader {
         }
         self.overlapped.hEvent = self.event;
         let result = unsafe {
-            ReadFile(self.handle, Some(&mut self.buf), None, Some(&mut *self.overlapped))
+            ReadFile(
+                self.handle,
+                Some(&mut self.buf),
+                None,
+                Some(&mut *self.overlapped),
+            )
         };
         match result {
             Ok(()) => {
