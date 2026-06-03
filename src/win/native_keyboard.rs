@@ -15,7 +15,7 @@ use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM, WPARAM};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegQueryValueExW, RegSetValueExW, HKEY,
-    HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_DWORD,
+    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_DWORD,
     REG_OPTION_NON_VOLATILE, REG_VALUE_TYPE,
 };
 use windows::Win32::System::Threading::{
@@ -36,17 +36,45 @@ static SUPPRESSING: AtomicBool = AtomicBool::new(false);
 ///
 /// LogonUI runs as SYSTEM, whose `HKCU` is `HKEY_USERS\.DEFAULT`, so the sign-in
 /// touch keyboard reads its setting from there. `0` = no auto-invoke.
-const TIP_SUBKEY: &str = ".DEFAULT\\Software\\Microsoft\\TabletTip\\1.7";
-const AUTO_INVOKE_VALUE: &str = "EnableDesktopModeAutoInvoke";
+const DEFAULT_TIP_SUBKEY: &str = ".DEFAULT\\Software\\Microsoft\\TabletTip\\1.7";
+const USER_TIP_SUBKEY: &str = "Software\\Microsoft\\TabletTip\\1.7";
+const TIP_VALUES: &[(&str, u32)] = &[
+    ("TouchKeyboardTapInvoke", 0),
+    ("EnableDesktopModeAutoInvoke", 0),
+    ("DisableNewKeyboardExperience", 1),
+];
 const SERVICE_START_VALUE: &str = "Start";
 const DISABLED_SERVICE_START: u32 = 4;
 const TEXT_INPUT_SERVICES: &[&str] = &["TextInputManagementService", "TabletInputService"];
 
-/// `Some(prior)` while we have the value overridden; `prior` is the value we
-/// must restore (`None` = the value was absent and should be deleted).
-static AUTO_INVOKE_SAVED: Mutex<Option<Option<u32>>> = Mutex::new(None);
+/// `Some(priors)` while we have TabletTip values overridden. Each prior is the
+/// value to restore (`None` = absent, delete it).
+static AUTO_INVOKE_SAVED: Mutex<Option<Vec<TipPrior>>> = Mutex::new(None);
 static TEXT_INPUT_SERVICES_SAVED: Mutex<Option<Vec<(&'static str, Option<u32>)>>> =
     Mutex::new(None);
+
+#[derive(Clone, Copy)]
+struct TipPrior {
+    root: TipRoot,
+    subkey: &'static str,
+    value: &'static str,
+    prior: Option<u32>,
+}
+
+#[derive(Clone, Copy)]
+enum TipRoot {
+    Users,
+    CurrentUser,
+}
+
+impl TipRoot {
+    fn hkey(self) -> HKEY {
+        match self {
+            Self::Users => HKEY_USERS,
+            Self::CurrentUser => HKEY_CURRENT_USER,
+        }
+    }
+}
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -62,37 +90,11 @@ pub fn disable_auto_invoke() {
     if saved.is_some() {
         return;
     }
-    unsafe {
-        let subkey = wide(TIP_SUBKEY);
-        let mut hkey = HKEY::default();
-        let rc = RegCreateKeyExW(
-            HKEY_USERS,
-            PCWSTR(subkey.as_ptr()),
-            0,
-            PCWSTR::null(),
-            REG_OPTION_NON_VOLATILE,
-            KEY_QUERY_VALUE | KEY_SET_VALUE,
-            None,
-            &mut hkey,
-            None,
-        );
-        if rc.0 != 0 {
-            crate::install::log_line(&format!("native kbd: RegCreateKeyEx failed rc={}", rc.0));
-            return;
-        }
-        let value = wide(AUTO_INVOKE_VALUE);
-        let prior = read_dword(hkey, &value);
-        let zero = 0u32.to_le_bytes();
-        let rc = RegSetValueExW(hkey, PCWSTR(value.as_ptr()), 0, REG_DWORD, Some(&zero));
-        if rc.0 != 0 {
-            crate::install::log_line(&format!("native kbd: RegSetValueEx failed rc={}", rc.0));
-        } else {
-            crate::install::log_line(&format!(
-                "native kbd: disabled touch keyboard auto-invoke (prior={prior:?})"
-            ));
-            *saved = Some(prior);
-        }
-        let _ = RegCloseKey(hkey);
+    let mut priors = Vec::new();
+    override_tablet_tip_values(TipRoot::Users, DEFAULT_TIP_SUBKEY, &mut priors);
+    override_tablet_tip_values(TipRoot::CurrentUser, USER_TIP_SUBKEY, &mut priors);
+    if !priors.is_empty() {
+        *saved = Some(priors);
     }
     disable_text_input_services();
 }
@@ -105,15 +107,78 @@ pub fn restore_auto_invoke() {
     let Ok(mut saved) = AUTO_INVOKE_SAVED.lock() else {
         return;
     };
-    let Some(prior) = saved.take() else {
+    let Some(priors) = saved.take() else {
         return;
     };
+
+    for p in priors {
+        restore_tablet_tip_value(p);
+    }
+    crate::install::log_line("native kbd: restored TabletTip keyboard values");
+}
+
+fn override_tablet_tip_values(root: TipRoot, subkey: &'static str, priors: &mut Vec<TipPrior>) {
     unsafe {
-        let subkey = wide(TIP_SUBKEY);
+        let subkey_w = wide(subkey);
         let mut hkey = HKEY::default();
         let rc = RegCreateKeyExW(
-            HKEY_USERS,
-            PCWSTR(subkey.as_ptr()),
+            root.hkey(),
+            PCWSTR(subkey_w.as_ptr()),
+            0,
+            PCWSTR::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_QUERY_VALUE | KEY_SET_VALUE,
+            None,
+            &mut hkey,
+            None,
+        );
+        if rc.0 != 0 {
+            crate::install::log_line(&format!(
+                "native kbd: TabletTip key open failed {subkey} rc={}",
+                rc.0
+            ));
+            return;
+        }
+
+        for &(value_name, desired) in TIP_VALUES {
+            let value_w = wide(value_name);
+            let prior = read_dword(hkey, &value_w);
+            let desired_bytes = desired.to_le_bytes();
+            let rc = RegSetValueExW(
+                hkey,
+                PCWSTR(value_w.as_ptr()),
+                0,
+                REG_DWORD,
+                Some(&desired_bytes),
+            );
+            if rc.0 == 0 {
+                priors.push(TipPrior {
+                    root,
+                    subkey,
+                    value: value_name,
+                    prior,
+                });
+                crate::install::log_line(&format!(
+                    "native kbd: set TabletTip {subkey}\\{value_name}={desired} (prior={prior:?})"
+                ));
+            } else {
+                crate::install::log_line(&format!(
+                    "native kbd: TabletTip set failed {subkey}\\{value_name} rc={}",
+                    rc.0
+                ));
+            }
+        }
+        let _ = RegCloseKey(hkey);
+    }
+}
+
+fn restore_tablet_tip_value(p: TipPrior) {
+    unsafe {
+        let subkey_w = wide(p.subkey);
+        let mut hkey = HKEY::default();
+        let rc = RegCreateKeyExW(
+            p.root.hkey(),
+            PCWSTR(subkey_w.as_ptr()),
             0,
             PCWSTR::null(),
             REG_OPTION_NON_VOLATILE,
@@ -125,22 +190,21 @@ pub fn restore_auto_invoke() {
         if rc.0 != 0 {
             return;
         }
-        let value = wide(AUTO_INVOKE_VALUE);
-        match prior {
+        let value_w = wide(p.value);
+        match p.prior {
             Some(v) => {
                 let _ = RegSetValueExW(
                     hkey,
-                    PCWSTR(value.as_ptr()),
+                    PCWSTR(value_w.as_ptr()),
                     0,
                     REG_DWORD,
                     Some(&v.to_le_bytes()),
                 );
             }
             None => {
-                let _ = RegDeleteValueW(hkey, PCWSTR(value.as_ptr()));
+                let _ = RegDeleteValueW(hkey, PCWSTR(value_w.as_ptr()));
             }
         }
-        crate::install::log_line("native kbd: restored touch keyboard auto-invoke");
         let _ = RegCloseKey(hkey);
     }
 }
