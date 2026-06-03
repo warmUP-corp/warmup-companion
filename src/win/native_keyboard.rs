@@ -4,6 +4,8 @@
 //! retargeted. Warmup owns the visible VK, so hide any native panel windows that
 //! appear on the current desktop.
 
+use std::path::Path;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::thread;
@@ -13,7 +15,8 @@ use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM, WPARAM};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegQueryValueExW, RegSetValueExW, HKEY,
-    HKEY_USERS, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_VALUE_TYPE,
+    HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_DWORD,
+    REG_OPTION_NON_VOLATILE, REG_VALUE_TYPE,
 };
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, TerminateProcess, PROCESS_NAME_WIN32,
@@ -35,10 +38,15 @@ static SUPPRESSING: AtomicBool = AtomicBool::new(false);
 /// touch keyboard reads its setting from there. `0` = no auto-invoke.
 const TIP_SUBKEY: &str = ".DEFAULT\\Software\\Microsoft\\TabletTip\\1.7";
 const AUTO_INVOKE_VALUE: &str = "EnableDesktopModeAutoInvoke";
+const SERVICE_START_VALUE: &str = "Start";
+const DISABLED_SERVICE_START: u32 = 4;
+const TEXT_INPUT_SERVICES: &[&str] = &["TextInputManagementService", "TabletInputService"];
 
 /// `Some(prior)` while we have the value overridden; `prior` is the value we
 /// must restore (`None` = the value was absent and should be deleted).
 static AUTO_INVOKE_SAVED: Mutex<Option<Option<u32>>> = Mutex::new(None);
+static TEXT_INPUT_SERVICES_SAVED: Mutex<Option<Vec<(&'static str, Option<u32>)>>> =
+    Mutex::new(None);
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -86,11 +94,14 @@ pub fn disable_auto_invoke() {
         }
         let _ = RegCloseKey(hkey);
     }
+    disable_text_input_services();
 }
 
 /// Restore the auto-invoke value saved by [`disable_auto_invoke`] (delete it if
 /// it was originally absent). No-op if we never overrode it.
 pub fn restore_auto_invoke() {
+    restore_text_input_services();
+
     let Ok(mut saved) = AUTO_INVOKE_SAVED.lock() else {
         return;
     };
@@ -117,7 +128,13 @@ pub fn restore_auto_invoke() {
         let value = wide(AUTO_INVOKE_VALUE);
         match prior {
             Some(v) => {
-                let _ = RegSetValueExW(hkey, PCWSTR(value.as_ptr()), 0, REG_DWORD, Some(&v.to_le_bytes()));
+                let _ = RegSetValueExW(
+                    hkey,
+                    PCWSTR(value.as_ptr()),
+                    0,
+                    REG_DWORD,
+                    Some(&v.to_le_bytes()),
+                );
             }
             None => {
                 let _ = RegDeleteValueW(hkey, PCWSTR(value.as_ptr()));
@@ -125,6 +142,171 @@ pub fn restore_auto_invoke() {
         }
         crate::install::log_line("native kbd: restored touch keyboard auto-invoke");
         let _ = RegCloseKey(hkey);
+    }
+}
+
+fn disable_text_input_services() {
+    let Ok(mut saved) = TEXT_INPUT_SERVICES_SAVED.lock() else {
+        return;
+    };
+    if saved.is_some() {
+        return;
+    }
+
+    let mut prior_values = Vec::new();
+    for &service_name in TEXT_INPUT_SERVICES {
+        unsafe {
+            let subkey = service_registry_subkey(service_name);
+            let subkey_w = wide(&subkey);
+            let mut hkey = HKEY::default();
+            let rc = RegCreateKeyExW(
+                HKEY_LOCAL_MACHINE,
+                PCWSTR(subkey_w.as_ptr()),
+                0,
+                PCWSTR::null(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_QUERY_VALUE | KEY_SET_VALUE,
+                None,
+                &mut hkey,
+                None,
+            );
+            if rc.0 != 0 {
+                crate::install::log_line(&format!(
+                    "native kbd: service key open failed {service_name} rc={}",
+                    rc.0
+                ));
+                continue;
+            }
+
+            let value = wide(SERVICE_START_VALUE);
+            let prior = read_dword(hkey, &value);
+            let disabled = DISABLED_SERVICE_START.to_le_bytes();
+            let rc = RegSetValueExW(hkey, PCWSTR(value.as_ptr()), 0, REG_DWORD, Some(&disabled));
+            if rc.0 == 0 {
+                crate::install::log_line(&format!(
+                    "native kbd: disabled text input service {service_name} (prior={prior:?})"
+                ));
+                stop_text_input_service(service_name);
+                prior_values.push((service_name, prior));
+            } else {
+                crate::install::log_line(&format!(
+                    "native kbd: service disable failed {service_name} rc={}",
+                    rc.0
+                ));
+            }
+            let _ = RegCloseKey(hkey);
+        }
+    }
+
+    if !prior_values.is_empty() {
+        *saved = Some(prior_values);
+    }
+}
+
+fn restore_text_input_services() {
+    let Ok(mut saved) = TEXT_INPUT_SERVICES_SAVED.lock() else {
+        return;
+    };
+    let Some(prior_values) = saved.take() else {
+        return;
+    };
+
+    for (service_name, prior) in prior_values {
+        unsafe {
+            let subkey = service_registry_subkey(service_name);
+            let subkey_w = wide(&subkey);
+            let mut hkey = HKEY::default();
+            let rc = RegCreateKeyExW(
+                HKEY_LOCAL_MACHINE,
+                PCWSTR(subkey_w.as_ptr()),
+                0,
+                PCWSTR::null(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_SET_VALUE,
+                None,
+                &mut hkey,
+                None,
+            );
+            if rc.0 != 0 {
+                continue;
+            }
+
+            let value = wide(SERVICE_START_VALUE);
+            match prior {
+                Some(v) => {
+                    let _ = RegSetValueExW(
+                        hkey,
+                        PCWSTR(value.as_ptr()),
+                        0,
+                        REG_DWORD,
+                        Some(&v.to_le_bytes()),
+                    );
+                }
+                None => {
+                    let _ = RegDeleteValueW(hkey, PCWSTR(value.as_ptr()));
+                }
+            }
+            crate::install::log_line(&format!(
+                "native kbd: restored text input service {service_name}"
+            ));
+            let _ = RegCloseKey(hkey);
+        }
+    }
+}
+
+fn service_registry_subkey(service_name: &str) -> String {
+    format!(r"SYSTEM\CurrentControlSet\Services\{service_name}")
+}
+
+fn stop_text_input_service(service_name: &'static str) {
+    let name = service_name.to_string();
+    if thread::Builder::new()
+        .name(format!("warmup-stop-{service_name}"))
+        .spawn(move || {
+            let output = hidden_command(Path::new("sc.exe"))
+                .args(["stop", name.as_str()])
+                .output();
+            match output {
+                Ok(out) if out.status.success() => {
+                    crate::install::log_line(&format!("native kbd: stopped service {name}"));
+                }
+                Ok(out) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    crate::install::log_line(&format!(
+                        "native kbd: stop service {name} returned {} stdout='{}' stderr='{}'",
+                        out.status,
+                        stdout.trim(),
+                        stderr.trim()
+                    ));
+                }
+                Err(e) => {
+                    crate::install::log_line(&format!(
+                        "native kbd: stop service {name} spawn failed: {e}"
+                    ));
+                }
+            }
+        })
+        .is_err()
+    {
+        crate::install::log_line(&format!(
+            "native kbd: stop service {service_name} thread spawn failed"
+        ));
+    }
+}
+
+fn hidden_command(exe: &Path) -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut cmd = Command::new(exe);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new(exe)
     }
 }
 
@@ -238,7 +420,9 @@ unsafe fn terminate_pid(pid: u32) {
     if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, pid) {
         let _ = TerminateProcess(handle, 1);
         let _ = CloseHandle(handle);
-        crate::install::log_line(&format!("native kbd: terminated touch-keyboard host pid={pid}"));
+        crate::install::log_line(&format!(
+            "native kbd: terminated touch-keyboard host pid={pid}"
+        ));
     }
 }
 
