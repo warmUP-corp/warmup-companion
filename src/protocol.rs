@@ -150,6 +150,18 @@ pub struct ConfigPayload {
     /// Absent leaves the current colour untouched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub led_color: Option<String>,
+    /// Lightbar animation: `solid` | `breathing` | `rainbow` | `off`. Absent keeps the current effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub led_effect: Option<String>,
+    /// Lightbar brightness 0.0–1.0. Absent keeps the current brightness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub led_brightness: Option<f32>,
+    /// Invert the scroll direction (natural / reverse scrolling).
+    #[serde(default)]
+    pub natural_scroll: bool,
+    /// Cursor movement smoothing (EMA factor) 0.0 (off) – 1.0 (max).
+    #[serde(default)]
+    pub cursor_smoothing: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keyboard_theme: Option<KeyboardThemePayload>,
 }
@@ -289,6 +301,10 @@ mod tests {
             enabled: true,
             clicks_enabled: false,
             led_color: Some("#b6a0ff".into()),
+            led_effect: Some("breathing".into()),
+            led_brightness: Some(0.8),
+            natural_scroll: true,
+            cursor_smoothing: 0.25,
             keyboard_theme: Some(KeyboardThemePayload {
                 background: Some("#101010".into()),
                 key: Some("#202020".into()),
@@ -302,6 +318,8 @@ mod tests {
         assert_eq!(json["type"], "config");
         assert_eq!(json["payload"]["clicksEnabled"], false);
         assert_eq!(json["payload"]["ledColor"], "#b6a0ff");
+        assert_eq!(json["payload"]["ledEffect"], "breathing");
+        assert_eq!(json["payload"]["naturalScroll"], true);
         assert_eq!(json["payload"]["accelerationExp"], 2.0);
         assert_eq!(json["payload"]["keyboardTheme"]["background"], "#101010");
         assert_eq!(json["payload"]["keyboardTheme"]["selectedText"], "#FFFFFF");

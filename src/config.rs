@@ -34,6 +34,10 @@ pub struct GamepadSettings {
     pub scroll_deadzone: f32,
     pub scroll_speed: f32,
     pub scroll_accel: f32,
+    /// Invert scroll direction (natural / reverse scrolling).
+    pub natural_scroll: bool,
+    /// Cursor movement smoothing (EMA factor), 0.0 (off) – 1.0 (max).
+    pub cursor_smoothing: f32,
 }
 
 #[cfg(feature = "gamepad")]
@@ -47,6 +51,8 @@ impl Default for GamepadSettings {
             scroll_deadzone: 0.15,
             scroll_speed: 5.0,
             scroll_accel: 2.0,
+            natural_scroll: false,
+            cursor_smoothing: 0.0,
         }
     }
 }
@@ -129,6 +135,12 @@ fn apply_gamepad_settings_text(settings: &mut GamepadSettings, text: &str) {
             "scroll_accel" => {
                 settings.scroll_accel = parse_positive_f32(value, settings.scroll_accel)
             }
+            "natural_scroll" => {
+                settings.natural_scroll = parse_bool(value, settings.natural_scroll)
+            }
+            "cursor_smoothing" => {
+                settings.cursor_smoothing = parse_unit_f32(value, settings.cursor_smoothing)
+            }
             _ => {}
         }
     }
@@ -200,6 +212,15 @@ fn parse_positive_f32(value: &str, fallback: f32) -> f32 {
         .ok()
         .filter(|v| *v > 0.0)
         .unwrap_or(fallback)
+}
+
+#[cfg(feature = "gamepad")]
+fn parse_bool(value: &str, fallback: bool) -> bool {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => true,
+        "false" | "0" | "no" | "off" => false,
+        _ => fallback,
+    }
 }
 
 #[cfg(feature = "gamepad")]
@@ -293,12 +314,16 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
                 Err("poll mode must be full or sleep".to_string())
             }
         }
-        "cursor_deadzone" | "scroll_deadzone" => value
+        "cursor_deadzone" | "scroll_deadzone" | "cursor_smoothing" => value
             .parse::<f32>()
             .ok()
             .filter(|v| (0.0..0.95).contains(v))
             .map(|_| ())
             .ok_or_else(|| format!("{key} must be >= 0.0 and < 0.95")),
+        "natural_scroll" => match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "false" | "1" | "0" | "yes" | "no" | "on" | "off" => Ok(()),
+            _ => Err("natural_scroll must be a boolean".to_string()),
+        },
         "cursor_speed" | "cursor_accel" | "scroll_speed" | "scroll_accel" => value
             .parse::<f32>()
             .ok()

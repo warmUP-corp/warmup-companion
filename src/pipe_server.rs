@@ -13,7 +13,8 @@ use crate::protocol::{
 };
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, Once, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Cursor mode (A → OS left-click). `false` = focus/D-pad mode (buttons only). Default true;
 /// the connected desktop pushes the real value via `config` frames (#349).
@@ -149,6 +150,155 @@ pub fn drain_device_commands() -> Vec<PadCommand> {
         .unwrap_or_default()
 }
 
+/// Lightbar animation the companion drives. Mirrors the desktop `ledEffect` vocabulary.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LedEffect {
+    Solid,
+    Breathing,
+    Rainbow,
+    Off,
+}
+
+impl LedEffect {
+    fn parse(s: &str) -> Self {
+        match s {
+            "off" => Self::Off,
+            "breathing" => Self::Breathing,
+            "rainbow" => Self::Rainbow,
+            _ => Self::Solid,
+        }
+    }
+}
+
+/// Desired lightbar state, set from `config` frames and rendered by the LED engine thread.
+#[derive(Clone, Copy)]
+struct LedState {
+    effect: LedEffect,
+    /// Base colour (true RGB channels).
+    r: u8,
+    g: u8,
+    b: u8,
+    /// 0.0–1.0 brightness multiplier.
+    brightness: f32,
+}
+
+impl Default for LedState {
+    fn default() -> Self {
+        // warmUP primary #b6a0ff.
+        Self {
+            effect: LedEffect::Solid,
+            r: 0xb6,
+            g: 0xa0,
+            b: 0xff,
+            brightness: 1.0,
+        }
+    }
+}
+
+static LED_STATE: OnceLock<Mutex<LedState>> = OnceLock::new();
+static LED_ENGINE: Once = Once::new();
+
+fn led_state() -> &'static Mutex<LedState> {
+    LED_STATE.get_or_init(|| Mutex::new(LedState::default()))
+}
+
+fn scale_channel(c: u8, f: f32) -> u8 {
+    (c as f32 * f).round().clamp(0.0, 255.0) as u8
+}
+
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let h6 = (h.rem_euclid(1.0)) * 6.0;
+    let c = v * s;
+    let x = c * (1.0 - (h6.rem_euclid(2.0) - 1.0).abs());
+    let m = v - c;
+    let (r, g, b) = match h6 as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    (
+        scale_channel(255, r + m),
+        scale_channel(255, g + m),
+        scale_channel(255, b + m),
+    )
+}
+
+/// Effective lightbar colour for `state` at elapsed time `t` seconds.
+fn led_color_at(state: &LedState, t: f32) -> (u8, u8, u8) {
+    match state.effect {
+        LedEffect::Off => (0, 0, 0),
+        LedEffect::Solid => (
+            scale_channel(state.r, state.brightness),
+            scale_channel(state.g, state.brightness),
+            scale_channel(state.b, state.brightness),
+        ),
+        LedEffect::Breathing => {
+            // 0.15–1.0 sine envelope, ~3.6 s period.
+            let env = 0.15 + 0.85 * (0.5 - 0.5 * (t * std::f32::consts::TAU / 3.6).cos());
+            let f = state.brightness * env;
+            (
+                scale_channel(state.r, f),
+                scale_channel(state.g, f),
+                scale_channel(state.b, f),
+            )
+        }
+        // ~6 s hue sweep; the base colour is replaced by the cycling hue.
+        LedEffect::Rainbow => hsv_to_rgb((t / 6.0).fract(), 1.0, state.brightness),
+    }
+}
+
+/// Spawn the LED engine once. It re-renders the current [`LedState`] at ~30 Hz and pushes a
+/// `Led` device command only when the colour changes, so static effects cost one command.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn ensure_led_engine() {
+    LED_ENGINE.call_once(|| {
+        let _ = std::thread::Builder::new()
+            .name("warmup-led".into())
+            .spawn(|| {
+                let start = Instant::now();
+                let mut last: Option<(u8, u8, u8)> = None;
+                loop {
+                    let state = led_state().lock().map(|s| *s).unwrap_or_default();
+                    let color = led_color_at(&state, start.elapsed().as_secs_f32());
+                    if last != Some(color) {
+                        push_device_command(PadCommand::Led {
+                            r: color.0,
+                            g: color.1,
+                            b: color.2,
+                        });
+                        last = Some(color);
+                    }
+                    std::thread::sleep(Duration::from_millis(33));
+                }
+            });
+    });
+}
+
+/// Update the lightbar state from a `config` frame (colour / effect / brightness) and make
+/// sure the engine is running. Absent fields keep the current value.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn apply_led_config(p: &crate::protocol::ConfigPayload) {
+    if let Ok(mut st) = led_state().lock() {
+        // `parse_theme_color` yields a Windows COLORREF (0x00BBGGRR); extract true RGB
+        // channels (the earlier `>>16 = r` read swapped red and blue).
+        if let Some(cref) = p.led_color.as_deref().and_then(crate::config::parse_theme_color) {
+            st.r = (cref & 0xff) as u8;
+            st.g = ((cref >> 8) & 0xff) as u8;
+            st.b = ((cref >> 16) & 0xff) as u8;
+        }
+        if let Some(effect) = p.led_effect.as_deref() {
+            st.effect = LedEffect::parse(effect);
+        }
+        if let Some(brightness) = p.led_brightness {
+            st.brightness = brightness.clamp(0.0, 1.0);
+        }
+    }
+    ensure_led_engine();
+}
+
 /// Apply a pushed `config`: write through to the companion's cursor settings (read live by
 /// `pc_cursor`) and set the clicks-enabled mode. Maps desktop fields → companion params.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -158,16 +308,19 @@ fn apply_config(p: &crate::protocol::ConfigPayload) {
     let _ = crate::config::set_gamepad_setting("cursor_speed", &p.sensitivity.to_string());
     let _ = crate::config::set_gamepad_setting("cursor_accel", &p.acceleration_exp.to_string());
     let _ = crate::config::set_gamepad_setting("scroll_speed", &p.scroll_sensitivity.to_string());
+    let _ = crate::config::set_gamepad_setting(
+        "natural_scroll",
+        if p.natural_scroll { "true" } else { "false" },
+    );
+    // Clamp below the 0.95 setting ceiling; pc_cursor clamps again at apply time.
+    let _ = crate::config::set_gamepad_setting(
+        "cursor_smoothing",
+        &p.cursor_smoothing.clamp(0.0, 0.9).to_string(),
+    );
     if let Some(theme) = &p.keyboard_theme {
         let _ = crate::config::set_keyboard_theme(&keyboard_theme_from_payload(theme));
     }
-    // Persistent LED colour rides the config frame; queue it for the backend.
-    if let Some(color) = p.led_color.as_deref().and_then(crate::config::parse_theme_color) {
-        let r = ((color >> 16) & 0xff) as u8;
-        let g = ((color >> 8) & 0xff) as u8;
-        let b = (color & 0xff) as u8;
-        push_device_command(PadCommand::Led { r, g, b });
-    }
+    apply_led_config(p);
 }
 
 /// Queue a one-shot rumble command from an inbound `rumble` frame.
