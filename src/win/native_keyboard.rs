@@ -45,7 +45,10 @@ const TIP_VALUES: &[(&str, u32)] = &[
 ];
 const SERVICE_START_VALUE: &str = "Start";
 const DISABLED_SERVICE_START: u32 = 4;
-const TEXT_INPUT_SERVICES: &[&str] = &["TextInputManagementService", "TabletInputService"];
+// NOTE: do NOT add TextInputManagementService here — it powers the Start menu /
+// taskbar search text input. Disabling it kills typing in Start search. Only the
+// touch-keyboard service is safe to disable for native-VK suppression.
+const TEXT_INPUT_SERVICES: &[&str] = &["TabletInputService"];
 
 /// `Some(priors)` while we have TabletTip values overridden. Each prior is the
 /// value to restore (`None` = absent, delete it).

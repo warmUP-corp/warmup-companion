@@ -9,7 +9,11 @@ use serde::{Deserialize, Serialize};
 
 /// Wire protocol version. Bumped on any breaking frame/framing change. A `hello`
 /// mismatch closes the connection (see ADR 0002).
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// v2: additive customisation fields on the `config` frame — `ledEffect`,
+/// `ledBrightness`, `naturalScroll`, `cursorSmoothing` (consumed by the desktop /
+/// future companion device control), alongside the existing `keyboardTheme`.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Desktop mode snapshot carried in `hello` and the `mode` down-frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +69,71 @@ pub struct CursorMovedPayload {
     pub dy: f64,
 }
 
+/// `battery` frame payload. `percent` is 0–100 or −1 when unknown; `wired` = no
+/// internal battery. Shape matches the desktop `gamepad:battery` webview event 1:1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatteryPayload {
+    pub percent: i32,
+    pub charging: bool,
+    pub wired: bool,
+}
+
+/// One touchpad finger slot. `x`/`y` are normalized 0..1; `pressure` 0..1.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TouchpadFingerPayload {
+    pub index: u8,
+    pub down: bool,
+    pub x: f32,
+    pub y: f32,
+    pub pressure: f32,
+}
+
+/// `touchpad` frame payload — every supported finger slot this poll. Shape matches
+/// the desktop `gamepad:touchpad` webview event 1:1.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TouchpadPayload {
+    pub fingers: Vec<TouchpadFingerPayload>,
+}
+
+/// `rumble` down-frame payload — one-shot force feedback (#352). Internally tagged by
+/// `kind`: `"full"` drives the main motors, `"triggers"` the adaptive-trigger motors.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum RumblePayload {
+    Full {
+        strong: f32,
+        weak: f32,
+        #[serde(rename = "durationMs")]
+        duration_ms: u32,
+    },
+    Triggers {
+        left: f32,
+        right: f32,
+        #[serde(rename = "durationMs")]
+        duration_ms: u32,
+    },
+}
+
+/// Optional native keyboard theme colors. Each field is `#RRGGBB`; absent fields keep
+/// the companion's current dark/light default for that slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyboardThemePayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_text: Option<String>,
+}
+
 /// `config` down-frame payload — cursor-relevant tuning the companion applies, plus the
 /// `clicksEnabled` mode (cursor vs focus/D-pad). Device features (LED/rumble/gyro) ride
 /// later frames (#352).
@@ -77,6 +146,12 @@ pub struct ConfigPayload {
     pub scroll_sensitivity: f32,
     pub enabled: bool,
     pub clicks_enabled: bool,
+    /// Lightbar/LED colour `#RRGGBB` for pads with an LED (DualSense / DS4).
+    /// Absent leaves the current colour untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub led_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keyboard_theme: Option<KeyboardThemePayload>,
 }
 
 /// Up frames (companion → desktop). This slice (#347) knows `hello` + `connection`;
@@ -89,6 +164,8 @@ pub enum UpFrame {
     Connection(ConnectionPayload),
     Button(ButtonPayload),
     CursorMoved(CursorMovedPayload),
+    Battery(BatteryPayload),
+    Touchpad(TouchpadPayload),
     /// A frame whose `type` this slice does not know (added by a later slice).
     /// Never serialized; produced only by [`UpFrame::parse_line`].
     #[serde(skip)]
@@ -102,6 +179,7 @@ pub enum DownFrame {
     Hello(Hello),
     Config(ConfigPayload),
     Mode(ModeSnapshot),
+    Rumble(RumblePayload),
     #[serde(skip)]
     Unknown,
 }
@@ -129,7 +207,9 @@ impl UpFrame {
     pub fn parse_line(line: &str) -> Result<Self, serde_json::Error> {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
-            "hello" | "connection" | "button" | "cursor_moved" => serde_json::from_str(line),
+            "hello" | "connection" | "button" | "cursor_moved" | "battery" | "touchpad" => {
+                serde_json::from_str(line)
+            }
             _ => Ok(Self::Unknown),
         }
     }
@@ -142,7 +222,7 @@ impl DownFrame {
     pub fn parse_line(line: &str) -> Result<Self, serde_json::Error> {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
-            "hello" | "config" | "mode" => serde_json::from_str(line),
+            "hello" | "config" | "mode" | "rumble" => serde_json::from_str(line),
             _ => Ok(Self::Unknown),
         }
     }
@@ -208,12 +288,23 @@ mod tests {
             scroll_sensitivity: 5.0,
             enabled: true,
             clicks_enabled: false,
+            led_color: Some("#b6a0ff".into()),
+            keyboard_theme: Some(KeyboardThemePayload {
+                background: Some("#101010".into()),
+                key: Some("#202020".into()),
+                accent: Some("#4C7B99".into()),
+                text: Some("#FFFFFF".into()),
+                selected_text: Some("#FFFFFF".into()),
+            }),
         });
         let line = frame.to_ndjson_line();
         let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(json["type"], "config");
         assert_eq!(json["payload"]["clicksEnabled"], false);
+        assert_eq!(json["payload"]["ledColor"], "#b6a0ff");
         assert_eq!(json["payload"]["accelerationExp"], 2.0);
+        assert_eq!(json["payload"]["keyboardTheme"]["background"], "#101010");
+        assert_eq!(json["payload"]["keyboardTheme"]["selectedText"], "#FFFFFF");
         assert_eq!(DownFrame::parse_line(line.trim_end()).unwrap(), frame);
     }
 
@@ -244,9 +335,70 @@ mod tests {
 
     #[test]
     fn unknown_up_frame_type_is_tolerated() {
-        // A future frame (e.g. battery) must not break a client that only knows connection.
-        let parsed = UpFrame::parse_line(r#"{"type":"battery","payload":{"percent":50}}"#).unwrap();
+        // A future frame (one this version doesn't know) must not break the client.
+        let parsed =
+            UpFrame::parse_line(r#"{"type":"gyro","payload":{"pitch":0.1}}"#).unwrap();
         assert_eq!(parsed, UpFrame::Unknown);
+    }
+
+    #[test]
+    fn battery_up_frame_round_trips() {
+        let frame = UpFrame::Battery(BatteryPayload {
+            percent: 80,
+            charging: true,
+            wired: false,
+        });
+        let line = frame.to_ndjson_line();
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["type"], "battery");
+        assert_eq!(json["payload"]["percent"], 80);
+        assert_eq!(json["payload"]["charging"], true);
+        assert_eq!(UpFrame::parse_line(line.trim_end()).unwrap(), frame);
+    }
+
+    #[test]
+    fn touchpad_up_frame_round_trips() {
+        let frame = UpFrame::Touchpad(TouchpadPayload {
+            fingers: vec![TouchpadFingerPayload {
+                index: 0,
+                down: true,
+                x: 0.5,
+                y: 0.25,
+                pressure: 1.0,
+            }],
+        });
+        let line = frame.to_ndjson_line();
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["type"], "touchpad");
+        assert_eq!(json["payload"]["fingers"][0]["down"], true);
+        assert_eq!(json["payload"]["fingers"][0]["x"], 0.5);
+        assert_eq!(UpFrame::parse_line(line.trim_end()).unwrap(), frame);
+    }
+
+    #[test]
+    fn rumble_down_frame_round_trips_both_kinds() {
+        let full = DownFrame::Rumble(RumblePayload::Full {
+            strong: 0.8,
+            weak: 0.4,
+            duration_ms: 200,
+        });
+        let line = full.to_ndjson_line();
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["type"], "rumble");
+        assert_eq!(json["payload"]["kind"], "full");
+        assert_eq!(json["payload"]["durationMs"], 200);
+        assert_eq!(DownFrame::parse_line(line.trim_end()).unwrap(), full);
+
+        let trig = DownFrame::Rumble(RumblePayload::Triggers {
+            left: 0.3,
+            right: 0.6,
+            duration_ms: 150,
+        });
+        let line = trig.to_ndjson_line();
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["payload"]["kind"], "triggers");
+        assert_eq!(json["payload"]["left"], 0.3);
+        assert_eq!(DownFrame::parse_line(line.trim_end()).unwrap(), trig);
     }
 
     #[test]
@@ -264,7 +416,7 @@ mod tests {
         let line = hello.to_ndjson_line();
         let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(json["type"], "hello");
-        assert_eq!(json["payload"]["protocolVersion"], 1);
+        assert_eq!(json["payload"]["protocolVersion"], 2);
         assert_eq!(json["payload"]["mode"]["gameActive"], false);
     }
 }

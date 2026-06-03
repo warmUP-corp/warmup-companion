@@ -69,6 +69,16 @@ fn colorref_hex(c: u32) -> String {
     format!("#{r:02X}{g:02X}{b:02X}")
 }
 
+fn colorref_mix(fg: u32, bg: u32, amount: f32) -> u32 {
+    let amount = amount.clamp(0.0, 1.0);
+    let blend = |shift: u32| {
+        let f = ((fg >> shift) & 0xff_u32) as f32;
+        let b = ((bg >> shift) & 0xff_u32) as f32;
+        (b + (f - b) * amount).round() as u32
+    };
+    blend(0) | (blend(8) << 8) | (blend(16) << 16)
+}
+
 fn configure_d2d_quality(ctx: &ID2D1DeviceContext) {
     // Default D2D text path can look aliased on our DXGI composition target.
     let _ = unsafe { ctx.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE) };
@@ -212,7 +222,6 @@ const CHIP_FONT_PX: f32 = 14.0;
 enum VkIcon {
     Backspace,
     Enter,
-    Mic,
     MicOff,
     Space,
     Paste,
@@ -237,9 +246,6 @@ impl VkIcon {
             }
             VkIcon::Enter => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 4v7a4 4 0 0 1-4 4H4"/><path d="m9 10-5 5 5 5"/></svg>"#
-            }
-            VkIcon::Mic => {
-                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></svg>"#
             }
             VkIcon::MicOff => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M16.95 16.95A7 7 0 0 1 5 12v-2"/><path d="M18.89 13.23A7 7 0 0 0 19 12v-2"/><path d="m2 2 20 20"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/></svg>"#
@@ -692,11 +698,8 @@ impl VkRenderer {
             }
 
             if matches!(key.action, KeyAction::VoiceInput) {
-                if crate::vk_nav::voice_input_active() {
-                    self.draw_svg_icon(VkIcon::MicOff, rect.rect, label_color)?;
-                } else {
-                    self.draw_svg_icon(VkIcon::Mic, rect.rect, label_color)?;
-                }
+                let disabled_color = colorref_mix(label_color, pal.key, 0.42);
+                self.draw_svg_icon(VkIcon::MicOff, rect.rect, disabled_color)?;
             } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE)
             {
                 self.draw_svg_icon(VkIcon::Space, rect.rect, label_color)?;

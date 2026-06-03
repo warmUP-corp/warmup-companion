@@ -192,6 +192,7 @@ pub enum PollMode {
 }
 
 /// Raw touchpad finger data read from SDL3 in a single poll cycle.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TouchpadSample {
     pub index: u8,
     pub down: bool,

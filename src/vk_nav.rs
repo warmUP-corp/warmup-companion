@@ -225,7 +225,12 @@ fn build_pc_layout(shift: bool, caps: bool) -> Vec<KeyRow> {
         KeyRow {
             keys: vec![
                 KeyCell::vk("", VK_SPACE, GRID_UNITS - 1.5 - 1.5 - 1.5),
-                KeyCell::named("Mic", KeyAction::VoiceInput, 1.5),
+                KeyCell {
+                    label: "Mic".to_string(),
+                    sublabel: Some("WIP".to_string()),
+                    action: KeyAction::VoiceInput,
+                    span: 1.5,
+                },
                 KeyCell::named("Paste", KeyAction::Paste, 1.5),
                 KeyCell::named("", KeyAction::CloseVk, 1.5),
             ],
@@ -297,6 +302,10 @@ pub fn set_voice_input_active(active: bool) {
         nav.voice_input = active;
     }
     request_ui_repaint();
+}
+
+fn voice_input_wip_disabled() -> bool {
+    true
 }
 
 pub fn modifier_state() -> (bool, bool) {
@@ -530,6 +539,12 @@ fn send_paste() {
 }
 
 pub fn start_voice_input() {
+    if voice_input_wip_disabled() {
+        crate::install::log_line("vk voice input ignored: WIP");
+        set_voice_input_active(false);
+        return;
+    }
+
     if crate::win::logon_focus::is_active() {
         crate::install::log_line("vk voice input ignored on Winlogon");
         return;

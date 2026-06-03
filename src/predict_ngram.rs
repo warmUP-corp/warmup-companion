@@ -20,11 +20,7 @@ pub fn lexicon() -> &'static [&'static str] {
 }
 
 pub fn word_id(word: &str) -> Option<u16> {
-    tables()
-        .lexicon
-        .binary_search(&word)
-        .ok()
-        .map(|i| i as u16)
+    tables().lexicon.binary_search(&word).ok().map(|i| i as u16)
 }
 
 pub fn unigram_score(id: u16) -> u32 {

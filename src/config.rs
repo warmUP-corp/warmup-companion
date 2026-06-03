@@ -15,6 +15,15 @@ const USERLAND_POLL_FILE: &str = "userland-poll.mode";
 #[cfg(feature = "gamepad")]
 const SETTINGS_FILE: &str = "settings.ini";
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeyboardTheme {
+    pub bg: Option<u32>,
+    pub key: Option<u32>,
+    pub accent: Option<u32>,
+    pub text: Option<u32>,
+    pub sel_text: Option<u32>,
+}
+
 #[cfg(feature = "gamepad")]
 #[derive(Clone, Copy, Debug)]
 pub struct GamepadSettings {
@@ -78,6 +87,15 @@ pub fn gamepad_settings() -> GamepadSettings {
 }
 
 #[cfg(feature = "gamepad")]
+pub fn keyboard_theme() -> KeyboardTheme {
+    let mut theme = KeyboardTheme::default();
+    if let Some(text) = settings_path().and_then(|p| std::fs::read_to_string(p).ok()) {
+        apply_keyboard_theme_text(&mut theme, &text);
+    }
+    theme
+}
+
+#[cfg(feature = "gamepad")]
 fn apply_gamepad_settings_text(settings: &mut GamepadSettings, text: &str) {
     for line in text.lines() {
         let line = line.trim();
@@ -114,6 +132,56 @@ fn apply_gamepad_settings_text(settings: &mut GamepadSettings, text: &str) {
             _ => {}
         }
     }
+}
+
+#[cfg(feature = "gamepad")]
+fn apply_keyboard_theme_text(theme: &mut KeyboardTheme, text: &str) {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let Some(color) = parse_theme_color(value.trim()) else {
+            continue;
+        };
+        match key.trim() {
+            "keyboard_bg" | "keyboard_background" => theme.bg = Some(color),
+            "keyboard_key" | "keyboard_key_bg" => theme.key = Some(color),
+            "keyboard_accent" => theme.accent = Some(color),
+            "keyboard_text" => theme.text = Some(color),
+            "keyboard_sel_text" | "keyboard_selected_text" => theme.sel_text = Some(color),
+            _ => {}
+        }
+    }
+}
+
+#[cfg(feature = "gamepad")]
+pub fn parse_theme_color(value: &str) -> Option<u32> {
+    let v = value.trim();
+    let hex = v
+        .strip_prefix('#')
+        .or_else(|| v.strip_prefix("0x"))
+        .or_else(|| v.strip_prefix("0X"))
+        .unwrap_or(v);
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let rgb = u32::from_str_radix(hex, 16).ok()?;
+    let r = (rgb >> 16) & 0xff;
+    let g = (rgb >> 8) & 0xff;
+    let b = rgb & 0xff;
+    Some((b << 16) | (g << 8) | r)
+}
+
+#[cfg(feature = "gamepad")]
+fn format_theme_color(colorref: u32) -> String {
+    let r = colorref & 0xff;
+    let g = (colorref >> 8) & 0xff;
+    let b = (colorref >> 16) & 0xff;
+    format!("#{r:02X}{g:02X}{b:02X}")
 }
 
 #[cfg(feature = "gamepad")]
@@ -199,6 +267,22 @@ pub fn set_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
 }
 
 #[cfg(feature = "gamepad")]
+pub fn set_keyboard_theme(theme: &KeyboardTheme) -> Result<(), String> {
+    for (key, value) in [
+        ("keyboard_bg", theme.bg),
+        ("keyboard_key", theme.key),
+        ("keyboard_accent", theme.accent),
+        ("keyboard_text", theme.text),
+        ("keyboard_sel_text", theme.sel_text),
+    ] {
+        if let Some(color) = value {
+            set_gamepad_setting(key, &format_theme_color(color))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "gamepad")]
 fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
     match key {
         "userland_poll" | "userland_poll_mode" | "poll_mode" => {
@@ -221,6 +305,51 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
             .filter(|v| *v > 0.0)
             .map(|_| ())
             .ok_or_else(|| format!("{key} must be > 0.0")),
+        "keyboard_bg"
+        | "keyboard_background"
+        | "keyboard_key"
+        | "keyboard_key_bg"
+        | "keyboard_accent"
+        | "keyboard_text"
+        | "keyboard_sel_text"
+        | "keyboard_selected_text" => parse_theme_color(value)
+            .map(|_| ())
+            .ok_or_else(|| format!("{key} must be a #RRGGBB color")),
         _ => Err(format!("unknown setting: {key}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn theme_color_accepts_common_rgb_formats_as_colorref() {
+        assert_eq!(parse_theme_color("#112233"), Some(0x00332211));
+        assert_eq!(parse_theme_color("112233"), Some(0x00332211));
+        assert_eq!(parse_theme_color("0x112233"), Some(0x00332211));
+        assert_eq!(parse_theme_color("#123"), None);
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn keyboard_theme_text_accepts_aliases() {
+        let mut theme = KeyboardTheme::default();
+        apply_keyboard_theme_text(
+            &mut theme,
+            "
+            keyboard_background=#010203
+            keyboard_key_bg=#040506
+            keyboard_accent=#070809
+            keyboard_text=#0A0B0C
+            keyboard_selected_text=#0D0E0F
+            ",
+        );
+        assert_eq!(theme.bg, Some(0x00030201));
+        assert_eq!(theme.key, Some(0x00060504));
+        assert_eq!(theme.accent, Some(0x00090807));
+        assert_eq!(theme.text, Some(0x000c0b0a));
+        assert_eq!(theme.sel_text, Some(0x000f0e0d));
     }
 }

@@ -7,7 +7,10 @@
 //! controller label; the server thread streams the latest connection snapshot to the
 //! connected client. The pipe is ACL'd to the interactive user.
 
-use crate::protocol::{ButtonPayload, ConnectionPayload, ModeSnapshot};
+use crate::gamepad_backend::PadCommand;
+use crate::protocol::{
+    BatteryPayload, ButtonPayload, ConnectionPayload, ModeSnapshot, RumblePayload, TouchpadPayload,
+};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -71,6 +74,81 @@ fn take_cursor_moved() -> Option<crate::protocol::CursorMovedPayload> {
     Some(payload)
 }
 
+/// Latest battery snapshot from the gamepad loop. The server sends it on change.
+static BATTERY: OnceLock<Mutex<Option<BatteryPayload>>> = OnceLock::new();
+/// Latest touchpad sample + a dirty flag, coalesced like `cursor_moved` and sent throttled.
+static TOUCHPAD: OnceLock<Mutex<(Option<TouchpadPayload>, bool)>> = OnceLock::new();
+/// Device write commands pushed by inbound `config`/`rumble` frames, drained by the
+/// gamepad loop (which owns the backend) and applied to the pad.
+static DEVICE_CMDS: OnceLock<Mutex<VecDeque<PadCommand>>> = OnceLock::new();
+const DEVICE_CMD_CAP: usize = 64;
+
+fn battery_slot() -> &'static Mutex<Option<BatteryPayload>> {
+    BATTERY.get_or_init(|| Mutex::new(None))
+}
+
+fn touchpad_slot() -> &'static Mutex<(Option<TouchpadPayload>, bool)> {
+    TOUCHPAD.get_or_init(|| Mutex::new((None, false)))
+}
+
+fn device_cmds() -> &'static Mutex<VecDeque<PadCommand>> {
+    DEVICE_CMDS.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+/// Publish the latest battery snapshot (read by the server, sent on change).
+pub fn publish_battery(percent: i32, charging: bool, wired: bool) {
+    if let Ok(mut b) = battery_slot().lock() {
+        *b = Some(BatteryPayload {
+            percent,
+            charging,
+            wired,
+        });
+    }
+}
+
+/// Publish the latest touchpad sample (coalesced; the server sends it throttled).
+pub fn publish_touchpad(payload: TouchpadPayload) {
+    if let Ok(mut t) = touchpad_slot().lock() {
+        *t = (Some(payload), true);
+    }
+}
+
+/// Current battery snapshot, if any has been published.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn current_battery() -> Option<BatteryPayload> {
+    battery_slot().lock().ok().and_then(|b| *b)
+}
+
+/// Take the latest touchpad sample if it changed since the last send.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn take_touchpad() -> Option<TouchpadPayload> {
+    let mut t = touchpad_slot().lock().ok()?;
+    if !t.1 {
+        return None;
+    }
+    t.1 = false;
+    t.0.clone()
+}
+
+/// Queue a device write command (bounded; oldest dropped first).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn push_device_command(cmd: PadCommand) {
+    if let Ok(mut q) = device_cmds().lock() {
+        if q.len() >= DEVICE_CMD_CAP {
+            q.pop_front();
+        }
+        q.push_back(cmd);
+    }
+}
+
+/// Drain queued device write commands (LED/rumble) for the gamepad loop to apply.
+pub fn drain_device_commands() -> Vec<PadCommand> {
+    device_cmds()
+        .lock()
+        .map(|mut q| q.drain(..).collect())
+        .unwrap_or_default()
+}
+
 /// Apply a pushed `config`: write through to the companion's cursor settings (read live by
 /// `pc_cursor`) and set the clicks-enabled mode. Maps desktop fields → companion params.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -80,6 +158,64 @@ fn apply_config(p: &crate::protocol::ConfigPayload) {
     let _ = crate::config::set_gamepad_setting("cursor_speed", &p.sensitivity.to_string());
     let _ = crate::config::set_gamepad_setting("cursor_accel", &p.acceleration_exp.to_string());
     let _ = crate::config::set_gamepad_setting("scroll_speed", &p.scroll_sensitivity.to_string());
+    if let Some(theme) = &p.keyboard_theme {
+        let _ = crate::config::set_keyboard_theme(&keyboard_theme_from_payload(theme));
+    }
+    // Persistent LED colour rides the config frame; queue it for the backend.
+    if let Some(color) = p.led_color.as_deref().and_then(crate::config::parse_theme_color) {
+        let r = ((color >> 16) & 0xff) as u8;
+        let g = ((color >> 8) & 0xff) as u8;
+        let b = (color & 0xff) as u8;
+        push_device_command(PadCommand::Led { r, g, b });
+    }
+}
+
+/// Queue a one-shot rumble command from an inbound `rumble` frame.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn apply_rumble(p: &RumblePayload) {
+    let cmd = match *p {
+        RumblePayload::Full {
+            strong,
+            weak,
+            duration_ms,
+        } => PadCommand::Rumble {
+            strong,
+            weak,
+            ms: duration_ms,
+        },
+        RumblePayload::Triggers {
+            left,
+            right,
+            duration_ms,
+        } => PadCommand::TriggerRumble {
+            left,
+            right,
+            ms: duration_ms,
+        },
+    };
+    push_device_command(cmd);
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn keyboard_theme_from_payload(
+    p: &crate::protocol::KeyboardThemePayload,
+) -> crate::config::KeyboardTheme {
+    crate::config::KeyboardTheme {
+        bg: p
+            .background
+            .as_deref()
+            .and_then(crate::config::parse_theme_color),
+        key: p.key.as_deref().and_then(crate::config::parse_theme_color),
+        accent: p
+            .accent
+            .as_deref()
+            .and_then(crate::config::parse_theme_color),
+        text: p.text.as_deref().and_then(crate::config::parse_theme_color),
+        sel_text: p
+            .selected_text
+            .as_deref()
+            .and_then(crate::config::parse_theme_color),
+    }
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -235,10 +371,12 @@ pub fn spawn() {}
 #[cfg(windows)]
 mod server {
     use super::{
-        apply_config, apply_mode, clear_desktop_mode, current, drain_buttons, reset_button_stream,
-        take_cursor_moved,
+        apply_config, apply_mode, apply_rumble, clear_desktop_mode, current, current_battery,
+        drain_buttons, reset_button_stream, take_cursor_moved, take_touchpad,
     };
-    use crate::protocol::{ConnectionPayload, DownFrame, Hello, UpFrame, PROTOCOL_VERSION};
+    use crate::protocol::{
+        BatteryPayload, ConnectionPayload, DownFrame, Hello, UpFrame, PROTOCOL_VERSION,
+    };
     use std::time::{Duration, Instant};
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
@@ -374,6 +512,7 @@ mod server {
     /// plus a keepalive so a dropped idle client is noticed via the write error).
     fn stream(pipe: HANDLE) {
         let mut last: Option<ConnectionPayload> = None;
+        let mut last_battery: Option<BatteryPayload> = None;
         let mut last_conn_write = Instant::now()
             .checked_sub(KEEPALIVE)
             .unwrap_or_else(Instant::now);
@@ -388,11 +527,27 @@ mod server {
                     return; // client gone — return to accept a new one
                 }
             }
+            // Battery — send only when it changes (low-rate; no keepalive needed).
+            let battery = current_battery();
+            if battery.is_some() && battery != last_battery {
+                if let Some(b) = battery {
+                    if write_all(pipe, UpFrame::Battery(b).to_ndjson_line().as_bytes()).is_err() {
+                        return;
+                    }
+                    last_battery = Some(b);
+                }
+            }
             if last_cursor_write.elapsed() >= CURSOR_HINT_INTERVAL {
                 if let Some(hint) = take_cursor_moved() {
                     if write_all(pipe, UpFrame::CursorMoved(hint).to_ndjson_line().as_bytes())
                         .is_err()
                     {
+                        return;
+                    }
+                }
+                // Touchpad shares the cursor throttle (both are ≈100 ms visual hints).
+                if let Some(tp) = take_touchpad() {
+                    if write_all(pipe, UpFrame::Touchpad(tp).to_ndjson_line().as_bytes()).is_err() {
                         return;
                     }
                 }
@@ -426,6 +581,7 @@ mod server {
             match DownFrame::parse_line(trimmed) {
                 Ok(DownFrame::Config(p)) => apply_config(&p),
                 Ok(DownFrame::Mode(p)) => apply_mode(&p),
+                Ok(DownFrame::Rumble(p)) => apply_rumble(&p),
                 _ => {}
             }
         }

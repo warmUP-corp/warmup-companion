@@ -72,7 +72,7 @@ const fn rgb(v: u32) -> u32 {
 /// Dark/light accent + greys from `FUN_00466970` (dark accent `0xff4c7b99`,
 /// light accent `0xff0e80c7`; the WinRT `UISettings` override is not applied).
 fn vk_palette(dark: bool) -> VkPalette {
-    if dark {
+    let mut pal = if dark {
         VkPalette {
             bg: rgb(0x1f1f1f),
             key: rgb(0x2b2b2b),
@@ -88,7 +88,24 @@ fn vk_palette(dark: bool) -> VkPalette {
             text: rgb(0x000000),
             sel_text: rgb(0xffffff),
         }
+    };
+    let theme = crate::config::keyboard_theme();
+    if let Some(v) = theme.bg {
+        pal.bg = v;
     }
+    if let Some(v) = theme.key {
+        pal.key = v;
+    }
+    if let Some(v) = theme.accent {
+        pal.accent = v;
+    }
+    if let Some(v) = theme.text {
+        pal.text = v;
+    }
+    if let Some(v) = theme.sel_text {
+        pal.sel_text = v;
+    }
+    pal
 }
 
 /// Joyxoff `param_1[0x65]` dark flag, here read live from the OS theme.
@@ -696,6 +713,9 @@ unsafe fn show_and_place(hwnd: HWND) {
     );
     let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     ensure_topmost(hwnd);
+    // Draw the keyboard once up front; the slide then just moves the window, so the
+    // already-composited DComp content rides along without a per-frame redraw.
+    render_frame();
     animate_window_y(hwnd, x, start_y, y, outer_w, outer_h, VK_SHOW_ANIMATION_MS);
     start_timers(hwnd);
     log_window_rect(hwnd);
@@ -729,17 +749,19 @@ unsafe fn animate_window_y(
         let t = (started.elapsed().as_secs_f32() / duration.as_secs_f32()).min(1.0);
         let eased = ease_out_cubic(t);
         let y = from_y as f32 + (to_y - from_y) as f32 * eased;
+        // Move only — freeze z-order (SWP_NOZORDER) so the compositor doesn't reinsert
+        // the window every frame, and skip the per-frame redraw (content is unchanged
+        // during the slide). Topmost was asserted once before the loop; the 200ms timer
+        // + WM_WINDOWPOSCHANGING keep it pinned afterwards.
         let _ = SetWindowPos(
             hwnd,
-            HWND_TOPMOST,
+            HWND::default(),
             x,
             y.round() as i32,
             width,
             height,
-            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW,
         );
-        ensure_topmost(hwnd);
-        render_frame();
         if t >= 1.0 {
             break;
         }
