@@ -847,7 +847,10 @@ fn render_frame() {
             let candidates = crate::vk_predict::strip_view();
             let top_inset = vk_renderer::top_chrome_inset();
             let scale_w = vk_scale_w();
-            let floating = matches!(crate::config::vk_layout_mode(), crate::config::VkLayoutMode::Floating);
+            let floating = matches!(
+                crate::config::vk_layout_mode(),
+                crate::config::VkLayoutMode::Floating
+            );
             if let Err(e) = renderer.draw(
                 &pal,
                 &rows,
@@ -901,9 +904,13 @@ fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<KeyCell> {
     // Same layout the renderer draws with, so clicks always match the visible keys.
     let top_inset = vk_renderer::top_chrome_inset();
     let scale_w = unsafe { vk_scale_w() };
-    for kr in
-        vk_renderer::key_rects(client.right as f32, client.bottom as f32, scale_w, &rows, top_inset)
-    {
+    for kr in vk_renderer::key_rects(
+        client.right as f32,
+        client.bottom as f32,
+        scale_w,
+        &rows,
+        top_inset,
+    ) {
         if xf >= kr.left && xf < kr.right && yf >= kr.top && yf < kr.bottom {
             return rows
                 .get(kr.pos.row)

@@ -21,6 +21,8 @@ const WARMUP_LAUNCH_DEBOUNCE: Duration = Duration::from_secs(2);
 /// Ignore spurious X/dpad from misaligned HID for a moment after VK opens.
 const VK_NAV_INPUT_GRACE: Duration = Duration::from_millis(450);
 const DESKTOP_SYNC_LOG_INTERVAL: Duration = Duration::from_secs(120);
+const HAPTIC_CONFIRM_MS: u32 = 14;
+const HAPTIC_ALERT_MS: u32 = 45;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VkLoopAction {
@@ -156,6 +158,14 @@ impl Backend {
                 }
             }
         }
+    }
+
+    fn haptic_confirm(&mut self) {
+        self.rumble(0.0, 0.07, HAPTIC_CONFIRM_MS);
+    }
+
+    fn haptic_alert(&mut self) {
+        self.rumble(0.24, 0.12, HAPTIC_ALERT_MS);
     }
 
     /// Publish device-feature reads (battery on change, touchpad coalesced) to the IPC server.
@@ -391,6 +401,7 @@ impl GamepadPoll {
     ) -> Result<Vec<VkLoopAction>, String> {
         if vk_open && !self.last_vk_open {
             self.on_vk_opened();
+            self.backend.haptic_confirm();
             self.a_cursor_down = false;
             self.touchpad_cursor_down = false;
             cursor.set_left_button(false);
@@ -478,6 +489,7 @@ impl GamepadPoll {
                 continue;
             }
             if self.update_launch_hotkey(change) {
+                self.backend.haptic_alert();
                 edges.push(VkLoopAction::LaunchWarmup);
             }
             if change.button != VK_BUTTON {
@@ -486,6 +498,7 @@ impl GamepadPoll {
             let edge = match (self.vk_down, change.pressed) {
                 (false, true) => {
                     self.vk_down = true;
+                    self.backend.haptic_confirm();
                     Some(VkLoopAction::Toggle)
                 }
                 (true, false) => {
@@ -590,6 +603,7 @@ impl GamepadPoll {
                 if self.vk_toggle_need_release {
                     return None;
                 }
+                self.backend.haptic_confirm();
                 Some(VkLoopAction::Close)
             }
             (VK_BUTTON, false) => {
@@ -632,6 +646,7 @@ impl GamepadPoll {
             (Button::Y, true) => {
                 vk_nav::start_voice_input();
                 vk_ui::request_repaint();
+                self.backend.haptic_alert();
                 None
             }
             (Button::Lb, true) => {

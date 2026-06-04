@@ -367,8 +367,7 @@ mod tests {
     #[test]
     fn unknown_up_frame_type_is_tolerated() {
         // A future frame (one this version doesn't know) must not break the client.
-        let parsed =
-            UpFrame::parse_line(r#"{"type":"gyro","payload":{"pitch":0.1}}"#).unwrap();
+        let parsed = UpFrame::parse_line(r#"{"type":"gyro","payload":{"pitch":0.1}}"#).unwrap();
         assert_eq!(parsed, UpFrame::Unknown);
     }
 

@@ -295,7 +295,11 @@ fn apply_led_config(p: &crate::protocol::ConfigPayload) {
     if let Ok(mut st) = led_state().lock() {
         // `parse_theme_color` yields a Windows COLORREF (0x00BBGGRR); extract true RGB
         // channels (the earlier `>>16 = r` read swapped red and blue).
-        if let Some(cref) = p.led_color.as_deref().and_then(crate::config::parse_theme_color) {
+        if let Some(cref) = p
+            .led_color
+            .as_deref()
+            .and_then(crate::config::parse_theme_color)
+        {
             st.r = (cref & 0xff) as u8;
             st.g = ((cref >> 8) & 0xff) as u8;
             st.b = ((cref >> 16) & 0xff) as u8;
@@ -910,7 +914,10 @@ mod tests {
             clicks_enabled: false,
             launcher_owns_text_input: false,
         });
-        assert!(game_active() && !launcher_foreground_nav(), "in-game → sleep");
+        assert!(
+            game_active() && !launcher_foreground_nav(),
+            "in-game → sleep"
+        );
 
         // Launcher woken over the running game: nav flips true so the pad keeps driving the launcher.
         apply_mode(&ModeSnapshot {
