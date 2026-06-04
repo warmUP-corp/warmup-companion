@@ -324,16 +324,20 @@ pub fn move_selection(dir: Button) -> bool {
     let mut pos = nav.pos;
     let changed = match dir {
         Button::Left => {
-            if pos.col > 0 {
-                pos.col -= 1;
+            // Wrap around the row: left from the first key lands on the last.
+            let cols = nav.rows[pos.row].keys.len();
+            if cols > 0 {
+                pos.col = if pos.col > 0 { pos.col - 1 } else { cols - 1 };
                 true
             } else {
                 false
             }
         }
         Button::Right => {
-            if pos.col + 1 < nav.rows[pos.row].keys.len() {
-                pos.col += 1;
+            // Wrap around the row: right from the last key lands on the first.
+            let cols = nav.rows[pos.row].keys.len();
+            if cols > 0 {
+                pos.col = if pos.col + 1 < cols { pos.col + 1 } else { 0 };
                 true
             } else {
                 false

@@ -210,6 +210,9 @@ const RADIUS_FRAC: f32 = 6.8 / 68.0;
 /// Prefix-completion candidate strip (reclaims former legend/tooltip row).
 pub const CANDIDATE_STRIP_H: f32 = 70.0;
 
+/// Uniform padding between the floating card's rounded edge and its key grid.
+pub const FLOATING_PAD: f32 = 18.0;
+
 const CHIP_H: f32 = 48.0;
 const CHIP_GAP: f32 = 10.0;
 const CHIP_PAD_X: f32 = 14.0;
@@ -278,6 +281,20 @@ impl VkIcon {
 pub fn top_chrome_inset() -> f32 {
     CANDIDATE_STRIP_H
 }
+
+/// Natural bounding box `(width, height)` of the key grid at `scale_w`, excluding
+/// card padding and top chrome. Lets the floating card be sized to wrap keys that
+/// render at the same scale as the docked bar.
+pub fn grid_size(scale_w: f32, rows: &[KeyRow]) -> (f32, f32) {
+    let (kw, kh, gap) = key_metrics(scale_w, f32::INFINITY, rows, 0.0);
+    let grid_w = rows
+        .iter()
+        .map(|r| row_pixel_width(r, kw, gap))
+        .fold(0.0f32, f32::max);
+    let n = rows.len() as f32;
+    let block_h = n * kh + (n - 1.0).max(0.0) * gap;
+    (grid_w, block_h)
+}
 /// Key width in px for a span of `n` key-units (`FUN_00463bd0`: span×keyW + (span−1)×gap).
 fn key_width(kw: f32, gap: f32, span: f32) -> f32 {
     span * kw + (span - 1.0).max(0.0) * gap
@@ -316,8 +333,16 @@ fn row_stretch_key(row_index: usize, key_count: usize) -> usize {
     }
 }
 
-pub fn key_rects(client_w: f32, client_h: f32, rows: &[KeyRow], top_inset: f32) -> Vec<KeyRect> {
-    let (kw, kh, gap) = key_metrics(client_w, client_h, rows, top_inset);
+/// `scale_w` drives key size (always the monitor width, so floating keys match the
+/// docked bar); `client_w`/`client_h` drive centering within the target window.
+pub fn key_rects(
+    client_w: f32,
+    client_h: f32,
+    scale_w: f32,
+    rows: &[KeyRow],
+    top_inset: f32,
+) -> Vec<KeyRect> {
+    let (kw, kh, gap) = key_metrics(scale_w, client_h, rows, top_inset);
     let n = rows.len() as f32;
     let block_h = n * kh + (n - 1.0).max(0.0) * gap;
     let mut top = top_inset + ((client_h - top_inset - block_h) / 2.0).max(0.0);
@@ -629,6 +654,7 @@ impl VkRenderer {
         key_glyph: fn(&KeyCell) -> (String, bool),
         key_hint: fn(&KeyCell) -> Option<&'static str>,
         top_inset: f32,
+        scale_w: f32,
         candidates: Option<&crate::vk_predict::StripView>,
         floating: bool,
     ) -> Result<(), String> {
@@ -637,33 +663,24 @@ impl VkRenderer {
 
         self.d2d_context.BeginDraw();
 
-        let rects = key_rects(cw, ch, rows, top_inset);
+        let rects = key_rects(cw, ch, scale_w, rows, top_inset);
 
         if floating {
-            // Floating layout emulates the webview VK card: a transparent backdrop with a rounded
-            // panel sized to wrap the keys (not a full-bleed opaque rectangle). Content is clipped
-            // to the panel so nothing bleeds into the transparent gutter.
+            // Floating layout emulates the webview VK card. The window is already sized to wrap
+            // the chips + keys (see `vk_dock_rect`), so the rounded panel fills the whole client
+            // area minus a hairline for the antialiased stroke; content is clipped to it.
             self.d2d_context.Clear(Some(&D2D1_COLOR_F {
                 r: 0.0,
                 g: 0.0,
                 b: 0.0,
                 a: 0.0,
             }));
-            let mut min_l = cw;
-            let mut max_r = 0.0_f32;
-            let mut max_b = 0.0_f32;
-            for kr in &rects {
-                min_l = min_l.min(kr.left);
-                max_r = max_r.max(kr.right);
-                max_b = max_b.max(kr.bottom);
-            }
-            let pad = (ch * 0.045).clamp(10.0, 40.0);
             let radius = (ch * 0.06).clamp(14.0, 30.0);
             let panel = D2D_RECT_F {
-                left: (min_l - pad).max(0.0),
-                top: pad.max(0.0),
-                right: (max_r + pad).min(cw),
-                bottom: (max_b + pad).min(ch),
+                left: 1.0,
+                top: 1.0,
+                right: cw - 1.0,
+                bottom: ch - 1.0,
             };
             let rounded = D2D1_ROUNDED_RECT {
                 rect: panel,
@@ -769,17 +786,17 @@ impl VkRenderer {
             } else if matches!(key.action, KeyAction::Shift) {
                 let (shift, _) = crate::vk_nav::modifier_state();
                 let icon = if shift {
-                    VkIcon::ShiftFilled
+                    VkIcon::CapsFilled
                 } else {
-                    VkIcon::Shift
+                    VkIcon::Caps
                 };
                 self.draw_svg_icon(icon, rect.rect, label_color)?;
             } else if matches!(key.action, KeyAction::CapsLock) {
                 let (_, caps) = crate::vk_nav::modifier_state();
                 let icon = if caps {
-                    VkIcon::CapsFilled
+                    VkIcon::ShiftFilled
                 } else {
-                    VkIcon::Caps
+                    VkIcon::Shift
                 };
                 self.draw_svg_icon(icon, rect.rect, label_color)?;
             } else {
@@ -1021,8 +1038,8 @@ fn user_locale_name() -> windows::core::HSTRING {
 /// Returns `(key_width, key_height, gap)` in px. Keys are sized from the window
 /// width at the Joyxoff 92px reference (scaled by `client_w/1920`), holding the
 /// 92:68 aspect, then shrunk to fit all rows in the docked bar's height.
-fn key_metrics(client_w: f32, client_h: f32, rows: &[KeyRow], top_inset: f32) -> (f32, f32, f32) {
-    let scale = (client_w / REF_MON_W).max(0.05);
+fn key_metrics(scale_w: f32, client_h: f32, rows: &[KeyRow], top_inset: f32) -> (f32, f32, f32) {
+    let scale = (scale_w / REF_MON_W).max(0.05);
     let mut kw = REF_KEY_W * scale;
     let mut gap = REF_GAP * scale;
     let mut kh = kw * KEY_ASPECT;

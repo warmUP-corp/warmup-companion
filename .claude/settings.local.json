@@ -83,7 +83,9 @@
       "PowerShell($id=[Security.Principal.WindowsIdentity]::GetCurrent\\(\\); $p=[Security.Principal.WindowsPrincipal]$id; \"Admin: \" + $p.IsInRole\\([Security.Principal.WindowsBuiltInRole]::Administrator\\); \"User: \" + $id.Name; sc.exe query WarmupVkSvc 2>&1 | Select-Object -First 4)",
       "PowerShell(git status --short; \"----\"; git log --oneline -3)",
       "PowerShell(git *)",
-      "PowerShell(Get-CimInstance *)"
+      "PowerShell(Get-CimInstance *)",
+      "PowerShell(git rev-parse HEAD origin/main main; \"--- commits on local feat branch NOT on origin/main ---\"; git log --oneline origin/main..feat/companion-device-features; \"--- commits on origin/main NOT on local feat branch ---\"; git log --oneline feat/companion-device-features..origin/main)",
+      "PowerShell(\"--- is main a direct ancestor of the feat branch? ---\"; git merge-base --is-ancestor main feat/companion-device-features; if \\($LASTEXITCODE -eq 0\\) { \"YES - feat is a clean fast-forward ahead of main\" } else { \"NO - branches have diverged\" }; \"--- stashes ---\"; git stash list; \"--- unique commits on claude/gifted-cerf vs origin/main ---\"; git log --oneline origin/main..claude/gifted-cerf-09c757; \"--- working tree ---\"; git status --short)"
     ]
   },
   "enabledMcpjsonServers": [
