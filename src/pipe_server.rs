@@ -320,6 +320,9 @@ fn apply_config(p: &crate::protocol::ConfigPayload) {
     if let Some(theme) = &p.keyboard_theme {
         let _ = crate::config::set_keyboard_theme(&keyboard_theme_from_payload(theme));
     }
+    if let Some(mode) = &p.vk_mode {
+        let _ = crate::config::set_gamepad_setting("vk_mode", mode);
+    }
     apply_led_config(p);
 }
 
@@ -366,6 +369,10 @@ fn keyboard_theme_from_payload(
         text: p.text.as_deref().and_then(crate::config::parse_theme_color),
         sel_text: p
             .selected_text
+            .as_deref()
+            .and_then(crate::config::parse_theme_color),
+        border: p
+            .border
             .as_deref()
             .and_then(crate::config::parse_theme_color),
     }

@@ -79,6 +79,7 @@ fn vk_palette(dark: bool) -> VkPalette {
             accent: rgb(0x4c7b99),
             text: rgb(0xffffff),
             sel_text: rgb(0xffffff),
+            border: rgb(0x3a3a3a),
         }
     } else {
         VkPalette {
@@ -87,6 +88,7 @@ fn vk_palette(dark: bool) -> VkPalette {
             accent: rgb(0x0e80c7),
             text: rgb(0x000000),
             sel_text: rgb(0xffffff),
+            border: rgb(0xcfcfcf),
         }
     };
     let theme = crate::config::keyboard_theme();
@@ -104,6 +106,9 @@ fn vk_palette(dark: bool) -> VkPalette {
     }
     if let Some(v) = theme.sel_text {
         pal.sel_text = v;
+    }
+    if let Some(v) = theme.border {
+        pal.border = v;
     }
     pal
 }
@@ -635,15 +640,28 @@ unsafe fn target_monitor_rect() -> windows::Win32::Foundation::RECT {
     }
 }
 
-/// Joyxoff geometry: full monitor width, docked at the screen bottom, with
-/// height = `monitorHeight * 384/1080`. Returns `(x, y, width, height)`.
+/// Keyboard geometry. Returns `(x, y, width, height)`.
+///
+/// - **Docked** (Joyxoff default): full monitor width along the bottom edge, height
+///   = `monitorHeight * 384/1080`.
+/// - **Floating**: a compact, horizontally-centred panel raised off the bottom edge —
+///   emulates the warmUP webview keyboard card. Pushed via the desktop `config.vkMode`.
 unsafe fn vk_dock_rect() -> (i32, i32, i32, i32) {
     let m = target_monitor_rect();
     let full_w = (m.right - m.left).max(1);
     let full_h = (m.bottom - m.top).max(1);
     let h = ((full_h as f32) * VK_KB_REF_H / VK_REF_MONITOR_H).round() as i32;
     let h = h.clamp(160, full_h);
-    (m.left, m.bottom - h, full_w, h)
+    match crate::config::vk_layout_mode() {
+        crate::config::VkLayoutMode::Floating => {
+            let margin = (((full_h as f32) * 0.04).round() as i32).clamp(24, 160);
+            let w = (((full_w as f32) * 0.62).round() as i32).clamp(640.min(full_w), full_w);
+            let x = m.left + (full_w - w) / 2;
+            let y = m.bottom - h - margin;
+            (x, y, w, h)
+        }
+        crate::config::VkLayoutMode::Docked => (m.left, m.bottom - h, full_w, h),
+    }
 }
 
 unsafe fn create_vk_window() -> Result<HWND, String> {

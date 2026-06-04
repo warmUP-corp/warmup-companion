@@ -13,7 +13,10 @@ use serde::{Deserialize, Serialize};
 /// v2: additive customisation fields on the `config` frame — `ledEffect`,
 /// `ledBrightness`, `naturalScroll`, `cursorSmoothing` (consumed by the desktop /
 /// future companion device control), alongside the existing `keyboardTheme`.
-pub const PROTOCOL_VERSION: u32 = 2;
+///
+/// v3: additive `keyboardTheme.border` (key outline color, matches the webview VK) and the
+/// `config.vkMode` layout selector (`docked` | `floating`).
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Desktop mode snapshot carried in `hello` and the `mode` down-frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,6 +135,9 @@ pub struct KeyboardThemePayload {
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_text: Option<String>,
+    /// Key outline color (matches the webview VK border). Derived desktop-side from `key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border: Option<String>,
 }
 
 /// `config` down-frame payload — cursor-relevant tuning the companion applies, plus the
@@ -164,6 +170,9 @@ pub struct ConfigPayload {
     pub cursor_smoothing: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keyboard_theme: Option<KeyboardThemePayload>,
+    /// Virtual-keyboard layout mode: `"docked"` (default) or `"floating"`. Absent keeps current.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vk_mode: Option<String>,
 }
 
 /// Up frames (companion → desktop). This slice (#347) knows `hello` + `connection`;
@@ -311,7 +320,9 @@ mod tests {
                 accent: Some("#4C7B99".into()),
                 text: Some("#FFFFFF".into()),
                 selected_text: Some("#FFFFFF".into()),
+                border: Some("#333333".into()),
             }),
+            vk_mode: Some("docked".into()),
         });
         let line = frame.to_ndjson_line();
         let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
@@ -323,6 +334,8 @@ mod tests {
         assert_eq!(json["payload"]["accelerationExp"], 2.0);
         assert_eq!(json["payload"]["keyboardTheme"]["background"], "#101010");
         assert_eq!(json["payload"]["keyboardTheme"]["selectedText"], "#FFFFFF");
+        assert_eq!(json["payload"]["keyboardTheme"]["border"], "#333333");
+        assert_eq!(json["payload"]["vkMode"], "docked");
         assert_eq!(DownFrame::parse_line(line.trim_end()).unwrap(), frame);
     }
 
@@ -434,7 +447,7 @@ mod tests {
         let line = hello.to_ndjson_line();
         let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(json["type"], "hello");
-        assert_eq!(json["payload"]["protocolVersion"], 2);
+        assert_eq!(json["payload"]["protocolVersion"], 3);
         assert_eq!(json["payload"]["mode"]["gameActive"], false);
     }
 }

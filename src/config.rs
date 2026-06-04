@@ -22,6 +22,47 @@ pub struct KeyboardTheme {
     pub accent: Option<u32>,
     pub text: Option<u32>,
     pub sel_text: Option<u32>,
+    /// Key outline color (matches the webview VK border).
+    pub border: Option<u32>,
+}
+
+/// Virtual-keyboard layout: docked along the screen edge, or floating near the caret
+/// (emulating the warmUP webview keyboard). Pushed from the desktop `config.vkMode`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VkLayoutMode {
+    #[default]
+    Docked,
+    Floating,
+}
+
+impl VkLayoutMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VkLayoutMode::Docked => "docked",
+            VkLayoutMode::Floating => "floating",
+        }
+    }
+}
+
+#[cfg(feature = "gamepad")]
+pub fn parse_vk_layout_mode(raw: Option<&str>) -> VkLayoutMode {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("floating") => VkLayoutMode::Floating,
+        _ => VkLayoutMode::Docked,
+    }
+}
+
+#[cfg(feature = "gamepad")]
+pub fn vk_layout_mode() -> VkLayoutMode {
+    let raw = settings_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|text| {
+            text.lines().find_map(|line| {
+                let (k, v) = line.split_once('=')?;
+                (k.trim() == "vk_mode").then(|| v.trim().to_string())
+            })
+        });
+    parse_vk_layout_mode(raw.as_deref())
 }
 
 #[cfg(feature = "gamepad")]
@@ -165,6 +206,7 @@ fn apply_keyboard_theme_text(theme: &mut KeyboardTheme, text: &str) {
             "keyboard_accent" => theme.accent = Some(color),
             "keyboard_text" => theme.text = Some(color),
             "keyboard_sel_text" | "keyboard_selected_text" => theme.sel_text = Some(color),
+            "keyboard_border" => theme.border = Some(color),
             _ => {}
         }
     }
@@ -295,6 +337,7 @@ pub fn set_keyboard_theme(theme: &KeyboardTheme) -> Result<(), String> {
         ("keyboard_accent", theme.accent),
         ("keyboard_text", theme.text),
         ("keyboard_sel_text", theme.sel_text),
+        ("keyboard_border", theme.border),
     ] {
         if let Some(color) = value {
             set_gamepad_setting(key, &format_theme_color(color))?;
@@ -337,9 +380,14 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
         | "keyboard_accent"
         | "keyboard_text"
         | "keyboard_sel_text"
-        | "keyboard_selected_text" => parse_theme_color(value)
+        | "keyboard_selected_text"
+        | "keyboard_border" => parse_theme_color(value)
             .map(|_| ())
             .ok_or_else(|| format!("{key} must be a #RRGGBB color")),
+        "vk_mode" => match value.trim().to_ascii_lowercase().as_str() {
+            "docked" | "floating" => Ok(()),
+            _ => Err("vk_mode must be docked or floating".to_string()),
+        },
         _ => Err(format!("unknown setting: {key}")),
     }
 }

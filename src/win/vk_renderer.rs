@@ -171,6 +171,8 @@ pub struct VkPalette {
     pub text: u32,
     /// Label colour on the selected key (Joyxoff inverts it — `DAT_004a4964`).
     pub sel_text: u32,
+    /// Key outline colour (matches the webview VK border).
+    pub border: u32,
 }
 
 pub struct VkRenderer {
@@ -639,6 +641,7 @@ impl VkRenderer {
         let accent_brush = solid_brush(&self.d2d_context, colorref(pal.accent))?;
         let text_brush = solid_brush(&self.d2d_context, colorref(pal.text))?;
         let sel_text_brush = solid_brush(&self.d2d_context, colorref(pal.sel_text))?;
+        let border_brush = solid_brush(&self.d2d_context, colorref(pal.border))?;
 
         if let Some(strip) = candidates {
             draw_candidate_strip(
@@ -677,6 +680,12 @@ impl VkRenderer {
             };
             let label_color = if selected { pal.sel_text } else { pal.text };
             self.d2d_context.FillRoundedRectangle(&rect, fill);
+            // Outline non-selected keys to match the webview VK border; the selected key keeps a
+            // clean accent fill.
+            if !selected {
+                self.d2d_context
+                    .DrawRoundedRectangle(&rect, &border_brush, 1.25, None);
+            }
 
             if let Some(sub) = &key.sublabel {
                 let kh = kr.bottom - kr.top;
