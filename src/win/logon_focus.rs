@@ -41,6 +41,13 @@ static DUMP_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// loop). Gates the per-keystroke focus redirect so userland is untouched.
 static ON_WINLOGON: AtomicBool = AtomicBool::new(false);
 
+/// Set whenever we stop the search service for the secure desktop (and `true`
+/// at startup); cleared after we issue a userland `sc start`. Lets us re-start
+/// the service exactly once per userland transition — including the orphan case
+/// where this process started fresh in userland after a prior run stopped it —
+/// without spawning `sc.exe` on every poll.
+static NEED_SEARCH_START: AtomicBool = AtomicBool::new(true);
+
 /// Thread id of the gamepad loop (the COM/UIA apartment + Winlogon-attached
 /// thread). `focus_password_field` no-ops off this thread so the VK UI thread's
 /// mouse path never inits COM on the wrong apartment.
@@ -80,12 +87,27 @@ pub fn set_active(on_winlogon: bool) {
         LOOP_TID.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
         if !was {
             // Entered the secure desktop: stop the native touch keyboard being
-            // summoned on credential-field focus (the hide loop only flashes it).
+            // summoned on credential-field focus (the hide loop only flashes it),
+            // and stop the search service live so the gamepad keyboard can't be
+            // summoned. `Start` is left untouched (always auto) so userland — and
+            // any reboot — can bring it straight back.
             crate::win::native_keyboard::disable_auto_invoke();
+            crate::win::native_keyboard::stop_search_service();
+            NEED_SEARCH_START.store(true, Ordering::SeqCst);
         }
-    } else if was {
-        clear_cache();
-        crate::win::native_keyboard::restore_auto_invoke();
+    } else {
+        // Userland. Re-start the search service once per transition (and once at
+        // startup) so Start-menu search works. Guarded by NEED_SEARCH_START so we
+        // don't spawn `sc.exe` every poll; the startup default of `true` also
+        // covers the orphan case (process started fresh in userland after a prior
+        // run stopped the service, so there is no Winlogon->userland edge to ride).
+        if NEED_SEARCH_START.swap(false, Ordering::SeqCst) {
+            crate::win::native_keyboard::ensure_search_service_running();
+        }
+        if was {
+            clear_cache();
+            crate::win::native_keyboard::restore_auto_invoke();
+        }
     }
 }
 

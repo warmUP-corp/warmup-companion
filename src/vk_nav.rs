@@ -225,7 +225,12 @@ fn build_pc_layout(shift: bool, caps: bool) -> Vec<KeyRow> {
         KeyRow {
             keys: vec![
                 KeyCell::vk("", VK_SPACE, GRID_UNITS - 1.5 - 1.5 - 1.5),
-                KeyCell::named("Mic", KeyAction::VoiceInput, 1.5),
+                KeyCell {
+                    label: "Mic".to_string(),
+                    sublabel: Some("WIP".to_string()),
+                    action: KeyAction::VoiceInput,
+                    span: 1.5,
+                },
                 KeyCell::named("Paste", KeyAction::Paste, 1.5),
                 KeyCell::named("", KeyAction::CloseVk, 1.5),
             ],
@@ -299,6 +304,10 @@ pub fn set_voice_input_active(active: bool) {
     request_ui_repaint();
 }
 
+fn voice_input_wip_disabled() -> bool {
+    true
+}
+
 pub fn modifier_state() -> (bool, bool) {
     NAV.lock().map(|n| (n.shift, n.caps)).unwrap_or_default()
 }
@@ -315,16 +324,20 @@ pub fn move_selection(dir: Button) -> bool {
     let mut pos = nav.pos;
     let changed = match dir {
         Button::Left => {
-            if pos.col > 0 {
-                pos.col -= 1;
+            // Wrap around the row: left from the first key lands on the last.
+            let cols = nav.rows[pos.row].keys.len();
+            if cols > 0 {
+                pos.col = if pos.col > 0 { pos.col - 1 } else { cols - 1 };
                 true
             } else {
                 false
             }
         }
         Button::Right => {
-            if pos.col + 1 < nav.rows[pos.row].keys.len() {
-                pos.col += 1;
+            // Wrap around the row: right from the last key lands on the first.
+            let cols = nav.rows[pos.row].keys.len();
+            if cols > 0 {
+                pos.col = if pos.col + 1 < cols { pos.col + 1 } else { 0 };
                 true
             } else {
                 false
@@ -530,6 +543,12 @@ fn send_paste() {
 }
 
 pub fn start_voice_input() {
+    if voice_input_wip_disabled() {
+        crate::install::log_line("vk voice input ignored: WIP");
+        set_voice_input_active(false);
+        return;
+    }
+
     if crate::win::logon_focus::is_active() {
         crate::install::log_line("vk voice input ignored on Winlogon");
         return;

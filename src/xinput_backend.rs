@@ -31,7 +31,7 @@ use windows::Win32::UI::Input::XboxController::{
 use windows::Win32::UI::Input::{
     GetRawInputData, GetRawInputDeviceInfoW, GetRawInputDeviceList, RegisterRawInputDevices,
     HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTDEVICELIST, RAWINPUTHEADER, RIDEV_INPUTSINK,
-    RIDEV_PAGEONLY, RIDI_DEVICEINFO, RID_INPUT, RID_DEVICE_INFO, RIM_TYPEHID,
+    RIDEV_PAGEONLY, RIDI_DEVICEINFO, RID_DEVICE_INFO, RID_INPUT, RIM_TYPEHID,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClassNameW,
@@ -1574,7 +1574,9 @@ fn poll_xinput_tick(state: &mut PollState) {
         state.xusb.retain(|d| !d.is_disconnected());
         if state.xusb.is_empty() {
             state.last_xusb = None;
-            let _ = state.tx.send(SecureMsg::Error("XUSB: pad disconnected; slot freed".into()));
+            let _ = state.tx.send(SecureMsg::Error(
+                "XUSB: pad disconnected; slot freed".into(),
+            ));
         }
     }
     // Keep the last good report: a connected pad occasionally returns no bytes for

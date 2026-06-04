@@ -157,7 +157,8 @@ impl XusbDevice {
             )
         };
         if ok.is_err() || returned == 0 {
-            self.fail_streak.set(self.fail_streak.get().saturating_add(1));
+            self.fail_streak
+                .set(self.fail_streak.get().saturating_add(1));
             return None;
         }
         self.fail_streak.set(0);

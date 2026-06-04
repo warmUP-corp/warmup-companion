@@ -59,6 +59,9 @@ pub struct PcCursor {
     scale_y: f32,
     /// Left mouse button currently held (edge-tracked, Joyxoff `FUN_004512b0`).
     left_held: bool,
+    /// EMA-smoothed cursor delta carried between frames (cursor_smoothing).
+    smooth_dx: f32,
+    smooth_dy: f32,
 }
 
 impl PcCursor {
@@ -85,6 +88,8 @@ impl PcCursor {
             scale_x,
             scale_y,
             left_held: false,
+            smooth_dx: 0.0,
+            smooth_dy: 0.0,
         }
     }
 
@@ -101,6 +106,8 @@ impl PcCursor {
             scale_x,
             scale_y,
             left_held: false,
+            smooth_dx: 0.0,
+            smooth_dy: 0.0,
         }
     }
 
@@ -126,8 +133,23 @@ impl PcCursor {
         if dx == 0.0 && dy == 0.0 {
             self.remainder_x = 0.0;
             self.remainder_y = 0.0;
+            // Snap smoothing state to rest so the cursor doesn't glide after release.
+            self.smooth_dx = 0.0;
+            self.smooth_dy = 0.0;
             return;
         }
+        // EMA smoothing: higher factor = smoother but laggier. Clamped so the cursor
+        // always keeps moving (a factor of 1.0 would freeze it).
+        let s = settings.cursor_smoothing.clamp(0.0, 0.95);
+        let (dx, dy) = if s > 0.0 {
+            let sx = self.smooth_dx * s + dx * (1.0 - s);
+            let sy = self.smooth_dy * s + dy * (1.0 - s);
+            self.smooth_dx = sx;
+            self.smooth_dy = sy;
+            (sx, sy)
+        } else {
+            (dx, dy)
+        };
         let total_x = dx + self.remainder_x;
         let total_y = dy + self.remainder_y;
         let int_x = total_x as i32;
@@ -162,8 +184,11 @@ impl PcCursor {
         let total_x = sx + self.scroll_remainder_x;
         let int_x = total_x as i32;
         self.scroll_remainder_x = total_x - int_x as f32;
+        // Default scrolls content opposite the stick; natural_scroll makes content
+        // follow the stick (reverse direction).
+        let v_sign = if settings.natural_scroll { 1 } else { -1 };
         if int_y != 0 {
-            self.dispatch(Cmd::ScrollV(-int_y));
+            self.dispatch(Cmd::ScrollV(v_sign * int_y));
         }
         if int_x != 0 {
             self.dispatch(Cmd::ScrollH(int_x));

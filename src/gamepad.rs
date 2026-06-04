@@ -18,8 +18,6 @@ const VK_BUTTON: Button = Button::L3;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(8);
 const WARMUP_LAUNCH_DEBOUNCE: Duration = Duration::from_secs(2);
-/// Ignore L3 release right after opening VK (same press must not instantly close).
-const VK_TOGGLE_RELEASE_GRACE: Duration = Duration::from_millis(550);
 /// Ignore spurious X/dpad from misaligned HID for a moment after VK opens.
 const VK_NAV_INPUT_GRACE: Duration = Duration::from_millis(450);
 const DESKTOP_SYNC_LOG_INTERVAL: Duration = Duration::from_secs(120);
@@ -99,6 +97,96 @@ impl Backend {
     fn is_connected(&self) -> bool {
         self.controller_label() != "none"
     }
+
+    // Device features wired through to the active backend; the XInput (Winlogon)
+    // path uses the trait's no-op defaults.
+    fn touchpad(&self) -> crate::gamepad_backend::TouchpadFrame {
+        match self {
+            Backend::Sdl(b) => b.touchpad(),
+            #[cfg(windows)]
+            Backend::XInput(b) => b.touchpad(),
+        }
+    }
+
+    /// Gyro angular velocity — no companion up-frame consumes it yet (gyro-scroll is a
+    /// future config behaviour), but it is wired so the data is reachable.
+    #[allow(dead_code)]
+    fn gyro(&self) -> Option<(f32, f32, f32)> {
+        match self {
+            Backend::Sdl(b) => b.gyro(),
+            #[cfg(windows)]
+            Backend::XInput(b) => b.gyro(),
+        }
+    }
+
+    fn battery(&self) -> crate::gamepad_backend::BatteryFrame {
+        match self {
+            Backend::Sdl(b) => b.battery(),
+            #[cfg(windows)]
+            Backend::XInput(b) => b.battery(),
+        }
+    }
+
+    fn set_led(&mut self, r: u8, g: u8, b: u8) {
+        match self {
+            Backend::Sdl(be) => be.set_led(r, g, b),
+            #[cfg(windows)]
+            Backend::XInput(be) => be.set_led(r, g, b),
+        }
+    }
+
+    fn rumble(&mut self, strong: f32, weak: f32, duration_ms: u32) {
+        match self {
+            Backend::Sdl(b) => b.rumble(strong, weak, duration_ms),
+            #[cfg(windows)]
+            Backend::XInput(b) => b.rumble(strong, weak, duration_ms),
+        }
+    }
+
+    fn trigger_rumble(&mut self, left: f32, right: f32, duration_ms: u32) {
+        match self {
+            Backend::Sdl(b) => b.trigger_rumble(left, right, duration_ms),
+            #[cfg(windows)]
+            Backend::XInput(b) => b.trigger_rumble(left, right, duration_ms),
+        }
+    }
+
+    /// Apply queued device-write commands (LED/rumble) from inbound IPC frames.
+    fn apply_device_commands(&mut self) {
+        use crate::gamepad_backend::PadCommand;
+        for cmd in crate::pipe_server::drain_device_commands() {
+            match cmd {
+                PadCommand::Led { r, g, b } => self.set_led(r, g, b),
+                PadCommand::Rumble { strong, weak, ms } => self.rumble(strong, weak, ms),
+                PadCommand::TriggerRumble { left, right, ms } => {
+                    self.trigger_rumble(left, right, ms)
+                }
+            }
+        }
+    }
+
+    /// Publish device-feature reads (battery on change, touchpad coalesced) to the IPC server.
+    fn publish_device_features(&self) {
+        let bat = self.battery();
+        crate::pipe_server::publish_battery(bat.percent, bat.charging, bat.wired);
+
+        let tp = self.touchpad();
+        // Only publish when a finger slot is present this poll — avoids spamming empty frames.
+        if !tp.fingers.is_empty() {
+            let fingers = tp
+                .fingers
+                .iter()
+                .map(|f| crate::protocol::TouchpadFingerPayload {
+                    index: f.index,
+                    down: f.down,
+                    x: f.x,
+                    y: f.y,
+                    pressure: f.pressure,
+                })
+                .collect();
+            crate::pipe_server::publish_touchpad(crate::protocol::TouchpadPayload { fingers });
+        }
+    }
 }
 
 pub struct GamepadPoll {
@@ -106,7 +194,9 @@ pub struct GamepadPoll {
     vk_down: bool,
     a_down_while_vk: bool,
     last_vk_open: bool,
-    vk_toggle_ignore_until: Option<Instant>,
+    /// The L3 press that opened the VK is still physically down; close only on the
+    /// *next* press. Release-gated, not time-gated — close is instant once L3 lifts.
+    vk_toggle_need_release: bool,
     vk_nav_grace_until: Option<Instant>,
     stick_nav: Option<Button>,
     launch_select_down: bool,
@@ -241,7 +331,7 @@ impl GamepadPoll {
             vk_down: false,
             a_down_while_vk: false,
             last_vk_open: false,
-            vk_toggle_ignore_until: None,
+            vk_toggle_need_release: false,
             vk_nav_grace_until: None,
             stick_nav: None,
             launch_select_down: false,
@@ -261,7 +351,7 @@ impl GamepadPoll {
     pub fn reset_vk_controls(&mut self) {
         self.vk_down = false;
         self.a_down_while_vk = false;
-        self.vk_toggle_ignore_until = None;
+        self.vk_toggle_need_release = false;
         self.vk_nav_grace_until = None;
         self.stick_nav = None;
         self.reset_launch_hotkey();
@@ -276,7 +366,7 @@ impl GamepadPoll {
     pub fn on_vk_opened(&mut self) {
         self.vk_down = false;
         self.a_down_while_vk = false;
-        self.vk_toggle_ignore_until = Some(Instant::now() + VK_TOGGLE_RELEASE_GRACE);
+        self.vk_toggle_need_release = true;
         self.vk_nav_grace_until = Some(Instant::now() + VK_NAV_INPUT_GRACE);
         #[cfg(windows)]
         {
@@ -315,7 +405,11 @@ impl GamepadPoll {
             cursor.set_on_winlogon(Self::input_desktop_is_winlogon());
         }
 
+        // Apply any LED/rumble commands the desktop pushed since the last poll, then
+        // poll the pad and publish its device-feature reads (battery/touchpad).
+        self.backend.apply_device_commands();
         let PadFrame { changes, axes } = self.backend.poll_frame()?;
+        self.backend.publish_device_features();
         let (lx, ly, rx, ry) = axes;
 
         #[cfg(windows)]
@@ -486,16 +580,16 @@ impl GamepadPoll {
         // D-pad/L-stick axis=move focus.
         match (change.button, change.pressed) {
             (VK_BUTTON, true) => {
-                if self
-                    .vk_toggle_ignore_until
-                    .is_some_and(|until| Instant::now() < until)
-                {
+                // Same press that opened the VK is still held — wait for release.
+                if self.vk_toggle_need_release {
                     return None;
                 }
                 Some(VkLoopAction::Close)
             }
             (VK_BUTTON, false) => {
                 self.vk_down = false;
+                // L3 lifted: a fresh press may now close immediately.
+                self.vk_toggle_need_release = false;
                 None
             }
             (Button::Up | Button::Down | Button::Left | Button::Right, true) => {

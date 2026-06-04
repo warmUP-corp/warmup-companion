@@ -32,7 +32,7 @@ The client sends `hello` as its **first** frame after connecting. The server rep
 
 ```json
 {"type":"hello","payload":{
-  "protocolVersion": 1,
+  "protocolVersion": 3,
   "config": { ...GamepadConfig },
   "mode": { "gameActive": false, "launcherForegroundNav": false }
 }}
@@ -85,15 +85,33 @@ camelCase, matching the desktop serde shape:
   "triggerRumbleMagnitude": 0.5,
   "gyroScrollEnabled": false,
   "gyroScrollSensitivity": 1.0,
-  "ledColor": "#b6a0ff"
+  "ledColor": "#b6a0ff",
+  "vkMode": "docked",
+  "keyboardTheme": {
+    "background": "#1f1f1f",
+    "key": "#2b2b2b",
+    "accent": "#4c7b99",
+    "text": "#ffffff",
+    "selectedText": "#ffffff",
+    "border": "#3a3a3a"
+  }
 }
 ```
 
+Added in v3: `keyboardTheme.border` (key outline, derived desktop-side from `key` to match the
+webview VK) and `vkMode` (`"docked"` | `"floating"`; floating renders a compact panel near the
+field instead of the full-width bottom dock). Both are additive and optional.
+
 The companion maps cursor/scroll tuning fields to its internal names per the golden fixture's `configFieldMapping` (`sensitivity->cursor_speed`, `accelerationExp->cursor_accel`, `deadzone->cursor_deadzone`, `scrollSensitivity->scroll_speed`).
+
+`keyboardTheme` is optional, and each color inside it is optional. Colors are `#RRGGBB`;
+the companion persists provided values as `keyboard_bg`, `keyboard_key`,
+`keyboard_accent`, `keyboard_text`, and `keyboard_sel_text` in `settings.ini`. Missing
+fields keep the native keyboard's current dark/light default for that color slot.
 
 ## Versioning policy
 
-- `protocolVersion` is a **single integer**, currently `1`.
+- `protocolVersion` is a **single integer**, currently `3`.
 - Any change to the pipe name, framing, `hello` shape, or a frame's `payload` shape bumps it.
 - Additive-only changes still bump (no minor negotiation in v1 — the boundary is between two independently-deployed binaries we control; a hard version gate is simpler and safer than partial compatibility).
 - A version mismatch is resolved by the server closing the connection; the client surfaces a "companion update required" state rather than interpreting unknown frames.

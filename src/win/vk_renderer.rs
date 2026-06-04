@@ -69,6 +69,16 @@ fn colorref_hex(c: u32) -> String {
     format!("#{r:02X}{g:02X}{b:02X}")
 }
 
+fn colorref_mix(fg: u32, bg: u32, amount: f32) -> u32 {
+    let amount = amount.clamp(0.0, 1.0);
+    let blend = |shift: u32| {
+        let f = ((fg >> shift) & 0xff_u32) as f32;
+        let b = ((bg >> shift) & 0xff_u32) as f32;
+        (b + (f - b) * amount).round() as u32
+    };
+    blend(0) | (blend(8) << 8) | (blend(16) << 16)
+}
+
 fn configure_d2d_quality(ctx: &ID2D1DeviceContext) {
     // Default D2D text path can look aliased on our DXGI composition target.
     let _ = unsafe { ctx.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE) };
@@ -161,6 +171,8 @@ pub struct VkPalette {
     pub text: u32,
     /// Label colour on the selected key (Joyxoff inverts it — `DAT_004a4964`).
     pub sel_text: u32,
+    /// Key outline colour (matches the webview VK border).
+    pub border: u32,
 }
 
 pub struct VkRenderer {
@@ -198,6 +210,9 @@ const RADIUS_FRAC: f32 = 6.8 / 68.0;
 /// Prefix-completion candidate strip (reclaims former legend/tooltip row).
 pub const CANDIDATE_STRIP_H: f32 = 70.0;
 
+/// Uniform padding between the floating card's rounded edge and its key grid.
+pub const FLOATING_PAD: f32 = 18.0;
+
 const CHIP_H: f32 = 48.0;
 const CHIP_GAP: f32 = 10.0;
 const CHIP_PAD_X: f32 = 14.0;
@@ -211,8 +226,8 @@ const CHIP_FONT_PX: f32 = 14.0;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum VkIcon {
     Backspace,
+    Close,
     Enter,
-    Mic,
     MicOff,
     Space,
     Paste,
@@ -235,11 +250,11 @@ impl VkIcon {
             VkIcon::Backspace => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 5a2 2 0 0 0-1.344.519l-6.328 5.74a1 1 0 0 0 0 1.481l6.328 5.741A2 2 0 0 0 10 19h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z"/><path d="m12 9 6 6"/><path d="m18 9-6 6"/></svg>"#
             }
+            VkIcon::Close => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>"#
+            }
             VkIcon::Enter => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 4v7a4 4 0 0 1-4 4H4"/><path d="m9 10-5 5 5 5"/></svg>"#
-            }
-            VkIcon::Mic => {
-                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></svg>"#
             }
             VkIcon::MicOff => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M16.95 16.95A7 7 0 0 1 5 12v-2"/><path d="M18.89 13.23A7 7 0 0 0 19 12v-2"/><path d="m2 2 20 20"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/></svg>"#
@@ -269,6 +284,20 @@ impl VkIcon {
 /// Top chrome always reserved so keys do not shift when chips appear.
 pub fn top_chrome_inset() -> f32 {
     CANDIDATE_STRIP_H
+}
+
+/// Natural bounding box `(width, height)` of the key grid at `scale_w`, excluding
+/// card padding and top chrome. Lets the floating card be sized to wrap keys that
+/// render at the same scale as the docked bar.
+pub fn grid_size(scale_w: f32, rows: &[KeyRow]) -> (f32, f32) {
+    let (kw, kh, gap) = key_metrics(scale_w, f32::INFINITY, rows, 0.0);
+    let grid_w = rows
+        .iter()
+        .map(|r| row_pixel_width(r, kw, gap))
+        .fold(0.0f32, f32::max);
+    let n = rows.len() as f32;
+    let block_h = n * kh + (n - 1.0).max(0.0) * gap;
+    (grid_w, block_h)
 }
 /// Key width in px for a span of `n` key-units (`FUN_00463bd0`: span×keyW + (span−1)×gap).
 fn key_width(kw: f32, gap: f32, span: f32) -> f32 {
@@ -308,8 +337,16 @@ fn row_stretch_key(row_index: usize, key_count: usize) -> usize {
     }
 }
 
-pub fn key_rects(client_w: f32, client_h: f32, rows: &[KeyRow], top_inset: f32) -> Vec<KeyRect> {
-    let (kw, kh, gap) = key_metrics(client_w, client_h, rows, top_inset);
+/// `scale_w` drives key size (always the monitor width, so floating keys match the
+/// docked bar); `client_w`/`client_h` drive centering within the target window.
+pub fn key_rects(
+    client_w: f32,
+    client_h: f32,
+    scale_w: f32,
+    rows: &[KeyRow],
+    top_inset: f32,
+) -> Vec<KeyRect> {
+    let (kw, kh, gap) = key_metrics(scale_w, client_h, rows, top_inset);
     let n = rows.len() as f32;
     let block_h = n * kh + (n - 1.0).max(0.0) * gap;
     let mut top = top_inset + ((client_h - top_inset - block_h) / 2.0).max(0.0);
@@ -621,18 +658,57 @@ impl VkRenderer {
         key_glyph: fn(&KeyCell) -> (String, bool),
         key_hint: fn(&KeyCell) -> Option<&'static str>,
         top_inset: f32,
+        scale_w: f32,
         candidates: Option<&crate::vk_predict::StripView>,
+        floating: bool,
     ) -> Result<(), String> {
         let cw = self.width as f32;
         let ch = self.height as f32;
 
         self.d2d_context.BeginDraw();
-        self.d2d_context.Clear(Some(&colorref(pal.bg)));
+
+        let rects = key_rects(cw, ch, scale_w, rows, top_inset);
+
+        if floating {
+            // Floating layout emulates the webview VK card. The window is already sized to wrap
+            // the chips + keys (see `vk_dock_rect`), so the rounded panel fills the whole client
+            // area minus a hairline for the antialiased stroke; content is clipped to it.
+            self.d2d_context.Clear(Some(&D2D1_COLOR_F {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            }));
+            let radius = (ch * 0.06).clamp(14.0, 30.0);
+            let panel = D2D_RECT_F {
+                left: 1.0,
+                top: 1.0,
+                right: cw - 1.0,
+                bottom: ch - 1.0,
+            };
+            let rounded = D2D1_ROUNDED_RECT {
+                rect: panel,
+                radiusX: radius,
+                radiusY: radius,
+            };
+            let bg_brush = solid_brush(&self.d2d_context, colorref(pal.bg))?;
+            let panel_border = solid_brush(&self.d2d_context, colorref(pal.border))?;
+            self.d2d_context.FillRoundedRectangle(&rounded, &bg_brush);
+            self.d2d_context
+                .DrawRoundedRectangle(&rounded, &panel_border, 1.5, None);
+            self.d2d_context.PushAxisAlignedClip(
+                &panel,
+                windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            );
+        } else {
+            self.d2d_context.Clear(Some(&colorref(pal.bg)));
+        }
 
         let key_brush = solid_brush(&self.d2d_context, colorref(pal.key))?;
         let accent_brush = solid_brush(&self.d2d_context, colorref(pal.accent))?;
         let text_brush = solid_brush(&self.d2d_context, colorref(pal.text))?;
         let sel_text_brush = solid_brush(&self.d2d_context, colorref(pal.sel_text))?;
+        let border_brush = solid_brush(&self.d2d_context, colorref(pal.border))?;
 
         if let Some(strip) = candidates {
             draw_candidate_strip(
@@ -648,7 +724,7 @@ impl VkRenderer {
             )?;
         }
 
-        for kr in key_rects(cw, ch, rows, top_inset) {
+        for kr in &rects {
             let key = &rows[kr.pos.row].keys[kr.pos.col];
             let selected = sel.row == kr.pos.row && sel.col == kr.pos.col;
             // Radius scales with key height (Joyxoff 6.8px @ 68px key).
@@ -671,6 +747,12 @@ impl VkRenderer {
             };
             let label_color = if selected { pal.sel_text } else { pal.text };
             self.d2d_context.FillRoundedRectangle(&rect, fill);
+            // Outline non-selected keys to match the webview VK border; the selected key keeps a
+            // clean accent fill.
+            if !selected {
+                self.d2d_context
+                    .DrawRoundedRectangle(&rect, &border_brush, 1.25, None);
+            }
 
             if let Some(sub) = &key.sublabel {
                 let kh = kr.bottom - kr.top;
@@ -692,11 +774,8 @@ impl VkRenderer {
             }
 
             if matches!(key.action, KeyAction::VoiceInput) {
-                if crate::vk_nav::voice_input_active() {
-                    self.draw_svg_icon(VkIcon::MicOff, rect.rect, label_color)?;
-                } else {
-                    self.draw_svg_icon(VkIcon::Mic, rect.rect, label_color)?;
-                }
+                let disabled_color = colorref_mix(label_color, pal.key, 0.42);
+                self.draw_svg_icon(VkIcon::MicOff, rect.rect, disabled_color)?;
             } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE)
             {
                 self.draw_svg_icon(VkIcon::Space, rect.rect, label_color)?;
@@ -708,20 +787,22 @@ impl VkRenderer {
                 self.draw_svg_icon(VkIcon::Enter, rect.rect, label_color)?;
             } else if matches!(key.action, KeyAction::Paste) {
                 self.draw_svg_icon(VkIcon::Paste, rect.rect, label_color)?;
+            } else if matches!(key.action, KeyAction::CloseVk) {
+                self.draw_svg_icon(VkIcon::Close, rect.rect, label_color)?;
             } else if matches!(key.action, KeyAction::Shift) {
                 let (shift, _) = crate::vk_nav::modifier_state();
                 let icon = if shift {
-                    VkIcon::ShiftFilled
+                    VkIcon::CapsFilled
                 } else {
-                    VkIcon::Shift
+                    VkIcon::Caps
                 };
                 self.draw_svg_icon(icon, rect.rect, label_color)?;
             } else if matches!(key.action, KeyAction::CapsLock) {
                 let (_, caps) = crate::vk_nav::modifier_state();
                 let icon = if caps {
-                    VkIcon::CapsFilled
+                    VkIcon::ShiftFilled
                 } else {
-                    VkIcon::Caps
+                    VkIcon::Shift
                 };
                 self.draw_svg_icon(icon, rect.rect, label_color)?;
             } else {
@@ -785,6 +866,10 @@ impl VkRenderer {
         drop(accent_brush);
         drop(text_brush);
         drop(sel_text_brush);
+
+        if floating {
+            self.d2d_context.PopAxisAlignedClip();
+        }
 
         self.d2d_context
             .EndDraw(None, None)
@@ -959,8 +1044,8 @@ fn user_locale_name() -> windows::core::HSTRING {
 /// Returns `(key_width, key_height, gap)` in px. Keys are sized from the window
 /// width at the Joyxoff 92px reference (scaled by `client_w/1920`), holding the
 /// 92:68 aspect, then shrunk to fit all rows in the docked bar's height.
-fn key_metrics(client_w: f32, client_h: f32, rows: &[KeyRow], top_inset: f32) -> (f32, f32, f32) {
-    let scale = (client_w / REF_MON_W).max(0.05);
+fn key_metrics(scale_w: f32, client_h: f32, rows: &[KeyRow], top_inset: f32) -> (f32, f32, f32) {
+    let scale = (scale_w / REF_MON_W).max(0.05);
     let mut kw = REF_KEY_W * scale;
     let mut gap = REF_GAP * scale;
     let mut kh = kw * KEY_ASPECT;

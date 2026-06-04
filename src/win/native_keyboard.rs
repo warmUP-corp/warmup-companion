@@ -45,7 +45,16 @@ const TIP_VALUES: &[(&str, u32)] = &[
 ];
 const SERVICE_START_VALUE: &str = "Start";
 const DISABLED_SERVICE_START: u32 = 4;
-const TEXT_INPUT_SERVICES: &[&str] = &["TextInputManagementService", "TabletInputService"];
+/// `TextInputManagementService` also powers userland Start-menu / taskbar search,
+/// and its DACL denies `SERVICE_CHANGE_CONFIG` to everyone — so it must NOT be
+/// disabled via the registry `Start` value (that strands search until a reboot,
+/// unrecoverable live). It is toggled by live stop/start instead — see
+/// [`stop_search_service`] / [`ensure_search_service_running`]. Keep it OUT of
+/// the registry-disable list below.
+const SEARCH_SERVICE: &str = "TextInputManagementService";
+// Registry `Start`-toggled services. TextInputManagementService is deliberately
+// NOT here (see SEARCH_SERVICE) — it is toggled by live stop/start instead.
+const TEXT_INPUT_SERVICES: &[&str] = &["TabletInputService"];
 
 /// `Some(priors)` while we have TabletTip values overridden. Each prior is the
 /// value to restore (`None` = absent, delete it).
@@ -355,6 +364,66 @@ fn stop_text_input_service(service_name: &'static str) {
     {
         crate::install::log_line(&format!(
             "native kbd: stop service {service_name} thread spawn failed"
+        ));
+    }
+}
+
+/// Stop [`SEARCH_SERVICE`] live for the secure desktop, suppressing the gamepad
+/// keyboard. We toggle the *running state*, never the `Start` type: the service
+/// DACL denies `SERVICE_CHANGE_CONFIG` to everyone (so `sc config` fails with
+/// access-denied 5), and a raw-registry `Start=4` write disables it in the SCM
+/// at next boot with no way to re-enable it live (`sc start` then fails 1058).
+/// LocalSystem — our service account — holds `SERVICE_STOP` per the DACL, so a
+/// live stop works while `Start` stays `2` (auto). See [`ensure_search_service_running`].
+pub fn stop_search_service() {
+    spawn_sc("stop", SEARCH_SERVICE);
+}
+
+/// Start [`SEARCH_SERVICE`] live so userland Start-menu / taskbar search works.
+/// Idempotent: a benign 1056 (already running) is treated as success. Because we
+/// never change the `Start` type, the service is always enabled in the SCM and
+/// LocalSystem's `SERVICE_START` right lets this succeed in the live session —
+/// and any reboot autostarts it (`Start=2`), so search can never be stranded.
+pub fn ensure_search_service_running() {
+    spawn_sc("start", SEARCH_SERVICE);
+}
+
+/// Run `sc.exe <action> <service>` off-thread (SCM calls can block). Logs the
+/// outcome; non-zero exit codes are logged but not treated as fatal (e.g. 1056
+/// = already running, 1062 = not started — both benign for our idempotent use).
+fn spawn_sc(action: &'static str, service_name: &'static str) {
+    let name = service_name.to_string();
+    if thread::Builder::new()
+        .name(format!("warmup-sc-{action}-{service_name}"))
+        .spawn(move || {
+            match hidden_command(Path::new("sc.exe"))
+                .args([action, name.as_str()])
+                .output()
+            {
+                Ok(out) if out.status.success() => {
+                    crate::install::log_line(&format!("native kbd: sc {action} {name} ok"));
+                }
+                Ok(out) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    crate::install::log_line(&format!(
+                        "native kbd: sc {action} {name} returned {} stdout='{}' stderr='{}'",
+                        out.status,
+                        stdout.trim(),
+                        stderr.trim()
+                    ));
+                }
+                Err(e) => {
+                    crate::install::log_line(&format!(
+                        "native kbd: sc {action} {name} spawn failed: {e}"
+                    ));
+                }
+            }
+        })
+        .is_err()
+    {
+        crate::install::log_line(&format!(
+            "native kbd: sc {action} {service_name} thread spawn failed"
         ));
     }
 }

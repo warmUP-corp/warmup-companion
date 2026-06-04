@@ -72,13 +72,14 @@ const fn rgb(v: u32) -> u32 {
 /// Dark/light accent + greys from `FUN_00466970` (dark accent `0xff4c7b99`,
 /// light accent `0xff0e80c7`; the WinRT `UISettings` override is not applied).
 fn vk_palette(dark: bool) -> VkPalette {
-    if dark {
+    let mut pal = if dark {
         VkPalette {
             bg: rgb(0x1f1f1f),
             key: rgb(0x2b2b2b),
             accent: rgb(0x4c7b99),
             text: rgb(0xffffff),
             sel_text: rgb(0xffffff),
+            border: rgb(0x34384a),
         }
     } else {
         VkPalette {
@@ -87,8 +88,29 @@ fn vk_palette(dark: bool) -> VkPalette {
             accent: rgb(0x0e80c7),
             text: rgb(0x000000),
             sel_text: rgb(0xffffff),
+            border: rgb(0xcfcfcf),
         }
+    };
+    let theme = crate::config::keyboard_theme();
+    if let Some(v) = theme.bg {
+        pal.bg = v;
     }
+    if let Some(v) = theme.key {
+        pal.key = v;
+    }
+    if let Some(v) = theme.accent {
+        pal.accent = v;
+    }
+    if let Some(v) = theme.text {
+        pal.text = v;
+    }
+    if let Some(v) = theme.sel_text {
+        pal.sel_text = v;
+    }
+    if let Some(v) = theme.border {
+        pal.border = v;
+    }
+    pal
 }
 
 /// Joyxoff `param_1[0x65]` dark flag, here read live from the OS theme.
@@ -618,15 +640,46 @@ unsafe fn target_monitor_rect() -> windows::Win32::Foundation::RECT {
     }
 }
 
-/// Joyxoff geometry: full monitor width, docked at the screen bottom, with
-/// height = `monitorHeight * 384/1080`. Returns `(x, y, width, height)`.
+/// Keyboard geometry. Returns `(x, y, width, height)`.
+///
+/// - **Docked** (Joyxoff default): full monitor width along the bottom edge, height
+///   = `monitorHeight * 384/1080`.
+/// - **Floating**: a compact, horizontally-centred panel raised off the bottom edge —
+///   emulates the warmUP webview keyboard card. Pushed via the desktop `config.vkMode`.
 unsafe fn vk_dock_rect() -> (i32, i32, i32, i32) {
     let m = target_monitor_rect();
     let full_w = (m.right - m.left).max(1);
     let full_h = (m.bottom - m.top).max(1);
     let h = ((full_h as f32) * VK_KB_REF_H / VK_REF_MONITOR_H).round() as i32;
     let h = h.clamp(160, full_h);
-    (m.left, m.bottom - h, full_w, h)
+    match crate::config::vk_layout_mode() {
+        crate::config::VkLayoutMode::Floating => {
+            // Size the card to wrap chips + keys at the *docked* key scale (scale_w = monitor
+            // width), so floating keys keep the same spacing as the docked bar. The card height
+            // is the chip chrome + the key block + one pad of slack — no full-bar letterbox.
+            let rows = vk_nav::rows_snapshot();
+            let scale_w = full_w as f32;
+            let (grid_w, block_h) = vk_renderer::grid_size(scale_w, &rows);
+            let pad = vk_renderer::FLOATING_PAD;
+            let chrome = vk_renderer::top_chrome_inset();
+            let w = ((grid_w + pad * 2.0).round() as i32).min(full_w);
+            let card_h = ((chrome + block_h + pad).round() as i32).clamp(160, full_h);
+            // Sit close to the bottom edge — just a small breathing gap.
+            let margin = (((full_h as f32) * 0.015).round() as i32).clamp(10, 48);
+            let x = m.left + (full_w - w) / 2;
+            let y = m.bottom - card_h - margin;
+            (x, y, w, card_h)
+        }
+        crate::config::VkLayoutMode::Docked => (m.left, m.bottom - h, full_w, h),
+    }
+}
+
+/// Width used to scale key size (Joyxoff 92px @ 1920 reference). Always the monitor
+/// width so floating keys render at the same scale as the docked bar, independent of
+/// the narrower floating card width.
+unsafe fn vk_scale_w() -> f32 {
+    let m = target_monitor_rect();
+    ((m.right - m.left).max(1)) as f32
 }
 
 unsafe fn create_vk_window() -> Result<HWND, String> {
@@ -696,6 +749,9 @@ unsafe fn show_and_place(hwnd: HWND) {
     );
     let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     ensure_topmost(hwnd);
+    // Draw the keyboard once up front; the slide then just moves the window, so the
+    // already-composited DComp content rides along without a per-frame redraw.
+    render_frame();
     animate_window_y(hwnd, x, start_y, y, outer_w, outer_h, VK_SHOW_ANIMATION_MS);
     start_timers(hwnd);
     log_window_rect(hwnd);
@@ -729,17 +785,19 @@ unsafe fn animate_window_y(
         let t = (started.elapsed().as_secs_f32() / duration.as_secs_f32()).min(1.0);
         let eased = ease_out_cubic(t);
         let y = from_y as f32 + (to_y - from_y) as f32 * eased;
+        // Move only — freeze z-order (SWP_NOZORDER) so the compositor doesn't reinsert
+        // the window every frame, and skip the per-frame redraw (content is unchanged
+        // during the slide). Topmost was asserted once before the loop; the 200ms timer
+        // + WM_WINDOWPOSCHANGING keep it pinned afterwards.
         let _ = SetWindowPos(
             hwnd,
-            HWND_TOPMOST,
+            HWND::default(),
             x,
             y.round() as i32,
             width,
             height,
-            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW,
         );
-        ensure_topmost(hwnd);
-        render_frame();
         if t >= 1.0 {
             break;
         }
@@ -788,6 +846,8 @@ fn render_frame() {
             let sel = vk_nav::selection();
             let candidates = crate::vk_predict::strip_view();
             let top_inset = vk_renderer::top_chrome_inset();
+            let scale_w = vk_scale_w();
+            let floating = matches!(crate::config::vk_layout_mode(), crate::config::VkLayoutMode::Floating);
             if let Err(e) = renderer.draw(
                 &pal,
                 &rows,
@@ -795,7 +855,9 @@ fn render_frame() {
                 key_glyph,
                 key_hint,
                 top_inset,
+                scale_w,
                 candidates.as_ref(),
+                floating,
             ) {
                 vk_log::log(&format!("renderer draw: {e}"));
             }
@@ -838,7 +900,10 @@ fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<KeyCell> {
     let (xf, yf) = (x as f32, y as f32);
     // Same layout the renderer draws with, so clicks always match the visible keys.
     let top_inset = vk_renderer::top_chrome_inset();
-    for kr in vk_renderer::key_rects(client.right as f32, client.bottom as f32, &rows, top_inset) {
+    let scale_w = unsafe { vk_scale_w() };
+    for kr in
+        vk_renderer::key_rects(client.right as f32, client.bottom as f32, scale_w, &rows, top_inset)
+    {
         if xf >= kr.left && xf < kr.right && yf >= kr.top && yf < kr.bottom {
             return rows
                 .get(kr.pos.row)
