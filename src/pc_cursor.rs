@@ -12,6 +12,7 @@ use enigo::{Axis, Coordinate, Direction, Enigo, Mouse, Settings};
 
 const BASE_SPEED: f32 = 100.0;
 const BASE_SCROLL_SPEED: f32 = 20.0;
+const TOUCHPAD_PIXEL_SCALE: f32 = 1.5;
 
 /// Joyxoff's reference resolution: its sensitivity constants are tuned for
 /// 1080p and scaled by `actual/reference` per axis (`FUN_00422dd0`).
@@ -192,6 +193,24 @@ impl PcCursor {
         }
         if int_x != 0 {
             self.dispatch(Cmd::ScrollH(int_x));
+        }
+    }
+
+    pub fn move_touchpad(&mut self, delta: Option<(f32, f32)>) {
+        let Some((dx, dy)) = delta else {
+            return;
+        };
+        let dx = dx * REF_WIDTH * self.scale_x * TOUCHPAD_PIXEL_SCALE;
+        let dy = dy * REF_HEIGHT * self.scale_y * TOUCHPAD_PIXEL_SCALE;
+        let total_x = dx + self.remainder_x;
+        let total_y = dy + self.remainder_y;
+        let int_x = total_x as i32;
+        let int_y = total_y as i32;
+        self.remainder_x = total_x - int_x as f32;
+        self.remainder_y = total_y - int_y as f32;
+        if int_x != 0 || int_y != 0 {
+            self.dispatch(Cmd::Move(int_x, int_y));
+            crate::pipe_server::publish_cursor_moved(int_x as f64, int_y as f64);
         }
     }
 

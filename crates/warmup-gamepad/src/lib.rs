@@ -2,10 +2,27 @@ use sdl3::GamepadSubsystem;
 use sdl3::gamepad::{Axis, Button as SdlButton, Gamepad, GamepadType};
 use sdl3::sys::gamepad::{SDL_GetGamepadFromID, SDL_GetGamepadTouchpadFinger, SDL_SetGamepadLED};
 use std::collections::HashMap;
+use std::ffi::c_char;
 use std::path::Path;
 
 /// SDL3 trigger press threshold: SDL3 range is 0..=32767; 50% ≈ 16383.
 const TRIGGER_THRESHOLD: i16 = 16_383;
+
+fn set_sdl_hint(name: &'static [u8], value: &'static [u8]) {
+    unsafe extern "C" {
+        fn SDL_SetHint(name: *const c_char, value: *const c_char) -> bool;
+    }
+    unsafe {
+        SDL_SetHint(name.as_ptr().cast(), value.as_ptr().cast());
+    }
+}
+
+fn set_controller_feature_hints() {
+    // Optional DualSense features require SDL's HIDAPI driver; set before SDL init.
+    set_sdl_hint(b"SDL_JOYSTICK_HIDAPI\0", b"1\0");
+    set_sdl_hint(b"SDL_JOYSTICK_HIDAPI_PS5\0", b"1\0");
+    set_sdl_hint(b"SDL_JOYSTICK_ENHANCED_REPORTS\0", b"1\0");
+}
 
 /// When several pads are plugged in, prefer PlayStation / Xbox over generic HID.
 fn open_preferred_gamepad(gc_sub: &GamepadSubsystem) -> Option<Gamepad> {
@@ -222,6 +239,7 @@ pub struct GamepadInput {
 impl GamepadInput {
     /// Initialise SDL3, load the community game controller DB, and open the first available pad.
     pub fn new(db_path: &Path) -> Result<Self, String> {
+        set_controller_feature_hints();
         let sdl = sdl3::init().map_err(|e| format!("Failed to init SDL3: {e}"))?;
         let gc_sub = sdl
             .gamepad()

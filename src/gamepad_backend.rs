@@ -112,7 +112,7 @@ pub struct SdlBackend {
 impl SdlBackend {
     pub fn open() -> Result<Self, String> {
         let db = mapping_db_path();
-        let mut input = GamepadInput::new(&db)?;
+        let input = GamepadInput::new(&db)?;
         let gyro_enabled = input.enable_gyro();
         Ok(Self {
             input,
@@ -354,7 +354,11 @@ fn sdl_thread_main(
                 delta,
                 fingers: fingers.to_vec(),
             };
-            let gy = if gyro_enabled { input.read_gyro() } else { None };
+            let gy = if gyro_enabled {
+                input.read_gyro()
+            } else {
+                None
+            };
             (tp, gy)
         } else {
             (TouchpadFrame::default(), None)
@@ -428,11 +432,7 @@ impl GamepadBackend for SdlThreadBackend {
     }
 
     fn battery(&self) -> BatteryFrame {
-        self.shared
-            .battery
-            .lock()
-            .map(|b| *b)
-            .unwrap_or_default()
+        self.shared.battery.lock().map(|b| *b).unwrap_or_default()
     }
 
     fn set_led(&mut self, r: u8, g: u8, b: u8) {

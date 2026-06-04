@@ -44,6 +44,7 @@ enum Backend {
 struct PadFrame {
     changes: Vec<ButtonChange>,
     axes: (f32, f32, f32, f32),
+    touchpad: crate::gamepad_backend::TouchpadFrame,
 }
 
 impl Backend {
@@ -56,6 +57,7 @@ impl Backend {
                 Ok(PadFrame {
                     changes: b.button_changes(),
                     axes: b.axes(),
+                    touchpad: b.touchpad(),
                 })
             }
             #[cfg(windows)]
@@ -64,6 +66,7 @@ impl Backend {
                 Ok(PadFrame {
                     changes: b.button_changes(),
                     axes: b.axes(),
+                    touchpad: b.touchpad(),
                 })
             }
         }
@@ -96,16 +99,6 @@ impl Backend {
 
     fn is_connected(&self) -> bool {
         self.controller_label() != "none"
-    }
-
-    // Device features wired through to the active backend; the XInput (Winlogon)
-    // path uses the trait's no-op defaults.
-    fn touchpad(&self) -> crate::gamepad_backend::TouchpadFrame {
-        match self {
-            Backend::Sdl(b) => b.touchpad(),
-            #[cfg(windows)]
-            Backend::XInput(b) => b.touchpad(),
-        }
     }
 
     /// Gyro angular velocity — no companion up-frame consumes it yet (gyro-scroll is a
@@ -166,11 +159,10 @@ impl Backend {
     }
 
     /// Publish device-feature reads (battery on change, touchpad coalesced) to the IPC server.
-    fn publish_device_features(&self) {
+    fn publish_device_features(&self, tp: &crate::gamepad_backend::TouchpadFrame) {
         let bat = self.battery();
         crate::pipe_server::publish_battery(bat.percent, bat.charging, bat.wired);
 
-        let tp = self.touchpad();
         // Only publish when a finger slot is present this poll — avoids spamming empty frames.
         if !tp.fingers.is_empty() {
             let fingers = tp
@@ -193,6 +185,8 @@ pub struct GamepadPoll {
     backend: Backend,
     vk_down: bool,
     a_down_while_vk: bool,
+    a_cursor_down: bool,
+    touchpad_cursor_down: bool,
     last_vk_open: bool,
     /// The L3 press that opened the VK is still physically down; close only on the
     /// *next* press. Release-gated, not time-gated — close is instant once L3 lifts.
@@ -330,6 +324,8 @@ impl GamepadPoll {
             backend,
             vk_down: false,
             a_down_while_vk: false,
+            a_cursor_down: false,
+            touchpad_cursor_down: false,
             last_vk_open: false,
             vk_toggle_need_release: false,
             vk_nav_grace_until: None,
@@ -351,6 +347,8 @@ impl GamepadPoll {
     pub fn reset_vk_controls(&mut self) {
         self.vk_down = false;
         self.a_down_while_vk = false;
+        self.a_cursor_down = false;
+        self.touchpad_cursor_down = false;
         self.vk_toggle_need_release = false;
         self.vk_nav_grace_until = None;
         self.stick_nav = None;
@@ -393,6 +391,9 @@ impl GamepadPoll {
     ) -> Result<Vec<VkLoopAction>, String> {
         if vk_open && !self.last_vk_open {
             self.on_vk_opened();
+            self.a_cursor_down = false;
+            self.touchpad_cursor_down = false;
+            cursor.set_left_button(false);
         }
         self.last_vk_open = vk_open;
 
@@ -408,8 +409,12 @@ impl GamepadPoll {
         // Apply any LED/rumble commands the desktop pushed since the last poll, then
         // poll the pad and publish its device-feature reads (battery/touchpad).
         self.backend.apply_device_commands();
-        let PadFrame { changes, axes } = self.backend.poll_frame()?;
-        self.backend.publish_device_features();
+        let PadFrame {
+            changes,
+            axes,
+            touchpad,
+        } = self.backend.poll_frame()?;
+        self.backend.publish_device_features(&touchpad);
         let (lx, ly, rx, ry) = axes;
 
         #[cfg(windows)]
@@ -443,6 +448,7 @@ impl GamepadPoll {
             return Ok(edges);
         }
 
+        cursor.move_touchpad(touchpad.delta);
         cursor.move_stick(lx, ly, dt_secs);
         cursor.scroll_stick(rx, ry, dt_secs);
 
@@ -455,18 +461,18 @@ impl GamepadPoll {
             // Forward every edge to the warmUP desktop over the pipe so the launcher grid
             // is gamepad-navigable (#348). The companion still drives its own VK/cursor below.
             crate::pipe_server::publish_button(change.button.as_str(), change.pressed);
-            if change.button == Button::A {
-                // Joyxoff-style hold: A down -> mouse-left down, A up -> up, so
+            if change.button == Button::A || change.button == Button::Touchpad {
+                // Joyxoff-style hold: button down -> mouse-left down, up -> up, so
                 // the PIN keypad sees a real press duration (not an instant click).
                 // Gate the *press* by cursor mode (#349); always forward the release so a
                 // click can't get stuck down if the mode flips while A is held.
-                if change.pressed {
-                    if crate::pipe_server::clicks_enabled() {
-                        cursor.set_left_button(true);
-                    }
-                } else {
-                    cursor.set_left_button(false);
+                match change.button {
+                    Button::A => self.a_cursor_down = change.pressed,
+                    Button::Touchpad => self.touchpad_cursor_down = change.pressed,
+                    _ => {}
                 }
+                let any_click_down = self.a_cursor_down || self.touchpad_cursor_down;
+                cursor.set_left_button(any_click_down && crate::pipe_server::clicks_enabled());
             }
             if crate::pipe_server::native_vk_suppressed() {
                 continue;
