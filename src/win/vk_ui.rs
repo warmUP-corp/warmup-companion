@@ -79,7 +79,7 @@ fn vk_palette(dark: bool) -> VkPalette {
             accent: rgb(0x4c7b99),
             text: rgb(0xffffff),
             sel_text: rgb(0xffffff),
-            border: rgb(0x3a3a3a),
+            border: rgb(0x34384a),
         }
     } else {
         VkPalette {
@@ -828,6 +828,7 @@ fn render_frame() {
             let sel = vk_nav::selection();
             let candidates = crate::vk_predict::strip_view();
             let top_inset = vk_renderer::top_chrome_inset();
+            let floating = matches!(crate::config::vk_layout_mode(), crate::config::VkLayoutMode::Floating);
             if let Err(e) = renderer.draw(
                 &pal,
                 &rows,
@@ -836,6 +837,7 @@ fn render_frame() {
                 key_hint,
                 top_inset,
                 candidates.as_ref(),
+                floating,
             ) {
                 vk_log::log(&format!("renderer draw: {e}"));
             }

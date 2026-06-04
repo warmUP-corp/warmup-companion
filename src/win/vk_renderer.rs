@@ -630,12 +630,58 @@ impl VkRenderer {
         key_hint: fn(&KeyCell) -> Option<&'static str>,
         top_inset: f32,
         candidates: Option<&crate::vk_predict::StripView>,
+        floating: bool,
     ) -> Result<(), String> {
         let cw = self.width as f32;
         let ch = self.height as f32;
 
         self.d2d_context.BeginDraw();
-        self.d2d_context.Clear(Some(&colorref(pal.bg)));
+
+        let rects = key_rects(cw, ch, rows, top_inset);
+
+        if floating {
+            // Floating layout emulates the webview VK card: a transparent backdrop with a rounded
+            // panel sized to wrap the keys (not a full-bleed opaque rectangle). Content is clipped
+            // to the panel so nothing bleeds into the transparent gutter.
+            self.d2d_context.Clear(Some(&D2D1_COLOR_F {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            }));
+            let mut min_l = cw;
+            let mut max_r = 0.0_f32;
+            let mut max_b = 0.0_f32;
+            for kr in &rects {
+                min_l = min_l.min(kr.left);
+                max_r = max_r.max(kr.right);
+                max_b = max_b.max(kr.bottom);
+            }
+            let pad = (ch * 0.045).clamp(10.0, 40.0);
+            let radius = (ch * 0.06).clamp(14.0, 30.0);
+            let panel = D2D_RECT_F {
+                left: (min_l - pad).max(0.0),
+                top: pad.max(0.0),
+                right: (max_r + pad).min(cw),
+                bottom: (max_b + pad).min(ch),
+            };
+            let rounded = D2D1_ROUNDED_RECT {
+                rect: panel,
+                radiusX: radius,
+                radiusY: radius,
+            };
+            let bg_brush = solid_brush(&self.d2d_context, colorref(pal.bg))?;
+            let panel_border = solid_brush(&self.d2d_context, colorref(pal.border))?;
+            self.d2d_context.FillRoundedRectangle(&rounded, &bg_brush);
+            self.d2d_context
+                .DrawRoundedRectangle(&rounded, &panel_border, 1.5, None);
+            self.d2d_context.PushAxisAlignedClip(
+                &panel,
+                windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            );
+        } else {
+            self.d2d_context.Clear(Some(&colorref(pal.bg)));
+        }
 
         let key_brush = solid_brush(&self.d2d_context, colorref(pal.key))?;
         let accent_brush = solid_brush(&self.d2d_context, colorref(pal.accent))?;
@@ -657,7 +703,7 @@ impl VkRenderer {
             )?;
         }
 
-        for kr in key_rects(cw, ch, rows, top_inset) {
+        for kr in &rects {
             let key = &rows[kr.pos.row].keys[kr.pos.col];
             let selected = sel.row == kr.pos.row && sel.col == kr.pos.col;
             // Radius scales with key height (Joyxoff 6.8px @ 68px key).
@@ -797,6 +843,10 @@ impl VkRenderer {
         drop(accent_brush);
         drop(text_brush);
         drop(sel_text_brush);
+
+        if floating {
+            self.d2d_context.PopAxisAlignedClip();
+        }
 
         self.d2d_context
             .EndDraw(None, None)
