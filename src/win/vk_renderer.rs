@@ -2,8 +2,10 @@
 
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
+use std::time::Instant;
 
 use windows::core::{w, Interface};
+use windows::Foundation::Numerics::Matrix3x2;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -28,10 +30,11 @@ use windows::Win32::Graphics::DirectComposition::{
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
-    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL,
-    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
-    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
+    IDWriteTextLayout, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
+    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
+    DWRITE_TEXT_METRICS,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
@@ -77,6 +80,10 @@ fn colorref_mix(fg: u32, bg: u32, amount: f32) -> u32 {
         (b + (f - b) * amount).round() as u32
     };
     blend(0) | (blend(8) << 8) | (blend(16) << 16)
+}
+
+pub fn mix_color(fg: u32, bg: u32, amount: f32) -> u32 {
+    colorref_mix(fg, bg, amount)
 }
 
 fn configure_d2d_quality(ctx: &ID2D1DeviceContext) {
@@ -190,6 +197,7 @@ pub struct VkRenderer {
     chip_format: IDWriteTextFormat,
     sublabel_format: IDWriteTextFormat,
     icon_cache: HashMap<IconCacheKey, ID2D1Bitmap1>,
+    prompt_started: Instant,
     _d3d: ID3D11Device,
     _d2d_device: ID2D1Device,
     _dcomp_device: IDCompositionDevice,
@@ -235,6 +243,9 @@ enum VkIcon {
     ShiftFilled,
     Caps,
     CapsFilled,
+    /// PlayStation L3 (left-stick click) chip — keeps its native colors (no
+    /// `currentColor`), extracted from the controller-icon atlas.
+    L3,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -277,6 +288,9 @@ impl VkIcon {
             VkIcon::CapsFilled => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1v-6a1 1 0 0 1 1-1h3.293a.707.707 0 0 0 .5-1.207l-7.086-7.086a1 1 0 0 0-1.414 0l-7.086 7.086a.707.707 0 0 0 .5 1.207H8a1 1 0 0 1 1 1z"/></svg>"#
             }
+            // Native-colored chip; has no `currentColor`, so the palette swap in
+            // `draw_svg_icon` is a no-op and it keeps its PlayStation look.
+            VkIcon::L3 => include_str!("../../controller-icons/l3.svg"),
         }
     }
 }
@@ -544,6 +558,7 @@ impl VkRenderer {
             chip_format,
             sublabel_format,
             icon_cache: HashMap::new(),
+            prompt_started: Instant::now(),
             _d3d: d3d,
             _d2d_device: d2d_device,
             _dcomp_device: dcomp_device,
@@ -583,16 +598,27 @@ impl VkRenderer {
         color: u32,
     ) -> Result<(), String> {
         let h = rect.bottom - rect.top;
-        let px = (h * 0.5).round().clamp(16.0, 96.0) as u32;
-        let key = IconCacheKey { icon, px, color };
+        let draw_px = match icon {
+            VkIcon::L3 => (h * 0.88).round().clamp(24.0, 64.0),
+            _ => (h * 0.5).round().clamp(16.0, 96.0),
+        };
+        let raster_px = match icon {
+            VkIcon::L3 => (draw_px * 3.0).round().clamp(72.0, 192.0),
+            _ => draw_px,
+        } as u32;
+        let key = IconCacheKey {
+            icon,
+            px: raster_px,
+            color,
+        };
         if !self.icon_cache.contains_key(&key) {
             let svg = icon.svg().replace("currentColor", &colorref_hex(color));
             let opt = resvg::usvg::Options::default();
             let tree = resvg::usvg::Tree::from_data(svg.as_bytes(), &opt)
                 .map_err(|e| format!("parse svg icon {icon:?}: {e}"))?;
-            let mut pixmap = resvg::tiny_skia::Pixmap::new(px, px)
-                .ok_or_else(|| format!("alloc svg icon pixmap {px}x{px}"))?;
-            let scale = px as f32 / 24.0;
+            let mut pixmap = resvg::tiny_skia::Pixmap::new(raster_px, raster_px)
+                .ok_or_else(|| format!("alloc svg icon pixmap {raster_px}x{raster_px}"))?;
+            let scale = raster_px as f32 / 24.0;
             resvg::render(
                 &tree,
                 resvg::tiny_skia::Transform::from_scale(scale, scale),
@@ -617,11 +643,11 @@ impl VkRenderer {
                 .d2d_context
                 .CreateBitmap(
                     D2D_SIZE_U {
-                        width: px,
-                        height: px,
+                        width: raster_px,
+                        height: raster_px,
                     },
                     Some(bgra.as_ptr() as *const core::ffi::c_void),
-                    px * 4,
+                    raster_px * 4,
                     &props,
                 )
                 .map_err(|e| format!("CreateBitmap svg icon {icon:?}: {e}"))?;
@@ -632,7 +658,7 @@ impl VkRenderer {
             .icon_cache
             .get(&key)
             .ok_or_else(|| format!("missing svg icon cache {icon:?}"))?;
-        let size = px as f32;
+        let size = draw_px;
         let dest = D2D_RECT_F {
             left: (rect.left + rect.right - size) * 0.5,
             top: (rect.top + rect.bottom - size) * 0.5,
@@ -939,6 +965,168 @@ impl VkRenderer {
             y += 26.0;
         }
 
+        self.d2d_context
+            .EndDraw(None, None)
+            .map_err(|e| format!("EndDraw: {e}"))?;
+        self.swapchain
+            .Present(1, DXGI_PRESENT(0))
+            .ok()
+            .map_err(|e| format!("Present: {e}"))?;
+        Ok(())
+    }
+
+    /// Measure a text run's width in DIPs at [`Self::text_format`].
+    unsafe fn measure_text(&self, text: &str) -> f32 {
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        let layout: Option<IDWriteTextLayout> = self
+            .dwrite
+            .CreateTextLayout(&wide, &self.text_format, f32::MAX, f32::MAX)
+            .ok();
+        let Some(layout) = layout else { return 0.0 };
+        let mut m = DWRITE_TEXT_METRICS::default();
+        if layout.GetMetrics(&mut m).is_err() {
+            return 0.0;
+        }
+        m.widthIncludingTrailingWhitespace
+    }
+
+    /// Draw the "Press [L3] to open keyboard" prompt: a rounded pill filling the
+    /// client area, with `prefix` · L3 chip · `suffix` laid out left→right and
+    /// centered. The L3 chip keeps its native colors; text uses `text_color`.
+    pub unsafe fn draw_prompt(
+        &mut self,
+        bg: u32,
+        border: u32,
+        text_color: u32,
+        prefix: &str,
+        suffix: &str,
+        show_l3: bool,
+    ) -> Result<(), String> {
+        let cw = self.width as f32;
+        let ch = self.height as f32;
+        // Segments flow left to right, top-aligned to a shared baseline band.
+        let _ = self
+            .text_format
+            .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        let _ = self
+            .text_format
+            .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+        self.d2d_context.BeginDraw();
+        self.d2d_context.Clear(Some(&D2D1_COLOR_F {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        }));
+
+        let t = self.prompt_started.elapsed().as_secs_f32();
+        let pulse = (t * 0.33).fract();
+        let pulse_alpha = (1.0 - pulse).powi(2);
+        let scale_phase = (t * std::f32::consts::TAU * 0.33).sin() * 0.5 + 0.5;
+        let scale = 0.985 + 0.015 * scale_phase;
+        let transform = Matrix3x2 {
+            M11: scale,
+            M12: 0.0,
+            M21: 0.0,
+            M22: scale,
+            M31: cw * (1.0 - scale) * 0.5,
+            M32: ch * (1.0 - scale) * 0.5,
+        };
+        self.d2d_context.SetTransform(&transform);
+
+        // Rounded pill fills the window minus a hairline for the antialiased stroke.
+        let radius = (ch * 0.5 - 2.0).max(8.0);
+        let panel = D2D_RECT_F {
+            left: 4.0,
+            top: 4.0,
+            right: cw - 4.0,
+            bottom: ch - 4.0,
+        };
+        let rounded = D2D1_ROUNDED_RECT {
+            rect: panel,
+            radiusX: radius,
+            radiusY: radius,
+        };
+        let glow = colorref_mix(0x00FFFFFF, border, 0.38);
+        let bg_brush = solid_brush(&self.d2d_context, colorref(bg))?;
+        let glow_brush = solid_brush(&self.d2d_context, colorref_alpha(glow, 0.30 * pulse_alpha))?;
+        let border_brush = solid_brush(&self.d2d_context, colorref(glow))?;
+        self.d2d_context.FillRoundedRectangle(&rounded, &bg_brush);
+        self.d2d_context
+            .DrawRoundedRectangle(&rounded, &glow_brush, 2.0 + 8.0 * pulse, None);
+        self.d2d_context
+            .DrawRoundedRectangle(&rounded, &border_brush, 1.5, None);
+
+        // Chip is a square sized to the pill height; text runs sit either side.
+        let chip = (ch * 0.70).clamp(26.0, 48.0);
+        let gap = 8.0;
+        let w_prefix = self.measure_text(prefix);
+        let w_suffix = self.measure_text(suffix);
+        let total = if show_l3 {
+            w_prefix + gap + chip + gap + w_suffix
+        } else {
+            w_prefix
+        };
+        let mut x = ((cw - total) * 0.5).max(0.0);
+        let text_brush = solid_brush(&self.d2d_context, colorref(text_color))?;
+
+        // Prefix.
+        let pre: Vec<u16> = prefix.encode_utf16().collect();
+        self.d2d_context.DrawText(
+            &pre,
+            &self.text_format,
+            &D2D_RECT_F {
+                left: x,
+                top: 0.0,
+                right: x + w_prefix,
+                bottom: ch,
+            },
+            &text_brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
+        if show_l3 {
+            x += w_prefix + gap;
+
+            // L3 chip (native colors; the passed color is ignored by the no-op swap).
+            let chip_rect = D2D_RECT_F {
+                left: x,
+                top: (ch - chip) * 0.5,
+                right: x + chip,
+                bottom: (ch + chip) * 0.5,
+            };
+            self.draw_svg_icon(VkIcon::L3, chip_rect, text_color)?;
+            x += chip + gap;
+        }
+
+        // Suffix.
+        if !suffix.is_empty() {
+            let suf: Vec<u16> = suffix.encode_utf16().collect();
+            self.d2d_context.DrawText(
+                &suf,
+                &self.text_format,
+                &D2D_RECT_F {
+                    left: x,
+                    top: 0.0,
+                    right: x + w_suffix,
+                    bottom: ch,
+                },
+                &text_brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+
+        let identity = Matrix3x2 {
+            M11: 1.0,
+            M12: 0.0,
+            M21: 0.0,
+            M22: 1.0,
+            M31: 0.0,
+            M32: 0.0,
+        };
+        self.d2d_context.SetTransform(&identity);
         self.d2d_context
             .EndDraw(None, None)
             .map_err(|e| format!("EndDraw: {e}"))?;

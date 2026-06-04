@@ -110,6 +110,20 @@ pub fn debug_ui_enabled() -> bool {
     false
 }
 
+/// Winlogon "Press L3 to open keyboard" prompt overlay. User-facing, so default
+/// ON in service mode; killed by `WARMUP_VK_PROMPT=0` or a disable sentinel file.
+#[cfg(windows)]
+pub fn prompt_overlay_enabled() -> bool {
+    let off = std::env::var_os("WARMUP_VK_PROMPT").is_some_and(|v| v == "0")
+        || std::path::Path::new(r"C:\ProgramData\WarmupVk\prompt.disabled").is_file();
+    !off
+}
+
+#[cfg(not(windows))]
+pub fn prompt_overlay_enabled() -> bool {
+    false
+}
+
 #[cfg(feature = "gamepad")]
 pub fn userland_gamepad_poll_mode() -> warmup_gamepad::PollMode {
     gamepad_settings().userland_poll_mode

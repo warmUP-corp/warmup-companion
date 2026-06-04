@@ -910,6 +910,9 @@ where
             if crate::config::debug_ui_enabled() {
                 crate::win::debug_overlay::tick();
             }
+            if crate::config::prompt_overlay_enabled() {
+                crate::win::prompt_overlay::tick(vk_open());
+            }
             poll.log_desktop_sync_if_due(true);
             if crate::config::debug_ui_enabled() {
                 if crate::win::debug_overlay::take_vk_toggle_request() {
