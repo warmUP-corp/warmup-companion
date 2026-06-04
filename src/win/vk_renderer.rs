@@ -226,6 +226,7 @@ const CHIP_FONT_PX: f32 = 14.0;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum VkIcon {
     Backspace,
+    Close,
     Enter,
     MicOff,
     Space,
@@ -248,6 +249,9 @@ impl VkIcon {
         match self {
             VkIcon::Backspace => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 5a2 2 0 0 0-1.344.519l-6.328 5.74a1 1 0 0 0 0 1.481l6.328 5.741A2 2 0 0 0 10 19h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z"/><path d="m12 9 6 6"/><path d="m18 9-6 6"/></svg>"#
+            }
+            VkIcon::Close => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>"#
             }
             VkIcon::Enter => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 4v7a4 4 0 0 1-4 4H4"/><path d="m9 10-5 5 5 5"/></svg>"#
@@ -783,6 +787,8 @@ impl VkRenderer {
                 self.draw_svg_icon(VkIcon::Enter, rect.rect, label_color)?;
             } else if matches!(key.action, KeyAction::Paste) {
                 self.draw_svg_icon(VkIcon::Paste, rect.rect, label_color)?;
+            } else if matches!(key.action, KeyAction::CloseVk) {
+                self.draw_svg_icon(VkIcon::Close, rect.rect, label_color)?;
             } else if matches!(key.action, KeyAction::Shift) {
                 let (shift, _) = crate::vk_nav::modifier_state();
                 let icon = if shift {
