@@ -22,8 +22,13 @@ static CLICKS_ENABLED: AtomicBool = AtomicBool::new(true);
 /// WarmUp webview text entry is active. While true, the companion must not open
 /// or drive the native VK; button edges keep flowing to the desktop web VK.
 static LAUNCHER_OWNS_TEXT_INPUT: AtomicBool = AtomicBool::new(false);
-/// A game session is active. While true, the companion polls only Guide edges.
+/// A game session is active (a real game process owns the foreground). Combined with
+/// [`LAUNCHER_FOREGROUND_NAV`] this selects the poll mode: see [`launcher_foreground_nav`].
 static GAME_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// The warmUP launcher window is the foreground surface. When a game session is active but the
+/// user has brought the launcher forward (Guide-wake over a running game), this stays the full
+/// poll mode instead of sleeping, so the controller can navigate the launcher.
+static LAUNCHER_FOREGROUND_NAV: AtomicBool = AtomicBool::new(false);
 
 /// Coalesced visual-cursor hint accumulated since the last send: `(dx, dy, dirty)`.
 static CURSOR_ACC: OnceLock<Mutex<(f64, f64, bool)>> = OnceLock::new();
@@ -48,9 +53,15 @@ pub fn native_vk_suppressed() -> bool {
     LAUNCHER_OWNS_TEXT_INPUT.load(Ordering::Relaxed) || GAME_ACTIVE.load(Ordering::Relaxed)
 }
 
-/// Whether the companion should only observe Guide button edges.
+/// Whether a real game session owns the foreground (raw flag from the desktop).
 pub fn game_active() -> bool {
     GAME_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Whether the warmUP launcher is the foreground surface over a running game. When true, the
+/// companion stays in the full poll mode even though [`game_active`] is set.
+pub fn launcher_foreground_nav() -> bool {
+    LAUNCHER_FOREGROUND_NAV.load(Ordering::Relaxed)
 }
 
 /// Accumulate a visual-cursor hint. The companion has already injected the OS move; this
@@ -383,12 +394,14 @@ fn apply_mode(p: &ModeSnapshot) {
     CLICKS_ENABLED.store(p.clicks_enabled, Ordering::Relaxed);
     LAUNCHER_OWNS_TEXT_INPUT.store(p.launcher_owns_text_input, Ordering::Relaxed);
     GAME_ACTIVE.store(p.game_active, Ordering::Relaxed);
+    LAUNCHER_FOREGROUND_NAV.store(p.launcher_foreground_nav, Ordering::Relaxed);
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
 fn clear_desktop_mode() {
     LAUNCHER_OWNS_TEXT_INPUT.store(false, Ordering::Relaxed);
     GAME_ACTIVE.store(false, Ordering::Relaxed);
+    LAUNCHER_FOREGROUND_NAV.store(false, Ordering::Relaxed);
 }
 
 /// Latest connection snapshot, published by the gamepad loop and read by the server.
@@ -888,5 +901,32 @@ mod tests {
         });
         assert!(clicks_enabled());
         assert!(!launcher_owns_text_input());
+
+        // Surface flags drive the poll mode (see `effective_userland_poll_mode`):
+        // in-game = a game owns the foreground and the launcher is not over it.
+        apply_mode(&ModeSnapshot {
+            game_active: true,
+            launcher_foreground_nav: false,
+            clicks_enabled: false,
+            launcher_owns_text_input: false,
+        });
+        assert!(game_active() && !launcher_foreground_nav(), "in-game → sleep");
+
+        // Launcher woken over the running game: nav flips true so the pad keeps driving the launcher.
+        apply_mode(&ModeSnapshot {
+            game_active: true,
+            launcher_foreground_nav: true,
+            clicks_enabled: true,
+            launcher_owns_text_input: true,
+        });
+        assert!(
+            game_active() && launcher_foreground_nav(),
+            "launcher over game → full"
+        );
+
+        // Disconnect resets every surface flag.
+        clear_desktop_mode();
+        assert!(!game_active());
+        assert!(!launcher_foreground_nav());
     }
 }

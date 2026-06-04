@@ -51,8 +51,16 @@ pub enum PadCommand {
     TriggerRumble { left: f32, right: f32, ms: u32 },
 }
 
+/// Selects the poll mode from the desktop-pushed surface flags. The companion has three
+/// effective surfaces:
+///   - **in-game** (`game_active && !launcher_foreground_nav`): a real game owns the screen →
+///     [`PollMode::Sleep`], only Guide edges flow so the game owns the pad.
+///   - **launcher** (`launcher_foreground_nav`): the launcher is foreground (incl. woken over a
+///     running game) → full poll so the controller drives the launcher UI.
+///   - **desktop** (`!game_active`): no game and the launcher is backgrounded → full poll so the
+///     controller keeps driving the OS cursor on the Windows desktop.
 fn effective_userland_poll_mode() -> PollMode {
-    if crate::pipe_server::game_active() {
+    if crate::pipe_server::game_active() && !crate::pipe_server::launcher_foreground_nav() {
         PollMode::Sleep
     } else {
         crate::config::userland_gamepad_poll_mode()
