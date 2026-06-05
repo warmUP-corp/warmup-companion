@@ -106,8 +106,8 @@ pub fn predictions_enabled() -> bool {
     }
     #[cfg(not(test))]
     {
-        crate::win::input_desktop_name()
-            .map(|n| !n.eq_ignore_ascii_case("winlogon"))
+        crate::win::surface::input()
+            .map(|s| s.is_userland())
             .unwrap_or(false)
     }
 }

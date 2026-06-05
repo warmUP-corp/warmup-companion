@@ -5,6 +5,7 @@ pub mod logon_focus;
 pub mod native_keyboard;
 pub mod prompt_overlay;
 pub mod speech_input;
+pub mod surface;
 pub mod vk_layouts;
 mod vk_log;
 mod vk_renderer;

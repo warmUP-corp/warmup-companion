@@ -105,7 +105,7 @@ pub fn tick() {
     let on_winlogon = match desktop::input_desktop_name() {
         Ok(name) => {
             c.input_probe_failures = 0;
-            let on_winlogon = name.eq_ignore_ascii_case("Winlogon");
+            let on_winlogon = super::surface::classify(&name).is_winlogon();
             if on_winlogon {
                 c.off_winlogon_streak = 0;
             } else {

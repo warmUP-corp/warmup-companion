@@ -568,10 +568,7 @@ impl XInputBackend {
     }
 
     fn input_is_winlogon(&mut self) -> bool {
-        let winlogon = match crate::win::input_desktop_name() {
-            Ok(name) => name.eq_ignore_ascii_case("Winlogon"),
-            Err(_) => false,
-        };
+        let winlogon = crate::win::surface::input().is_some_and(|s| s.is_winlogon());
         if winlogon {
             self.secure_leave_winlogon_streak = 0;
             return true;

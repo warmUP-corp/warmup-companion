@@ -408,9 +408,7 @@ impl VkRenderer {
         // unreliable (confirmed via minidump). On the secure desktop, render with
         // the WARP software rasterizer, which never loads the vendor UMD. Userland
         // keeps hardware for perf. Either way, fall back to the other on failure.
-        let on_secure = crate::win::current_desktop_name()
-            .map(|n| n.eq_ignore_ascii_case("Winlogon"))
-            .unwrap_or(false);
+        let on_secure = crate::win::surface::thread().is_some_and(|s| s.is_winlogon());
         let d3d = create_d3d_device(on_secure)?;
         let dxgi_device: IDXGIDevice = d3d.cast().map_err(|e| format!("IDXGIDevice: {e}"))?;
 
