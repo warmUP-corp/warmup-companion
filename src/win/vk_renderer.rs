@@ -395,6 +395,49 @@ pub fn key_rects(
     out
 }
 
+/// Shift/caps captured for one frame, so the glyph loop never re-reads global
+/// nav state mid-draw. Same `VkModifiers` + same rows -> same pixels.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VkModifiers {
+    pub shift: bool,
+    pub caps: bool,
+}
+
+/// One immutable snapshot of everything the VK renderer needs for a frame.
+/// `render_frame` assembles it from a single logical read of nav/predict state;
+/// `draw` consumes only `&VkFrame` and performs no global reads, so the
+/// selection/glyph-branch logic is testable without a NAV lock or a D2D device.
+pub struct VkFrame<'a> {
+    pub pal: &'a VkPalette,
+    pub rows: &'a [KeyRow],
+    pub sel: KeyPos,
+    pub key_glyph: fn(&KeyCell) -> (String, bool),
+    pub key_hint: fn(&KeyCell) -> Option<&'static str>,
+    pub top_inset: f32,
+    pub scale_w: f32,
+    pub candidates: Option<&'a crate::vk_predict::StripState>,
+    pub floating: bool,
+    pub modifiers: VkModifiers,
+}
+
+/// Glyph for the Shift key (the Shift-action key reflects `shift`).
+fn shift_icon(shift: bool) -> VkIcon {
+    if shift {
+        VkIcon::CapsFilled
+    } else {
+        VkIcon::Caps
+    }
+}
+
+/// Glyph for the CapsLock key (the CapsLock-action key reflects `caps`).
+fn caps_icon(caps: bool) -> VkIcon {
+    if caps {
+        VkIcon::ShiftFilled
+    } else {
+        VkIcon::Shift
+    }
+}
+
 impl VkRenderer {
     pub unsafe fn create(hwnd: HWND) -> Result<Self, String> {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -674,18 +717,19 @@ impl VkRenderer {
         Ok(())
     }
 
-    pub unsafe fn draw(
-        &mut self,
-        pal: &VkPalette,
-        rows: &[KeyRow],
-        sel: KeyPos,
-        key_glyph: fn(&KeyCell) -> (String, bool),
-        key_hint: fn(&KeyCell) -> Option<&'static str>,
-        top_inset: f32,
-        scale_w: f32,
-        candidates: Option<&crate::vk_predict::StripState>,
-        floating: bool,
-    ) -> Result<(), String> {
+    pub unsafe fn draw(&mut self, frame: &VkFrame) -> Result<(), String> {
+        let VkFrame {
+            pal,
+            rows,
+            sel,
+            key_glyph,
+            key_hint,
+            top_inset,
+            scale_w,
+            candidates,
+            floating,
+            modifiers,
+        } = *frame;
         let cw = self.width as f32;
         let ch = self.height as f32;
 
@@ -814,21 +858,9 @@ impl VkRenderer {
             } else if matches!(key.action, KeyAction::CloseVk) {
                 self.draw_svg_icon(VkIcon::Close, rect.rect, label_color)?;
             } else if matches!(key.action, KeyAction::Shift) {
-                let (shift, _) = crate::vk_nav::modifier_state();
-                let icon = if shift {
-                    VkIcon::CapsFilled
-                } else {
-                    VkIcon::Caps
-                };
-                self.draw_svg_icon(icon, rect.rect, label_color)?;
+                self.draw_svg_icon(shift_icon(modifiers.shift), rect.rect, label_color)?;
             } else if matches!(key.action, KeyAction::CapsLock) {
-                let (_, caps) = crate::vk_nav::modifier_state();
-                let icon = if caps {
-                    VkIcon::ShiftFilled
-                } else {
-                    VkIcon::Shift
-                };
-                self.draw_svg_icon(icon, rect.rect, label_color)?;
+                self.draw_svg_icon(caps_icon(modifiers.caps), rect.rect, label_color)?;
             } else {
                 let (glyph, symbol_font) = key_glyph(key);
                 if !glyph.is_empty() {
@@ -1246,4 +1278,19 @@ fn key_metrics(scale_w: f32, client_h: f32, rows: &[KeyRow], top_inset: f32) -> 
         kw = kh / KEY_ASPECT;
     }
     (kw, kh, gap)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modifier_glyphs_map_verbatim() {
+        // Non-obvious crossed mapping the renderer must preserve:
+        // the Shift key reflects `shift`; the CapsLock key reflects `caps`.
+        assert_eq!(shift_icon(true), VkIcon::CapsFilled);
+        assert_eq!(shift_icon(false), VkIcon::Caps);
+        assert_eq!(caps_icon(true), VkIcon::ShiftFilled);
+        assert_eq!(caps_icon(false), VkIcon::Shift);
+    }
 }
