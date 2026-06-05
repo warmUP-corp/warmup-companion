@@ -627,7 +627,8 @@ impl GamepadPoll {
             }
             (Button::A, false) if self.a_down_while_vk => {
                 self.a_down_while_vk = false;
-                if !crate::vk_predict::commit_if_engaged() {
+                let mut sink = vk_nav::SendInputSink;
+                if crate::vk_predict::commit_if_engaged(&mut sink).is_none() {
                     vk_nav::activate_selection();
                 }
                 vk_ui::request_repaint();

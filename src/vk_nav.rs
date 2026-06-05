@@ -469,14 +469,41 @@ pub fn activate_key(key: &KeyCell) {
     }
 }
 
-/// Inject one character without updating prediction state (candidate commit path).
-pub fn send_char_direct(c: char) {
-    send_unicode(&[c as u16]);
-}
-
 pub fn send_text_direct(text: &str) {
     let units: Vec<u16> = text.encode_utf16().collect();
     send_unicode(&units);
+}
+
+/// Real Text-commit adapter (CONTEXT.md "Text commit"): one batched `SendInput`
+/// of `del` backspaces followed by the word's Unicode events. Commit is
+/// userland-only, so the Winlogon focus-collapse lead is a no-op here.
+pub struct SendInputSink;
+
+impl crate::vk_commit::TextSink for SendInputSink {
+    fn replace(&mut self, del: usize, ins: &str) -> std::io::Result<()> {
+        let collapse = focus_for_inject();
+        let units: Vec<u16> = ins.encode_utf16().collect();
+        let mut batch: Vec<INPUT> = Vec::with_capacity(2 + del * 2 + units.len() * 2);
+        push_collapse(&mut batch, collapse);
+        for _ in 0..del {
+            batch.push(vk_event(VK_BACK, false));
+            batch.push(vk_event(VK_BACK, true));
+        }
+        for unit in units {
+            batch.push(unicode_event(unit, false));
+            batch.push(unicode_event(unit, true));
+        }
+        let sent = unsafe { SendInput(&batch, std::mem::size_of::<INPUT>() as i32) };
+        suppress_native_keyboard_after_winlogon_inject(collapse);
+        if sent as usize == batch.len() {
+            Ok(())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("SendInput inserted {sent}/{} events", batch.len()),
+            ))
+        }
+    }
 }
 
 fn notify_vk_key(vk: VIRTUAL_KEY) {
@@ -498,11 +525,6 @@ fn request_ui_repaint() {
 
 pub fn backspace() {
     crate::vk_predict::on_backspace();
-    inject_vk(VK_BACK);
-}
-
-/// `SendInput` only — no prediction side effects (candidate commit backspaces).
-pub fn inject_backspace() {
     inject_vk(VK_BACK);
 }
 

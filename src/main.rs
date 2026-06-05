@@ -24,6 +24,8 @@ mod debug_state;
 #[cfg(windows)]
 mod predict_ngram;
 #[cfg(windows)]
+mod vk_commit;
+#[cfg(windows)]
 mod vk_nav;
 #[cfg(windows)]
 mod vk_predict;
