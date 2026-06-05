@@ -100,7 +100,7 @@ fn chip_width(word: &str) -> f32 {
 unsafe fn draw_candidate_strip(
     ctx: &ID2D1DeviceContext,
     cw: f32,
-    strip: &crate::vk_predict::StripView,
+    strip: &crate::vk_predict::StripState,
     key_brush: &ID2D1SolidColorBrush,
     accent_brush: &ID2D1SolidColorBrush,
     text_brush: &ID2D1SolidColorBrush,
@@ -683,7 +683,7 @@ impl VkRenderer {
         key_hint: fn(&KeyCell) -> Option<&'static str>,
         top_inset: f32,
         scale_w: f32,
-        candidates: Option<&crate::vk_predict::StripView>,
+        candidates: Option<&crate::vk_predict::StripState>,
         floating: bool,
     ) -> Result<(), String> {
         let cw = self.width as f32;

@@ -844,7 +844,7 @@ fn render_frame() {
             let pal = vk_palette(is_dark_theme());
             let rows = vk_nav::rows_snapshot();
             let sel = vk_nav::selection();
-            let candidates = crate::vk_predict::strip_view();
+            let candidates = crate::vk_predict::strip();
             let top_inset = vk_renderer::top_chrome_inset();
             let scale_w = vk_scale_w();
             let floating = matches!(

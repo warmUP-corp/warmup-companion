@@ -37,8 +37,10 @@ struct PredictState {
     personal: HashSet<String>,
 }
 
-/// Snapshot for the candidate strip renderer.
-pub struct StripView {
+/// Single source of truth for the candidate strip: the visible chips, which slot
+/// is highlighted, and whether the user engaged the strip with LB/RB (so A may
+/// commit). `strip()` returns this; `None` means no strip should show.
+pub struct StripState {
     pub visible: [String; VISIBLE],
     pub highlight_slot: usize,
     pub engaged: bool,
@@ -165,14 +167,9 @@ fn refresh_ranked(s: &mut PredictState) {
     }
 }
 
-pub fn strip_active() -> bool {
-    STATE
-        .lock()
-        .map(|s| s.enabled && s.partial.len() >= MIN_PREFIX_LEN && !s.ranked.is_empty())
-        .unwrap_or(false)
-}
-
-pub fn strip_view() -> Option<StripView> {
+/// The current candidate strip, or `None` when no strip should show. The one
+/// query for both rendering and the LB/RB context-swap decision.
+pub fn strip() -> Option<StripState> {
     let s = STATE.lock().ok()?;
     if !strip_active_inner(&s) {
         return None;
@@ -185,18 +182,11 @@ pub fn strip_view() -> Option<StripView> {
         }
     }
     let highlight_slot = s.highlight.saturating_sub(start);
-    Some(StripView {
+    Some(StripState {
         visible,
         highlight_slot,
         engaged: s.candidate_engaged,
     })
-}
-
-pub fn candidate_engaged() -> bool {
-    STATE
-        .lock()
-        .map(|s| s.candidate_engaged && strip_active_inner(&s))
-        .unwrap_or(false)
 }
 
 fn strip_active_inner(s: &PredictState) -> bool {
@@ -332,15 +322,17 @@ fn maybe_learn(s: &mut PredictState, word: &str) {
 }
 
 /// Commit the highlighted candidate through `sink` (CONTEXT.md "Candidate
-/// commit"): delete the partial prefix and inject the chosen word as one
-/// Text-commit replace. Returns the outcome, or None when there is nothing to
-/// commit. Personal-dict learn + VK-buffer push happen only on a landed commit.
-pub fn commit_highlighted(
+/// commit"), but only when the user engaged the strip with LB/RB first. Deletes
+/// the partial prefix and injects the chosen word as one Text-commit replace.
+/// Returns the outcome, or None when there is nothing to commit. The engage gate
+/// and the word pick share one lock, so a stale strip cannot commit. Personal-
+/// dict learn + VK-buffer push happen only on a landed commit.
+pub fn commit_if_engaged(
     sink: &mut dyn crate::vk_commit::TextSink,
 ) -> Option<crate::vk_commit::Committed> {
     let (word, del) = {
         let s = STATE.lock().ok()?;
-        if s.ranked.is_empty() {
+        if !(s.candidate_engaged && strip_active_inner(&s)) {
             return None;
         }
         let idx = s.highlight.min(s.ranked.len() - 1);
@@ -354,17 +346,6 @@ pub fn commit_highlighted(
         clear_strip(&mut s);
     }
     Some(res)
-}
-
-/// Commit only when the user picked a chip with LB/RB first.
-pub fn commit_if_engaged(
-    sink: &mut dyn crate::vk_commit::TextSink,
-) -> Option<crate::vk_commit::Committed> {
-    if candidate_engaged() {
-        commit_highlighted(sink)
-    } else {
-        None
-    }
 }
 
 #[cfg(test)]
@@ -388,7 +369,7 @@ mod tests {
         for c in "keyb".chars() {
             on_char(c);
         }
-        assert!(strip_active());
+        assert!(strip().is_some());
         let ranked = STATE.lock().unwrap().ranked.clone();
         assert!(ranked.iter().any(|w| w == "keyboard"));
     }
@@ -418,13 +399,13 @@ mod tests {
         for c in "keyb".chars() {
             on_char(c);
         }
-        assert!(strip_active());
-        assert!(!candidate_engaged());
+        assert!(strip().is_some());
+        assert!(!strip().unwrap().engaged);
         let mut sink = crate::vk_commit::BufSink::new("keyb");
         assert!(commit_if_engaged(&mut sink).is_none());
         assert_eq!(sink.buf, "keyb"); // nothing injected
-        cycle_next();
-        assert!(candidate_engaged());
+        assert!(cycle_next());
+        assert!(strip().unwrap().engaged);
     }
 
     #[test]
