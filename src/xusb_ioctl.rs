@@ -21,6 +21,9 @@ use std::cell::Cell;
 use std::ffi::c_void;
 use std::mem::size_of;
 
+use crate::hid_gamepad::PadSample;
+use crate::pad_decode::{norm_thumb, DevicePoller, LEFT_DEADZONE, RIGHT_DEADZONE};
+
 use windows::core::GUID;
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
@@ -178,6 +181,35 @@ impl Drop for XusbDevice {
         unsafe {
             let _ = CloseHandle(self.handle);
         }
+    }
+}
+
+impl XusbReport {
+    /// Normalize this raw IOCTL report into the shared [`PadSample`] currency,
+    /// so XUSB pads flow through the same decode/edge path as HID and XInput.
+    #[allow(dead_code)] // consumed by the DevicePoller adapter (staged; see pad_decode)
+    pub fn to_pad_sample(&self) -> PadSample {
+        PadSample {
+            buttons: self.buttons,
+            lt: self.left_trigger,
+            rt: self.right_trigger,
+            lx: norm_thumb(self.thumb_lx, LEFT_DEADZONE),
+            ly: norm_thumb(self.thumb_ly, LEFT_DEADZONE),
+            rx: norm_thumb(self.thumb_rx, RIGHT_DEADZONE),
+            ry: norm_thumb(self.thumb_ry, RIGHT_DEADZONE),
+        }
+    }
+}
+
+#[allow(dead_code)] // seam adapter; polymorphic consumer lands with the secure split
+impl DevicePoller for XusbDevice {
+    fn poll(&mut self) -> Option<PadSample> {
+        // inherent XusbDevice::poll(&self) returns the raw IOCTL report.
+        XusbDevice::poll(self).map(|r| r.to_pad_sample())
+    }
+
+    fn label(&self) -> String {
+        format!("xusb pad (led {})", self.led)
     }
 }
 
