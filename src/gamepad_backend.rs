@@ -8,6 +8,16 @@ use std::time::Duration;
 
 pub use warmup_gamepad::{Button, ButtonChange, GamepadInput, PollMode, TouchpadSample};
 
+static USERLAND_POLL_PAUSED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_userland_poll_paused(paused: bool) {
+    USERLAND_POLL_PAUSED.store(paused, Ordering::SeqCst);
+}
+
+pub fn userland_poll_paused() -> bool {
+    USERLAND_POLL_PAUSED.load(Ordering::SeqCst)
+}
+
 /// Owned, thread-portable snapshot of one touchpad poll. Unlike
 /// [`GamepadInput::poll_touchpad`] (which borrows internal state), this can be
 /// published across the SDL thread boundary.
@@ -60,7 +70,9 @@ pub enum PadCommand {
 ///   - **desktop** (`!game_active`): no game and the launcher is backgrounded → full poll so the
 ///     controller keeps driving the OS cursor on the Windows desktop.
 fn effective_userland_poll_mode() -> PollMode {
-    if crate::pipe_server::game_active() && !crate::pipe_server::launcher_foreground_nav() {
+    if userland_poll_paused()
+        || (crate::pipe_server::game_active() && !crate::pipe_server::launcher_foreground_nav())
+    {
         PollMode::Sleep
     } else {
         crate::config::userland_gamepad_poll_mode()

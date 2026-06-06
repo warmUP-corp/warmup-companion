@@ -16,6 +16,8 @@ mod vk_gate;
 mod crash;
 #[cfg(windows)]
 mod install;
+#[cfg(all(windows, feature = "gamepad"))]
+mod tray;
 #[cfg(all(windows, feature = "service"))]
 mod service;
 
@@ -621,6 +623,8 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     #[cfg(windows)]
     dispatch_install_or_service(&args);
+    #[cfg(all(windows, feature = "gamepad"))]
+    tray::spawn();
 
     let use_real_win32 = args.iter().any(|a| a == "--real")
         || env::var_os("WARMUP_REAL_VK").is_some_and(|v| v != "0");
@@ -805,6 +809,8 @@ fn dispatch_install_or_service(args: &[String]) {
     #[cfg(feature = "service")]
     {
         if args.iter().any(|a| a == "--service-worker") {
+            #[cfg(feature = "gamepad")]
+            tray::spawn();
             match service::run_worker() {
                 Ok(()) => std::process::exit(0),
                 Err(e) => {

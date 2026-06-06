@@ -399,6 +399,12 @@ impl GamepadPoll {
         dt_secs: f32,
         vk_open: bool,
     ) -> Result<Vec<VkLoopAction>, String> {
+        if crate::gamepad_backend::userland_poll_paused() {
+            self.backend.apply_device_commands();
+            cursor.set_left_button(false);
+            return Ok(Vec::new());
+        }
+
         if vk_open && !self.last_vk_open {
             self.on_vk_opened();
             self.backend.haptic_confirm();
