@@ -53,6 +53,8 @@ if (-not (Test-Admin)) {
 
 $BinDir = "C:\ProgramData\WarmupVk\bin"
 $BinExe = Join-Path $BinDir "warmup-companion.exe"
+$IconSrc = "C:\Users\jonas\warmUp-browser\apps\desktop\src-tauri\icons\icon.ico"
+$IconDest = Join-Path $BinDir "icon.ico"
 $LogFile = "C:\ProgramData\WarmupVk\service.log"
 $LegacyExe = "C:\Program Files\WarmupVk\warmup-vk-prototype.exe"
 
@@ -100,6 +102,13 @@ if ($DebugUi) {
 & $Exe @InstallArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+if (Test-Path $IconSrc) {
+    Copy-Item -LiteralPath $IconSrc -Destination $IconDest -Force
+    Write-Host "OK: tray icon installed at $IconDest"
+} else {
+    Write-Host "WARNING: tray icon source missing: $IconSrc" -ForegroundColor Yellow
+}
+
 if (-not (Test-Path $BinExe)) {
     throw @"
 Install failed: service binary not at:
@@ -113,6 +122,7 @@ If you only have $LegacyExe, delete it and run this script again as Administrato
 Write-Host ""
 Write-Host "=== Install OK ===" -ForegroundColor Green
 Write-Host "Service binary: $BinExe"
+Write-Host "Tray icon:      $IconDest"
 Write-Host "Log file:       $LogFile"
 Write-Host "Debug UI:       $(if ($DebugUi) { 'enabled' } else { 'disabled' })"
 Write-Host ""
