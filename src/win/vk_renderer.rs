@@ -243,6 +243,11 @@ enum VkIcon {
     ShiftFilled,
     Caps,
     CapsFilled,
+    /// Caret-move arrow keys (Lucide chevrons).
+    ChevronLeft,
+    ChevronRight,
+    ChevronUp,
+    ChevronDown,
     /// PlayStation L3 (left-stick click) chip — keeps its native colors (no
     /// `currentColor`), extracted from the controller-icon atlas.
     L3,
@@ -287,6 +292,18 @@ impl VkIcon {
             }
             VkIcon::CapsFilled => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1v-6a1 1 0 0 1 1-1h3.293a.707.707 0 0 0 .5-1.207l-7.086-7.086a1 1 0 0 0-1.414 0l-7.086 7.086a.707.707 0 0 0 .5 1.207H8a1 1 0 0 1 1 1z"/></svg>"#
+            }
+            VkIcon::ChevronLeft => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>"#
+            }
+            VkIcon::ChevronRight => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>"#
+            }
+            VkIcon::ChevronUp => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>"#
+            }
+            VkIcon::ChevronDown => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>"#
             }
             // Native-colored chip; has no `currentColor`, so the palette swap in
             // `draw_svg_icon` is a no-op and it keeps its PlayStation look.
@@ -853,6 +870,18 @@ impl VkRenderer {
             } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_RETURN)
             {
                 self.draw_svg_icon(VkIcon::Enter, rect.rect, label_color)?;
+            } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_LEFT)
+            {
+                self.draw_svg_icon(VkIcon::ChevronLeft, rect.rect, label_color)?;
+            } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_RIGHT)
+            {
+                self.draw_svg_icon(VkIcon::ChevronRight, rect.rect, label_color)?;
+            } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_UP)
+            {
+                self.draw_svg_icon(VkIcon::ChevronUp, rect.rect, label_color)?;
+            } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_DOWN)
+            {
+                self.draw_svg_icon(VkIcon::ChevronDown, rect.rect, label_color)?;
             } else if matches!(key.action, KeyAction::Paste) {
                 self.draw_svg_icon(VkIcon::Paste, rect.rect, label_color)?;
             } else if matches!(key.action, KeyAction::CloseVk) {

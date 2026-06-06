@@ -8,8 +8,8 @@ use crate::gamepad_backend::Button;
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, GetKeyboardLayout, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_END,
-    VK_RETURN, VK_SPACE, VK_TAB,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DOWN,
+    VK_END, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
 };
 
 #[derive(Clone)]
@@ -224,7 +224,14 @@ fn build_pc_layout(shift: bool, caps: bool) -> Vec<KeyRow> {
         },
         KeyRow {
             keys: vec![
-                KeyCell::vk("", VK_SPACE, GRID_UNITS - 1.5 - 1.5 - 1.5),
+                // Space shrinks by the 4 arrow units so the row still sums to GRID_UNITS.
+                KeyCell::vk("", VK_SPACE, GRID_UNITS - 1.5 - 1.5 - 1.5 - 4.0),
+                // Move the text caret without leaving the VK: select with the d-pad,
+                // press A to fire. inject_vk lands VK_LEFT/RIGHT/UP/DOWN in the focused field.
+                KeyCell::vk("\u{2190}", VK_LEFT, 1.0),
+                KeyCell::vk("\u{2191}", VK_UP, 1.0),
+                KeyCell::vk("\u{2193}", VK_DOWN, 1.0),
+                KeyCell::vk("\u{2192}", VK_RIGHT, 1.0),
                 KeyCell::named("Mic", KeyAction::VoiceInput, 1.5),
                 KeyCell::named("Paste", KeyAction::Paste, 1.5),
                 KeyCell::named("", KeyAction::CloseVk, 1.5),
@@ -561,19 +568,19 @@ pub fn start_voice_input() {
         return;
     }
 
-    if crate::win::speech_input::is_active() && voice_input_active() {
-        crate::win::speech_input::stop();
+    // Toggle off the user's mic helper if the indicator says it is on.
+    if voice_input_active() {
+        crate::win::speech_input::stop_helper();
         set_voice_input_active(false);
         return;
     }
-    if crate::win::speech_input::is_active() {
-        crate::win::speech_input::stop();
-    }
 
+    // Turn on: the worker runs as SYSTEM with no mic consent, so recognition runs
+    // in a helper process launched as the real logged-in user (see speech_input).
     set_voice_input_active(true);
-    if let Err(e) = crate::win::speech_input::start() {
+    if let Err(e) = crate::win::speech_input::start_helper() {
         set_voice_input_active(false);
-        crate::install::log_line(&format!("speech input start failed: {e}"));
+        crate::install::log_line(&format!("speech helper start failed: {e}"));
     }
 }
 
