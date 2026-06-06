@@ -26,6 +26,8 @@ mod debug_state;
 #[cfg(windows)]
 mod predict_ngram;
 #[cfg(windows)]
+mod vk_commit;
+#[cfg(windows)]
 mod vk_nav;
 #[cfg(windows)]
 mod vk_predict;
@@ -43,6 +45,8 @@ mod gamepad_backend;
 mod hid_gamepad;
 #[cfg(all(windows, feature = "gamepad"))]
 mod hid_reader;
+#[cfg(all(windows, feature = "gamepad"))]
+mod pad_decode;
 #[cfg(feature = "gamepad")]
 mod pc_cursor;
 #[cfg(all(windows, feature = "gamepad"))]
@@ -785,6 +789,18 @@ fn has_interactive_console() -> bool {
 
 #[cfg(windows)]
 fn dispatch_install_or_service(args: &[String]) {
+    // Mic recognition runs here, as the real logged-in user (the worker spawns us
+    // via CreateProcessAsUserW). Short-lived: recognize until silence, then exit.
+    if args.iter().any(|a| a == "--speech-helper") {
+        let code = match crate::win::speech_input::run_blocking() {
+            Ok(()) => 0,
+            Err(e) => {
+                install::log_line(&format!("speech helper failed: {e}"));
+                1
+            }
+        };
+        std::process::exit(code);
+    }
     match args.get(1).map(String::as_str) {
         Some("install") => {
             let debug_ui = args.iter().any(|a| a == "--debug-ui" || a == "--debug");

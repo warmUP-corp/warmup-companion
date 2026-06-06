@@ -37,8 +37,10 @@ struct PredictState {
     personal: HashSet<String>,
 }
 
-/// Snapshot for the candidate strip renderer.
-pub struct StripView {
+/// Single source of truth for the candidate strip: the visible chips, which slot
+/// is highlighted, and whether the user engaged the strip with LB/RB (so A may
+/// commit). `strip()` returns this; `None` means no strip should show.
+pub struct StripState {
     pub visible: [String; VISIBLE],
     pub highlight_slot: usize,
     pub engaged: bool,
@@ -106,8 +108,8 @@ pub fn predictions_enabled() -> bool {
     }
     #[cfg(not(test))]
     {
-        crate::win::input_desktop_name()
-            .map(|n| !n.eq_ignore_ascii_case("winlogon"))
+        crate::win::surface::input()
+            .map(|s| s.is_userland())
             .unwrap_or(false)
     }
 }
@@ -165,14 +167,9 @@ fn refresh_ranked(s: &mut PredictState) {
     }
 }
 
-pub fn strip_active() -> bool {
-    STATE
-        .lock()
-        .map(|s| s.enabled && s.partial.len() >= MIN_PREFIX_LEN && !s.ranked.is_empty())
-        .unwrap_or(false)
-}
-
-pub fn strip_view() -> Option<StripView> {
+/// The current candidate strip, or `None` when no strip should show. The one
+/// query for both rendering and the LB/RB context-swap decision.
+pub fn strip() -> Option<StripState> {
     let s = STATE.lock().ok()?;
     if !strip_active_inner(&s) {
         return None;
@@ -185,18 +182,11 @@ pub fn strip_view() -> Option<StripView> {
         }
     }
     let highlight_slot = s.highlight.saturating_sub(start);
-    Some(StripView {
+    Some(StripState {
         visible,
         highlight_slot,
         engaged: s.candidate_engaged,
     })
-}
-
-pub fn candidate_engaged() -> bool {
-    STATE
-        .lock()
-        .map(|s| s.candidate_engaged && strip_active_inner(&s))
-        .unwrap_or(false)
 }
 
 fn strip_active_inner(s: &PredictState) -> bool {
@@ -242,10 +232,6 @@ pub fn cycle_prev() -> bool {
     };
     s.candidate_engaged = true;
     true
-}
-
-pub fn partial_len() -> usize {
-    STATE.lock().map(|s| s.partial.len()).unwrap_or(0)
 }
 
 pub fn on_char(c: char) {
@@ -297,14 +283,25 @@ pub fn on_boundary() {
 fn finish_word(s: &mut PredictState) {
     if s.partial.len() >= 2 {
         let w = std::mem::take(&mut s.partial);
-        maybe_learn(s, &w);
-        s.words.push(w);
-        if s.words.len() > 8 {
-            s.words.remove(0);
-        }
-    } else {
-        s.partial.clear();
+        record_completed(s, &w);
     }
+    clear_strip(s);
+}
+
+/// Record a completed word: password-gated personal-dict learn (CONTEXT.md
+/// "Secure field") + push to the VK-only context buffer (cap 8). Shared by
+/// finish_word and Candidate commit so "word completed" lives in one place.
+fn record_completed(s: &mut PredictState, word: &str) {
+    maybe_learn(s, word);
+    s.words.push(word.to_string());
+    if s.words.len() > 8 {
+        s.words.remove(0);
+    }
+}
+
+/// Clear the partial + candidate strip after a word boundary or commit.
+fn clear_strip(s: &mut PredictState) {
+    s.partial.clear();
     s.ranked.clear();
     s.highlight = 0;
     s.candidate_engaged = false;
@@ -324,47 +321,31 @@ fn maybe_learn(s: &mut PredictState, word: &str) {
     }
 }
 
-/// Backspace partial prefix, inject full word. Returns true if committed.
-pub fn commit_highlighted() -> bool {
-    let word = {
-        let Ok(s) = STATE.lock() else {
-            return false;
-        };
-        if s.ranked.is_empty() {
-            return false;
+/// Commit the highlighted candidate through `sink` (CONTEXT.md "Candidate
+/// commit"), but only when the user engaged the strip with LB/RB first. Deletes
+/// the partial prefix and injects the chosen word as one Text-commit replace.
+/// Returns the outcome, or None when there is nothing to commit. The engage gate
+/// and the word pick share one lock, so a stale strip cannot commit. Personal-
+/// dict learn + VK-buffer push happen only on a landed commit.
+pub fn commit_if_engaged(
+    sink: &mut dyn crate::vk_commit::TextSink,
+) -> Option<crate::vk_commit::Committed> {
+    let (word, del) = {
+        let s = STATE.lock().ok()?;
+        if !(s.candidate_engaged && strip_active_inner(&s)) {
+            return None;
         }
         let idx = s.highlight.min(s.ranked.len() - 1);
-        s.ranked[idx].clone()
+        (s.ranked[idx].clone(), s.partial.chars().count())
     };
-    let n = partial_len();
-    for _ in 0..n {
-        crate::vk_nav::inject_backspace();
+    let res = crate::vk_commit::commit(&word, del, sink);
+    if let Ok(mut s) = STATE.lock() {
+        if res.injected {
+            record_completed(&mut s, &word);
+        }
+        clear_strip(&mut s);
     }
-    for c in word.chars() {
-        crate::vk_nav::send_char_direct(c);
-    }
-    let Ok(mut s) = STATE.lock() else {
-        return true;
-    };
-    maybe_learn(&mut s, &word);
-    s.words.push(word);
-    if s.words.len() > 8 {
-        s.words.remove(0);
-    }
-    s.partial.clear();
-    s.ranked.clear();
-    s.highlight = 0;
-    s.candidate_engaged = false;
-    true
-}
-
-/// Commit only when the user picked a chip with LB/RB first.
-pub fn commit_if_engaged() -> bool {
-    if candidate_engaged() {
-        commit_highlighted()
-    } else {
-        false
-    }
+    Some(res)
 }
 
 #[cfg(test)]
@@ -388,7 +369,7 @@ mod tests {
         for c in "keyb".chars() {
             on_char(c);
         }
-        assert!(strip_active());
+        assert!(strip().is_some());
         let ranked = STATE.lock().unwrap().ranked.clone();
         assert!(ranked.iter().any(|w| w == "keyboard"));
     }
@@ -418,10 +399,48 @@ mod tests {
         for c in "keyb".chars() {
             on_char(c);
         }
-        assert!(strip_active());
-        assert!(!candidate_engaged());
-        assert!(!commit_if_engaged());
+        assert!(strip().is_some());
+        assert!(!strip().unwrap().engaged);
+        let mut sink = crate::vk_commit::BufSink::new("keyb");
+        assert!(commit_if_engaged(&mut sink).is_none());
+        assert_eq!(sink.buf, "keyb"); // nothing injected
+        assert!(cycle_next());
+        assert!(strip().unwrap().engaged);
+    }
+
+    #[test]
+    fn commit_replaces_prefix_with_word() {
+        let _g = TEST_LOCK.lock().unwrap();
+        reset();
+        for c in "keyb".chars() {
+            on_char(c);
+        }
+        cycle_next(); // engage the strip with LB/RB
+        let highlighted = {
+            let s = STATE.lock().unwrap();
+            s.ranked[s.highlight].clone()
+        };
+        let mut sink = crate::vk_commit::BufSink::new("keyb");
+        let res = commit_if_engaged(&mut sink).expect("engaged commit");
+        assert!(res.injected);
+        assert_eq!(res.deleted, 4);
+        assert_eq!(sink.buf, highlighted);
+        // landed commit records the word into the VK-only context buffer
+        assert_eq!(STATE.lock().unwrap().words.last().unwrap(), &highlighted);
+    }
+
+    #[test]
+    fn failed_inject_does_not_record() {
+        let _g = TEST_LOCK.lock().unwrap();
+        reset();
+        for c in "keyb".chars() {
+            on_char(c);
+        }
         cycle_next();
-        assert!(candidate_engaged());
+        let mut sink = crate::vk_commit::BufSink::failing("keyb");
+        let res = commit_if_engaged(&mut sink).expect("attempted commit");
+        assert!(!res.injected);
+        assert_eq!(sink.buf, "keyb"); // untouched
+        assert!(STATE.lock().unwrap().words.is_empty()); // not recorded
     }
 }

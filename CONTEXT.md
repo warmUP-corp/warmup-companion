@@ -44,7 +44,9 @@ If secure-field detection fails (UIA/COM error, no focused element), **do not** 
 
 ### Candidate commit
 
-What happens when the user confirms a suggestion. **Decision:** delete the partial prefix from the target field with backspaces (one per character the VK buffer recorded), then inject the full chosen word via the normal text-commit path. Do **not** auto-insert a trailing space — the user presses Space explicitly if they want one.
+What happens when the user confirms a suggestion. **Decision:** delete the partial prefix from the target field with backspaces (one per **character** the VK buffer recorded, not per byte), then inject the full chosen word — both as a **single Text-commit replace**. Do **not** auto-insert a trailing space — the user presses Space explicitly if they want one.
+
+**Result is observable:** a commit reports whether the injection landed. Personal-dictionary learning and the VK-only buffer update happen **only on a landed commit** — if the injection fails, neither the dictionary nor the prediction context records the word.
 
 ### Candidate strip
 
@@ -61,6 +63,8 @@ When the candidate strip is active, LB/RB temporarily take over candidate cyclin
 ### Text commit
 
 How chosen characters reach the focused application. **Decision:** inject keystrokes through the same **`SendInput`** path the virtual keyboard already uses for key taps — not through a TSF/IME text service.
+
+**Seam:** Text commit is a **substitutable seam** — a delete-then-insert *replace* operation (`replace(delete_count, insert_text)`) applied as one atomic injection. The real adapter drives `SendInput`; an in-memory adapter records the resulting text for tests. The second adapter is what makes the seam real: the commit decision (Candidate commit) becomes testable without Win32 or the live foreground field.
 
 ### Prediction context
 

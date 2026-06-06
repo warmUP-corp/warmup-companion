@@ -100,7 +100,7 @@ fn chip_width(word: &str) -> f32 {
 unsafe fn draw_candidate_strip(
     ctx: &ID2D1DeviceContext,
     cw: f32,
-    strip: &crate::vk_predict::StripView,
+    strip: &crate::vk_predict::StripState,
     key_brush: &ID2D1SolidColorBrush,
     accent_brush: &ID2D1SolidColorBrush,
     text_brush: &ID2D1SolidColorBrush,
@@ -243,6 +243,11 @@ enum VkIcon {
     ShiftFilled,
     Caps,
     CapsFilled,
+    /// Caret-move arrow keys (Lucide chevrons).
+    ChevronLeft,
+    ChevronRight,
+    ChevronUp,
+    ChevronDown,
     /// PlayStation L3 (left-stick click) chip — keeps its native colors (no
     /// `currentColor`), extracted from the controller-icon atlas.
     L3,
@@ -287,6 +292,18 @@ impl VkIcon {
             }
             VkIcon::CapsFilled => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1v-6a1 1 0 0 1 1-1h3.293a.707.707 0 0 0 .5-1.207l-7.086-7.086a1 1 0 0 0-1.414 0l-7.086 7.086a.707.707 0 0 0 .5 1.207H8a1 1 0 0 1 1 1z"/></svg>"#
+            }
+            VkIcon::ChevronLeft => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>"#
+            }
+            VkIcon::ChevronRight => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>"#
+            }
+            VkIcon::ChevronUp => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>"#
+            }
+            VkIcon::ChevronDown => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>"#
             }
             // Native-colored chip; has no `currentColor`, so the palette swap in
             // `draw_svg_icon` is a no-op and it keeps its PlayStation look.
@@ -395,6 +412,49 @@ pub fn key_rects(
     out
 }
 
+/// Shift/caps captured for one frame, so the glyph loop never re-reads global
+/// nav state mid-draw. Same `VkModifiers` + same rows -> same pixels.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VkModifiers {
+    pub shift: bool,
+    pub caps: bool,
+}
+
+/// One immutable snapshot of everything the VK renderer needs for a frame.
+/// `render_frame` assembles it from a single logical read of nav/predict state;
+/// `draw` consumes only `&VkFrame` and performs no global reads, so the
+/// selection/glyph-branch logic is testable without a NAV lock or a D2D device.
+pub struct VkFrame<'a> {
+    pub pal: &'a VkPalette,
+    pub rows: &'a [KeyRow],
+    pub sel: KeyPos,
+    pub key_glyph: fn(&KeyCell) -> (String, bool),
+    pub key_hint: fn(&KeyCell) -> Option<&'static str>,
+    pub top_inset: f32,
+    pub scale_w: f32,
+    pub candidates: Option<&'a crate::vk_predict::StripState>,
+    pub floating: bool,
+    pub modifiers: VkModifiers,
+}
+
+/// Glyph for the Shift key (the Shift-action key reflects `shift`).
+fn shift_icon(shift: bool) -> VkIcon {
+    if shift {
+        VkIcon::CapsFilled
+    } else {
+        VkIcon::Caps
+    }
+}
+
+/// Glyph for the CapsLock key (the CapsLock-action key reflects `caps`).
+fn caps_icon(caps: bool) -> VkIcon {
+    if caps {
+        VkIcon::ShiftFilled
+    } else {
+        VkIcon::Shift
+    }
+}
+
 impl VkRenderer {
     pub unsafe fn create(hwnd: HWND) -> Result<Self, String> {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -408,9 +468,7 @@ impl VkRenderer {
         // unreliable (confirmed via minidump). On the secure desktop, render with
         // the WARP software rasterizer, which never loads the vendor UMD. Userland
         // keeps hardware for perf. Either way, fall back to the other on failure.
-        let on_secure = crate::win::current_desktop_name()
-            .map(|n| n.eq_ignore_ascii_case("Winlogon"))
-            .unwrap_or(false);
+        let on_secure = crate::win::surface::thread().is_some_and(|s| s.is_winlogon());
         let d3d = create_d3d_device(on_secure)?;
         let dxgi_device: IDXGIDevice = d3d.cast().map_err(|e| format!("IDXGIDevice: {e}"))?;
 
@@ -676,18 +734,19 @@ impl VkRenderer {
         Ok(())
     }
 
-    pub unsafe fn draw(
-        &mut self,
-        pal: &VkPalette,
-        rows: &[KeyRow],
-        sel: KeyPos,
-        key_glyph: fn(&KeyCell) -> (String, bool),
-        key_hint: fn(&KeyCell) -> Option<&'static str>,
-        top_inset: f32,
-        scale_w: f32,
-        candidates: Option<&crate::vk_predict::StripView>,
-        floating: bool,
-    ) -> Result<(), String> {
+    pub unsafe fn draw(&mut self, frame: &VkFrame) -> Result<(), String> {
+        let VkFrame {
+            pal,
+            rows,
+            sel,
+            key_glyph,
+            key_hint,
+            top_inset,
+            scale_w,
+            candidates,
+            floating,
+            modifiers,
+        } = *frame;
         let cw = self.width as f32;
         let ch = self.height as f32;
 
@@ -811,26 +870,26 @@ impl VkRenderer {
             } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_RETURN)
             {
                 self.draw_svg_icon(VkIcon::Enter, rect.rect, label_color)?;
+            } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_LEFT)
+            {
+                self.draw_svg_icon(VkIcon::ChevronLeft, rect.rect, label_color)?;
+            } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_RIGHT)
+            {
+                self.draw_svg_icon(VkIcon::ChevronRight, rect.rect, label_color)?;
+            } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_UP)
+            {
+                self.draw_svg_icon(VkIcon::ChevronUp, rect.rect, label_color)?;
+            } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_DOWN)
+            {
+                self.draw_svg_icon(VkIcon::ChevronDown, rect.rect, label_color)?;
             } else if matches!(key.action, KeyAction::Paste) {
                 self.draw_svg_icon(VkIcon::Paste, rect.rect, label_color)?;
             } else if matches!(key.action, KeyAction::CloseVk) {
                 self.draw_svg_icon(VkIcon::Close, rect.rect, label_color)?;
             } else if matches!(key.action, KeyAction::Shift) {
-                let (shift, _) = crate::vk_nav::modifier_state();
-                let icon = if shift {
-                    VkIcon::CapsFilled
-                } else {
-                    VkIcon::Caps
-                };
-                self.draw_svg_icon(icon, rect.rect, label_color)?;
+                self.draw_svg_icon(shift_icon(modifiers.shift), rect.rect, label_color)?;
             } else if matches!(key.action, KeyAction::CapsLock) {
-                let (_, caps) = crate::vk_nav::modifier_state();
-                let icon = if caps {
-                    VkIcon::ShiftFilled
-                } else {
-                    VkIcon::Shift
-                };
-                self.draw_svg_icon(icon, rect.rect, label_color)?;
+                self.draw_svg_icon(caps_icon(modifiers.caps), rect.rect, label_color)?;
             } else {
                 let (glyph, symbol_font) = key_glyph(key);
                 if !glyph.is_empty() {
@@ -1248,4 +1307,19 @@ fn key_metrics(scale_w: f32, client_h: f32, rows: &[KeyRow], top_inset: f32) -> 
         kw = kh / KEY_ASPECT;
     }
     (kw, kh, gap)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modifier_glyphs_map_verbatim() {
+        // Non-obvious crossed mapping the renderer must preserve:
+        // the Shift key reflects `shift`; the CapsLock key reflects `caps`.
+        assert_eq!(shift_icon(true), VkIcon::CapsFilled);
+        assert_eq!(shift_icon(false), VkIcon::Caps);
+        assert_eq!(caps_icon(true), VkIcon::ShiftFilled);
+        assert_eq!(caps_icon(false), VkIcon::Shift);
+    }
 }

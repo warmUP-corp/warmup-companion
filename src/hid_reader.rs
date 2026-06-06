@@ -259,3 +259,14 @@ impl Drop for HidReader {
         }
     }
 }
+
+#[allow(dead_code)] // seam adapter; polymorphic consumer lands with the secure split
+impl crate::pad_decode::DevicePoller for HidReader {
+    fn poll(&mut self) -> Option<PadSample> {
+        HidReader::poll(self)
+    }
+
+    fn label(&self) -> String {
+        HidReader::label(self)
+    }
+}

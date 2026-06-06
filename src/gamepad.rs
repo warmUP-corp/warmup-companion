@@ -633,7 +633,8 @@ impl GamepadPoll {
             }
             (Button::A, false) if self.a_down_while_vk => {
                 self.a_down_while_vk = false;
-                if !crate::vk_predict::commit_if_engaged() {
+                let mut sink = vk_nav::SendInputSink;
+                if crate::vk_predict::commit_if_engaged(&mut sink).is_none() {
                     vk_nav::activate_selection();
                 }
                 vk_ui::request_repaint();
@@ -656,8 +657,8 @@ impl GamepadPoll {
                 None
             }
             (Button::Lb, true) => {
-                if crate::vk_predict::strip_active() {
-                    crate::vk_predict::cycle_prev();
+                // cycle_prev returns true iff the strip was active (context swap).
+                if crate::vk_predict::cycle_prev() {
                     vk_ui::request_repaint();
                 } else {
                     vk_nav::next_layer();
@@ -665,8 +666,7 @@ impl GamepadPoll {
                 None
             }
             (Button::Rb, true) => {
-                if crate::vk_predict::strip_active() {
-                    crate::vk_predict::cycle_next();
+                if crate::vk_predict::cycle_next() {
                     vk_ui::request_repaint();
                 } else {
                     vk_nav::enter();

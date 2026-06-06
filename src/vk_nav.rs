@@ -8,8 +8,8 @@ use crate::gamepad_backend::Button;
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, GetKeyboardLayout, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_END,
-    VK_RETURN, VK_SPACE, VK_TAB,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DOWN,
+    VK_END, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
 };
 
 #[derive(Clone)]
@@ -224,13 +224,15 @@ fn build_pc_layout(shift: bool, caps: bool) -> Vec<KeyRow> {
         },
         KeyRow {
             keys: vec![
-                KeyCell::vk("", VK_SPACE, GRID_UNITS - 1.5 - 1.5 - 1.5),
-                KeyCell {
-                    label: "Mic".to_string(),
-                    sublabel: Some("WIP".to_string()),
-                    action: KeyAction::VoiceInput,
-                    span: 1.5,
-                },
+                // Space shrinks by the 4 arrow units so the row still sums to GRID_UNITS.
+                KeyCell::vk("", VK_SPACE, GRID_UNITS - 1.5 - 1.5 - 1.5 - 4.0),
+                // Move the text caret without leaving the VK: select with the d-pad,
+                // press A to fire. inject_vk lands VK_LEFT/RIGHT/UP/DOWN in the focused field.
+                KeyCell::vk("\u{2190}", VK_LEFT, 1.0),
+                KeyCell::vk("\u{2191}", VK_UP, 1.0),
+                KeyCell::vk("\u{2193}", VK_DOWN, 1.0),
+                KeyCell::vk("\u{2192}", VK_RIGHT, 1.0),
+                KeyCell::named("Mic", KeyAction::VoiceInput, 1.5),
                 KeyCell::named("Paste", KeyAction::Paste, 1.5),
                 KeyCell::named("", KeyAction::CloseVk, 1.5),
             ],
@@ -302,10 +304,6 @@ pub fn set_voice_input_active(active: bool) {
         nav.voice_input = active;
     }
     request_ui_repaint();
-}
-
-fn voice_input_wip_disabled() -> bool {
-    true
 }
 
 pub fn modifier_state() -> (bool, bool) {
@@ -478,14 +476,41 @@ pub fn activate_key(key: &KeyCell) {
     }
 }
 
-/// Inject one character without updating prediction state (candidate commit path).
-pub fn send_char_direct(c: char) {
-    send_unicode(&[c as u16]);
-}
-
 pub fn send_text_direct(text: &str) {
     let units: Vec<u16> = text.encode_utf16().collect();
     send_unicode(&units);
+}
+
+/// Real Text-commit adapter (CONTEXT.md "Text commit"): one batched `SendInput`
+/// of `del` backspaces followed by the word's Unicode events. Commit is
+/// userland-only, so the Winlogon focus-collapse lead is a no-op here.
+pub struct SendInputSink;
+
+impl crate::vk_commit::TextSink for SendInputSink {
+    fn replace(&mut self, del: usize, ins: &str) -> std::io::Result<()> {
+        let collapse = focus_for_inject();
+        let units: Vec<u16> = ins.encode_utf16().collect();
+        let mut batch: Vec<INPUT> = Vec::with_capacity(2 + del * 2 + units.len() * 2);
+        push_collapse(&mut batch, collapse);
+        for _ in 0..del {
+            batch.push(vk_event(VK_BACK, false));
+            batch.push(vk_event(VK_BACK, true));
+        }
+        for unit in units {
+            batch.push(unicode_event(unit, false));
+            batch.push(unicode_event(unit, true));
+        }
+        let sent = unsafe { SendInput(&batch, std::mem::size_of::<INPUT>() as i32) };
+        suppress_native_keyboard_after_winlogon_inject(collapse);
+        if sent as usize == batch.len() {
+            Ok(())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("SendInput inserted {sent}/{} events", batch.len()),
+            ))
+        }
+    }
 }
 
 fn notify_vk_key(vk: VIRTUAL_KEY) {
@@ -507,11 +532,6 @@ fn request_ui_repaint() {
 
 pub fn backspace() {
     crate::vk_predict::on_backspace();
-    inject_vk(VK_BACK);
-}
-
-/// `SendInput` only — no prediction side effects (candidate commit backspaces).
-pub fn inject_backspace() {
     inject_vk(VK_BACK);
 }
 
@@ -543,30 +563,24 @@ fn send_paste() {
 }
 
 pub fn start_voice_input() {
-    if voice_input_wip_disabled() {
-        crate::install::log_line("vk voice input ignored: WIP");
-        set_voice_input_active(false);
-        return;
-    }
-
     if crate::win::logon_focus::is_active() {
         crate::install::log_line("vk voice input ignored on Winlogon");
         return;
     }
 
-    if crate::win::speech_input::is_active() && voice_input_active() {
-        crate::win::speech_input::stop();
+    // Toggle off the user's mic helper if the indicator says it is on.
+    if voice_input_active() {
+        crate::win::speech_input::stop_helper();
         set_voice_input_active(false);
         return;
     }
-    if crate::win::speech_input::is_active() {
-        crate::win::speech_input::stop();
-    }
 
+    // Turn on: the worker runs as SYSTEM with no mic consent, so recognition runs
+    // in a helper process launched as the real logged-in user (see speech_input).
     set_voice_input_active(true);
-    if let Err(e) = crate::win::speech_input::start() {
+    if let Err(e) = crate::win::speech_input::start_helper() {
         set_voice_input_active(false);
-        crate::install::log_line(&format!("speech input start failed: {e}"));
+        crate::install::log_line(&format!("speech helper start failed: {e}"));
     }
 }
 

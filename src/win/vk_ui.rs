@@ -844,24 +844,29 @@ fn render_frame() {
             let pal = vk_palette(is_dark_theme());
             let rows = vk_nav::rows_snapshot();
             let sel = vk_nav::selection();
-            let candidates = crate::vk_predict::strip_view();
+            let (shift, caps) = vk_nav::modifier_state();
+            let candidates = crate::vk_predict::strip();
             let top_inset = vk_renderer::top_chrome_inset();
             let scale_w = vk_scale_w();
             let floating = matches!(
                 crate::config::vk_layout_mode(),
                 crate::config::VkLayoutMode::Floating
             );
-            if let Err(e) = renderer.draw(
-                &pal,
-                &rows,
+            // One logical snapshot: rows, selection and modifiers captured
+            // together so the glyph icons can't tear from the layout.
+            let frame = vk_renderer::VkFrame {
+                pal: &pal,
+                rows: &rows,
                 sel,
                 key_glyph,
                 key_hint,
                 top_inset,
                 scale_w,
-                candidates.as_ref(),
+                candidates: candidates.as_ref(),
                 floating,
-            ) {
+                modifiers: vk_renderer::VkModifiers { shift, caps },
+            };
+            if let Err(e) = renderer.draw(&frame) {
                 vk_log::log(&format!("renderer draw: {e}"));
             }
         }

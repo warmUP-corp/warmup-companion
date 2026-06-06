@@ -127,9 +127,7 @@ pub fn tick(vk_open: bool) {
     }
     c.last_tick = Instant::now();
 
-    let on_winlogon = desktop::input_desktop_name()
-        .map(|name| name.eq_ignore_ascii_case("Winlogon"))
-        .unwrap_or(false);
+    let on_winlogon = super::surface::input().is_some_and(|s| s.is_winlogon());
     let connected = crate::debug_state::snapshot().connected;
     let visual = if on_winlogon {
         if vk_open {

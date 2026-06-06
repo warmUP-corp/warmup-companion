@@ -22,10 +22,9 @@ use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
 };
 use windows::Win32::UI::Input::XboxController::{
-    XINPUT_CAPABILITIES, XINPUT_GAMEPAD, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_BACK,
+    XINPUT_CAPABILITIES, XINPUT_GAMEPAD, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B,
     XINPUT_GAMEPAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT,
-    XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_LEFT_THUMB,
-    XINPUT_GAMEPAD_RIGHT_SHOULDER, XINPUT_GAMEPAD_RIGHT_THUMB, XINPUT_GAMEPAD_START,
+    XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_RIGHT_SHOULDER,
     XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y, XINPUT_STATE,
 };
 use windows::Win32::UI::Input::{
@@ -46,16 +45,15 @@ use crate::gamepad_backend::Button;
 use crate::gamepad_backend::ButtonChange;
 use crate::gamepad_backend::GamepadBackend;
 use crate::hid_gamepad::{self, PadSample};
+use crate::pad_decode::{
+    button_edges, norm_thumb, trigger_edges, BUTTON_MASKS, LEFT_DEADZONE, RIGHT_DEADZONE,
+};
 use crate::xusb_ioctl::{XusbDevice, XusbReport};
 
 const SLOTS: u32 = 4;
 const ERROR_SUCCESS: u32 = 0;
 const ERROR_DEVICE_NOT_CONNECTED: u32 = 1167;
 const ERROR_EMPTY: u32 = 4306;
-
-const LEFT_DEADZONE: i16 = 7849;
-const RIGHT_DEADZONE: i16 = 8689;
-const GUIDE_BUTTON_MASK: u16 = 0x0400;
 
 type XInputGetStateFn = unsafe extern "system" fn(u32, *mut XINPUT_STATE) -> u32;
 type XInputGetKeystrokeFn = unsafe extern "system" fn(u32, u32, *mut XInputKeystroke) -> u32;
@@ -382,61 +380,6 @@ struct XInputKeystroke {
     hid_code: u8,
 }
 
-/// The one [`Button`] ↔ XInput mask table. HID and XInput both map through this;
-/// nothing else hard-codes the bit for a button.
-/// Analog trigger pressed threshold (0–255), matching SDL `TRIGGER_THRESHOLD` feel.
-const TRIGGER_PRESS_THRESH: u8 = 30;
-
-fn poll_trigger_edges(
-    prev_lt: &mut bool,
-    prev_rt: &mut bool,
-    left: u8,
-    right: u8,
-    out: &mut Vec<ButtonChange>,
-) {
-    let lt = left > TRIGGER_PRESS_THRESH;
-    let rt = right > TRIGGER_PRESS_THRESH;
-    if lt != *prev_lt {
-        *prev_lt = lt;
-        out.push(ButtonChange {
-            button: Button::Lt,
-            pressed: lt,
-        });
-    }
-    if rt != *prev_rt {
-        *prev_rt = rt;
-        out.push(ButtonChange {
-            button: Button::Rt,
-            pressed: rt,
-        });
-    }
-}
-
-const BUTTON_MASKS: &[(Button, u16)] = &[
-    (Button::Up, XINPUT_GAMEPAD_DPAD_UP.0),
-    (Button::Down, XINPUT_GAMEPAD_DPAD_DOWN.0),
-    (Button::Left, XINPUT_GAMEPAD_DPAD_LEFT.0),
-    (Button::Right, XINPUT_GAMEPAD_DPAD_RIGHT.0),
-    (Button::A, XINPUT_GAMEPAD_A.0),
-    (Button::B, XINPUT_GAMEPAD_B.0),
-    (Button::X, XINPUT_GAMEPAD_X.0),
-    (Button::Y, XINPUT_GAMEPAD_Y.0),
-    (Button::Lb, XINPUT_GAMEPAD_LEFT_SHOULDER.0),
-    (Button::Rb, XINPUT_GAMEPAD_RIGHT_SHOULDER.0),
-    (Button::Select, XINPUT_GAMEPAD_BACK.0),
-    (Button::Start, XINPUT_GAMEPAD_START.0),
-    (Button::L3, XINPUT_GAMEPAD_LEFT_THUMB.0),
-    (Button::R3, XINPUT_GAMEPAD_RIGHT_THUMB.0),
-    (Button::Guide, GUIDE_BUTTON_MASK),
-];
-
-/// XInput mask bit for a button, if it has one.
-pub(crate) fn button_mask(button: Button) -> Option<u16> {
-    BUTTON_MASKS
-        .iter()
-        .find_map(|&(b, mask)| (b == button).then_some(mask))
-}
-
 fn secure_hid_combo_mask(mask: u16) -> bool {
     const NON_DPAD: u16 = XINPUT_GAMEPAD_A.0
         | XINPUT_GAMEPAD_B.0
@@ -625,10 +568,7 @@ impl XInputBackend {
     }
 
     fn input_is_winlogon(&mut self) -> bool {
-        let winlogon = match crate::win::input_desktop_name() {
-            Ok(name) => name.eq_ignore_ascii_case("Winlogon"),
-            Err(_) => false,
-        };
+        let winlogon = crate::win::surface::input().is_some_and(|s| s.is_winlogon());
         if winlogon {
             self.secure_leave_winlogon_streak = 0;
             return true;
@@ -699,29 +639,6 @@ impl XInputBackend {
         None
     }
 
-    fn norm_thumb(value: i16, deadzone: i16) -> f32 {
-        let v = value as f32;
-        if v.abs() < deadzone as f32 {
-            return 0.0;
-        }
-        (v / 32767.0).clamp(-1.0, 1.0)
-    }
-
-    fn edges(prev: u16, cur: u16) -> Vec<ButtonChange> {
-        let mut out = Vec::new();
-        for &(button, mask) in BUTTON_MASKS {
-            let was = prev & mask != 0;
-            let now = cur & mask != 0;
-            if was != now {
-                out.push(ButtonChange {
-                    button,
-                    pressed: now,
-                });
-            }
-        }
-        out
-    }
-
     fn log_button_change(&mut self, slot: u32, prev: u16, cur: u16) {
         if prev == cur {
             return;
@@ -767,7 +684,7 @@ impl XInputBackend {
             if prev != cur {
                 self.prev_buttons[idx] = cur;
                 self.log_button_change(slot, prev, cur);
-                self.pending.extend(Self::edges(prev, cur));
+                self.pending.extend(button_edges(prev, cur));
             }
         }
     }
@@ -826,7 +743,7 @@ impl XInputBackend {
                         self.active_slot = Some(slot);
                         self.prev_buttons[slot as usize] = cur;
                     }
-                    self.pending.extend(Self::edges(prev, cur));
+                    self.pending.extend(button_edges(prev, cur));
                 }
                 SecureMsg::Trigger(edge) => {
                     match edge.button {
@@ -941,8 +858,8 @@ impl GamepadBackend for XInputBackend {
         let cur = pad.wButtons.0;
         self.prev_buttons[idx] = cur;
         self.log_button_change(slot, prev, cur);
-        self.pending.extend(Self::edges(prev, cur));
-        poll_trigger_edges(
+        self.pending.extend(button_edges(prev, cur));
+        trigger_edges(
             &mut self.prev_trigger_left,
             &mut self.prev_trigger_right,
             pad.bLeftTrigger,
@@ -951,10 +868,10 @@ impl GamepadBackend for XInputBackend {
         );
         self.poll_keystrokes(slot);
         self.axes = (
-            Self::norm_thumb(pad.sThumbLX, LEFT_DEADZONE),
-            Self::norm_thumb(pad.sThumbLY, LEFT_DEADZONE),
-            Self::norm_thumb(pad.sThumbRX, RIGHT_DEADZONE),
-            Self::norm_thumb(pad.sThumbRY, RIGHT_DEADZONE),
+            norm_thumb(pad.sThumbLX, LEFT_DEADZONE),
+            norm_thumb(pad.sThumbLY, LEFT_DEADZONE),
+            norm_thumb(pad.sThumbRX, RIGHT_DEADZONE),
+            norm_thumb(pad.sThumbRY, RIGHT_DEADZONE),
         );
         Ok(())
     }
@@ -1772,15 +1689,15 @@ fn poll_xinput_tick(state: &mut PollState) {
                 cur: buttons,
             });
         }
-        let mut trigger_edges = Vec::new();
-        poll_trigger_edges(
+        let mut trig = Vec::new();
+        trigger_edges(
             &mut state.prev_trigger_left,
             &mut state.prev_trigger_right,
             state.last_hid.lt,
             state.last_hid.rt,
-            &mut trigger_edges,
+            &mut trig,
         );
-        for edge in trigger_edges {
+        for edge in trig {
             let _ = state.tx.send(SecureMsg::Trigger(edge));
         }
         let _ = state.tx.send(SecureMsg::Axes((
@@ -1825,15 +1742,15 @@ fn poll_xinput_tick(state: &mut PollState) {
         ),
     };
 
-    let mut trigger_edges = Vec::new();
-    poll_trigger_edges(
+    let mut trig = Vec::new();
+    trigger_edges(
         &mut state.prev_trigger_left,
         &mut state.prev_trigger_right,
         lt,
         rt,
-        &mut trigger_edges,
+        &mut trig,
     );
-    for edge in trigger_edges {
+    for edge in trig {
         let _ = state.tx.send(SecureMsg::Trigger(edge));
     }
 
@@ -1854,10 +1771,10 @@ fn poll_xinput_tick(state: &mut PollState) {
     let stick_active = lx.abs() > LEFT_DEADZONE || ly.abs() > LEFT_DEADZONE;
     let axes = if stick_active {
         (
-            XInputBackend::norm_thumb(lx, LEFT_DEADZONE),
-            XInputBackend::norm_thumb(ly, LEFT_DEADZONE),
-            XInputBackend::norm_thumb(rx, RIGHT_DEADZONE),
-            XInputBackend::norm_thumb(ry, RIGHT_DEADZONE),
+            norm_thumb(lx, LEFT_DEADZONE),
+            norm_thumb(ly, LEFT_DEADZONE),
+            norm_thumb(rx, RIGHT_DEADZONE),
+            norm_thumb(ry, RIGHT_DEADZONE),
         )
     } else {
         (
@@ -1928,34 +1845,6 @@ fn service_log(msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn xinput_mask_edges_include_system_and_stick_buttons() {
-        let cur = XINPUT_GAMEPAD_BACK.0
-            | XINPUT_GAMEPAD_START.0
-            | XINPUT_GAMEPAD_LEFT_THUMB.0
-            | XINPUT_GAMEPAD_RIGHT_THUMB.0
-            | GUIDE_BUTTON_MASK;
-        let edges = XInputBackend::edges(0, cur);
-        let pressed: Vec<Button> = edges
-            .into_iter()
-            .filter_map(|edge| edge.pressed.then_some(edge.button))
-            .collect();
-
-        assert_eq!(
-            pressed,
-            vec![
-                Button::Select,
-                Button::Start,
-                Button::L3,
-                Button::R3,
-                Button::Guide,
-            ]
-        );
-        assert_eq!(button_mask(Button::Select), Some(XINPUT_GAMEPAD_BACK.0));
-        assert_eq!(button_mask(Button::Start), Some(XINPUT_GAMEPAD_START.0));
-        assert_eq!(button_mask(Button::Guide), Some(GUIDE_BUTTON_MASK));
-    }
 
     #[test]
     fn controller_label_identifies_secure_hid_source() {
