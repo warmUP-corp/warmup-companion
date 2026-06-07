@@ -1,0 +1,10 @@
+/target
+/.agents
+/.claude
+# Added by code-review-graph
+.code-review-graph/
+/crates/warmup-gamepad/target
+/temp/xbox_vk_decomp
+# Leipzig sentence dumps (often large; keep *-words.txt if small)
+assets/*-*sentences.txt
+assets/*.tar.gz

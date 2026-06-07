@@ -1,0 +1,338 @@
+//! Direct XUSB driver reader — bypasses XInput's foreground focus gate.
+//!
+//! `XInputGetState` (xinput1_4.dll) returns a neutral, zeroed gamepad to any
+//! process whose window is not foreground on the input desktop. On Winlogon
+//! that window is always LogonUI, so the secure poll thread can never satisfy
+//! the gate (stealing foreground would break the password box). The focus gate
+//! lives in the *DLL*, not the driver: `XInputGetState` is a thin wrapper over
+//! `DeviceIoControl` on the XUSB device interface. Talking to that interface
+//! directly returns real button state regardless of foreground.
+//!
+//! Scope: physical XUSB pads (Xbox 360 / One / Series, xusb22.sys). Virtual
+//! pads (ViGEm / DS4Windows / Steam Input) live in the interactive user session
+//! and do not exist on the secure desktop, so nothing reads them at Winlogon.
+//!
+//! NOTE: the GET_GAMEPAD_STATE output byte layout is reverse-engineered and
+//! provisional — `parse_report` documents the assumed offsets. Every poll also
+//! surfaces the raw bytes (see `XusbReport.raw`) so the offsets can be confirmed
+//! against a real button press before the parse is trusted.
+
+use std::cell::Cell;
+use std::ffi::c_void;
+use std::mem::size_of;
+
+use crate::hid_gamepad::PadSample;
+use crate::pad_decode::{norm_thumb, DevicePoller, LEFT_DEADZONE, RIGHT_DEADZONE};
+
+use windows::core::GUID;
+use windows::Win32::Devices::DeviceAndDriverInstallation::{
+    SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
+    SetupDiGetDeviceInterfaceDetailW, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, HDEVINFO,
+    SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
+};
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+};
+use windows::Win32::System::IO::DeviceIoControl;
+
+/// XUSB device interface class GUID {EC87F1E3-C13B-4100-B5F7-8B84D54260CB}.
+const GUID_XUSB: GUID = GUID::from_u128(0xEC87F1E3_C13B_4100_B5F7_8B84D54260CB);
+
+/// Wrapper IOCTLs xinput1_x sends to xusb22.sys.
+const IOCTL_XUSB_GET_INFORMATION: u32 = 0x8000_6000;
+const IOCTL_XUSB_GET_GAMEPAD_STATE: u32 = 0x8000_E00C;
+
+const GENERIC_READ: u32 = 0x8000_0000;
+const GENERIC_WRITE: u32 = 0x4000_0000;
+
+/// Max output bytes for GET_GAMEPAD_STATE (real reports are ~29; pad generous).
+const STATE_OUT_LEN: usize = 64;
+
+/// One open handle to a physical XUSB pad, plus the LED ordinal (user index)
+/// the driver expects in the GET_GAMEPAD_STATE request.
+pub struct XusbDevice {
+    handle: HANDLE,
+    led: u8,
+    /// Consecutive failed polls. A connected pad answers every poll; sustained
+    /// failures mean the pad was unplugged, so the device is pruned (see
+    /// `is_disconnected`) and the slot frees up for a different pad — without
+    /// this, a stale XUSB entry blocks the HID path from taking over on a
+    /// Xbox→PlayStation switch.
+    fail_streak: Cell<u32>,
+}
+
+/// Consecutive failed polls before an `XusbDevice` is considered unplugged.
+/// ~0.5s at the secure-poll tick rate — long enough to ride out the occasional
+/// single-poll empty read a connected pad produces.
+const XUSB_FAIL_LIMIT: u32 = 30;
+
+/// Parsed gamepad snapshot, mirroring the XInput state we already consume, plus
+/// the raw IOCTL bytes for offset verification.
+#[derive(Clone, Default)]
+pub struct XusbReport {
+    pub packet: u32,
+    pub buttons: u16,
+    pub left_trigger: u8,
+    pub right_trigger: u8,
+    pub thumb_lx: i16,
+    pub thumb_ly: i16,
+    pub thumb_rx: i16,
+    pub thumb_ry: i16,
+    /// Raw output buffer, truncated to the bytes the driver actually returned.
+    pub raw: Vec<u8>,
+}
+
+impl XusbDevice {
+    /// Enumerate every present XUSB interface and open a handle to each. Returns
+    /// the open devices plus diagnostic lines describing what happened (caller
+    /// forwards them through the existing secure-poll log channel).
+    pub fn open_all() -> (Vec<XusbDevice>, Vec<String>) {
+        let mut log = Vec::new();
+        let mut devices = Vec::new();
+
+        let hdev = unsafe {
+            SetupDiGetClassDevsW(
+                Some(&GUID_XUSB),
+                None,
+                None,
+                DIGCF_DEVICEINTERFACE | DIGCF_PRESENT,
+            )
+        };
+        let hdev: HDEVINFO = match hdev {
+            Ok(h) => h,
+            Err(e) => {
+                log.push(format!("XUSB: SetupDiGetClassDevsW failed: {e}"));
+                return (devices, log);
+            }
+        };
+
+        let mut index = 0u32;
+        loop {
+            let mut ifd = SP_DEVICE_INTERFACE_DATA {
+                cbSize: size_of::<SP_DEVICE_INTERFACE_DATA>() as u32,
+                ..Default::default()
+            };
+            if unsafe { SetupDiEnumDeviceInterfaces(hdev, None, &GUID_XUSB, index, &mut ifd) }
+                .is_err()
+            {
+                break; // ERROR_NO_MORE_ITEMS terminates the enumeration.
+            }
+            index += 1;
+
+            match open_interface(hdev, &ifd) {
+                Ok(path) => {
+                    let (handle, led) = path;
+                    devices.push(XusbDevice {
+                        handle,
+                        led,
+                        fail_streak: Cell::new(0),
+                    });
+                }
+                Err(e) => log.push(format!("XUSB: device {index} open failed: {e}")),
+            }
+        }
+
+        unsafe {
+            let _ = SetupDiDestroyDeviceInfoList(hdev);
+        }
+
+        log.push(format!("XUSB: opened {} physical pad(s)", devices.len()));
+        (devices, log)
+    }
+
+    /// Poll the current gamepad state via the XUSB driver. Returns None when the
+    /// IOCTL fails (device gone) or returns no usable bytes.
+    pub fn poll(&self) -> Option<XusbReport> {
+        let input: [u8; 3] = [0x01, 0x01, self.led];
+        let mut out = [0u8; STATE_OUT_LEN];
+        let mut returned = 0u32;
+        let ok = unsafe {
+            DeviceIoControl(
+                self.handle,
+                IOCTL_XUSB_GET_GAMEPAD_STATE,
+                Some(input.as_ptr() as *const c_void),
+                input.len() as u32,
+                Some(out.as_mut_ptr() as *mut c_void),
+                out.len() as u32,
+                Some(&mut returned),
+                None,
+            )
+        };
+        if ok.is_err() || returned == 0 {
+            self.fail_streak
+                .set(self.fail_streak.get().saturating_add(1));
+            return None;
+        }
+        self.fail_streak.set(0);
+        let raw = out[..returned as usize].to_vec();
+        Some(parse_report(&raw))
+    }
+
+    /// True once the pad has failed enough consecutive polls to be treated as
+    /// unplugged. Caller prunes the device so its slot is released.
+    pub fn is_disconnected(&self) -> bool {
+        self.fail_streak.get() >= XUSB_FAIL_LIMIT
+    }
+}
+
+impl Drop for XusbDevice {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.handle);
+        }
+    }
+}
+
+impl XusbReport {
+    /// Normalize this raw IOCTL report into the shared [`PadSample`] currency,
+    /// so XUSB pads flow through the same decode/edge path as HID and XInput.
+    #[allow(dead_code)] // consumed by the DevicePoller adapter (staged; see pad_decode)
+    pub fn to_pad_sample(&self) -> PadSample {
+        PadSample {
+            buttons: self.buttons,
+            lt: self.left_trigger,
+            rt: self.right_trigger,
+            lx: norm_thumb(self.thumb_lx, LEFT_DEADZONE),
+            ly: norm_thumb(self.thumb_ly, LEFT_DEADZONE),
+            rx: norm_thumb(self.thumb_rx, RIGHT_DEADZONE),
+            ry: norm_thumb(self.thumb_ry, RIGHT_DEADZONE),
+        }
+    }
+}
+
+#[allow(dead_code)] // seam adapter; polymorphic consumer lands with the secure split
+impl DevicePoller for XusbDevice {
+    fn poll(&mut self) -> Option<PadSample> {
+        // inherent XusbDevice::poll(&self) returns the raw IOCTL report.
+        XusbDevice::poll(self).map(|r| r.to_pad_sample())
+    }
+
+    fn label(&self) -> String {
+        format!("xusb pad (led {})", self.led)
+    }
+}
+
+/// Open one enumerated interface; also queries GET_INFORMATION to recover the
+/// LED ordinal the state IOCTL expects. Returns (handle, led_ordinal).
+fn open_interface(hdev: HDEVINFO, ifd: &SP_DEVICE_INTERFACE_DATA) -> Result<(HANDLE, u8), String> {
+    // Two-call pattern: first call reports the required detail-buffer size.
+    let mut required = 0u32;
+    let _ =
+        unsafe { SetupDiGetDeviceInterfaceDetailW(hdev, ifd, None, 0, Some(&mut required), None) };
+    if required == 0 {
+        return Err("detail size query returned 0".into());
+    }
+
+    let mut buf = vec![0u8; required as usize];
+    let detail = buf.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W;
+    // cbSize is the size of the fixed header (NOT the whole buffer): 8 on x64,
+    // 6 on x86. The OS uses it to locate the DevicePath member.
+    let cb = if cfg!(target_pointer_width = "64") {
+        8u32
+    } else {
+        6u32
+    };
+    unsafe {
+        (*detail).cbSize = cb;
+    }
+    unsafe {
+        SetupDiGetDeviceInterfaceDetailW(hdev, ifd, Some(detail), required, None, None)
+            .map_err(|e| format!("GetDeviceInterfaceDetailW: {e}"))?;
+    }
+
+    // DevicePath is a NUL-terminated wide string at the DevicePath member offset.
+    let path_off = std::mem::offset_of!(SP_DEVICE_INTERFACE_DETAIL_DATA_W, DevicePath);
+    let path = unsafe { wide_from_buf(&buf, path_off) };
+
+    let handle = unsafe {
+        CreateFileW(
+            windows::core::PCWSTR(path.as_ptr()),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+    }
+    .map_err(|e| format!("CreateFileW: {e}"))?;
+
+    let led = query_led(handle).unwrap_or(0);
+    Ok((handle, led))
+}
+
+/// GET_INFORMATION returns the device's LED ordinal (slot index) among other
+/// fields. Provisional: byte offset confirmed empirically — fall back to 0.
+fn query_led(handle: HANDLE) -> Option<u8> {
+    let mut out = [0u8; 16];
+    let mut returned = 0u32;
+    let ok = unsafe {
+        DeviceIoControl(
+            handle,
+            IOCTL_XUSB_GET_INFORMATION,
+            None,
+            0,
+            Some(out.as_mut_ptr() as *mut c_void),
+            out.len() as u32,
+            Some(&mut returned),
+            None,
+        )
+    };
+    if ok.is_err() || returned == 0 {
+        return None;
+    }
+    // The LED ordinal sits near the front of the info block; index 0 is the
+    // safe default for a single connected pad until verified against the dump.
+    Some(0)
+}
+
+/// Parse the GET_GAMEPAD_STATE output buffer.
+///
+/// CONFIRMED LAYOUT (decoded from real `XusbReport.raw` dumps cross-checked
+/// against the XInput DLL's `btn/lx/ly/rx/ry` on the same frame). The report is
+/// 29 bytes: a header, then an XINPUT_GAMEPAD-shaped payload at offset 11. Byte
+/// 10 is `0x13` while a packet is valid (0x00 on an empty/neutral read):
+///   [4..8]   packet/sequence (low byte at [5] increments per poll)
+///   [10]     valid marker (0x13 = payload present)
+///   [11..13] wButtons        (u16 LE, XINPUT bit layout)
+///   [13]     bLeftTrigger
+///   [14]     bRightTrigger
+///   [15..17] sThumbLX        (i16 LE)
+///   [17..19] sThumbLY
+///   [19..21] sThumbRX
+///   [21..23] sThumbRY
+fn parse_report(raw: &[u8]) -> XusbReport {
+    let r = |off: usize, len: usize| -> Option<&[u8]> { raw.get(off..off + len) };
+    let u16le = |off: usize| -> u16 { r(off, 2).map_or(0, |b| u16::from_le_bytes([b[0], b[1]])) };
+    let i16le = |off: usize| -> i16 { r(off, 2).map_or(0, |b| i16::from_le_bytes([b[0], b[1]])) };
+
+    XusbReport {
+        packet: raw.get(5).copied().unwrap_or(0) as u32,
+        buttons: u16le(11),
+        left_trigger: raw.get(13).copied().unwrap_or(0),
+        right_trigger: raw.get(14).copied().unwrap_or(0),
+        thumb_lx: i16le(15),
+        thumb_ly: i16le(17),
+        thumb_rx: i16le(19),
+        thumb_ry: i16le(21),
+        raw: raw.to_vec(),
+    }
+}
+
+/// Read a NUL-terminated UTF-16 string from `buf` starting at byte `offset`,
+/// returning it NUL-terminated for PCWSTR use.
+unsafe fn wide_from_buf(buf: &[u8], offset: usize) -> Vec<u16> {
+    let mut out = Vec::new();
+    let mut i = offset;
+    while i + 1 < buf.len() {
+        let ch = u16::from_le_bytes([buf[i], buf[i + 1]]);
+        if ch == 0 {
+            break;
+        }
+        out.push(ch);
+        i += 2;
+    }
+    out.push(0);
+    out
+}
