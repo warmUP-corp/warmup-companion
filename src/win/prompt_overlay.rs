@@ -32,11 +32,14 @@ const WINDOW_CLASS: windows::core::PCWSTR = w!("WarmupPromptOverlayWindow");
 
 const PANEL_W: i32 = 390;
 const PANEL_H: i32 = 58;
+const CONNECTED_PANEL_W: i32 = 430;
+const CONNECTED_PANEL_H: i32 = 188;
 /// Gap between the pill's bottom edge and the bottom of the primary monitor.
 const MARGIN_BOTTOM: i32 = 72;
 const REPAINT_TIMER_ID: usize = 12;
 const REPAINT_TIMER_MS: u32 = 50;
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
+const CONNECTED_VISUAL_DURATION: Duration = Duration::from_millis(2400);
 
 const PROMPT_PREFIX: &str = "Press ";
 const PROMPT_SUFFIX: &str = " for keyboard";
@@ -51,6 +54,8 @@ struct PromptOverlayController {
     thread: Option<DesktopWindowThread>,
     last_tick: Instant,
     last_visual: Option<PromptVisual>,
+    last_connected: bool,
+    connected_visual_until: Option<Instant>,
 }
 
 impl Default for PromptOverlayController {
@@ -59,6 +64,8 @@ impl Default for PromptOverlayController {
             thread: None,
             last_tick: crate::time_util::stale(TICK_INTERVAL),
             last_visual: None,
+            last_connected: false,
+            connected_visual_until: None,
         }
     }
 }
@@ -67,6 +74,7 @@ impl Default for PromptOverlayController {
 enum PromptVisual {
     Ready,
     NoPad,
+    Connected,
 }
 
 impl PromptVisual {
@@ -74,12 +82,14 @@ impl PromptVisual {
         LPARAM(match self {
             PromptVisual::Ready => 1,
             PromptVisual::NoPad => 2,
+            PromptVisual::Connected => 3,
         })
     }
 
     fn from_lparam(lparam: LPARAM) -> Self {
         match lparam.0 {
             2 => PromptVisual::NoPad,
+            3 => PromptVisual::Connected,
             _ => PromptVisual::Ready,
         }
     }
@@ -129,9 +139,20 @@ pub fn tick(vk_open: bool) {
 
     let on_winlogon = super::surface::input().is_some_and(|s| s.is_winlogon());
     let connected = crate::debug_state::snapshot().connected;
+    if connected && !c.last_connected {
+        c.connected_visual_until = Some(Instant::now() + CONNECTED_VISUAL_DURATION);
+    } else if !connected {
+        c.connected_visual_until = None;
+    }
+    c.last_connected = connected;
+    let connected_intro_active = c
+        .connected_visual_until
+        .is_some_and(|until| Instant::now() < until);
     let visual = if on_winlogon {
         if vk_open {
             None
+        } else if connected_intro_active {
+            Some(PromptVisual::Connected)
         } else if connected {
             Some(PromptVisual::Ready)
         } else {
@@ -164,6 +185,7 @@ pub fn tick(vk_open: bool) {
         if let Some(visual) = visual {
             let _ = thread.show(visual.as_lparam());
             service_log(match visual {
+                PromptVisual::Connected => "prompt ui: shown (Winlogon, pad connected animation)",
                 PromptVisual::Ready => "prompt ui: shown (Winlogon, VK closed, pad connected)",
                 PromptVisual::NoPad => "prompt ui: shown (Winlogon, no pad connected)",
             });
@@ -186,13 +208,14 @@ fn ui_show(visual: PromptVisual) {
             HWND_STATE.with(|state| state.set(Some(hwnd)));
             unsafe {
                 let (x, y) = bottom_center();
+                let (w, h) = panel_size_for_visual(visual);
                 let _ = SetWindowPos(
                     hwnd,
                     HWND_TOPMOST,
                     x,
                     y,
-                    PANEL_W,
-                    PANEL_H,
+                    w,
+                    h,
                     SWP_SHOWWINDOW | SWP_NOACTIVATE,
                 );
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -228,9 +251,17 @@ fn ui_hide() {
 unsafe fn bottom_center() -> (i32, i32) {
     let cx = GetSystemMetrics(SM_CXSCREEN);
     let cy = GetSystemMetrics(SM_CYSCREEN);
-    let x = ((cx - PANEL_W) / 2).max(0);
-    let y = (cy - PANEL_H - MARGIN_BOTTOM).max(0);
+    let (w, h) = VISUAL_STATE.with(|state| panel_size_for_visual(state.get()));
+    let x = ((cx - w) / 2).max(0);
+    let y = (cy - h - MARGIN_BOTTOM).max(0);
     (x, y)
+}
+
+fn panel_size_for_visual(visual: PromptVisual) -> (i32, i32) {
+    match visual {
+        PromptVisual::Connected => (CONNECTED_PANEL_W, CONNECTED_PANEL_H),
+        PromptVisual::Ready | PromptVisual::NoPad => (PANEL_W, PANEL_H),
+    }
 }
 
 unsafe fn create_prompt_window() -> Result<HWND, String> {
@@ -305,6 +336,9 @@ fn render_prompt(hwnd: HWND) {
                         service_log(&format!("prompt ui: renderer resize: {e}"));
                     }
                     let result = match visual {
+                        PromptVisual::Connected => {
+                            r.draw_connected_prompt(bg, border, text, "Controller", "Connected")
+                        }
                         PromptVisual::Ready => {
                             r.draw_prompt(bg, border, text, PROMPT_PREFIX, PROMPT_SUFFIX, true)
                         }

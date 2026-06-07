@@ -328,6 +328,8 @@ enum VkIcon {
     ChevronRight,
     ChevronUp,
     ChevronDown,
+    /// Generic controller image for the connection card.
+    Gamepad,
     /// PlayStation L3 (left-stick click) chip — keeps its native colors (no
     /// `currentColor`), extracted from the controller-icon atlas.
     L3,
@@ -384,6 +386,9 @@ impl VkIcon {
             }
             VkIcon::ChevronDown => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>"#
+            }
+            VkIcon::Gamepad => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><line x1="6" x2="10" y1="12" y2="12"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="15" x2="15.01" y1="13" y2="13"/><line x1="18" x2="18.01" y1="11" y2="11"/><rect width="20" height="12" x="2" y="6" rx="4"/><path d="M6 18v1a2 2 0 0 0 4 0v-1"/><path d="M14 18v1a2 2 0 0 0 4 0v-1"/></svg>"#
             }
             // Native-colored chip; has no `currentColor`, so the palette swap in
             // `draw_svg_icon` is a no-op and it keeps its PlayStation look.
@@ -1127,6 +1132,163 @@ impl VkRenderer {
             return 0.0;
         }
         m.widthIncludingTrailingWhitespace
+    }
+
+    /// Draw an AirPods-style connection card with a controller image.
+    /// Kept D2D-only so the secure-desktop service path does not need asset IO or
+    /// a separate 3D runtime.
+    pub unsafe fn draw_connected_prompt(
+        &mut self,
+        bg: u32,
+        border: u32,
+        text_color: u32,
+        title: &str,
+        status: &str,
+    ) -> Result<(), String> {
+        let cw = self.width as f32;
+        let ch = self.height as f32;
+        let _ = self
+            .text_format
+            .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        let _ = self
+            .text_format
+            .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        let _ = self
+            .hint_format
+            .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        let _ = self
+            .hint_format
+            .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+        self.d2d_context.BeginDraw();
+        self.d2d_context.Clear(Some(&D2D1_COLOR_F {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        }));
+
+        let t = self.prompt_started.elapsed().as_secs_f32();
+        let intro = (t / 0.62).clamp(0.0, 1.0);
+        let eased = 1.0 - (1.0 - intro).powi(3);
+        let pulse = (t * 0.72).fract();
+        let pulse_alpha = (1.0 - pulse).powi(2);
+        let scale = 0.90 + 0.10 * eased;
+        let transform = Matrix3x2 {
+            M11: scale,
+            M12: 0.0,
+            M21: 0.0,
+            M22: scale,
+            M31: cw * (1.0 - scale) * 0.5,
+            M32: ch * (1.0 - scale) * 0.5,
+        };
+        self.d2d_context.SetTransform(&transform);
+
+        let panel = D2D_RECT_F {
+            left: 5.0,
+            top: 5.0,
+            right: cw - 5.0,
+            bottom: ch - 5.0,
+        };
+        let rounded = D2D1_ROUNDED_RECT {
+            rect: panel,
+            radiusX: 28.0,
+            radiusY: 28.0,
+        };
+        let glow = colorref_mix(0x00FFFFFF, border, 0.45);
+        let bg_brush = solid_brush(&self.d2d_context, colorref_alpha(bg, 0.94))?;
+        let border_brush = solid_brush(&self.d2d_context, colorref_alpha(glow, 0.84))?;
+        let halo_brush = solid_brush(&self.d2d_context, colorref_alpha(glow, 0.22 * pulse_alpha))?;
+        self.d2d_context.FillRoundedRectangle(&rounded, &bg_brush);
+        self.d2d_context
+            .DrawRoundedRectangle(&rounded, &halo_brush, 3.0 + 12.0 * pulse, None);
+        self.d2d_context
+            .DrawRoundedRectangle(&rounded, &border_brush, 1.2, None);
+
+        let image_cx = cw * 0.5;
+        let image_y = 48.0 - 7.0 * (1.0 - eased);
+        let shadow = solid_brush(&self.d2d_context, colorref_alpha(0x00000000, 0.26))?;
+
+        let shadow_rect = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: image_cx - 70.0,
+                top: image_y + 60.0,
+                right: image_cx + 70.0,
+                bottom: image_y + 74.0,
+            },
+            radiusX: 18.0,
+            radiusY: 18.0,
+        };
+        self.d2d_context.FillRoundedRectangle(&shadow_rect, &shadow);
+
+        let ring = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: image_cx - 102.0 - 18.0 * pulse,
+                top: image_y - 14.0 - 18.0 * pulse,
+                right: image_cx + 102.0 + 18.0 * pulse,
+                bottom: image_y + 86.0 + 18.0 * pulse,
+            },
+            radiusX: 58.0 + 18.0 * pulse,
+            radiusY: 58.0 + 18.0 * pulse,
+        };
+        self.d2d_context
+            .DrawRoundedRectangle(&ring, &halo_brush, 2.0, None);
+        let image_rect = D2D_RECT_F {
+            left: image_cx - 76.0,
+            top: image_y - 6.0,
+            right: image_cx + 76.0,
+            bottom: image_y + 78.0,
+        };
+        self.draw_svg_icon(VkIcon::Gamepad, image_rect, text_color)?;
+
+        let title_w: Vec<u16> = title.encode_utf16().collect();
+        let status_w: Vec<u16> = status.encode_utf16().collect();
+        let text_brush = solid_brush(&self.d2d_context, colorref(text_color))?;
+        let sub_brush = solid_brush(&self.d2d_context, colorref_alpha(text_color, 0.70))?;
+        self.d2d_context.DrawText(
+            &title_w,
+            &self.text_format,
+            &D2D_RECT_F {
+                left: 24.0,
+                top: ch - 78.0,
+                right: cw - 24.0,
+                bottom: ch - 42.0,
+            },
+            &text_brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
+        self.d2d_context.DrawText(
+            &status_w,
+            &self.hint_format,
+            &D2D_RECT_F {
+                left: 24.0,
+                top: ch - 42.0,
+                right: cw - 24.0,
+                bottom: ch - 16.0,
+            },
+            &sub_brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
+
+        let identity = Matrix3x2 {
+            M11: 1.0,
+            M12: 0.0,
+            M21: 0.0,
+            M22: 1.0,
+            M31: 0.0,
+            M32: 0.0,
+        };
+        self.d2d_context.SetTransform(&identity);
+        self.d2d_context
+            .EndDraw(None, None)
+            .map_err(|e| format!("EndDraw: {e}"))?;
+        self.swapchain
+            .Present(1, DXGI_PRESENT(0))
+            .ok()
+            .map_err(|e| format!("Present: {e}"))?;
+        Ok(())
     }
 
     /// Draw the "Press [L3] to open keyboard" prompt: a rounded pill filling the
