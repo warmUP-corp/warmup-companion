@@ -248,6 +248,8 @@ enum VkIcon {
     ChevronRight,
     ChevronUp,
     ChevronDown,
+    /// Generic controller image for the connection card.
+    Gamepad,
     /// PlayStation L3 (left-stick click) chip — keeps its native colors (no
     /// `currentColor`), extracted from the controller-icon atlas.
     L3,
@@ -304,6 +306,9 @@ impl VkIcon {
             }
             VkIcon::ChevronDown => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>"#
+            }
+            VkIcon::Gamepad => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><line x1="6" x2="10" y1="12" y2="12"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="15" x2="15.01" y1="13" y2="13"/><line x1="18" x2="18.01" y1="11" y2="11"/><rect width="20" height="12" x="2" y="6" rx="4"/><path d="M6 18v1a2 2 0 0 0 4 0v-1"/><path d="M14 18v1a2 2 0 0 0 4 0v-1"/></svg>"#
             }
             // Native-colored chip; has no `currentColor`, so the palette swap in
             // `draw_svg_icon` is a no-op and it keeps its PlayStation look.
@@ -1049,7 +1054,7 @@ impl VkRenderer {
         m.widthIncludingTrailingWhitespace
     }
 
-    /// Draw an AirPods-style connection card with a shaded controller model.
+    /// Draw an AirPods-style connection card with a controller image.
     /// Kept D2D-only so the secure-desktop service path does not need asset IO or
     /// a separate 3D runtime.
     pub unsafe fn draw_connected_prompt(
@@ -1120,126 +1125,41 @@ impl VkRenderer {
         self.d2d_context
             .DrawRoundedRectangle(&rounded, &border_brush, 1.2, None);
 
-        let model_cx = cw * 0.5;
-        let model_y = 54.0 - 7.0 * (1.0 - eased);
+        let image_cx = cw * 0.5;
+        let image_y = 48.0 - 7.0 * (1.0 - eased);
         let shadow = solid_brush(&self.d2d_context, colorref_alpha(0x00000000, 0.26))?;
-        let body = solid_brush(
-            &self.d2d_context,
-            colorref(colorref_mix(0x00FFFFFF, bg, 0.70)),
-        )?;
-        let face = solid_brush(
-            &self.d2d_context,
-            colorref(colorref_mix(0x00FFFFFF, bg, 0.86)),
-        )?;
-        let dim = solid_brush(&self.d2d_context, colorref_alpha(text_color, 0.34))?;
-        let accent = solid_brush(&self.d2d_context, colorref(glow))?;
 
         let shadow_rect = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F {
-                left: model_cx - 78.0,
-                top: model_y + 50.0,
-                right: model_cx + 78.0,
-                bottom: model_y + 66.0,
+                left: image_cx - 70.0,
+                top: image_y + 60.0,
+                right: image_cx + 70.0,
+                bottom: image_y + 74.0,
             },
             radiusX: 18.0,
             radiusY: 18.0,
         };
         self.d2d_context.FillRoundedRectangle(&shadow_rect, &shadow);
 
-        let left_grip = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: model_cx - 106.0,
-                top: model_y + 7.0,
-                right: model_cx - 42.0,
-                bottom: model_y + 77.0,
-            },
-            radiusX: 30.0,
-            radiusY: 30.0,
-        };
-        let right_grip = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: model_cx + 42.0,
-                top: model_y + 7.0,
-                right: model_cx + 106.0,
-                bottom: model_y + 77.0,
-            },
-            radiusX: 30.0,
-            radiusY: 30.0,
-        };
-        let center = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: model_cx - 68.0,
-                top: model_y,
-                right: model_cx + 68.0,
-                bottom: model_y + 61.0,
-            },
-            radiusX: 26.0,
-            radiusY: 26.0,
-        };
-        self.d2d_context.FillRoundedRectangle(&left_grip, &body);
-        self.d2d_context.FillRoundedRectangle(&right_grip, &body);
-        self.d2d_context.FillRoundedRectangle(&center, &face);
-        self.d2d_context
-            .DrawRoundedRectangle(&center, &border_brush, 1.0, None);
-
-        let round_dot = |x: f32, y: f32, r: f32| D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: x - r,
-                top: y - r,
-                right: x + r,
-                bottom: y + r,
-            },
-            radiusX: r,
-            radiusY: r,
-        };
-        self.d2d_context
-            .FillRoundedRectangle(&round_dot(model_cx - 34.0, model_y + 49.0, 14.0), &dim);
-        self.d2d_context
-            .FillRoundedRectangle(&round_dot(model_cx + 34.0, model_y + 49.0, 14.0), &dim);
-        for (x, y) in [
-            (model_cx + 75.0, model_y + 25.0),
-            (model_cx + 91.0, model_y + 39.0),
-            (model_cx + 59.0, model_y + 39.0),
-            (model_cx + 75.0, model_y + 53.0),
-        ] {
-            self.d2d_context
-                .FillRoundedRectangle(&round_dot(x, y, 7.0), &accent);
-        }
-        let dpad_h = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: model_cx - 91.0,
-                top: model_y + 35.0,
-                right: model_cx - 55.0,
-                bottom: model_y + 47.0,
-            },
-            radiusX: 6.0,
-            radiusY: 6.0,
-        };
-        let dpad_v = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: model_cx - 79.0,
-                top: model_y + 23.0,
-                right: model_cx - 67.0,
-                bottom: model_y + 59.0,
-            },
-            radiusX: 6.0,
-            radiusY: 6.0,
-        };
-        self.d2d_context.FillRoundedRectangle(&dpad_h, &dim);
-        self.d2d_context.FillRoundedRectangle(&dpad_v, &dim);
-
         let ring = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F {
-                left: model_cx - 124.0 - 18.0 * pulse,
-                top: model_y - 16.0 - 18.0 * pulse,
-                right: model_cx + 124.0 + 18.0 * pulse,
-                bottom: model_y + 90.0 + 18.0 * pulse,
+                left: image_cx - 102.0 - 18.0 * pulse,
+                top: image_y - 14.0 - 18.0 * pulse,
+                right: image_cx + 102.0 + 18.0 * pulse,
+                bottom: image_y + 86.0 + 18.0 * pulse,
             },
             radiusX: 58.0 + 18.0 * pulse,
             radiusY: 58.0 + 18.0 * pulse,
         };
         self.d2d_context
             .DrawRoundedRectangle(&ring, &halo_brush, 2.0, None);
+        let image_rect = D2D_RECT_F {
+            left: image_cx - 76.0,
+            top: image_y - 6.0,
+            right: image_cx + 76.0,
+            bottom: image_y + 78.0,
+        };
+        self.draw_svg_icon(VkIcon::Gamepad, image_rect, text_color)?;
 
         let title_w: Vec<u16> = title.encode_utf16().collect();
         let status_w: Vec<u16> = status.encode_utf16().collect();
