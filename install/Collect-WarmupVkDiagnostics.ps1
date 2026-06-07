@@ -35,6 +35,26 @@ if (Test-Path $BinExe) {
 }
 
 Write-Host ""
+Write-Host "=== Trust / Telemetry ==="
+Write-Host "Sentry env: $(if ($env:WARMUP_SENTRY_DSN) { 'enabled by WARMUP_SENTRY_DSN' } else { 'disabled or not inherited by this shell' })"
+foreach ($Doc in @("README.md", "PRIVACY.md", "SECURITY.md", "LICENSE")) {
+    $Path = Join-Path $DataDir $Doc
+    if (Test-Path $Path) {
+        Write-Host "$Doc: $Path"
+    }
+}
+$Dumps = Get-ChildItem -Path $DataDir -Filter "worker-crash-*.dmp" -ErrorAction SilentlyContinue
+if ($Dumps) {
+    Write-Host "Crash dumps:"
+    $Dumps | Sort-Object LastWriteTime -Descending | Select-Object -First 8 | ForEach-Object {
+        Write-Host "  $($_.FullName) ($($_.Length) bytes, $($_.LastWriteTime))"
+    }
+    Write-Host "Review crash dumps before sharing; they may contain process memory."
+} else {
+    Write-Host "Crash dumps: none found"
+}
+
+Write-Host ""
 Write-Host "=== Recent Service Log ==="
 if (-not (Test-Path $LogFile)) {
     Write-Host "Missing: $LogFile"

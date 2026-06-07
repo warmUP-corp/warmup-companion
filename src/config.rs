@@ -69,6 +69,9 @@ pub fn vk_layout_mode() -> VkLayoutMode {
 #[derive(Clone, Copy, Debug)]
 pub struct GamepadSettings {
     pub userland_poll_mode: warmup_gamepad::PollMode,
+    /// Standalone companion behavior: sleep the userland gamepad loop when another
+    /// fullscreen game-like window is detected, even without warmUP IPC mode pushes.
+    pub sleep_on_game: bool,
     pub cursor_deadzone: f32,
     pub cursor_speed: f32,
     pub cursor_accel: f32,
@@ -86,6 +89,7 @@ impl Default for GamepadSettings {
     fn default() -> Self {
         Self {
             userland_poll_mode: warmup_gamepad::PollMode::Full,
+            sleep_on_game: true,
             cursor_deadzone: 0.15,
             cursor_speed: 15.0,
             cursor_accel: 2.0,
@@ -143,6 +147,9 @@ pub fn gamepad_settings() -> GamepadSettings {
     if raw.is_some() {
         settings.userland_poll_mode = parse_userland_gamepad_poll_mode(raw.as_deref());
     }
+    if let Ok(raw) = std::env::var("WARMUP_VK_SLEEP_ON_GAME") {
+        settings.sleep_on_game = parse_bool(&raw, settings.sleep_on_game);
+    }
 
     settings
 }
@@ -171,6 +178,9 @@ fn apply_gamepad_settings_text(settings: &mut GamepadSettings, text: &str) {
         match key {
             "userland_poll" | "userland_poll_mode" | "poll_mode" => {
                 settings.userland_poll_mode = parse_userland_gamepad_poll_mode(Some(value));
+            }
+            "sleep_on_game" | "game_sleep" | "sleep_when_game_active" => {
+                settings.sleep_on_game = parse_bool(value, settings.sleep_on_game)
             }
             "cursor_deadzone" => {
                 settings.cursor_deadzone = parse_unit_f32(value, settings.cursor_deadzone)
@@ -381,6 +391,12 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
             "true" | "false" | "1" | "0" | "yes" | "no" | "on" | "off" => Ok(()),
             _ => Err("natural_scroll must be a boolean".to_string()),
         },
+        "sleep_on_game" | "game_sleep" | "sleep_when_game_active" => {
+            match value.trim().to_ascii_lowercase().as_str() {
+                "true" | "false" | "1" | "0" | "yes" | "no" | "on" | "off" => Ok(()),
+                _ => Err("sleep_on_game must be a boolean".to_string()),
+            }
+        }
         "cursor_speed" | "cursor_accel" | "scroll_speed" | "scroll_accel" => value
             .parse::<f32>()
             .ok()
@@ -438,5 +454,16 @@ mod tests {
         assert_eq!(theme.accent, Some(0x00090807));
         assert_eq!(theme.text, Some(0x000c0b0a));
         assert_eq!(theme.sel_text, Some(0x000f0e0d));
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn gamepad_settings_text_accepts_sleep_on_game_aliases() {
+        let mut settings = GamepadSettings::default();
+        apply_gamepad_settings_text(&mut settings, "sleep_on_game=false\n");
+        assert!(!settings.sleep_on_game);
+
+        apply_gamepad_settings_text(&mut settings, "game_sleep=on\n");
+        assert!(settings.sleep_on_game);
     }
 }

@@ -252,12 +252,7 @@ fn remove_test_services() {
 }
 
 fn copy_gamecontroller_db() -> Result<(), String> {
-    let candidates = [
-        std::env::var_os("WARMUP_GAMECONTROLLER_DB").map(PathBuf::from),
-        Some(PathBuf::from(
-            r"C:\Users\jonas\warmUp\apps\desktop\src-tauri\resources\gamecontrollerdb.txt",
-        )),
-    ];
+    let candidates = [std::env::var_os("WARMUP_GAMECONTROLLER_DB").map(PathBuf::from)];
     let dest = Path::new(DATA_DIR).join("gamecontrollerdb.txt");
     for c in candidates.into_iter().flatten() {
         if c.is_file() {

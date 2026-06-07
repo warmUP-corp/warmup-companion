@@ -15,7 +15,7 @@ use windows::Win32::System::StationsAndDesktops::{
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 
-/// Same access mask as decompiled Joyxoff (`0x2000000`).
+/// Desktop access mask used for attach attempts (`0x2000000`).
 const DESKTOP_ALL: u32 = 0x200_0000;
 
 struct DesktopGuard {

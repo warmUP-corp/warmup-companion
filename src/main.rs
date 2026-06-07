@@ -8,6 +8,7 @@ mod pipe_server;
 /// Companion IPC wire frames (#347). Pure serde; used by the pipe server and tests.
 #[allow(dead_code)]
 mod protocol;
+mod sentry_telemetry;
 mod symbols;
 mod time_util;
 mod vk_gate;
@@ -16,10 +17,10 @@ mod vk_gate;
 mod crash;
 #[cfg(windows)]
 mod install;
-#[cfg(all(windows, feature = "gamepad"))]
-mod tray;
 #[cfg(all(windows, feature = "service"))]
 mod service;
+#[cfg(all(windows, feature = "gamepad"))]
+mod tray;
 
 #[cfg(windows)]
 mod debug_state;
@@ -178,11 +179,11 @@ impl App {
         }
     }
 
-    /// Joyxoff `-boot` + config `+0xd9` for sign-in / UAC (service or `--boot --cfg-winlogon`).
+    /// Boot-service + config `+0xd9` path for sign-in / UAC (service or `--boot --cfg-winlogon`).
     ///
-    /// Matches Joyxoff `FUN_00426080` (main controller fn): when `+0xd9` is set, the
-    /// main thread runs `warmup_attach_named_desktop("winlogon")` *first*, then creates
-    /// the controller anchor window (`JoyXoffMWindow`) on that desktop. Owning a window
+    /// When `+0xd9` is set, the main thread runs
+    /// `warmup_attach_named_desktop("winlogon")` *first*, then creates
+    /// the controller anchor window on that desktop. Owning a window
     /// on the input desktop is the gating condition for HID/XInput delivery.
     pub(crate) fn configure_boot_service(&mut self) {
         self.config_winlogon_0xd9 = true;
@@ -624,6 +625,7 @@ mod repl_scroll {
 }
 
 fn main() {
+    let _sentry = sentry_telemetry::init();
     let args: Vec<String> = env::args().collect();
     #[cfg(windows)]
     dispatch_install_or_service(&args);
@@ -815,6 +817,13 @@ fn dispatch_install_or_service(args: &[String]) {
             install::run_stop();
             std::process::exit(0);
         }
+        Some("restore-keyboard") | Some("restore-native-keyboard") => {
+            crate::win::native_keyboard::restore_auto_invoke();
+            crate::win::native_keyboard::ensure_search_service_running();
+            install::log_line("restore-keyboard: requested Windows keyboard service restore");
+            println!("Requested Windows touch keyboard/search service restore.");
+            std::process::exit(0);
+        }
         #[cfg(feature = "gamepad")]
         Some("settings") => {
             run_settings_command(args);
@@ -859,6 +868,7 @@ fn run_settings_command(args: &[String]) {
   warmup-companion.exe settings get
   warmup-companion.exe settings path
   warmup-companion.exe settings set <key> <value>
+  warmup-companion.exe settings sleep-on-game <get|on|off>
   warmup-companion.exe settings userland-poll <get|full|sleep|path>";
     match args.get(2).map(String::as_str) {
         Some("get") | None => print_gamepad_settings(),
@@ -919,6 +929,29 @@ fn run_settings_command(args: &[String]) {
                 std::process::exit(2);
             }
         },
+        Some("sleep-on-game") => match args.get(3).map(String::as_str) {
+            Some("get") | None => {
+                println!("{}", crate::config::gamepad_settings().sleep_on_game);
+            }
+            Some("on") | Some("true") | Some("1") => {
+                if let Err(e) = crate::config::set_gamepad_setting("sleep_on_game", "true") {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                println!("true");
+            }
+            Some("off") | Some("false") | Some("0") => {
+                if let Err(e) = crate::config::set_gamepad_setting("sleep_on_game", "false") {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                println!("false");
+            }
+            Some(_) => {
+                eprintln!("{usage}");
+                std::process::exit(2);
+            }
+        },
         Some(_) => {
             eprintln!("{usage}");
             std::process::exit(2);
@@ -938,6 +971,7 @@ fn poll_mode_name(mode: warmup_gamepad::PollMode) -> &'static str {
 fn print_gamepad_settings() {
     let s = crate::config::gamepad_settings();
     println!("userland_poll={}", poll_mode_name(s.userland_poll_mode));
+    println!("sleep_on_game={}", s.sleep_on_game);
     println!("cursor_deadzone={}", s.cursor_deadzone);
     println!("cursor_speed={}", s.cursor_speed);
     println!("cursor_accel={}", s.cursor_accel);
@@ -1274,7 +1308,7 @@ fn print_help() {
   slot bad            slot 7 does not queue action 7
   reset               reset state
   quit                exit
-  --real              Win32 desktop + TabTip/JoyXboxVkWindow (Windows)
+  --real              Win32 desktop + TabTip/WarmupXboxVkWindow (Windows)
   pad                 (gamepad feature) SDL3 snapshot
   --gamepad           (gamepad feature) sticks + L3 → VK
 

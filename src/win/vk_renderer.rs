@@ -1,4 +1,4 @@
-//! D3D11 + DXGI composition swapchain + D2D + DirectComposition — Joyxoff `FUN_0041e670`.
+//! D3D11 + DXGI composition swapchain + D2D + DirectComposition renderer.
 
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
@@ -106,6 +106,7 @@ unsafe fn draw_candidate_strip(
     text_brush: &ID2D1SolidColorBrush,
     sel_text_brush: &ID2D1SolidColorBrush,
     chip_format: &IDWriteTextFormat,
+    hint_format: &IDWriteTextFormat,
     pal: &VkPalette,
 ) -> Result<(), String> {
     let mut widths = [0.0f32; 3];
@@ -124,7 +125,28 @@ unsafe fn draw_candidate_strip(
     let total_w: f32 = widths.iter().sum::<f32>() + CHIP_GAP * (count.saturating_sub(1) as f32);
     let mut x = (cw - total_w) / 2.0;
     let outline = solid_brush(&ctx, colorref_alpha(pal.text, 0.28))?;
+    let hint_fill = solid_brush(&ctx, colorref_alpha(pal.text, 0.10))?;
+    let hint_text = solid_brush(&ctx, colorref_alpha(pal.text, 0.72))?;
     let radius = CHIP_H * 0.42;
+
+    draw_shortcut_pill(
+        ctx,
+        "LB",
+        x - HINT_PILL_W - HINT_GAP,
+        &hint_fill,
+        &outline,
+        &hint_text,
+        hint_format,
+    )?;
+    draw_shortcut_pill(
+        ctx,
+        "RB",
+        x + total_w + HINT_GAP,
+        &hint_fill,
+        &outline,
+        &hint_text,
+        hint_format,
+    )?;
 
     for (i, word) in strip.visible.iter().enumerate() {
         if word.is_empty() {
@@ -154,7 +176,13 @@ unsafe fn draw_candidate_strip(
         let label_rect = D2D_RECT_F {
             left: rect.rect.left + CHIP_LABEL_INSET_X,
             top: rect.rect.top + CHIP_LABEL_INSET_Y,
-            right: rect.rect.right - CHIP_LABEL_INSET_X,
+            right: rect.rect.right
+                - CHIP_LABEL_INSET_X
+                - if selected {
+                    HINT_PILL_W + HINT_INSET
+                } else {
+                    0.0
+                },
             bottom: rect.rect.bottom - CHIP_LABEL_INSET_Y,
         };
         let wide: Vec<u16> = word.encode_utf16().collect();
@@ -166,8 +194,55 @@ unsafe fn draw_candidate_strip(
             D2D1_DRAW_TEXT_OPTIONS_CLIP,
             DWRITE_MEASURING_MODE_NATURAL,
         );
+        if selected {
+            draw_shortcut_pill(
+                ctx,
+                "A",
+                rect.rect.right - HINT_PILL_W - HINT_INSET,
+                &hint_fill,
+                &outline,
+                sel_text_brush,
+                hint_format,
+            )?;
+        }
         x += w + CHIP_GAP;
     }
+    Ok(())
+}
+
+unsafe fn draw_shortcut_pill(
+    ctx: &ID2D1DeviceContext,
+    label: &str,
+    x: f32,
+    fill: &ID2D1SolidColorBrush,
+    outline: &ID2D1SolidColorBrush,
+    text: &ID2D1SolidColorBrush,
+    format: &IDWriteTextFormat,
+) -> Result<(), String> {
+    if x < 0.0 {
+        return Ok(());
+    }
+    let rect = D2D1_ROUNDED_RECT {
+        rect: D2D_RECT_F {
+            left: x,
+            top: HINT_TOP,
+            right: x + HINT_PILL_W,
+            bottom: HINT_TOP + HINT_PILL_H,
+        },
+        radiusX: HINT_PILL_H * 0.5,
+        radiusY: HINT_PILL_H * 0.5,
+    };
+    ctx.FillRoundedRectangle(&rect, fill);
+    ctx.DrawRoundedRectangle(&rect, outline, 1.0, None);
+    let wide: Vec<u16> = label.encode_utf16().collect();
+    ctx.DrawText(
+        &wide,
+        format,
+        &rect.rect,
+        text,
+        D2D1_DRAW_TEXT_OPTIONS_NONE,
+        DWRITE_MEASURING_MODE_NATURAL,
+    );
     Ok(())
 }
 
@@ -176,7 +251,7 @@ pub struct VkPalette {
     pub key: u32,
     pub accent: u32,
     pub text: u32,
-    /// Label colour on the selected key (Joyxoff inverts it — `DAT_004a4964`).
+    /// Label colour on the selected key.
     pub sel_text: u32,
     /// Key outline colour (matches the webview VK border).
     pub border: u32,
@@ -207,13 +282,13 @@ pub struct VkRenderer {
     _visual: IDCompositionVisual,
 }
 
-/// Joyxoff reference metrics on a 1920px-wide monitor: 92x68 px keys, 4 px gap,
-/// 6.8 px corner radius (`_DAT_00494d5c`/`_DAT_00494d4c`/`_DAT_00494cb0`/`_DAT_00494ce8`).
+/// Reference metrics on a 1920px-wide monitor: 92x68 px keys, 4 px gap,
+/// 6.8 px corner radius.
 const REF_MON_W: f32 = 1920.0;
 const REF_KEY_W: f32 = 92.0;
 const KEY_ASPECT: f32 = 68.0 / 92.0;
 const REF_GAP: f32 = 4.0;
-/// Corner radius as a fraction of key height (Joyxoff 6.8/68).
+/// Corner radius as a fraction of key height (6.8/68).
 const RADIUS_FRAC: f32 = 6.8 / 68.0;
 /// Prefix-completion candidate strip (reclaims former legend/tooltip row).
 pub const CANDIDATE_STRIP_H: f32 = 70.0;
@@ -230,6 +305,11 @@ const CHIP_LABEL_INSET_X: f32 = 8.0;
 const CHIP_LABEL_INSET_Y: f32 = 4.0;
 /// Chip label size in DIPs — independent of key label scaling.
 const CHIP_FONT_PX: f32 = 14.0;
+const HINT_PILL_W: f32 = 34.0;
+const HINT_PILL_H: f32 = 22.0;
+const HINT_TOP: f32 = 24.0;
+const HINT_GAP: f32 = 12.0;
+const HINT_INSET: f32 = 6.0;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum VkIcon {
@@ -346,8 +426,7 @@ pub struct KeyRect {
 }
 
 /// Compute every key's rect for the given client size + layout rows. Each key's
-/// width is `span * kw` so the wide space bar covers several key-units (Joyxoff
-/// `FUN_00463bd0` width = span*keyW + (span-1)*gap).
+/// width is `span * kw` so the wide space bar covers several key-units.
 fn row_pixel_width(row: &KeyRow, kw: f32, gap: f32) -> f32 {
     row.keys
         .iter()
@@ -533,7 +612,7 @@ impl VkRenderer {
         // Font scales with the docked bar height so labels fill the larger keys
         // (bar ~384px @1080p -> ~32px labels).
         let label_px = (height as f32 / 12.0).clamp(14.0, 48.0);
-        // Joyxoff `FUN_00463130`: Segoe UI labels; Segoe MDL2 Assets when icon row enabled.
+        // Segoe UI labels; Segoe MDL2 Assets when icon row enabled.
         let text_format = dwrite
             .CreateTextFormat(
                 w!("Segoe UI"),
@@ -805,6 +884,7 @@ impl VkRenderer {
                 &text_brush,
                 &sel_text_brush,
                 &self.chip_format,
+                &self.hint_format,
                 pal,
             )?;
         }
@@ -812,7 +892,7 @@ impl VkRenderer {
         for kr in &rects {
             let key = &rows[kr.pos.row].keys[kr.pos.col];
             let selected = sel.row == kr.pos.row && sel.col == kr.pos.col;
-            // Radius scales with key height (Joyxoff 6.8px @ 68px key).
+            // Radius scales with key height (6.8px @ 68px key).
             let radius = (kr.bottom - kr.top) * RADIUS_FRAC;
             let rect = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
@@ -824,7 +904,7 @@ impl VkRenderer {
                 radiusX: radius,
                 radiusY: radius,
             };
-            // Selected key: solid accent fill + inverted label (Joyxoff `FUN_004676b0`).
+            // Selected key: solid accent fill + inverted label.
             let (fill, label_brush) = if selected {
                 (&accent_brush, &sel_text_brush)
             } else {
@@ -1289,7 +1369,7 @@ fn user_locale_name() -> windows::core::HSTRING {
 }
 
 /// Returns `(key_width, key_height, gap)` in px. Keys are sized from the window
-/// width at the Joyxoff 92px reference (scaled by `client_w/1920`), holding the
+/// width at the 92px reference (scaled by `client_w/1920`), holding the
 /// 92:68 aspect, then shrunk to fit all rows in the docked bar's height.
 fn key_metrics(scale_w: f32, client_h: f32, rows: &[KeyRow], top_inset: f32) -> (f32, f32, f32) {
     let scale = (scale_w / REF_MON_W).max(0.05);

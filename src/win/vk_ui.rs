@@ -40,7 +40,7 @@ use super::vk_renderer::{self, VkPalette, VkRenderer};
 
 const WINDOW_CLASS: windows::core::PCWSTR = w!("WarmupXboxVkWindow");
 
-/// Joyxoff docks the keyboard full-monitor-width at the screen bottom; its height is
+/// Dock the keyboard full-monitor-width at the screen bottom; its height is
 /// `monitorHeight * 384/1080` (`_DAT_00494db8`=384 @ the 1080p reference monitor —
 /// see `warmup_create_xbox_vk_window` + `FUN_00467190`).
 const VK_REF_MONITOR_H: f32 = 1080.0;
@@ -48,7 +48,7 @@ const VK_KB_REF_H: f32 = 384.0;
 /// Re-assert topmost while visible (shell search/task UI also uses HWND_TOPMOST).
 const VK_ZORDER_TIMER_ID: usize = 1;
 const VK_ZORDER_TIMER_MS: u32 = 200;
-/// Joyxoff `FUN_00466970` drives frames from a timer (id 100); we use 16 ms (~60 Hz).
+/// Drive frames from a timer at 16 ms (~60 Hz).
 const VK_RENDER_TIMER_ID: usize = 2;
 const VK_RENDER_TIMER_MS: u32 = 16;
 const VK_SHOW_ANIMATION_MS: u64 = 180;
@@ -113,7 +113,7 @@ fn vk_palette(dark: bool) -> VkPalette {
     pal
 }
 
-/// Joyxoff `param_1[0x65]` dark flag, here read live from the OS theme.
+/// Dark flag, read live from the OS theme.
 /// `HKCU\...\Themes\Personalize\AppsUseLightTheme` (0 = dark). Defaults to dark.
 fn is_dark_theme() -> bool {
     unsafe {
@@ -136,8 +136,8 @@ fn is_dark_theme() -> bool {
     }
 }
 
-/// Glyph + font face for a key (Joyxoff renders special keys from Segoe MDL2 Assets;
-/// we use the equivalent Unicode symbols, which Segoe UI Symbol covers reliably).
+/// Glyph + font face for a key. Special keys use equivalent Unicode symbols,
+/// which Segoe UI Symbol covers reliably.
 /// Returns `(text, is_symbol_font)`.
 fn key_glyph(key: &KeyCell) -> (String, bool) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_RETURN, VK_SPACE};
@@ -293,7 +293,7 @@ impl VkUiThread {
     }
 }
 
-/// Joyxoff `warmup_create_xbox_vk_window` registers these two hooks (OUTOFCONTEXT,
+/// Register these two hooks (OUTOFCONTEXT,
 /// delivered on the UI thread during the pump). DESKTOPSWITCH re-attaches us to the
 /// new input desktop on lock/logon/UAC; FOREGROUND re-asserts topmost vs LogonUI.
 fn install_winevent_hooks() {
@@ -492,7 +492,7 @@ unsafe fn restore_app_space(saved: Option<(HWND, windows::Win32::Foundation::REC
     }
 }
 
-/// EVENT_SYSTEM_DESKTOPSWITCH callback. Joyxoff `FUN_0041ece0` re-attaches the VK
+/// EVENT_SYSTEM_DESKTOPSWITCH callback. Re-attaches the VK
 /// thread to the new input desktop on every desktop switch (lock screen, logon, UAC).
 /// Without this our window stays stranded on the old desktop -> invisible after a
 /// switch. Delivered on this UI thread (WINEVENT_OUTOFCONTEXT) during the message
@@ -516,7 +516,7 @@ unsafe extern "system" fn on_desktop_switch(
     }
 }
 
-/// EVENT_SYSTEM_FOREGROUND callback. Joyxoff `FUN_0041ed00` re-asserts topmost when
+/// EVENT_SYSTEM_FOREGROUND callback. Re-asserts topmost when
 /// foreground changes; LogonUI grabs foreground aggressively on the secure desktop.
 /// Event-driven re-assert complements the 200ms z-order timer.
 unsafe extern "system" fn on_foreground(
@@ -571,7 +571,7 @@ unsafe extern "system" fn vk_wndproc(
             LRESULT(0)
         }
         WM_WINDOWPOSCHANGING => {
-            // Keep above fullscreen apps and other topmost windows (Joyxoff-style).
+            // Keep above fullscreen apps and other topmost windows.
             let pos = lparam.0 as *mut WINDOWPOS;
             if !pos.is_null() {
                 let pos = &mut *pos;
@@ -610,15 +610,15 @@ fn window_style() -> windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE {
 }
 
 fn window_ex_style() -> windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE {
-    // Joyxoff `JoyXboxVkWindow` ex_style is 0x8280088, but its LAYERED bit is dropped
+    // Reference ex_style is 0x8280088, but its LAYERED bit is dropped
     // here: DirectComposition owns the surface via NOREDIRECTIONBITMAP, and a LAYERED
     // window stays invisible until SetLayeredWindowAttributes/UpdateLayeredWindow — which
     // can't apply with no redirection bitmap. NOREDIRECTIONBITMAP is the required flag.
     WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP
 }
 
-/// Full bounds of the monitor that hosts the foreground window (Joyxoff
-/// `FUN_00467190`: `MonitorFromWindow` + `GetMonitorInfo`, full `rcMonitor`).
+/// Full bounds of the monitor that hosts the foreground window
+/// (`MonitorFromWindow` + `GetMonitorInfo`, full `rcMonitor`).
 unsafe fn target_monitor_rect() -> windows::Win32::Foundation::RECT {
     let fg = windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
     let mon = MonitorFromWindow(fg, MONITOR_DEFAULTTOPRIMARY);
@@ -642,7 +642,7 @@ unsafe fn target_monitor_rect() -> windows::Win32::Foundation::RECT {
 
 /// Keyboard geometry. Returns `(x, y, width, height)`.
 ///
-/// - **Docked** (Joyxoff default): full monitor width along the bottom edge, height
+/// - **Docked**: full monitor width along the bottom edge, height
 ///   = `monitorHeight * 384/1080`.
 /// - **Floating**: a compact, horizontally-centred panel raised off the bottom edge —
 ///   emulates the warmUP webview keyboard card. Pushed via the desktop `config.vkMode`.
@@ -674,7 +674,7 @@ unsafe fn vk_dock_rect() -> (i32, i32, i32, i32) {
     }
 }
 
-/// Width used to scale key size (Joyxoff 92px @ 1920 reference). Always the monitor
+/// Width used to scale key size (92px @ 1920 reference). Always the monitor
 /// width so floating keys render at the same scale as the docked bar, independent of
 /// the narrower floating card width.
 unsafe fn vk_scale_w() -> f32 {
@@ -735,7 +735,7 @@ unsafe fn stop_timers(hwnd: HWND) {
 unsafe fn show_and_place(hwnd: HWND) {
     let (x, y, outer_w, outer_h) = vk_dock_rect();
     let start_y = y + outer_h;
-    // Never activate. Joyxoff's `JoyXboxVkWindow` is NOACTIVATE and shown without
+    // Never activate. The VK window is NOACTIVATE and shown without
     // taking foreground, so the focused control (winlogon password edit) keeps focus
     // and Windows never auto-invokes the native touch keyboard.
     let _ = SetWindowPos(

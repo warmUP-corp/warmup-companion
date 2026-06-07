@@ -64,6 +64,7 @@ pub fn run_dispatcher() -> Result<(), String> {
 
 fn service_main(_arguments: Vec<OsString>) {
     std::panic::set_hook(Box::new(|info| {
+        crate::sentry_telemetry::capture_panic(info, "service-launcher");
         install::log_line(&format!("PANIC: {info}"));
     }));
     match run_service_core() {
@@ -137,6 +138,7 @@ fn run_service_core() -> Result<(), String> {
 /// Worker child launched into active console session. Owns XInput polling and VK UI.
 pub fn run_worker() -> Result<(), String> {
     std::panic::set_hook(Box::new(|info| {
+        crate::sentry_telemetry::capture_panic(info, "service-worker");
         install::log_line(&format!("WORKER PANIC: {info}"));
     }));
     std::env::set_var("WARMUP_VK_SERVICE", "1");
@@ -434,7 +436,7 @@ unsafe fn create_worker_process(token: HANDLE) -> Result<WorkerProcess, String> 
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let exe_w = wide_os(exe.as_os_str());
     let mut cmd_w = wide(&command_line(&exe, WORKER_ARGS));
-    // Joyxoff-style: Default desktop in session; app attaches via OpenInputDesktop (lock/logon/UAC).
+    // Default desktop in session; app attaches via OpenInputDesktop (lock/logon/UAC).
     let mut desktop = wide("winsta0\\default");
     let mut startup = STARTUPINFOW {
         cb: std::mem::size_of::<STARTUPINFOW>() as u32,

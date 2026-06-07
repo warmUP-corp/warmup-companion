@@ -1,11 +1,10 @@
 //! OS mouse cursor from sticks (same math as warmUP `gamepad/cursor.rs`).
 //!
-//! Cursor model matches Joyxoff (RE'd from `Joyxoff.exe`): relative-velocity
+//! Cursor model: relative-velocity
 //! `MOUSEEVENTF_MOVE` from the left stick, and the action button drives a real
-//! mouse-button HOLD (down on press-edge, up on release-edge — Joyxoff's
-//! `FUN_004512b0` tracks a held-mask at `this+0x10` and emits DOWN/UP on edges,
+//! mouse-button HOLD (down on press-edge, up on release-edge,
 //! not an instant click). Stick velocity is normalized to a 1080p reference
-//! (`screenW/1920`, `screenH/1080`) like Joyxoff's `FUN_00422dd0`, so the feel
+//! (`screenW/1920`, `screenH/1080`), so the feel
 //! is resolution-independent.
 
 use enigo::{Axis, Coordinate, Direction, Enigo, Mouse, Settings};
@@ -14,12 +13,12 @@ const BASE_SPEED: f32 = 100.0;
 const BASE_SCROLL_SPEED: f32 = 20.0;
 const TOUCHPAD_PIXEL_SCALE: f32 = 1.5;
 
-/// Joyxoff's reference resolution: its sensitivity constants are tuned for
+/// Reference resolution: sensitivity constants are tuned for
 /// 1080p and scaled by `actual/reference` per axis (`FUN_00422dd0`).
 const REF_WIDTH: f32 = 1920.0;
 const REF_HEIGHT: f32 = 1080.0;
 
-/// Per-axis velocity scale = actual screen size / Joyxoff's 1080p reference.
+/// Per-axis velocity scale = actual screen size / 1080p reference.
 /// 1.0 on a 1080p display; >1 on higher-res so the cursor crosses the screen in
 /// the same physical stick-throw regardless of resolution. Falls back to 1.0
 /// off Windows / if the metrics query fails.
@@ -55,10 +54,10 @@ pub struct PcCursor {
     remainder_y: f32,
     scroll_remainder_x: f32,
     scroll_remainder_y: f32,
-    /// Resolution normalization (Joyxoff `FUN_00422dd0`): velocity * actual/1080p.
+    /// Resolution normalization: velocity * actual/1080p.
     scale_x: f32,
     scale_y: f32,
-    /// Left mouse button currently held (edge-tracked, Joyxoff `FUN_004512b0`).
+    /// Left mouse button currently held, edge-tracked.
     left_held: bool,
     /// EMA-smoothed cursor delta carried between frames (cursor_smoothing).
     smooth_dx: f32,
@@ -128,8 +127,7 @@ impl PcCursor {
             settings.cursor_accel,
             dt_secs,
         );
-        // Joyxoff normalizes velocity to actual/1080p so the throw feels the
-        // same at any resolution (`FUN_00422dd0`).
+        // Normalize velocity to actual/1080p so the throw feels the same at any resolution.
         let (dx, dy) = (dx * self.scale_x, dy * self.scale_y);
         if dx == 0.0 && dy == 0.0 {
             self.remainder_x = 0.0;
@@ -214,8 +212,8 @@ impl PcCursor {
         }
     }
 
-    /// Drive the left mouse button as a real HOLD, edge-tracked like Joyxoff's
-    /// `FUN_004512b0` (DOWN on press-edge, UP on release-edge) instead of an
+    /// Drive the left mouse button as a real HOLD, edge-tracked
+    /// (DOWN on press-edge, UP on release-edge) instead of an
     /// instant click. Giving XAML/LogonUI a genuine press duration is what makes
     /// the native PIN keypad register the tap reliably on the secure desktop.
     /// Idempotent: repeated same-state calls are dropped.

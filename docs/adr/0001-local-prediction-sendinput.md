@@ -6,7 +6,7 @@
 
 ## Context
 
-Warmup Keyboard is a Windows virtual keyboard (Joyxoff-style) that injects keystrokes with `SendInput`, runs as a service with winlogon/desktop attach paths, and is primarily driven by a gamepad. We want **word suggestions** (prefix completion) in **userland** only — not on sign-in, lock, or UAC surfaces.
+Warmup Keyboard is a Windows virtual keyboard that injects keystrokes with `SendInput`, runs as a service with winlogon/desktop attach paths, and is primarily driven by a gamepad. We want **word suggestions** (prefix completion) in **userland** only — not on sign-in, lock, or UAC surfaces.
 
 Windows does **not** expose a supported public API for third-party keyboards to consume the same next-word predictions shown by the built-in “text suggestions” setting. Practical options discussed in product research were:
 
@@ -41,7 +41,7 @@ Product glossary and behavioral definitions live in `CONTEXT.md`. This ADR recor
 
 **Pros:** Platform-native composition; could participate in input method contracts; cleaner long-term if Warmup becomes a full IME.
 
-**Cons:** Large COM surface (`ITfTextInputProcessor`, registration, lifetime); does not match current Joyxoff-parity architecture; uncertain behavior across winlogon vs default desktop; still requires **our own** language model — TSF does not supply Microsoft’s prediction brain.
+**Cons:** Large COM surface (`ITfTextInputProcessor`, registration, lifetime); does not match the current service/VK architecture; uncertain behavior across winlogon vs default desktop; still requires **our own** language model — TSF does not supply Microsoft’s prediction brain.
 
 **Rejected for v1** because cost and risk dominate benefit for an Xbox-style overlay VK that already injects keys.
 

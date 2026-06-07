@@ -150,10 +150,12 @@ unsafe extern "system" fn seh_filter(info: *const EXCEPTION_POINTERS) -> i32 {
         String::new()
     };
 
-    crate::install::log_line(&format!(
+    let summary = format!(
         "WORKER SEH: 0x{code:08X} at {loc}{extra} tid={}",
         GetCurrentThreadId()
-    ));
+    );
+    crate::install::log_line(&summary);
+    crate::sentry_telemetry::capture_native_crash(summary);
     write_minidump(info);
 
     // Terminate after we have logged + dumped; the launcher will relaunch.

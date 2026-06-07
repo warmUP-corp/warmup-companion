@@ -52,23 +52,23 @@ Maps **Y / Triangle** (SDL north face) → mask `0x200`. Controller DB: `Full-Sc
 
 ## Real on-screen keyboard (`--real`)
 
-**`WarmupXboxVkWindow`** — native UI in `src/win/vk_ui.rs` on a dedicated thread (Joyxoff-style). Keys send `SendInput` to the focused control. No TabTip/osk.
+**`WarmupXboxVkWindow`** — native UI in `src/win/vk_ui.rs` on a dedicated thread. Keys send `SendInput` to the focused control. No TabTip/osk.
 
 - Desktop attach (`OpenInputDesktop`) runs on the **VK UI thread** before `CreateWindow`, with handles kept open (`desktop.rs`) to avoid `0x800700AA` (resource in use).
 - Main/gamepad thread no longer blocks on desktop attach; UAC path uses `VkAttach::Input` on the UI thread.
 - If attach fails, the window still opens on the current desktop (logged).
 
-## Joyxoff lock-screen model
+## Secure desktop controller model
 
 Decomp source of truth:
 
 - Service starts worker with a winlogon token and `lpDesktop = "winsta0\\default"`.
-- With config `+0xd9`, Joyxoff's worker calls `SetThreadDesktop("winlogon")` before creating `JoyXoffMWindow` or polling XInput.
+- With config `+0xd9`, the worker calls `SetThreadDesktop("winlogon")` before creating the anchor window or polling XInput.
 - Warmup service worker follows that order at sign-in, then migrates its controller thread and reloads XInput when a later lock/UAC transition changes the input desktop.
 - Desktop changes are handled once per transition on the controller thread. Cursor and VK navigation key-send paths do not switch desktops.
-- On Winlogon, XInput polling stays under the Winlogon-token worker and runs on the anchor-window thread, matching Joyxoff's window-owning timer path. Joyxoff uses interactive-user impersonation for registry/config work, not its XInput timer.
+- On Winlogon, XInput polling stays under the Winlogon-token worker and runs on the anchor-window thread. Interactive-user impersonation is for registry/config work, not the XInput timer.
 - Service cursor is disabled (`PcCursor::new_service()` has no `Enigo`) so stick/click paths cannot force desktop attach.
-- XInput loads Joyxoff-style: `xinput1_4.dll` ordinal `100`, fallback named `XInputGetState`, fallback `xinput1_3.dll`.
+- XInput loads `xinput1_4.dll` ordinal `100`, fallback named `XInputGetState`, fallback `xinput1_3.dll`.
 
 Expected loader log:
 
@@ -130,7 +130,7 @@ Gamepad (VK open, borderless overlay, no focus steal):
 - **LB** — move caret left in focused field
 - **RB** — Enter
 
-**Later:** match Joyxoff layout/theming (`warmup_create_xbox_vk_window`), gamepad navigation inside VK, secure-desktop service (`-boot`).
+**Later:** refine layout/theming (`warmup_create_xbox_vk_window`), gamepad navigation inside VK, secure-desktop service (`-boot`).
 
 ### UAC / sign-in?
 
@@ -157,7 +157,7 @@ cfg winlogon on -> boot -> fg uac -> press -> press
 
 ## Verifying UAC and sign-in (LogonUI)
 
-This prototype is **not** the real Warmup/Joyxoff Windows service. Secure-desktop tests need **Administrator** (or a future `-boot` service install). SDL gamepad on the logon screen is also unreliable; treat **VK on the secure desktop** as the real test.
+This prototype is **not** the production Warmup Windows service. Secure-desktop tests need **Administrator** (or a future `-boot` service install). SDL gamepad on the logon screen is also unreliable; treat **VK on the secure desktop** as the real test.
 
 ### 1. Gate logic only (no secure desktop)
 
@@ -209,7 +209,7 @@ To get the blue secure-desktop prompt: **Settings → Account → Other security
 2. **Window A — Admin:** PowerShell **Run as administrator**, start the prototype:
 
 ```powershell
-cd C:\Users\jonas\Documents\Codex\2026-05-19\caveman-c-users-jonas-agents-skills
+cd <warmup-companion-repo>
 cargo run --features gamepad -- --gamepad --boot --cfg-winlogon
 ```
 
@@ -241,7 +241,7 @@ Do **not** run step 3 in the same Admin window as step 2.
 Install once (Admin PowerShell):
 
 ```powershell
-cd C:\Users\jonas\Documents\Codex\2026-05-19\caveman-c-users-jonas-agents-skills
+cd <warmup-companion-repo>
 .\install\Install-WarmupVk.ps1
 ```
 
@@ -265,13 +265,13 @@ This registers **`WarmupVkSvc`** (`LocalSystem`, auto-start) running
 
 **Uninstall (Admin):** `.\target\release\warmup-vk-prototype.exe uninstall`
 
-**Not** “Sign-in options” / Startup apps — those run after login. This is a **boot service** like Joyxoff `-boot`.
+**Not** “Sign-in options” / Startup apps — those run after login. This is a **boot service**.
 
-**Caveats:** SDL gamepad from a service may fail on some setups (Joyxoff uses XInput). Check `service.log` if Y does nothing at logon.
+**Caveats:** SDL gamepad from a service may fail on some setups; secure desktop input uses XInput. Check `service.log` if Y does nothing at logon.
 
 ### 4b. Sign-in simulation (CLI only)
 
-Joyxoff runs as a **boot service** on `winlogon` before LogonUI appears. Without the service, use CLI only:
+Production secure-desktop support runs as a **boot service** on `winlogon` before LogonUI appears. Without the service, use CLI only:
 
 **CLI gate check only:**
 
@@ -299,4 +299,4 @@ press
 
 - Normal non-elevated `cargo run` → VK on **default** desktop only; UAC prompt is another desktop.
 - Gamepad on LogonUI without a service → often **no pad** or VK on wrong desktop.
-- Full parity = Joyxoff service + XInput + native `JoyXboxVkWindow` from the binary, not this prototype alone.
+- Full secure-desktop parity = boot service + XInput + native `WarmupXboxVkWindow`, not this prototype alone.

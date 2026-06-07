@@ -479,7 +479,7 @@ impl GamepadPoll {
             // is gamepad-navigable (#348). The companion still drives its own VK/cursor below.
             crate::pipe_server::publish_button(change.button.as_str(), change.pressed);
             if change.button == Button::A || change.button == Button::Touchpad {
-                // Joyxoff-style hold: button down -> mouse-left down, up -> up, so
+                // Hold: button down -> mouse-left down, up -> up, so
                 // the PIN keypad sees a real press duration (not an instant click).
                 // Gate the *press* by cursor mode (#349); always forward the release so a
                 // click can't get stuck down if the mode flips while A is held.

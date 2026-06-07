@@ -8,7 +8,7 @@
 //! the nav drifted to. The fix is to re-target the password element via UIA
 //! `SetFocus` immediately before each key, regardless of where nav drifted.
 //!
-//! Joyxoff does **not** do this (no UIA imports); this is a warmup-only path.
+//! This is a Warmup-only path, separate from the baseline Win32 focus path.
 //!
 //! Step 1 (this module so far): a `dump_foreground_tree()` probe to confirm the
 //! password element's identity (ControlType / IsPassword / Name) on a real

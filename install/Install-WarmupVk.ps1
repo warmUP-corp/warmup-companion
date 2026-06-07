@@ -53,8 +53,9 @@ if (-not (Test-Admin)) {
 
 $BinDir = "C:\ProgramData\WarmupVk\bin"
 $BinExe = Join-Path $BinDir "warmup-companion.exe"
-$IconSrc = "C:\Users\jonas\warmUp-browser\apps\desktop\src-tauri\icons\icon.ico"
+$IconSrc = if ($env:WARMUP_ICON_PATH) { $env:WARMUP_ICON_PATH } else { Join-Path $Root "assets\icon.ico" }
 $IconDest = Join-Path $BinDir "icon.ico"
+$DataDir = "C:\ProgramData\WarmupVk"
 $LogFile = "C:\ProgramData\WarmupVk\service.log"
 $LegacyExe = "C:\Program Files\WarmupVk\warmup-vk-prototype.exe"
 
@@ -69,6 +70,17 @@ function Test-BinaryString {
     $text = [System.Text.Encoding]::ASCII.GetString($bytes)
     return $text.Contains($Needle)
 }
+
+Write-Host "=== Warmup Companion install disclosure ===" -ForegroundColor Cyan
+Write-Host "Service:       WarmupVkSvc (LocalSystem, auto-start)"
+Write-Host "Binary path:   $BinExe"
+Write-Host "Data/log path: C:\ProgramData\WarmupVk"
+Write-Host "Reason:        secure desktop input for sign-in, lock, and UAC"
+Write-Host "Telemetry:     disabled unless WARMUP_SENTRY_DSN is set"
+Write-Host "Privacy:       no host-control text reads for prediction; VK-only local context"
+Write-Host "Game sleep:    enabled by default; fullscreen game detection sleeps poll to Guide-only"
+Write-Host "Recovery:      tray menu and CLI command 'restore-keyboard' restore Windows keyboard services"
+Write-Host ""
 
 Write-Host "Building release (default service + gamepad features)..."
 cargo build --release
@@ -109,6 +121,13 @@ if (Test-Path $IconSrc) {
     Write-Host "WARNING: tray icon source missing: $IconSrc" -ForegroundColor Yellow
 }
 
+foreach ($Doc in @("README.md", "PRIVACY.md", "SECURITY.md", "LICENSE")) {
+    $SrcDoc = Join-Path $Root $Doc
+    if (Test-Path $SrcDoc) {
+        Copy-Item -LiteralPath $SrcDoc -Destination (Join-Path $DataDir $Doc) -Force
+    }
+}
+
 if (-not (Test-Path $BinExe)) {
     throw @"
 Install failed: service binary not at:
@@ -124,7 +143,15 @@ Write-Host "=== Install OK ===" -ForegroundColor Green
 Write-Host "Service binary: $BinExe"
 Write-Host "Tray icon:      $IconDest"
 Write-Host "Log file:       $LogFile"
+Write-Host "Trust docs:     C:\ProgramData\WarmupVk\README.md / PRIVACY.md / SECURITY.md"
 Write-Host "Debug UI:       $(if ($DebugUi) { 'enabled' } else { 'disabled' })"
+Write-Host "Sentry:         $(if ($env:WARMUP_SENTRY_DSN) { 'enabled by WARMUP_SENTRY_DSN' } else { 'disabled' })"
+Write-Host ""
+Write-Host "Important trust notes:"
+Write-Host "  - The VK uses SendInput; it does not read host app text for prediction."
+Write-Host "  - Prediction is local and disabled on UAC, lock, and sign-in surfaces."
+Write-Host "  - Secure-desktop use may temporarily suppress Windows touch keyboard surfaces."
+Write-Host "  - Restore command: $BinExe restore-keyboard"
 Write-Host ""
 Write-Host "Winlogon DualShock test:"
 Write-Host "  1. Lock Windows or switch to the sign-in screen."

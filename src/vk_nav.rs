@@ -1,4 +1,4 @@
-//! Gamepad-driven VK focus + full PC QWERTY grid (Joyxoff settings-style layout).
+//! Gamepad-driven VK focus + full PC QWERTY grid.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -148,7 +148,7 @@ const HOLD_REPEAT: Duration = Duration::from_millis(70);
 /// Every row spans this many key-units so the block is one rectangle.
 const GRID_UNITS: f32 = 15.0;
 
-/// Five-row US QWERTY matching the Joyxoff settings keyboard screenshot.
+/// Five-row US QWERTY.
 fn build_pc_layout(shift: bool, caps: bool) -> Vec<KeyRow> {
     let a = |c: char| KeyCell::alpha(c, shift, caps);
     let p = |base: char, shifted: char| KeyCell::pair(base, shifted, shift, caps);

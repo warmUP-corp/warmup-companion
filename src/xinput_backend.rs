@@ -1,6 +1,6 @@
 //! Winlogon gamepad polling: vendor-agnostic HID (primary) + XInput (Xbox fast path).
 //!
-//! Joyxoff insight: XInputGetState returns neutral (zeroed) state to processes
+//! XInputGetState can return neutral (zeroed) state to processes
 //! that have no foreground-eligible window on the input desktop. Mitigation: the
 //! secure poll thread runs a real Win32 UI message pump and owns a tiny anchor
 //! window on the Winlogon desktop. PlayStation and Xbox pads are read via raw
@@ -181,8 +181,8 @@ impl XInputProbe {
 /// (`authid`), its origin logon session (`origin`), token type / impersonation
 /// level, and the parent process. If `authid`/`origin` don't match winlogon's
 /// logon session, our `CreateProcessAsUserW` launch is not in winlogon's context
-/// — the leading hypothesis for why our plain XInput read zeros while Joyxoff's
-/// (identical recipe) reads live. Integrity RIDs: System=0x4000, High=0x3000.
+/// — the leading hypothesis for why plain XInput reads can return zeros while
+/// the desktop-attached recipe reads live. Integrity RIDs: System=0x4000, High=0x3000.
 fn probe_self_identity() -> String {
     use windows::core::PWSTR;
     use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
@@ -467,7 +467,7 @@ pub fn begin_inject_hold() {
 /// current foreground thread lifts that restriction for the duration of the call.
 /// Self-limiting: once we win, the next tick sees `cur == hwnd` and skips this.
 ///
-/// Retained (dead) after the Joyxoff-style no-foreground switch: the inject path
+/// Retained (dead) after the no-foreground switch: the inject path
 /// may still want a one-shot foreground hand-off to LogonUI for keystroke sends.
 #[allow(dead_code)]
 unsafe fn force_foreground(hwnd: HWND, current_fg: HWND) {
@@ -818,7 +818,7 @@ impl GamepadBackend for XInputBackend {
     fn poll(&mut self) -> Result<(), String> {
         self.pending.clear();
         // Keep the Winlogon-attached helper alive for diagnostics/fallback, but
-        // still poll XInput from the service worker's Default desktop. Joyxoff's
+        // still poll XInput from the service worker's Default desktop. The
         // controller loop runs from its normal UI/render thread; attaching the
         // polling thread to Winlogon can produce packet changes with neutral
         // buttons on some systems.
@@ -983,8 +983,8 @@ fn secure_poll_main(
     }
 
     // 2. Register class + create the anchor window on the Winlogon desktop first.
-    //    Joyxoff polls XInput on the window-owning thread under the Winlogon worker
-    //    token — not via ImpersonateLoggedOnUser on the timer path (see NOTES.md).
+    //    Poll XInput on the window-owning thread under the Winlogon worker
+    //    token, not via ImpersonateLoggedOnUser on the timer path (see NOTES.md).
     //    This is the key bypass: XInput delivers real packets to processes that
     //    own a window on the input desktop, and the poll runs on this thread.
     let hwnd = unsafe {
@@ -1005,7 +1005,7 @@ fn secure_poll_main(
         };
         // RegisterClassW returns 0 if class already exists; ignore.
         RegisterClassW(&wc);
-        // Joyxoff-style anchor (exstyle 0x08080088 = NOACTIVATE|TOOLWINDOW|LAYERED
+        // Anchor (exstyle 0x08080088 = NOACTIVATE|TOOLWINDOW|LAYERED
         // |TOPMOST, WS_POPUP): a non-activating tool window that NEVER takes
         // foreground. Stealing foreground was confirmed harmful — it broke manual
         // PIN entry (yanked focus from LogonUI every tick) and no longer earned a
@@ -1038,14 +1038,14 @@ fn secure_poll_main(
     };
 
     // Fully transparent (alpha 0) so the off-screen 1x1 anchor is never visible.
-    // The anchor never takes foreground (Joyxoff-style); the pad-read grant is
+    // The anchor never takes foreground; the pad-read grant is
     // pursued via the focus-owner mechanism, not foreground ownership.
     unsafe {
         let _ =
             SetLayeredWindowAttributes(hwnd, windows::Win32::Foundation::COLORREF(0), 0, LWA_ALPHA);
     }
     let _ = tx.send(SecureMsg::Error(
-        "anchor window created (NOACTIVATE; no foreground steal, Joyxoff-style)".into(),
+        "anchor window created (NOACTIVATE; no foreground steal)".into(),
     ));
     let _ = tx.send(SecureMsg::Error(probe_self_identity()));
 
@@ -1158,7 +1158,7 @@ unsafe extern "system" fn anchor_wndproc(
     lparam: LPARAM,
 ) -> LRESULT {
     if msg == WM_TIMER && wparam.0 == POLL_TIMER_ID {
-        // Joyxoff-style: never touch foreground. We only record the credential
+        // Never touch foreground. We only record the credential
         // window LogonUI owns (for the inject path's SetFocus), then poll. Stealing
         // foreground broke manual entry and did not earn a live read on this build.
         unsafe {

@@ -63,20 +63,33 @@ pub enum PadCommand {
 
 /// Selects the poll mode from the desktop-pushed surface flags. The companion has three
 /// effective surfaces:
-///   - **in-game** (`game_active && !launcher_foreground_nav`): a real game owns the screen →
+///   - **in-game** (`game_active && !launcher_foreground_nav`, or standalone fullscreen-game
+///     detection when `sleep_on_game` is enabled): a real game owns the screen →
 ///     [`PollMode::Sleep`], only Guide edges flow so the game owns the pad.
 ///   - **launcher** (`launcher_foreground_nav`): the launcher is foreground (incl. woken over a
 ///     running game) → full poll so the controller drives the launcher UI.
 ///   - **desktop** (`!game_active`): no game and the launcher is backgrounded → full poll so the
 ///     controller keeps driving the OS cursor on the Windows desktop.
 fn effective_userland_poll_mode() -> PollMode {
-    if userland_poll_paused()
-        || (crate::pipe_server::game_active() && !crate::pipe_server::launcher_foreground_nav())
-    {
+    let settings = crate::config::gamepad_settings();
+    let desktop_game_active =
+        crate::pipe_server::game_active() && !crate::pipe_server::launcher_foreground_nav();
+    let standalone_game_active = settings.sleep_on_game && standalone_game_active();
+    if userland_poll_paused() || desktop_game_active || standalone_game_active {
         PollMode::Sleep
     } else {
-        crate::config::userland_gamepad_poll_mode()
+        settings.userland_poll_mode
     }
+}
+
+#[cfg(windows)]
+fn standalone_game_active() -> bool {
+    crate::win::game_detect::standalone_game_active_cached()
+}
+
+#[cfg(not(windows))]
+fn standalone_game_active() -> bool {
+    false
 }
 
 /// Polls physical controller state and produces normalized axes + button edges.
@@ -489,13 +502,5 @@ pub fn mapping_db_path() -> PathBuf {
             return installed;
         }
     }
-    let warmup_db = PathBuf::from(
-        r"C:\Users\jonas\warmUp\apps\desktop\src-tauri\resources\gamecontrollerdb.txt",
-    );
-    if warmup_db.is_file() {
-        return warmup_db;
-    }
-    PathBuf::from(
-        r"C:\Users\Jonas.Voegel\Full-Screen-Console-PC-v2-Tauri\apps\desktop\src-tauri\resources\gamecontrollerdb.txt",
-    )
+    PathBuf::from("gamecontrollerdb.txt")
 }
