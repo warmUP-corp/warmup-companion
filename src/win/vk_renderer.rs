@@ -1049,6 +1049,248 @@ impl VkRenderer {
         m.widthIncludingTrailingWhitespace
     }
 
+    /// Draw an AirPods-style connection card with a shaded controller model.
+    /// Kept D2D-only so the secure-desktop service path does not need asset IO or
+    /// a separate 3D runtime.
+    pub unsafe fn draw_connected_prompt(
+        &mut self,
+        bg: u32,
+        border: u32,
+        text_color: u32,
+        title: &str,
+        status: &str,
+    ) -> Result<(), String> {
+        let cw = self.width as f32;
+        let ch = self.height as f32;
+        let _ = self
+            .text_format
+            .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        let _ = self
+            .text_format
+            .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        let _ = self
+            .hint_format
+            .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        let _ = self
+            .hint_format
+            .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+        self.d2d_context.BeginDraw();
+        self.d2d_context.Clear(Some(&D2D1_COLOR_F {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        }));
+
+        let t = self.prompt_started.elapsed().as_secs_f32();
+        let intro = (t / 0.62).clamp(0.0, 1.0);
+        let eased = 1.0 - (1.0 - intro).powi(3);
+        let pulse = (t * 0.72).fract();
+        let pulse_alpha = (1.0 - pulse).powi(2);
+        let scale = 0.90 + 0.10 * eased;
+        let transform = Matrix3x2 {
+            M11: scale,
+            M12: 0.0,
+            M21: 0.0,
+            M22: scale,
+            M31: cw * (1.0 - scale) * 0.5,
+            M32: ch * (1.0 - scale) * 0.5,
+        };
+        self.d2d_context.SetTransform(&transform);
+
+        let panel = D2D_RECT_F {
+            left: 5.0,
+            top: 5.0,
+            right: cw - 5.0,
+            bottom: ch - 5.0,
+        };
+        let rounded = D2D1_ROUNDED_RECT {
+            rect: panel,
+            radiusX: 28.0,
+            radiusY: 28.0,
+        };
+        let glow = colorref_mix(0x00FFFFFF, border, 0.45);
+        let bg_brush = solid_brush(&self.d2d_context, colorref_alpha(bg, 0.94))?;
+        let border_brush = solid_brush(&self.d2d_context, colorref_alpha(glow, 0.84))?;
+        let halo_brush = solid_brush(&self.d2d_context, colorref_alpha(glow, 0.22 * pulse_alpha))?;
+        self.d2d_context.FillRoundedRectangle(&rounded, &bg_brush);
+        self.d2d_context
+            .DrawRoundedRectangle(&rounded, &halo_brush, 3.0 + 12.0 * pulse, None);
+        self.d2d_context
+            .DrawRoundedRectangle(&rounded, &border_brush, 1.2, None);
+
+        let model_cx = cw * 0.5;
+        let model_y = 54.0 - 7.0 * (1.0 - eased);
+        let shadow = solid_brush(&self.d2d_context, colorref_alpha(0x00000000, 0.26))?;
+        let body = solid_brush(
+            &self.d2d_context,
+            colorref(colorref_mix(0x00FFFFFF, bg, 0.70)),
+        )?;
+        let face = solid_brush(
+            &self.d2d_context,
+            colorref(colorref_mix(0x00FFFFFF, bg, 0.86)),
+        )?;
+        let dim = solid_brush(&self.d2d_context, colorref_alpha(text_color, 0.34))?;
+        let accent = solid_brush(&self.d2d_context, colorref(glow))?;
+
+        let shadow_rect = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: model_cx - 78.0,
+                top: model_y + 50.0,
+                right: model_cx + 78.0,
+                bottom: model_y + 66.0,
+            },
+            radiusX: 18.0,
+            radiusY: 18.0,
+        };
+        self.d2d_context.FillRoundedRectangle(&shadow_rect, &shadow);
+
+        let left_grip = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: model_cx - 106.0,
+                top: model_y + 7.0,
+                right: model_cx - 42.0,
+                bottom: model_y + 77.0,
+            },
+            radiusX: 30.0,
+            radiusY: 30.0,
+        };
+        let right_grip = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: model_cx + 42.0,
+                top: model_y + 7.0,
+                right: model_cx + 106.0,
+                bottom: model_y + 77.0,
+            },
+            radiusX: 30.0,
+            radiusY: 30.0,
+        };
+        let center = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: model_cx - 68.0,
+                top: model_y,
+                right: model_cx + 68.0,
+                bottom: model_y + 61.0,
+            },
+            radiusX: 26.0,
+            radiusY: 26.0,
+        };
+        self.d2d_context.FillRoundedRectangle(&left_grip, &body);
+        self.d2d_context.FillRoundedRectangle(&right_grip, &body);
+        self.d2d_context.FillRoundedRectangle(&center, &face);
+        self.d2d_context
+            .DrawRoundedRectangle(&center, &border_brush, 1.0, None);
+
+        let round_dot = |x: f32, y: f32, r: f32| D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: x - r,
+                top: y - r,
+                right: x + r,
+                bottom: y + r,
+            },
+            radiusX: r,
+            radiusY: r,
+        };
+        self.d2d_context
+            .FillRoundedRectangle(&round_dot(model_cx - 34.0, model_y + 49.0, 14.0), &dim);
+        self.d2d_context
+            .FillRoundedRectangle(&round_dot(model_cx + 34.0, model_y + 49.0, 14.0), &dim);
+        for (x, y) in [
+            (model_cx + 75.0, model_y + 25.0),
+            (model_cx + 91.0, model_y + 39.0),
+            (model_cx + 59.0, model_y + 39.0),
+            (model_cx + 75.0, model_y + 53.0),
+        ] {
+            self.d2d_context
+                .FillRoundedRectangle(&round_dot(x, y, 7.0), &accent);
+        }
+        let dpad_h = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: model_cx - 91.0,
+                top: model_y + 35.0,
+                right: model_cx - 55.0,
+                bottom: model_y + 47.0,
+            },
+            radiusX: 6.0,
+            radiusY: 6.0,
+        };
+        let dpad_v = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: model_cx - 79.0,
+                top: model_y + 23.0,
+                right: model_cx - 67.0,
+                bottom: model_y + 59.0,
+            },
+            radiusX: 6.0,
+            radiusY: 6.0,
+        };
+        self.d2d_context.FillRoundedRectangle(&dpad_h, &dim);
+        self.d2d_context.FillRoundedRectangle(&dpad_v, &dim);
+
+        let ring = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: model_cx - 124.0 - 18.0 * pulse,
+                top: model_y - 16.0 - 18.0 * pulse,
+                right: model_cx + 124.0 + 18.0 * pulse,
+                bottom: model_y + 90.0 + 18.0 * pulse,
+            },
+            radiusX: 58.0 + 18.0 * pulse,
+            radiusY: 58.0 + 18.0 * pulse,
+        };
+        self.d2d_context
+            .DrawRoundedRectangle(&ring, &halo_brush, 2.0, None);
+
+        let title_w: Vec<u16> = title.encode_utf16().collect();
+        let status_w: Vec<u16> = status.encode_utf16().collect();
+        let text_brush = solid_brush(&self.d2d_context, colorref(text_color))?;
+        let sub_brush = solid_brush(&self.d2d_context, colorref_alpha(text_color, 0.70))?;
+        self.d2d_context.DrawText(
+            &title_w,
+            &self.text_format,
+            &D2D_RECT_F {
+                left: 24.0,
+                top: ch - 78.0,
+                right: cw - 24.0,
+                bottom: ch - 42.0,
+            },
+            &text_brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
+        self.d2d_context.DrawText(
+            &status_w,
+            &self.hint_format,
+            &D2D_RECT_F {
+                left: 24.0,
+                top: ch - 42.0,
+                right: cw - 24.0,
+                bottom: ch - 16.0,
+            },
+            &sub_brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
+
+        let identity = Matrix3x2 {
+            M11: 1.0,
+            M12: 0.0,
+            M21: 0.0,
+            M22: 1.0,
+            M31: 0.0,
+            M32: 0.0,
+        };
+        self.d2d_context.SetTransform(&identity);
+        self.d2d_context
+            .EndDraw(None, None)
+            .map_err(|e| format!("EndDraw: {e}"))?;
+        self.swapchain
+            .Present(1, DXGI_PRESENT(0))
+            .ok()
+            .map_err(|e| format!("Present: {e}"))?;
+        Ok(())
+    }
+
     /// Draw the "Press [L3] to open keyboard" prompt: a rounded pill filling the
     /// client area, with `prefix` · L3 chip · `suffix` laid out left→right and
     /// centered. The L3 chip keeps its native colors; text uses `text_color`.
