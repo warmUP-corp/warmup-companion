@@ -436,8 +436,9 @@ impl GamepadPoll {
 
         #[cfg(windows)]
         if crate::config::service_mode() {
+            let name = self.backend.controller_label();
             let input = self.backend.live_input_summary();
-            crate::debug_state::set_gamepad(self.backend.is_connected(), input);
+            crate::debug_state::set_gamepad(self.backend.is_connected(), name, input);
         }
 
         #[cfg(windows)]
@@ -893,6 +894,17 @@ where
 
         // Publish the current controller connection state to the pipe server (#347).
         crate::pipe_server::publish_from_label(&poll.controller_label());
+
+        #[cfg(windows)]
+        if !crate::pipe_server::desktop_connected()
+            && crate::config::gamepad_settings().auto_stop_on_game
+            && crate::gamepad_backend::standalone_game_active_now()
+        {
+            if service_mode {
+                service_log("gamepad loop auto-stopping: standalone game launched");
+            }
+            break;
+        }
 
         match poll.poll_frame(&mut cursor, dt, vk_open()) {
             Ok(actions) => {

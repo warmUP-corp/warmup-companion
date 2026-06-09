@@ -869,6 +869,7 @@ fn run_settings_command(args: &[String]) {
   warmup-companion.exe settings path
   warmup-companion.exe settings set <key> <value>
   warmup-companion.exe settings sleep-on-game <get|on|off>
+  warmup-companion.exe settings auto-stop-on-game <get|on|off>
   warmup-companion.exe settings userland-poll <get|full|sleep|path>";
     match args.get(2).map(String::as_str) {
         Some("get") | None => print_gamepad_settings(),
@@ -952,6 +953,29 @@ fn run_settings_command(args: &[String]) {
                 std::process::exit(2);
             }
         },
+        Some("auto-stop-on-game") => match args.get(3).map(String::as_str) {
+            Some("get") | None => {
+                println!("{}", crate::config::gamepad_settings().auto_stop_on_game);
+            }
+            Some("on") | Some("true") | Some("1") => {
+                if let Err(e) = crate::config::set_gamepad_setting("auto_stop_on_game", "true") {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                println!("true");
+            }
+            Some("off") | Some("false") | Some("0") => {
+                if let Err(e) = crate::config::set_gamepad_setting("auto_stop_on_game", "false") {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                println!("false");
+            }
+            Some(_) => {
+                eprintln!("{usage}");
+                std::process::exit(2);
+            }
+        },
         Some(_) => {
             eprintln!("{usage}");
             std::process::exit(2);
@@ -972,6 +996,7 @@ fn print_gamepad_settings() {
     let s = crate::config::gamepad_settings();
     println!("userland_poll={}", poll_mode_name(s.userland_poll_mode));
     println!("sleep_on_game={}", s.sleep_on_game);
+    println!("auto_stop_on_game={}", s.auto_stop_on_game);
     println!("cursor_deadzone={}", s.cursor_deadzone);
     println!("cursor_speed={}", s.cursor_speed);
     println!("cursor_accel={}", s.cursor_accel);

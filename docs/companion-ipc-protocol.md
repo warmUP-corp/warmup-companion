@@ -1,6 +1,6 @@
 # Companion IPC protocol
 
-**Status:** v1 (foundation slice, warmUP-corp/warmUP#346). Companion (`warmup-keyboard`) ⇄ warmUP desktop.
+**Status:** v4. Companion (`warmup-keyboard`) ⇄ warmUP desktop.
 
 This spec is the **versioned wire contract** between the two processes (ADR `0002`). It is mirrored verbatim in both repos. Changing any frame shape or the pipe framing is a breaking change and **must** bump `protocolVersion`.
 
@@ -32,9 +32,10 @@ The client sends `hello` as its **first** frame after connecting. The server rep
 
 ```json
 {"type":"hello","payload":{
-  "protocolVersion": 3,
+  "protocolVersion": 4,
   "config": { ...GamepadConfig },
-  "mode": { "gameActive": false, "launcherForegroundNav": false }
+  "mode": { "gameActive": false, "launcherForegroundNav": false },
+  "companionSettings": { "sleepOnGame": true, "autoStopOnGame": false }
 }}
 ```
 
@@ -43,6 +44,7 @@ The client sends `hello` as its **first** frame after connecting. The server rep
 | `protocolVersion` | both | single integer; bumped on any breaking wire change |
 | `config` | client | desktop's current `GamepadConfig` snapshot (so the companion starts with the right tuning); server omits |
 | `mode` | client | desktop's current mode snapshot; server omits |
+| `companionSettings` | client | desktop-pushed companion-local settings snapshot; server omits |
 
 ## Up frames (companion → desktop)
 
@@ -68,6 +70,7 @@ Notes:
 | `config` | full `GamepadConfig` (below) | push tuning on change (`set_gamepad_config`) |
 | `mode` | `{ gameActive: bool, launcherForegroundNav: bool }` | game-active sleep branch + launcher-foreground nav forwarding (#351) |
 | `rumble` | `{ kind: "full", strong: f32, weak: f32, durationMs: u32 }` **or** `{ kind: "triggers", left: f32, right: f32, durationMs: u32 }` | one-shot force feedback (#352) |
+| `companion_settings` | `{ sleepOnGame?: bool, autoStopOnGame?: bool, userlandPollPaused?: bool, promptUserlandDebug?: bool }` | companion-local runtime/settings control |
 
 ### `GamepadConfig` payload
 
@@ -102,6 +105,27 @@ Added in v3: `keyboardTheme.border` (key outline, derived desktop-side from `key
 webview VK) and `vkMode` (`"docked"` | `"floating"`; floating renders a compact panel near the
 field instead of the full-width bottom dock). Both are additive and optional.
 
+### `companion_settings` payload
+
+camelCase; every field is optional so warmUP can send partial updates.
+
+```json
+{
+  "sleepOnGame": true,
+  "autoStopOnGame": false,
+  "userlandPollPaused": false,
+  "promptUserlandDebug": false
+}
+```
+
+- `sleepOnGame`: persist companion standalone fullscreen-game sleep behavior.
+- `autoStopOnGame`: persist companion standalone fullscreen-game auto-stop behavior.
+- `userlandPollPaused`: runtime pause flag for userland polling; mirrored to runtime status.
+- `promptUserlandDebug`: toggles the userland prompt debug overlay sentinel.
+
+When warmUP is connected, warmUP mode frames are authoritative; standalone fullscreen detection
+does not override `gameActive` / `launcherForegroundNav`.
+
 The companion maps cursor/scroll tuning fields to its internal names per the golden fixture's `configFieldMapping` (`sensitivity->cursor_speed`, `accelerationExp->cursor_accel`, `deadzone->cursor_deadzone`, `scrollSensitivity->scroll_speed`).
 
 `keyboardTheme` is optional, and each color inside it is optional. Colors are `#RRGGBB`;
@@ -111,7 +135,7 @@ fields keep the native keyboard's current dark/light default for that color slot
 
 ## Versioning policy
 
-- `protocolVersion` is a **single integer**, currently `3`.
+- `protocolVersion` is a **single integer**, currently `4`.
 - Any change to the pipe name, framing, `hello` shape, or a frame's `payload` shape bumps it.
 - Additive-only changes still bump (no minor negotiation in v1 — the boundary is between two independently-deployed binaries we control; a hard version gate is simpler and safer than partial compatibility).
 - A version mismatch is resolved by the server closing the connection; the client surfaces a "companion update required" state rather than interpreting unknown frames.

@@ -16,8 +16,8 @@ use windows::Win32::Graphics::Direct2D::{
     ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
     D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
     D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_ROUNDED_RECT,
-    D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_11_0,
@@ -34,7 +34,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD,
     DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
     DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
-    DWRITE_TEXT_METRICS,
+    DWRITE_TEXT_METRICS, DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
@@ -272,6 +272,7 @@ pub struct VkRenderer {
     chip_format: IDWriteTextFormat,
     sublabel_format: IDWriteTextFormat,
     icon_cache: HashMap<IconCacheKey, ID2D1Bitmap1>,
+    controller_art_cache: HashMap<ControllerArtCacheKey, (ID2D1Bitmap1, u32, u32)>,
     prompt_started: Instant,
     _d3d: ID3D11Device,
     _d2d_device: ID2D1Device,
@@ -340,6 +341,96 @@ struct IconCacheKey {
     icon: VkIcon,
     px: u32,
     color: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum ControllerArt {
+    DualSense,
+    XboxOne,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ControllerArtCacheKey {
+    art: ControllerArt,
+}
+
+impl ControllerArt {
+    fn from_label(label: &str) -> Option<Self> {
+        let l = label.to_ascii_lowercase();
+        if l.contains("dualsense")
+            || l.contains("dualshock")
+            || l.contains("playstation")
+            || l.contains("ps5")
+            || l.contains("ps4")
+            // Winlogon reads PlayStation pads via the direct-HID path ("HID slot N").
+            || l.contains("hid slot")
+        {
+            Some(Self::DualSense)
+        } else if l.contains("xbox") || l.contains("xinput") {
+            Some(Self::XboxOne)
+        } else {
+            None
+        }
+    }
+
+    fn png(self) -> &'static [u8] {
+        match self {
+            Self::DualSense => {
+                include_bytes!("../../assets/controller-models/dualsense-controller.png")
+            }
+            Self::XboxOne => {
+                include_bytes!("../../assets/controller-models/xbox-one-controller.png")
+            }
+        }
+    }
+}
+
+/// Longest edge (px) the cached controller bitmap is prefiltered down to. The
+/// card draws the art at roughly 110px; this keeps a few times that for HiDPI
+/// headroom while still being far enough below the ~1254px source that the GPU's
+/// final resample has no high frequencies left to alias.
+const CONTROLLER_ART_MAX_EDGE: u32 = 384;
+
+/// Area-averaging (box filter) downscale of a premultiplied-BGRA buffer. Returns
+/// the source unchanged when it already fits within `max_edge`. Averaging in
+/// premultiplied space is correct for images with transparency, so edges stay
+/// clean. Runs once per controller art (results are cached).
+fn downscale_bgra_premul(src: &[u8], sw: u32, sh: u32, max_edge: u32) -> (Vec<u8>, u32, u32) {
+    let long_edge = sw.max(sh);
+    if long_edge <= max_edge || sw == 0 || sh == 0 {
+        return (src.to_vec(), sw, sh);
+    }
+    let scale = max_edge as f32 / long_edge as f32;
+    let tw = ((sw as f32 * scale).round() as u32).max(1);
+    let th = ((sh as f32 * scale).round() as u32).max(1);
+    let mut out = vec![0u8; (tw as usize) * (th as usize) * 4];
+    for ty in 0..th {
+        let y0 = (ty * sh / th) as usize;
+        let y1 = (((ty + 1) * sh / th).max(ty * sh / th + 1).min(sh)) as usize;
+        for tx in 0..tw {
+            let x0 = (tx * sw / tw) as usize;
+            let x1 = (((tx + 1) * sw / tw).max(tx * sw / tw + 1).min(sw)) as usize;
+            let (mut b, mut g, mut r, mut a, mut n) = (0u32, 0u32, 0u32, 0u32, 0u32);
+            for sy in y0..y1 {
+                let row = sy * sw as usize * 4;
+                for sx in x0..x1 {
+                    let i = row + sx * 4;
+                    b += src[i] as u32;
+                    g += src[i + 1] as u32;
+                    r += src[i + 2] as u32;
+                    a += src[i + 3] as u32;
+                    n += 1;
+                }
+            }
+            let n = n.max(1);
+            let o = (ty as usize * tw as usize + tx as usize) * 4;
+            out[o] = (b / n) as u8;
+            out[o + 1] = (g / n) as u8;
+            out[o + 2] = (r / n) as u8;
+            out[o + 3] = (a / n) as u8;
+        }
+    }
+    (out, tw, th)
 }
 
 impl VkIcon {
@@ -700,6 +791,7 @@ impl VkRenderer {
             chip_format,
             sublabel_format,
             icon_cache: HashMap::new(),
+            controller_art_cache: HashMap::new(),
             prompt_started: Instant::now(),
             _d3d: d3d,
             _d2d_device: d2d_device,
@@ -812,6 +904,111 @@ impl VkRenderer {
             Some(&dest),
             1.0,
             D2D1_INTERPOLATION_MODE_LINEAR,
+            None,
+            None,
+        );
+        Ok(())
+    }
+
+    unsafe fn draw_controller_art(
+        &mut self,
+        art: ControllerArt,
+        rect: D2D_RECT_F,
+    ) -> Result<(), String> {
+        let key = ControllerArtCacheKey { art };
+        if !self.controller_art_cache.contains_key(&key) {
+            let decoder = png::Decoder::new(std::io::Cursor::new(art.png()));
+            let mut reader = decoder
+                .read_info()
+                .map_err(|e| format!("decode controller art {art:?}: {e}"))?;
+            let out_size = reader
+                .output_buffer_size()
+                .ok_or_else(|| format!("controller art {art:?}: unknown decoded size"))?;
+            let mut decoded = vec![0; out_size];
+            let info = reader
+                .next_frame(&mut decoded)
+                .map_err(|e| format!("read controller art {art:?}: {e}"))?;
+            let bytes = &decoded[..info.buffer_size()];
+            let mut bgra = Vec::with_capacity((info.width * info.height * 4) as usize);
+            match info.color_type {
+                png::ColorType::Rgba => {
+                    for px in bytes.chunks_exact(4) {
+                        let a = px[3] as u16;
+                        let premul = |c: u8| ((c as u16 * a + 127) / 255) as u8;
+                        bgra.extend_from_slice(&[
+                            premul(px[2]),
+                            premul(px[1]),
+                            premul(px[0]),
+                            px[3],
+                        ]);
+                    }
+                }
+                png::ColorType::Rgb => {
+                    for px in bytes.chunks_exact(3) {
+                        bgra.extend_from_slice(&[px[2], px[1], px[0], 255]);
+                    }
+                }
+                other => {
+                    return Err(format!(
+                        "controller art {art:?}: unsupported PNG color {other:?}"
+                    ))
+                }
+            }
+
+            // Prefilter to a modest size so the final GPU resample down to the
+            // ~110px card slot has no aliasing-prone high frequencies left.
+            let (bgra, art_w, art_h) =
+                downscale_bgra_premul(&bgra, info.width, info.height, CONTROLLER_ART_MAX_EDGE);
+
+            let props = D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+                colorContext: ManuallyDrop::new(None),
+            };
+            let bitmap = self
+                .d2d_context
+                .CreateBitmap(
+                    D2D_SIZE_U {
+                        width: art_w,
+                        height: art_h,
+                    },
+                    Some(bgra.as_ptr() as *const core::ffi::c_void),
+                    art_w * 4,
+                    &props,
+                )
+                .map_err(|e| format!("CreateBitmap controller art {art:?}: {e}"))?;
+            self.controller_art_cache
+                .insert(key, (bitmap, art_w, art_h));
+        }
+
+        let (bitmap, width, height) = self
+            .controller_art_cache
+            .get(&key)
+            .ok_or_else(|| format!("missing controller art cache {art:?}"))?;
+        let source_aspect = *width as f32 / *height as f32;
+        let fit_w = rect.right - rect.left;
+        let fit_h = rect.bottom - rect.top;
+        let (draw_w, draw_h) = if fit_w / fit_h > source_aspect {
+            (fit_h * source_aspect, fit_h)
+        } else {
+            (fit_w, fit_w / source_aspect)
+        };
+        let dest = D2D_RECT_F {
+            left: (rect.left + rect.right - draw_w) * 0.5,
+            top: (rect.top + rect.bottom - draw_h) * 0.5,
+            right: (rect.left + rect.right + draw_w) * 0.5,
+            bottom: (rect.top + rect.bottom + draw_h) * 0.5,
+        };
+        self.d2d_context.DrawBitmap(
+            bitmap,
+            Some(&dest),
+            1.0,
+            D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
             None,
             None,
         );
@@ -1143,7 +1340,7 @@ impl VkRenderer {
         border: u32,
         text_color: u32,
         title: &str,
-        status: &str,
+        controller_label: &str,
     ) -> Result<(), String> {
         let cw = self.width as f32;
         let ch = self.height as f32;
@@ -1184,10 +1381,17 @@ impl VkRenderer {
         };
         self.d2d_context.SetTransform(&transform);
 
+        // Leave a transparent band at the top so the controller name renders
+        // *outside* (above) the card. The card itself is a narrow pill that only
+        // hugs the controller art; it is centred in the (wider) window so the name
+        // above has room to render without clipping.
+        let card_top = 44.0;
+        let card_w = 196.0_f32.min(cw - 10.0);
+        let card_left = (cw - card_w) * 0.5;
         let panel = D2D_RECT_F {
-            left: 5.0,
-            top: 5.0,
-            right: cw - 5.0,
+            left: card_left,
+            top: card_top,
+            right: cw - card_left,
             bottom: ch - 5.0,
         };
         let rounded = D2D1_ROUNDED_RECT {
@@ -1206,71 +1410,56 @@ impl VkRenderer {
             .DrawRoundedRectangle(&rounded, &border_brush, 1.2, None);
 
         let image_cx = cw * 0.5;
-        let image_y = 48.0 - 7.0 * (1.0 - eased);
-        let shadow = solid_brush(&self.d2d_context, colorref_alpha(0x00000000, 0.26))?;
-
-        let shadow_rect = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: image_cx - 70.0,
-                top: image_y + 60.0,
-                right: image_cx + 70.0,
-                bottom: image_y + 74.0,
-            },
-            radiusX: 18.0,
-            radiusY: 18.0,
-        };
-        self.d2d_context.FillRoundedRectangle(&shadow_rect, &shadow);
+        // The controller name floats *above* the card on the transparent top band;
+        // the artwork is the sole content of the card, centred in it.
+        let name_top = 8.0;
+        let name_bottom = card_top - 6.0;
+        let image_cy = (panel.top + panel.bottom) * 0.5 - 6.0 * (1.0 - eased);
 
         let ring = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F {
-                left: image_cx - 102.0 - 18.0 * pulse,
-                top: image_y - 14.0 - 18.0 * pulse,
-                right: image_cx + 102.0 + 18.0 * pulse,
-                bottom: image_y + 86.0 + 18.0 * pulse,
+                left: image_cx - 74.0 - 10.0 * pulse,
+                top: image_cy - 60.0 - 10.0 * pulse,
+                right: image_cx + 74.0 + 10.0 * pulse,
+                bottom: image_cy + 60.0 + 10.0 * pulse,
             },
-            radiusX: 58.0 + 18.0 * pulse,
-            radiusY: 58.0 + 18.0 * pulse,
+            radiusX: 52.0 + 10.0 * pulse,
+            radiusY: 52.0 + 10.0 * pulse,
         };
         self.d2d_context
             .DrawRoundedRectangle(&ring, &halo_brush, 2.0, None);
         let image_rect = D2D_RECT_F {
-            left: image_cx - 76.0,
-            top: image_y - 6.0,
-            right: image_cx + 76.0,
-            bottom: image_y + 78.0,
+            left: image_cx - 62.0,
+            top: image_cy - 54.0,
+            right: image_cx + 62.0,
+            bottom: image_cy + 54.0,
         };
-        self.draw_svg_icon(VkIcon::Gamepad, image_rect, text_color)?;
+        if let Some(art) = ControllerArt::from_label(controller_label) {
+            self.draw_controller_art(art, image_rect)?;
+        } else {
+            self.draw_svg_icon(VkIcon::Gamepad, image_rect, text_color)?;
+        }
 
         let title_w: Vec<u16> = title.encode_utf16().collect();
-        let status_w: Vec<u16> = status.encode_utf16().collect();
         let text_brush = solid_brush(&self.d2d_context, colorref(text_color))?;
-        let sub_brush = solid_brush(&self.d2d_context, colorref_alpha(text_color, 0.70))?;
+        // The name is a single line above the card; without this it word-wraps and
+        // the short band clips all but the first word. Restore wrap after (the
+        // format is shared with the keyboard label renderer).
+        let _ = self.text_format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         self.d2d_context.DrawText(
             &title_w,
             &self.text_format,
             &D2D_RECT_F {
-                left: 24.0,
-                top: ch - 78.0,
-                right: cw - 24.0,
-                bottom: ch - 42.0,
+                left: 0.0,
+                top: name_top,
+                right: cw,
+                bottom: name_bottom,
             },
             &text_brush,
             D2D1_DRAW_TEXT_OPTIONS_NONE,
             DWRITE_MEASURING_MODE_NATURAL,
         );
-        self.d2d_context.DrawText(
-            &status_w,
-            &self.hint_format,
-            &D2D_RECT_F {
-                left: 24.0,
-                top: ch - 42.0,
-                right: cw - 24.0,
-                bottom: ch - 16.0,
-            },
-            &sub_brush,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-            DWRITE_MEASURING_MODE_NATURAL,
-        );
+        let _ = self.text_format.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
 
         let identity = Matrix3x2 {
             M11: 1.0,
@@ -1563,5 +1752,48 @@ mod tests {
         assert_eq!(shift_icon(false), VkIcon::Caps);
         assert_eq!(caps_icon(true), VkIcon::ShiftFilled);
         assert_eq!(caps_icon(false), VkIcon::Shift);
+    }
+
+    #[test]
+    fn controller_art_matches_device_families() {
+        assert_eq!(
+            ControllerArt::from_label("DualSense Wireless Controller"),
+            Some(ControllerArt::DualSense)
+        );
+        assert_eq!(
+            ControllerArt::from_label("Xbox Wireless Controller"),
+            Some(ControllerArt::XboxOne)
+        );
+        // Backend slot labels (secure desktop): HID = PlayStation, XInput = Xbox.
+        assert_eq!(
+            ControllerArt::from_label("HID slot 0"),
+            Some(ControllerArt::DualSense)
+        );
+        assert_eq!(
+            ControllerArt::from_label("XInput slot 0"),
+            Some(ControllerArt::XboxOne)
+        );
+        assert_eq!(ControllerArt::from_label("none"), None);
+    }
+
+    #[test]
+    fn downscale_box_filter_shrinks_and_averages() {
+        // 2x2 premultiplied-BGRA source averaged to a single pixel.
+        // Pixels: (b,g,r,a) = (0,0,0,0), (40,40,40,40), (80,80,80,80), (120,120,120,120)
+        let src = vec![
+            0, 0, 0, 0, 40, 40, 40, 40, 80, 80, 80, 80, 120, 120, 120, 120,
+        ];
+        let (out, w, h) = downscale_bgra_premul(&src, 2, 2, 1);
+        assert_eq!((w, h), (1, 1));
+        // Mean of {0,40,80,120} = 60 in every channel.
+        assert_eq!(out, vec![60, 60, 60, 60]);
+    }
+
+    #[test]
+    fn downscale_passes_through_when_already_small() {
+        let src = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let (out, w, h) = downscale_bgra_premul(&src, 2, 1, 64);
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(out, src);
     }
 }

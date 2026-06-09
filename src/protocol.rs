@@ -16,7 +16,10 @@ use serde::{Deserialize, Serialize};
 ///
 /// v3: additive `keyboardTheme.border` (key outline color, matches the webview VK) and the
 /// `config.vkMode` layout selector (`docked` | `floating`).
-pub const PROTOCOL_VERSION: u32 = 3;
+///
+/// v4: additive `companion_settings` down-frame for companion-local runtime settings
+/// (`sleepOnGame`, `autoStopOnGame`, `userlandPollPaused`, `promptUserlandDebug`).
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Desktop mode snapshot carried in `hello` and the `mode` down-frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +44,8 @@ pub struct Hello {
     pub config: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<ModeSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub companion_settings: Option<CompanionSettingsPayload>,
 }
 
 /// `connection` frame payload — authoritative controller connection snapshot.
@@ -99,6 +104,22 @@ pub struct TouchpadFingerPayload {
 #[serde(rename_all = "camelCase")]
 pub struct TouchpadPayload {
     pub fingers: Vec<TouchpadFingerPayload>,
+}
+
+/// Companion-local settings the warmUP desktop can push over IPC. Each field is optional so
+/// the desktop can send partial updates. Persisted settings are written to the companion's
+/// on-disk config; `userlandPollPaused` is runtime-only (mirrored to `runtime-status.ini`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionSettingsPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sleep_on_game: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_stop_on_game: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub userland_poll_paused: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_userland_debug: Option<bool>,
 }
 
 /// `rumble` down-frame payload — one-shot force feedback (#352). Internally tagged by
@@ -201,6 +222,7 @@ pub enum DownFrame {
     Config(ConfigPayload),
     Mode(ModeSnapshot),
     Rumble(RumblePayload),
+    CompanionSettings(CompanionSettingsPayload),
     #[serde(skip)]
     Unknown,
 }
@@ -243,7 +265,9 @@ impl DownFrame {
     pub fn parse_line(line: &str) -> Result<Self, serde_json::Error> {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
-            "hello" | "config" | "mode" | "rumble" => serde_json::from_str(line),
+            "hello" | "config" | "mode" | "rumble" | "companion_settings" => {
+                serde_json::from_str(line)
+            }
             _ => Ok(Self::Unknown),
         }
     }
@@ -442,11 +466,34 @@ mod tests {
                 clicks_enabled: true,
                 launcher_owns_text_input: false,
             }),
+            companion_settings: Some(CompanionSettingsPayload {
+                sleep_on_game: Some(true),
+                auto_stop_on_game: Some(false),
+                userland_poll_paused: Some(false),
+                prompt_userland_debug: None,
+            }),
         });
         let line = hello.to_ndjson_line();
         let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(json["type"], "hello");
-        assert_eq!(json["payload"]["protocolVersion"], 3);
+        assert_eq!(json["payload"]["protocolVersion"], 4);
         assert_eq!(json["payload"]["mode"]["gameActive"], false);
+        assert_eq!(json["payload"]["companionSettings"]["sleepOnGame"], true);
+    }
+
+    #[test]
+    fn companion_settings_down_frame_round_trips() {
+        let frame = DownFrame::CompanionSettings(CompanionSettingsPayload {
+            sleep_on_game: Some(false),
+            auto_stop_on_game: Some(true),
+            userland_poll_paused: Some(true),
+            prompt_userland_debug: Some(false),
+        });
+        let line = frame.to_ndjson_line();
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["type"], "companion_settings");
+        assert_eq!(json["payload"]["autoStopOnGame"], true);
+        assert_eq!(json["payload"]["userlandPollPaused"], true);
+        assert_eq!(DownFrame::parse_line(line.trim_end()).unwrap(), frame);
     }
 }

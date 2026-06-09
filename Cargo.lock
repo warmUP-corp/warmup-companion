@@ -1854,6 +1854,7 @@ version = "0.1.0"
 dependencies = [
  "ctrlc",
  "enigo",
+ "png",
  "resvg",
  "sentry",
  "serde",

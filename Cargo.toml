@@ -17,6 +17,7 @@ windows-service = { version = "0.8", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 resvg = "0.47.0"
+png = "0.18.1"
 sentry = { version = "0.48.2", default-features = false, features = ["backtrace", "contexts", "debug-images", "panic", "ureq"] }
 
 [target.'cfg(windows)'.dependencies]

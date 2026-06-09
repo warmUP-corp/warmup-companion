@@ -67,14 +67,17 @@ pub enum PadCommand {
 ///     detection when `sleep_on_game` is enabled): a real game owns the screen →
 ///     [`PollMode::Sleep`], only Guide edges flow so the game owns the pad.
 ///   - **launcher** (`launcher_foreground_nav`): the launcher is foreground (incl. woken over a
-///     running game) → full poll so the controller drives the launcher UI.
+///     running game) → full poll so the controller drives the launcher UI. Standalone fullscreen
+///     detection is ignored here — warmUP itself is fullscreen and must not trip game sleep.
 ///   - **desktop** (`!game_active`): no game and the launcher is backgrounded → full poll so the
 ///     controller keeps driving the OS cursor on the Windows desktop.
 fn effective_userland_poll_mode() -> PollMode {
     let settings = crate::config::gamepad_settings();
-    let desktop_game_active =
-        crate::pipe_server::game_active() && !crate::pipe_server::launcher_foreground_nav();
-    let standalone_game_active = settings.sleep_on_game && standalone_game_active();
+    let desktop_connected = crate::pipe_server::desktop_connected();
+    let launcher_foreground = crate::pipe_server::launcher_foreground_nav();
+    let desktop_game_active = crate::pipe_server::game_active() && !launcher_foreground;
+    let standalone_game_active =
+        !desktop_connected && settings.sleep_on_game && standalone_game_active_now();
     if userland_poll_paused() || desktop_game_active || standalone_game_active {
         PollMode::Sleep
     } else {
@@ -83,12 +86,12 @@ fn effective_userland_poll_mode() -> PollMode {
 }
 
 #[cfg(windows)]
-fn standalone_game_active() -> bool {
+pub fn standalone_game_active_now() -> bool {
     crate::win::game_detect::standalone_game_active_cached()
 }
 
 #[cfg(not(windows))]
-fn standalone_game_active() -> bool {
+pub fn standalone_game_active_now() -> bool {
     false
 }
 
