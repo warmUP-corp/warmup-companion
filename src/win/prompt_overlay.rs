@@ -381,13 +381,27 @@ fn render_prompt(hwnd: HWND) {
                             let title = connected_card_title(controller_label);
                             r.draw_connected_prompt(bg, border, text, &title, controller_label)
                         }
-                        PromptVisual::Ready => {
-                            r.draw_prompt(bg, border, text, PROMPT_PREFIX, PROMPT_SUFFIX, true)
-                        }
+                        PromptVisual::Ready => r.draw_prompt(
+                            bg,
+                            border,
+                            text,
+                            PROMPT_PREFIX,
+                            PROMPT_SUFFIX,
+                            true,
+                            snapshot.name.trim(),
+                        ),
                         PromptVisual::NoPad => {
                             let muted_text = crate::win::vk_renderer::mix_color(text, bg, 0.58);
                             let muted_border = crate::win::vk_renderer::mix_color(border, bg, 0.45);
-                            r.draw_prompt(bg, muted_border, muted_text, NO_PAD_PROMPT, "", false)
+                            r.draw_prompt(
+                                bg,
+                                muted_border,
+                                muted_text,
+                                NO_PAD_PROMPT,
+                                "",
+                                false,
+                                "",
+                            )
                         }
                     };
                     if let Err(e) = result {

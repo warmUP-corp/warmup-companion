@@ -108,6 +108,7 @@ unsafe fn draw_candidate_strip(
     chip_format: &IDWriteTextFormat,
     hint_format: &IDWriteTextFormat,
     pal: &VkPalette,
+    controller_icons: ControllerIconFamily,
 ) -> Result<(), String> {
     let mut widths = [0.0f32; 3];
     let mut count = 0usize;
@@ -132,6 +133,7 @@ unsafe fn draw_candidate_strip(
     draw_shortcut_pill(
         ctx,
         "LB",
+        controller_icons.hint_icon("LB"),
         x - HINT_PILL_W - HINT_GAP,
         &hint_fill,
         &outline,
@@ -141,6 +143,7 @@ unsafe fn draw_candidate_strip(
     draw_shortcut_pill(
         ctx,
         "RB",
+        controller_icons.hint_icon("RB"),
         x + total_w + HINT_GAP,
         &hint_fill,
         &outline,
@@ -198,6 +201,7 @@ unsafe fn draw_candidate_strip(
             draw_shortcut_pill(
                 ctx,
                 "A",
+                controller_icons.hint_icon("A"),
                 rect.rect.right - HINT_PILL_W - HINT_INSET,
                 &hint_fill,
                 &outline,
@@ -213,6 +217,7 @@ unsafe fn draw_candidate_strip(
 unsafe fn draw_shortcut_pill(
     ctx: &ID2D1DeviceContext,
     label: &str,
+    icon: Option<VkIcon>,
     x: f32,
     fill: &ID2D1SolidColorBrush,
     outline: &ID2D1SolidColorBrush,
@@ -234,14 +239,79 @@ unsafe fn draw_shortcut_pill(
     };
     ctx.FillRoundedRectangle(&rect, fill);
     ctx.DrawRoundedRectangle(&rect, outline, 1.0, None);
-    let wide: Vec<u16> = label.encode_utf16().collect();
-    ctx.DrawText(
-        &wide,
-        format,
-        &rect.rect,
-        text,
-        D2D1_DRAW_TEXT_OPTIONS_NONE,
-        DWRITE_MEASURING_MODE_NATURAL,
+    if let Some(icon) = icon {
+        draw_uncached_svg_icon(ctx, icon, rect.rect)?;
+    } else {
+        let wide: Vec<u16> = label.encode_utf16().collect();
+        ctx.DrawText(
+            &wide,
+            format,
+            &rect.rect,
+            text,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
+    }
+    Ok(())
+}
+
+unsafe fn draw_uncached_svg_icon(
+    ctx: &ID2D1DeviceContext,
+    icon: VkIcon,
+    rect: D2D_RECT_F,
+) -> Result<(), String> {
+    let h = rect.bottom - rect.top;
+    let draw_px = (h * 0.94).round().clamp(24.0, 64.0);
+    let raster_px = (draw_px * 3.0).round().clamp(54.0, 192.0) as u32;
+    let opt = resvg::usvg::Options::default();
+    let tree = resvg::usvg::Tree::from_data(icon.svg().as_bytes(), &opt)
+        .map_err(|e| format!("parse shortcut icon {icon:?}: {e}"))?;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(raster_px, raster_px)
+        .ok_or_else(|| format!("alloc shortcut icon pixmap {raster_px}x{raster_px}"))?;
+    let scale = raster_px as f32 / 32.0;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    let mut bgra = pixmap.data().to_vec();
+    for px in bgra.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    let props = D2D1_BITMAP_PROPERTIES1 {
+        pixelFormat: D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+        },
+        dpiX: 96.0,
+        dpiY: 96.0,
+        bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+        colorContext: ManuallyDrop::new(None),
+    };
+    let bitmap = ctx
+        .CreateBitmap(
+            D2D_SIZE_U {
+                width: raster_px,
+                height: raster_px,
+            },
+            Some(bgra.as_ptr() as *const core::ffi::c_void),
+            raster_px * 4,
+            &props,
+        )
+        .map_err(|e| format!("CreateBitmap shortcut icon {icon:?}: {e}"))?;
+    let dest = D2D_RECT_F {
+        left: (rect.left + rect.right - draw_px) * 0.5,
+        top: (rect.top + rect.bottom - draw_px) * 0.5,
+        right: (rect.left + rect.right + draw_px) * 0.5,
+        bottom: (rect.top + rect.bottom + draw_px) * 0.5,
+    };
+    ctx.DrawBitmap(
+        &bitmap,
+        Some(&dest),
+        1.0,
+        D2D1_INTERPOLATION_MODE_LINEAR,
+        None,
+        None,
     );
     Ok(())
 }
@@ -306,11 +376,13 @@ const CHIP_LABEL_INSET_X: f32 = 8.0;
 const CHIP_LABEL_INSET_Y: f32 = 4.0;
 /// Chip label size in DIPs — independent of key label scaling.
 const CHIP_FONT_PX: f32 = 14.0;
-const HINT_PILL_W: f32 = 34.0;
-const HINT_PILL_H: f32 = 22.0;
-const HINT_TOP: f32 = 24.0;
+const HINT_PILL_W: f32 = 40.0;
+const HINT_PILL_H: f32 = 32.0;
+const HINT_TOP: f32 = CHIP_TOP + (CHIP_H - HINT_PILL_H) * 0.5;
 const HINT_GAP: f32 = 12.0;
-const HINT_INSET: f32 = 6.0;
+const HINT_INSET: f32 = 8.0;
+const KEY_HINT_BADGE_MAX: f32 = 38.0;
+const KEY_HINT_BADGE_INSET: f32 = 7.0;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum VkIcon {
@@ -331,9 +403,26 @@ enum VkIcon {
     ChevronDown,
     /// Generic controller image for the connection card.
     Gamepad,
-    /// PlayStation L3 (left-stick click) chip — keeps its native colors (no
-    /// `currentColor`), extracted from the controller-icon atlas.
-    L3,
+    /// Left-stick click chips keep their native colors (no `currentColor`),
+    /// extracted from the controller-icon atlas.
+    L3Ps5,
+    L3Xbox,
+    Ps5Cross,
+    Ps5Circle,
+    Ps5Square,
+    Ps5Triangle,
+    Ps5L1,
+    Ps5R1,
+    Ps5L2,
+    Ps5R2,
+    XboxA,
+    XboxB,
+    XboxX,
+    XboxY,
+    XboxLb,
+    XboxRb,
+    XboxLt,
+    XboxRt,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -381,6 +470,60 @@ impl ControllerArt {
             Self::XboxOne => {
                 include_bytes!("../../assets/controller-models/xbox-one-controller.png")
             }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum ControllerIconFamily {
+    Ps5,
+    Xbox,
+}
+
+impl ControllerIconFamily {
+    fn from_label(label: &str) -> Self {
+        let l = label.to_ascii_lowercase();
+        if l.contains("dualsense")
+            || l.contains("dualshock")
+            || l.contains("playstation")
+            || l.contains("ps5")
+            || l.contains("ps4")
+            || l.contains("hid slot")
+        {
+            Self::Ps5
+        } else {
+            Self::Xbox
+        }
+    }
+
+    fn l3_icon(self) -> VkIcon {
+        match self {
+            Self::Ps5 => VkIcon::L3Ps5,
+            Self::Xbox => VkIcon::L3Xbox,
+        }
+    }
+
+    fn hint_icon(self, hint: &str) -> Option<VkIcon> {
+        match (self, hint) {
+            (Self::Ps5, "A") => Some(VkIcon::Ps5Cross),
+            (Self::Ps5, "B") => Some(VkIcon::Ps5Circle),
+            (Self::Ps5, "X") => Some(VkIcon::Ps5Square),
+            (Self::Ps5, "Y") => Some(VkIcon::Ps5Triangle),
+            (Self::Ps5, "LB") => Some(VkIcon::Ps5L1),
+            (Self::Ps5, "RB") => Some(VkIcon::Ps5R1),
+            (Self::Ps5, "LT") => Some(VkIcon::Ps5L2),
+            (Self::Ps5, "RT") => Some(VkIcon::Ps5R2),
+            (Self::Ps5, "L3") => Some(VkIcon::L3Ps5),
+            (Self::Xbox, "A") => Some(VkIcon::XboxA),
+            (Self::Xbox, "B") => Some(VkIcon::XboxB),
+            (Self::Xbox, "X") => Some(VkIcon::XboxX),
+            (Self::Xbox, "Y") => Some(VkIcon::XboxY),
+            (Self::Xbox, "LB") => Some(VkIcon::XboxLb),
+            (Self::Xbox, "RB") => Some(VkIcon::XboxRb),
+            (Self::Xbox, "LT") => Some(VkIcon::XboxLt),
+            (Self::Xbox, "RT") => Some(VkIcon::XboxRt),
+            (Self::Xbox, "L3") => Some(VkIcon::L3Xbox),
+            _ => None,
         }
     }
 }
@@ -481,10 +624,53 @@ impl VkIcon {
             VkIcon::Gamepad => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><line x1="6" x2="10" y1="12" y2="12"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="15" x2="15.01" y1="13" y2="13"/><line x1="18" x2="18.01" y1="11" y2="11"/><rect width="20" height="12" x="2" y="6" rx="4"/><path d="M6 18v1a2 2 0 0 0 4 0v-1"/><path d="M14 18v1a2 2 0 0 0 4 0v-1"/></svg>"#
             }
-            // Native-colored chip; has no `currentColor`, so the palette swap in
-            // `draw_svg_icon` is a no-op and it keeps its PlayStation look.
-            VkIcon::L3 => include_str!("../../controller-icons/l3.svg"),
+            // Native-colored chips have no `currentColor`, so the palette swap in
+            // `draw_svg_icon` is a no-op and they keep their controller look.
+            VkIcon::L3Ps5 => include_str!("../../controller-icons/p5_l3_click.svg"),
+            VkIcon::L3Xbox => include_str!("../../controller-icons/x_l3_click.svg"),
+            VkIcon::Ps5Cross => include_str!("../../controller-icons/p5_face_cross_colored.svg"),
+            VkIcon::Ps5Circle => include_str!("../../controller-icons/p5_face_circle_colored.svg"),
+            VkIcon::Ps5Square => include_str!("../../controller-icons/p5_face_square_colored.svg"),
+            VkIcon::Ps5Triangle => {
+                include_str!("../../controller-icons/p5_face_triangle_colored.svg")
+            }
+            VkIcon::Ps5L1 => include_str!("../../controller-icons/p5_shoulder_l1.svg"),
+            VkIcon::Ps5R1 => include_str!("../../controller-icons/p5_shoulder_r1.svg"),
+            VkIcon::Ps5L2 => include_str!("../../controller-icons/p5_trigger_l2.svg"),
+            VkIcon::Ps5R2 => include_str!("../../controller-icons/p5_trigger_r2.svg"),
+            VkIcon::XboxA => include_str!("../../controller-icons/x_face_a_colored.svg"),
+            VkIcon::XboxB => include_str!("../../controller-icons/x_face_b_colored.svg"),
+            VkIcon::XboxX => include_str!("../../controller-icons/x_face_x_colored.svg"),
+            VkIcon::XboxY => include_str!("../../controller-icons/x_face_y_colored.svg"),
+            VkIcon::XboxLb => include_str!("../../controller-icons/x_shoulder_lb.svg"),
+            VkIcon::XboxRb => include_str!("../../controller-icons/x_shoulder_rb.svg"),
+            VkIcon::XboxLt => include_str!("../../controller-icons/x_trigger_lt.svg"),
+            VkIcon::XboxRt => include_str!("../../controller-icons/x_trigger_rt.svg"),
         }
+    }
+
+    fn is_controller_tip(self) -> bool {
+        matches!(
+            self,
+            VkIcon::L3Ps5
+                | VkIcon::L3Xbox
+                | VkIcon::Ps5Cross
+                | VkIcon::Ps5Circle
+                | VkIcon::Ps5Square
+                | VkIcon::Ps5Triangle
+                | VkIcon::Ps5L1
+                | VkIcon::Ps5R1
+                | VkIcon::Ps5L2
+                | VkIcon::Ps5R2
+                | VkIcon::XboxA
+                | VkIcon::XboxB
+                | VkIcon::XboxX
+                | VkIcon::XboxY
+                | VkIcon::XboxLb
+                | VkIcon::XboxRb
+                | VkIcon::XboxLt
+                | VkIcon::XboxRt
+        )
     }
 }
 
@@ -610,6 +796,7 @@ pub struct VkFrame<'a> {
     pub candidates: Option<&'a crate::vk_predict::StripState>,
     pub floating: bool,
     pub modifiers: VkModifiers,
+    pub controller_label: &'a str,
 }
 
 /// Glyph for the Shift key (the Shift-action key reflects `shift`).
@@ -833,11 +1020,11 @@ impl VkRenderer {
     ) -> Result<(), String> {
         let h = rect.bottom - rect.top;
         let draw_px = match icon {
-            VkIcon::L3 => (h * 0.88).round().clamp(24.0, 64.0),
+            icon if icon.is_controller_tip() => (h * 0.98).round().clamp(24.0, 64.0),
             _ => (h * 0.5).round().clamp(16.0, 96.0),
         };
         let raster_px = match icon {
-            VkIcon::L3 => (draw_px * 3.0).round().clamp(72.0, 192.0),
+            icon if icon.is_controller_tip() => (draw_px * 3.0).round().clamp(54.0, 192.0),
             _ => draw_px,
         } as u32;
         let key = IconCacheKey {
@@ -852,7 +1039,8 @@ impl VkRenderer {
                 .map_err(|e| format!("parse svg icon {icon:?}: {e}"))?;
             let mut pixmap = resvg::tiny_skia::Pixmap::new(raster_px, raster_px)
                 .ok_or_else(|| format!("alloc svg icon pixmap {raster_px}x{raster_px}"))?;
-            let scale = raster_px as f32 / 24.0;
+            let source_px = if icon.is_controller_tip() { 32.0 } else { 24.0 };
+            let scale = raster_px as f32 / source_px;
             resvg::render(
                 &tree,
                 resvg::tiny_skia::Transform::from_scale(scale, scale),
@@ -1027,7 +1215,9 @@ impl VkRenderer {
             candidates,
             floating,
             modifiers,
+            controller_label,
         } = *frame;
+        let controller_icons = ControllerIconFamily::from_label(controller_label);
         let cw = self.width as f32;
         let ch = self.height as f32;
 
@@ -1088,6 +1278,7 @@ impl VkRenderer {
                 &self.chip_format,
                 &self.hint_format,
                 pal,
+                controller_icons,
             )?;
         }
 
@@ -1203,29 +1394,35 @@ impl VkRenderer {
                 }
             }
 
-            // Per-key controller-button badge in the top-left corner.
+            // Per-key controller-button badge in the top-left corner. Keep this
+            // footprint fixed so controller glyphs do not collide with key glyphs.
             if let Some(hint) = key_hint(key) {
-                let kh = kr.bottom - kr.top;
+                let key_h = kr.bottom - kr.top;
+                let badge_size = (key_h * 0.48).clamp(30.0, KEY_HINT_BADGE_MAX);
                 let badge = D2D_RECT_F {
-                    left: kr.left + 2.0,
-                    top: kr.top + 2.0,
-                    right: kr.right - 2.0,
-                    bottom: kr.top + kh * 0.5,
+                    left: kr.left + KEY_HINT_BADGE_INSET,
+                    top: kr.top + KEY_HINT_BADGE_INSET,
+                    right: kr.left + KEY_HINT_BADGE_INSET + badge_size,
+                    bottom: kr.top + KEY_HINT_BADGE_INSET + badge_size,
                 };
-                let badge_brush = if selected {
-                    &sel_text_brush
+                if let Some(icon) = controller_icons.hint_icon(hint) {
+                    self.draw_svg_icon(icon, badge, pal.text)?;
                 } else {
-                    &accent_brush
-                };
-                let w: Vec<u16> = hint.encode_utf16().collect();
-                self.d2d_context.DrawText(
-                    &w,
-                    &self.hint_format,
-                    &badge,
-                    badge_brush,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    DWRITE_MEASURING_MODE_NATURAL,
-                );
+                    let badge_brush = if selected {
+                        &sel_text_brush
+                    } else {
+                        &accent_brush
+                    };
+                    let w: Vec<u16> = hint.encode_utf16().collect();
+                    self.d2d_context.DrawText(
+                        &w,
+                        &self.hint_format,
+                        &badge,
+                        badge_brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
             }
         }
 
@@ -1493,6 +1690,7 @@ impl VkRenderer {
         prefix: &str,
         suffix: &str,
         show_l3: bool,
+        controller_label: &str,
     ) -> Result<(), String> {
         let cw = self.width as f32;
         let ch = self.height as f32;
@@ -1588,7 +1786,8 @@ impl VkRenderer {
                 right: x + chip,
                 bottom: (ch + chip) * 0.5,
             };
-            self.draw_svg_icon(VkIcon::L3, chip_rect, text_color)?;
+            let icon = ControllerIconFamily::from_label(controller_label).l3_icon();
+            self.draw_svg_icon(icon, chip_rect, text_color)?;
             x += chip + gap;
         }
 
@@ -1776,6 +1975,39 @@ mod tests {
             Some(ControllerArt::XboxOne)
         );
         assert_eq!(ControllerArt::from_label("none"), None);
+    }
+
+    #[test]
+    fn controller_icons_use_ps5_for_playstation_and_xbox_as_generic() {
+        assert_eq!(
+            ControllerIconFamily::from_label("DualSense Wireless Controller"),
+            ControllerIconFamily::Ps5
+        );
+        assert_eq!(
+            ControllerIconFamily::from_label("HID slot 0"),
+            ControllerIconFamily::Ps5
+        );
+        assert_eq!(
+            ControllerIconFamily::from_label("Xbox Wireless Controller"),
+            ControllerIconFamily::Xbox
+        );
+        assert_eq!(
+            ControllerIconFamily::from_label("Nintendo Pro Controller"),
+            ControllerIconFamily::Xbox
+        );
+        assert_eq!(
+            ControllerIconFamily::from_label("none"),
+            ControllerIconFamily::Xbox
+        );
+        assert_eq!(
+            ControllerIconFamily::Ps5.hint_icon("X"),
+            Some(VkIcon::Ps5Square)
+        );
+        assert_eq!(
+            ControllerIconFamily::Xbox.hint_icon("X"),
+            Some(VkIcon::XboxX)
+        );
+        assert_eq!(ControllerIconFamily::Xbox.hint_icon("unknown"), None);
     }
 
     #[test]
