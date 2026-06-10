@@ -9,7 +9,8 @@
 
 use crate::gamepad_backend::PadCommand;
 use crate::protocol::{
-    BatteryPayload, ButtonPayload, ConnectionPayload, ModeSnapshot, RumblePayload, TouchpadPayload,
+    AxisPayload, BatteryPayload, ButtonPayload, CompanionSettingsPayload, ConnectionPayload,
+    ModeSnapshot, RumblePayload, TouchpadPayload,
 };
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,6 +30,8 @@ static GAME_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// user has brought the launcher forward (Guide-wake over a running game), this stays the full
 /// poll mode instead of sleeping, so the controller can navigate the launcher.
 static LAUNCHER_FOREGROUND_NAV: AtomicBool = AtomicBool::new(false);
+/// True while a warmUP desktop client has completed the pipe handshake.
+static DESKTOP_CONNECTED: AtomicBool = AtomicBool::new(false);
 
 /// Coalesced visual-cursor hint accumulated since the last send: `(dx, dy, dirty)`.
 static CURSOR_ACC: OnceLock<Mutex<(f64, f64, bool)>> = OnceLock::new();
@@ -64,6 +67,11 @@ pub fn launcher_foreground_nav() -> bool {
     LAUNCHER_FOREGROUND_NAV.load(Ordering::Relaxed)
 }
 
+/// Whether warmUP is connected and should be the source of truth for mode state.
+pub fn desktop_connected() -> bool {
+    DESKTOP_CONNECTED.load(Ordering::Relaxed)
+}
+
 /// Accumulate a visual-cursor hint. The companion has already injected the OS move; this
 /// only keeps the webview's visual cursor in sync. Coalesced; the server sends it throttled.
 pub fn publish_cursor_moved(dx: f64, dy: f64) {
@@ -88,6 +96,8 @@ fn take_cursor_moved() -> Option<crate::protocol::CursorMovedPayload> {
 
 /// Latest battery snapshot from the gamepad loop. The server sends it on change.
 static BATTERY: OnceLock<Mutex<Option<BatteryPayload>>> = OnceLock::new();
+/// Latest raw stick snapshot from the gamepad loop. The server sends it throttled.
+static AXIS: OnceLock<Mutex<Option<AxisPayload>>> = OnceLock::new();
 /// Latest touchpad sample + a dirty flag, coalesced like `cursor_moved` and sent throttled.
 static TOUCHPAD: OnceLock<Mutex<(Option<TouchpadPayload>, bool)>> = OnceLock::new();
 /// Device write commands pushed by inbound `config`/`rumble` frames, drained by the
@@ -97,6 +107,10 @@ const DEVICE_CMD_CAP: usize = 64;
 
 fn battery_slot() -> &'static Mutex<Option<BatteryPayload>> {
     BATTERY.get_or_init(|| Mutex::new(None))
+}
+
+fn axis_slot() -> &'static Mutex<Option<AxisPayload>> {
+    AXIS.get_or_init(|| Mutex::new(None))
 }
 
 fn touchpad_slot() -> &'static Mutex<(Option<TouchpadPayload>, bool)> {
@@ -118,6 +132,18 @@ pub fn publish_battery(percent: i32, charging: bool, wired: bool) {
     }
 }
 
+/// Publish the latest raw stick snapshot (read by the server, sent throttled).
+pub fn publish_axis(left_x: f32, left_y: f32, right_x: f32, right_y: f32) {
+    if let Ok(mut a) = axis_slot().lock() {
+        *a = Some(AxisPayload {
+            left_x,
+            left_y,
+            right_x,
+            right_y,
+        });
+    }
+}
+
 /// Publish the latest touchpad sample (coalesced; the server sends it throttled).
 pub fn publish_touchpad(payload: TouchpadPayload) {
     if let Ok(mut t) = touchpad_slot().lock() {
@@ -129,6 +155,11 @@ pub fn publish_touchpad(payload: TouchpadPayload) {
 #[cfg_attr(not(windows), allow(dead_code))]
 fn current_battery() -> Option<BatteryPayload> {
     battery_slot().lock().ok().and_then(|b| *b)
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn current_axis() -> Option<AxisPayload> {
+    axis_slot().lock().ok().and_then(|a| *a)
 }
 
 /// Take the latest touchpad sample if it changed since the last send.
@@ -349,22 +380,42 @@ fn apply_rumble(p: &RumblePayload) {
             strong,
             weak,
             duration_ms,
-        } => PadCommand::Rumble {
-            strong,
-            weak,
-            ms: duration_ms,
-        },
+        } => {
+            crate::install::log_line(&format!(
+                "pipe inbound rumble full strong={strong} weak={weak} ms={duration_ms}"
+            ));
+            PadCommand::Rumble {
+                strong,
+                weak,
+                ms: duration_ms,
+            }
+        }
         RumblePayload::Triggers {
             left,
             right,
             duration_ms,
-        } => PadCommand::TriggerRumble {
-            left,
-            right,
-            ms: duration_ms,
-        },
+        } => {
+            crate::install::log_line(&format!(
+                "pipe inbound rumble triggers left={left} right={right} ms={duration_ms}"
+            ));
+            PadCommand::TriggerRumble {
+                left,
+                right,
+                ms: duration_ms,
+            }
+        }
     };
     push_device_command(cmd);
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn apply_led(p: &crate::protocol::LedPayload) {
+    crate::install::log_line(&format!("pipe inbound led r={} g={} b={}", p.r, p.g, p.b));
+    push_device_command(PadCommand::Led {
+        r: p.r,
+        g: p.g,
+        b: p.b,
+    });
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -406,6 +457,28 @@ fn clear_desktop_mode() {
     LAUNCHER_OWNS_TEXT_INPUT.store(false, Ordering::Relaxed);
     GAME_ACTIVE.store(false, Ordering::Relaxed);
     LAUNCHER_FOREGROUND_NAV.store(false, Ordering::Relaxed);
+}
+
+/// Apply companion-local settings pushed by warmUP (protocol v4 `companion_settings` frame).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn apply_companion_settings(p: &CompanionSettingsPayload) {
+    if let Some(v) = p.sleep_on_game {
+        let _ =
+            crate::config::set_gamepad_setting("sleep_on_game", if v { "true" } else { "false" });
+    }
+    if let Some(v) = p.auto_stop_on_game {
+        let _ = crate::config::set_gamepad_setting(
+            "auto_stop_on_game",
+            if v { "true" } else { "false" },
+        );
+    }
+    if let Some(v) = p.prompt_userland_debug {
+        let _ = crate::config::set_prompt_userland_debug(v);
+    }
+    if let Some(v) = p.userland_poll_paused {
+        crate::gamepad_backend::set_userland_poll_paused(v);
+        let _ = crate::config::write_userland_poll_paused(v);
+    }
 }
 
 /// Latest connection snapshot, published by the gamepad loop and read by the server.
@@ -468,9 +541,9 @@ fn controller_type_for(label: &str) -> String {
     if l.contains("xbox") {
         "xbox".into()
     } else if l.contains("dualsense") || l.contains("ps5") {
-        "ps5".into()
+        "playstation".into()
     } else if l.contains("dualshock") || l.contains("ps4") {
-        "ps4".into()
+        "playstation".into()
     } else if l.contains("nintendo") || l.contains("switch") || l.contains("pro controller") {
         "switch".into()
     } else {
@@ -548,12 +621,14 @@ pub fn spawn() {}
 #[cfg(windows)]
 mod server {
     use super::{
-        apply_config, apply_mode, apply_rumble, clear_desktop_mode, current, current_battery,
-        drain_buttons, reset_button_stream, take_cursor_moved, take_touchpad,
+        apply_companion_settings, apply_config, apply_led, apply_mode, apply_rumble,
+        clear_desktop_mode, current, current_axis, current_battery, drain_buttons,
+        reset_button_stream, take_cursor_moved, take_touchpad, DESKTOP_CONNECTED,
     };
     use crate::protocol::{
-        BatteryPayload, ConnectionPayload, DownFrame, Hello, UpFrame, PROTOCOL_VERSION,
+        AxisPayload, BatteryPayload, ConnectionPayload, DownFrame, Hello, UpFrame, PROTOCOL_VERSION,
     };
+    use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
@@ -652,7 +727,9 @@ mod server {
         if handshake(pipe).is_ok() {
             // Drop edges queued before this client connected (stale to it).
             reset_button_stream();
+            DESKTOP_CONNECTED.store(true, Ordering::Relaxed);
             stream(pipe);
+            DESKTOP_CONNECTED.store(false, Ordering::Relaxed);
             clear_desktop_mode();
         }
         unsafe {
@@ -673,6 +750,9 @@ mod server {
                 if let Some(mode) = h.mode {
                     apply_mode(&mode);
                 }
+                if let Some(settings) = h.companion_settings {
+                    apply_companion_settings(&settings);
+                }
             }
             _ => return Err(io_err("hello rejected (missing or version mismatch)")),
         }
@@ -680,6 +760,7 @@ mod server {
             protocol_version: PROTOCOL_VERSION,
             config: None,
             mode: None,
+            companion_settings: None,
         });
         write_all(pipe, reply.to_ndjson_line().as_bytes())
     }
@@ -690,6 +771,7 @@ mod server {
     fn stream(pipe: HANDLE) {
         let mut last: Option<ConnectionPayload> = None;
         let mut last_battery: Option<BatteryPayload> = None;
+        let mut last_axis: Option<AxisPayload> = None;
         let mut last_conn_write = Instant::now()
             .checked_sub(KEEPALIVE)
             .unwrap_or_else(Instant::now);
@@ -723,6 +805,15 @@ mod server {
                     }
                 }
                 // Touchpad shares the cursor throttle (both are ≈100 ms visual hints).
+                let axis = current_axis();
+                if axis.is_some() && axis != last_axis {
+                    if let Some(a) = axis {
+                        if write_all(pipe, UpFrame::Axis(a).to_ndjson_line().as_bytes()).is_err() {
+                            return;
+                        }
+                        last_axis = Some(a);
+                    }
+                }
                 if let Some(tp) = take_touchpad() {
                     if write_all(pipe, UpFrame::Touchpad(tp).to_ndjson_line().as_bytes()).is_err() {
                         return;
@@ -759,6 +850,8 @@ mod server {
                 Ok(DownFrame::Config(p)) => apply_config(&p),
                 Ok(DownFrame::Mode(p)) => apply_mode(&p),
                 Ok(DownFrame::Rumble(p)) => apply_rumble(&p),
+                Ok(DownFrame::Led(p)) => apply_led(&p),
+                Ok(DownFrame::CompanionSettings(p)) => apply_companion_settings(&p),
                 _ => {}
             }
         }

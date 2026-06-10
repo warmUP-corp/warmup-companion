@@ -182,6 +182,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 MENU_TOGGLE_POLL => {
                     let paused = !crate::gamepad_backend::userland_poll_paused();
                     crate::gamepad_backend::set_userland_poll_paused(paused);
+                    let _ = crate::config::write_userland_poll_paused(paused);
                 }
                 MENU_OPEN_LOG => open_log(),
                 MENU_DIAGNOSTICS => open_diagnostics(),

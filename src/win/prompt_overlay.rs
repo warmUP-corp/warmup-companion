@@ -32,8 +32,8 @@ const WINDOW_CLASS: windows::core::PCWSTR = w!("WarmupPromptOverlayWindow");
 
 const PANEL_W: i32 = 390;
 const PANEL_H: i32 = 58;
-const CONNECTED_PANEL_W: i32 = 430;
-const CONNECTED_PANEL_H: i32 = 188;
+const CONNECTED_PANEL_W: i32 = 300;
+const CONNECTED_PANEL_H: i32 = 210;
 /// Gap between the pill's bottom edge and the bottom of the primary monitor.
 const MARGIN_BOTTOM: i32 = 72;
 const REPAINT_TIMER_ID: usize = 12;
@@ -137,6 +137,7 @@ pub fn tick(vk_open: bool) {
     }
     c.last_tick = Instant::now();
 
+    let userland_debug = crate::config::prompt_userland_debug();
     let on_winlogon = super::surface::input().is_some_and(|s| s.is_winlogon());
     let connected = crate::debug_state::snapshot().connected;
     if connected && !c.last_connected {
@@ -148,7 +149,9 @@ pub fn tick(vk_open: bool) {
     let connected_intro_active = c
         .connected_visual_until
         .is_some_and(|until| Instant::now() < until);
-    let visual = if on_winlogon {
+    let visual = if userland_debug {
+        Some(PromptVisual::Connected)
+    } else if on_winlogon {
         if vk_open {
             None
         } else if connected_intro_active {
@@ -184,10 +187,15 @@ pub fn tick(vk_open: bool) {
         let thread = c.thread.as_ref().expect("checked is_some");
         if let Some(visual) = visual {
             let _ = thread.show(visual.as_lparam());
-            service_log(match visual {
-                PromptVisual::Connected => "prompt ui: shown (Winlogon, pad connected animation)",
-                PromptVisual::Ready => "prompt ui: shown (Winlogon, VK closed, pad connected)",
-                PromptVisual::NoPad => "prompt ui: shown (Winlogon, no pad connected)",
+            service_log(match (visual, userland_debug) {
+                (PromptVisual::Connected, true) => {
+                    "prompt ui: shown (userland debug, connected animation)"
+                }
+                (PromptVisual::Connected, false) => {
+                    "prompt ui: shown (Winlogon, pad connected animation)"
+                }
+                (PromptVisual::Ready, _) => "prompt ui: shown (Winlogon, VK closed, pad connected)",
+                (PromptVisual::NoPad, _) => "prompt ui: shown (Winlogon, no pad connected)",
             });
         } else {
             let _ = thread.hide();
@@ -320,6 +328,27 @@ unsafe extern "system" fn prompt_wndproc(
     }
 }
 
+/// User-facing title for the connection card. Prefers the real device name;
+/// backend slot labels ("XInput slot 0", "HID slot 0") aren't presentable, so
+/// they collapse to a controller family instead. Keep the keyword families in
+/// sync with `ControllerArt::from_label` so the title and artwork agree.
+fn connected_card_title(label: &str) -> String {
+    let l = label.trim();
+    let low = l.to_ascii_lowercase();
+    if l.is_empty() || low == "none" {
+        "Controller".to_string()
+    } else if low.contains("slot") {
+        // Winlogon reads PlayStation pads via direct HID and XInput pads via XUSB.
+        if low.contains("hid") {
+            "PlayStation Controller".to_string()
+        } else {
+            "Xbox Controller".to_string()
+        }
+    } else {
+        l.to_string()
+    }
+}
+
 /// Render the pill through the shared D3D11/D2D/DComp renderer. Colors follow the
 /// keyboard theme so the prompt matches the VK card; the L3 chip keeps its own.
 fn render_prompt(hwnd: HWND) {
@@ -328,6 +357,7 @@ fn render_prompt(hwnd: HWND) {
     let border = theme.border.or(theme.accent).unwrap_or(DEFAULT_BORDER);
     let text = theme.text.unwrap_or(DEFAULT_TEXT);
     let visual = VISUAL_STATE.with(|state| state.get());
+    let snapshot = crate::debug_state::snapshot();
     RENDERER.with(|c| {
         if let Ok(mut slot) = c.try_borrow_mut() {
             if let Some(r) = slot.as_mut() {
@@ -337,15 +367,41 @@ fn render_prompt(hwnd: HWND) {
                     }
                     let result = match visual {
                         PromptVisual::Connected => {
-                            r.draw_connected_prompt(bg, border, text, "Controller", "Connected")
+                            // The live device name (e.g. "DualSense Wireless Controller")
+                            // drives both the card title and the controller artwork. Fall
+                            // back to a generic pad name only when the backend hasn't
+                            // published one yet (no service-mode publish, mid-connect, …).
+                            let name = snapshot.name.trim();
+                            let controller_label =
+                                if name.is_empty() || name.eq_ignore_ascii_case("none") {
+                                    "Xbox Wireless Controller"
+                                } else {
+                                    name
+                                };
+                            let title = connected_card_title(controller_label);
+                            r.draw_connected_prompt(bg, border, text, &title, controller_label)
                         }
-                        PromptVisual::Ready => {
-                            r.draw_prompt(bg, border, text, PROMPT_PREFIX, PROMPT_SUFFIX, true)
-                        }
+                        PromptVisual::Ready => r.draw_prompt(
+                            bg,
+                            border,
+                            text,
+                            PROMPT_PREFIX,
+                            PROMPT_SUFFIX,
+                            true,
+                            snapshot.name.trim(),
+                        ),
                         PromptVisual::NoPad => {
                             let muted_text = crate::win::vk_renderer::mix_color(text, bg, 0.58);
                             let muted_border = crate::win::vk_renderer::mix_color(border, bg, 0.45);
-                            r.draw_prompt(bg, muted_border, muted_text, NO_PAD_PROMPT, "", false)
+                            r.draw_prompt(
+                                bg,
+                                muted_border,
+                                muted_text,
+                                NO_PAD_PROMPT,
+                                "",
+                                false,
+                                "",
+                            )
                         }
                     };
                     if let Err(e) = result {

@@ -241,6 +241,11 @@ impl GamepadPoll {
             service_log("gamepad backend: HID + XInput (Winlogon)");
             Backend::XInput(XInputBackend::new())
         } else {
+            if let Err(e) = crate::win::attach_input() {
+                service_log(&format!(
+                    "gamepad backend: attach input(Default) before SDL3 failed: {e}"
+                ));
+            }
             // Service userland: SDL on its own thread (off the loop/SendInput thread).
             match SdlThreadBackend::open() {
                 Ok(b) => {
@@ -288,6 +293,16 @@ impl GamepadPoll {
         }
         let using_xinput = matches!(self.backend, Backend::XInput(_));
         if on_winlogon == using_xinput {
+            if !on_winlogon {
+                let current = crate::win::current_desktop_name().unwrap_or_else(|| "?".into());
+                if !current.eq_ignore_ascii_case("default") {
+                    if let Err(e) = crate::win::attach_input() {
+                        service_log(&format!("loop thread attach input(Default) failed: {e}"));
+                    } else {
+                        service_log("loop thread reattached to Default");
+                    }
+                }
+            }
             return;
         }
         self.reset_vk_controls();
@@ -433,11 +448,13 @@ impl GamepadPoll {
         } = self.backend.poll_frame()?;
         self.backend.publish_device_features(&touchpad);
         let (lx, ly, rx, ry) = axes;
+        crate::pipe_server::publish_axis(lx, ly, rx, ry);
 
         #[cfg(windows)]
         if crate::config::service_mode() {
+            let name = self.backend.controller_label();
             let input = self.backend.live_input_summary();
-            crate::debug_state::set_gamepad(self.backend.is_connected(), input);
+            crate::debug_state::set_gamepad(self.backend.is_connected(), name, input);
         }
 
         #[cfg(windows)]
@@ -893,6 +910,17 @@ where
 
         // Publish the current controller connection state to the pipe server (#347).
         crate::pipe_server::publish_from_label(&poll.controller_label());
+
+        #[cfg(windows)]
+        if !crate::pipe_server::desktop_connected()
+            && crate::config::gamepad_settings().auto_stop_on_game
+            && crate::gamepad_backend::standalone_game_active_now()
+        {
+            if service_mode {
+                service_log("gamepad loop auto-stopping: standalone game launched");
+            }
+            break;
+        }
 
         match poll.poll_frame(&mut cursor, dt, vk_open()) {
             Ok(actions) => {

@@ -588,15 +588,16 @@ impl GamepadInput {
         std::mem::take(&mut self.pending_button_changes)
     }
 
-    /// Fires a rumble effect on the active gamepad. Silently no-ops if unsupported or no pad.
-    pub fn rumble(&mut self, strong: f32, weak: f32, duration_ms: u32) {
+    /// Fires a rumble effect on the active gamepad. Returns false if unsupported or no pad.
+    pub fn rumble(&mut self, strong: f32, weak: f32, duration_ms: u32) -> bool {
         let Some(ref mut gp) = self.active_gamepad else {
-            return;
+            return false;
         };
         let strong_u16 = (strong.clamp(0.0, 1.0) * u16::MAX as f32) as u16;
         let weak_u16 = (weak.clamp(0.0, 1.0) * u16::MAX as f32) as u16;
         // Cap duration: passing u32::MAX overflows SDL3 internally and ends immediately.
-        let _ = gp.set_rumble(strong_u16, weak_u16, duration_ms.min(30_000));
+        gp.set_rumble(strong_u16, weak_u16, duration_ms.min(30_000))
+            .is_ok()
     }
 
     /// Clears main and trigger rumble on the active gamepad.
@@ -610,14 +611,14 @@ impl GamepadInput {
 
     /// Fires a rumble effect on the trigger (adaptive) motors.
     /// Only supported on controllers with per-trigger haptics (e.g. DualSense, Xbox Series).
-    pub fn trigger_rumble(&mut self, left: f32, right: f32, duration_ms: u32) {
+    pub fn trigger_rumble(&mut self, left: f32, right: f32, duration_ms: u32) -> bool {
         let Some(ref gp) = self.active_gamepad else {
-            return;
+            return false;
         };
-        let Ok(id) = gp.id() else { return };
+        let Ok(id) = gp.id() else { return false };
         let raw = unsafe { SDL_GetGamepadFromID(id) };
         if raw.is_null() {
-            return;
+            return false;
         }
         // SDL3: SDL_RumbleGamepadTriggers(gamepad, left_rumble_u16, right_rumble_u16, duration_ms)
         unsafe extern "C" {
@@ -630,9 +631,7 @@ impl GamepadInput {
         }
         let left_u16 = (left.clamp(0.0, 1.0) * u16::MAX as f32) as u16;
         let right_u16 = (right.clamp(0.0, 1.0) * u16::MAX as f32) as u16;
-        unsafe {
-            SDL_RumbleGamepadTriggers(raw, left_u16, right_u16, duration_ms.min(30_000));
-        }
+        unsafe { SDL_RumbleGamepadTriggers(raw, left_u16, right_u16, duration_ms.min(30_000)) }
     }
 
     /// Enables the gyroscope sensor on the active gamepad.

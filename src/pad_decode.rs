@@ -180,7 +180,10 @@ mod tests {
 
     #[test]
     fn button_edges_report_press_then_release() {
-        assert_eq!(pairs(button_edges(0, XINPUT_GAMEPAD_A.0)), vec![(Button::A, true)]);
+        assert_eq!(
+            pairs(button_edges(0, XINPUT_GAMEPAD_A.0)),
+            vec![(Button::A, true)]
+        );
         assert_eq!(
             pairs(button_edges(XINPUT_GAMEPAD_A.0, 0)),
             vec![(Button::A, false)]

@@ -67,6 +67,8 @@ When warmUP is connected, it pushes `gameActive` / `launcherForegroundNav` over
 IPC and the companion sleeps the controller loop while the game owns the pad.
 Standalone companion builds also detect a foreground fullscreen game-like window
 locally using the same warmUP-style fullscreen/window denylist heuristic.
+While warmUP is connected over IPC, warmUP owns the mode state and standalone
+detection is ignored.
 
 Default: enabled.
 
@@ -74,12 +76,15 @@ Default: enabled.
 warmup-companion.exe settings sleep-on-game get
 warmup-companion.exe settings sleep-on-game off
 warmup-companion.exe settings sleep-on-game on
+warmup-companion.exe settings auto-stop-on-game get
+warmup-companion.exe settings auto-stop-on-game on
 ```
 
 Equivalent config key in `%LOCALAPPDATA%\WarmupVk\settings.ini`:
 
 ```ini
 sleep_on_game=true
+auto_stop_on_game=false
 ```
 
 ## Sentry

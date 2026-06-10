@@ -16,8 +16,8 @@ use windows::Win32::Graphics::Direct2D::{
     ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
     D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
     D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_ROUNDED_RECT,
-    D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_11_0,
@@ -34,7 +34,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD,
     DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
     DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
-    DWRITE_TEXT_METRICS,
+    DWRITE_TEXT_METRICS, DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
@@ -108,6 +108,7 @@ unsafe fn draw_candidate_strip(
     chip_format: &IDWriteTextFormat,
     hint_format: &IDWriteTextFormat,
     pal: &VkPalette,
+    controller_icons: ControllerIconFamily,
 ) -> Result<(), String> {
     let mut widths = [0.0f32; 3];
     let mut count = 0usize;
@@ -132,6 +133,7 @@ unsafe fn draw_candidate_strip(
     draw_shortcut_pill(
         ctx,
         "LB",
+        controller_icons.hint_icon("LB"),
         x - HINT_PILL_W - HINT_GAP,
         &hint_fill,
         &outline,
@@ -141,6 +143,7 @@ unsafe fn draw_candidate_strip(
     draw_shortcut_pill(
         ctx,
         "RB",
+        controller_icons.hint_icon("RB"),
         x + total_w + HINT_GAP,
         &hint_fill,
         &outline,
@@ -198,6 +201,7 @@ unsafe fn draw_candidate_strip(
             draw_shortcut_pill(
                 ctx,
                 "A",
+                controller_icons.hint_icon("A"),
                 rect.rect.right - HINT_PILL_W - HINT_INSET,
                 &hint_fill,
                 &outline,
@@ -213,6 +217,7 @@ unsafe fn draw_candidate_strip(
 unsafe fn draw_shortcut_pill(
     ctx: &ID2D1DeviceContext,
     label: &str,
+    icon: Option<VkIcon>,
     x: f32,
     fill: &ID2D1SolidColorBrush,
     outline: &ID2D1SolidColorBrush,
@@ -234,14 +239,79 @@ unsafe fn draw_shortcut_pill(
     };
     ctx.FillRoundedRectangle(&rect, fill);
     ctx.DrawRoundedRectangle(&rect, outline, 1.0, None);
-    let wide: Vec<u16> = label.encode_utf16().collect();
-    ctx.DrawText(
-        &wide,
-        format,
-        &rect.rect,
-        text,
-        D2D1_DRAW_TEXT_OPTIONS_NONE,
-        DWRITE_MEASURING_MODE_NATURAL,
+    if let Some(icon) = icon {
+        draw_uncached_svg_icon(ctx, icon, rect.rect)?;
+    } else {
+        let wide: Vec<u16> = label.encode_utf16().collect();
+        ctx.DrawText(
+            &wide,
+            format,
+            &rect.rect,
+            text,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
+    }
+    Ok(())
+}
+
+unsafe fn draw_uncached_svg_icon(
+    ctx: &ID2D1DeviceContext,
+    icon: VkIcon,
+    rect: D2D_RECT_F,
+) -> Result<(), String> {
+    let h = rect.bottom - rect.top;
+    let draw_px = (h * 0.94).round().clamp(24.0, 64.0);
+    let raster_px = (draw_px * 3.0).round().clamp(54.0, 192.0) as u32;
+    let opt = resvg::usvg::Options::default();
+    let tree = resvg::usvg::Tree::from_data(icon.svg().as_bytes(), &opt)
+        .map_err(|e| format!("parse shortcut icon {icon:?}: {e}"))?;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(raster_px, raster_px)
+        .ok_or_else(|| format!("alloc shortcut icon pixmap {raster_px}x{raster_px}"))?;
+    let scale = raster_px as f32 / 32.0;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    let mut bgra = pixmap.data().to_vec();
+    for px in bgra.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    let props = D2D1_BITMAP_PROPERTIES1 {
+        pixelFormat: D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+        },
+        dpiX: 96.0,
+        dpiY: 96.0,
+        bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+        colorContext: ManuallyDrop::new(None),
+    };
+    let bitmap = ctx
+        .CreateBitmap(
+            D2D_SIZE_U {
+                width: raster_px,
+                height: raster_px,
+            },
+            Some(bgra.as_ptr() as *const core::ffi::c_void),
+            raster_px * 4,
+            &props,
+        )
+        .map_err(|e| format!("CreateBitmap shortcut icon {icon:?}: {e}"))?;
+    let dest = D2D_RECT_F {
+        left: (rect.left + rect.right - draw_px) * 0.5,
+        top: (rect.top + rect.bottom - draw_px) * 0.5,
+        right: (rect.left + rect.right + draw_px) * 0.5,
+        bottom: (rect.top + rect.bottom + draw_px) * 0.5,
+    };
+    ctx.DrawBitmap(
+        &bitmap,
+        Some(&dest),
+        1.0,
+        D2D1_INTERPOLATION_MODE_LINEAR,
+        None,
+        None,
     );
     Ok(())
 }
@@ -272,6 +342,7 @@ pub struct VkRenderer {
     chip_format: IDWriteTextFormat,
     sublabel_format: IDWriteTextFormat,
     icon_cache: HashMap<IconCacheKey, ID2D1Bitmap1>,
+    controller_art_cache: HashMap<ControllerArtCacheKey, (ID2D1Bitmap1, u32, u32)>,
     prompt_started: Instant,
     _d3d: ID3D11Device,
     _d2d_device: ID2D1Device,
@@ -305,11 +376,13 @@ const CHIP_LABEL_INSET_X: f32 = 8.0;
 const CHIP_LABEL_INSET_Y: f32 = 4.0;
 /// Chip label size in DIPs — independent of key label scaling.
 const CHIP_FONT_PX: f32 = 14.0;
-const HINT_PILL_W: f32 = 34.0;
-const HINT_PILL_H: f32 = 22.0;
-const HINT_TOP: f32 = 24.0;
+const HINT_PILL_W: f32 = 40.0;
+const HINT_PILL_H: f32 = 32.0;
+const HINT_TOP: f32 = CHIP_TOP + (CHIP_H - HINT_PILL_H) * 0.5;
 const HINT_GAP: f32 = 12.0;
-const HINT_INSET: f32 = 6.0;
+const HINT_INSET: f32 = 8.0;
+const KEY_HINT_BADGE_MAX: f32 = 38.0;
+const KEY_HINT_BADGE_INSET: f32 = 7.0;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum VkIcon {
@@ -330,9 +403,26 @@ enum VkIcon {
     ChevronDown,
     /// Generic controller image for the connection card.
     Gamepad,
-    /// PlayStation L3 (left-stick click) chip — keeps its native colors (no
-    /// `currentColor`), extracted from the controller-icon atlas.
-    L3,
+    /// Left-stick click chips keep their native colors (no `currentColor`),
+    /// extracted from the controller-icon atlas.
+    L3Ps5,
+    L3Xbox,
+    Ps5Cross,
+    Ps5Circle,
+    Ps5Square,
+    Ps5Triangle,
+    Ps5L1,
+    Ps5R1,
+    Ps5L2,
+    Ps5R2,
+    XboxA,
+    XboxB,
+    XboxX,
+    XboxY,
+    XboxLb,
+    XboxRb,
+    XboxLt,
+    XboxRt,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -340,6 +430,150 @@ struct IconCacheKey {
     icon: VkIcon,
     px: u32,
     color: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum ControllerArt {
+    DualSense,
+    XboxOne,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ControllerArtCacheKey {
+    art: ControllerArt,
+}
+
+impl ControllerArt {
+    fn from_label(label: &str) -> Option<Self> {
+        let l = label.to_ascii_lowercase();
+        if l.contains("dualsense")
+            || l.contains("dualshock")
+            || l.contains("playstation")
+            || l.contains("ps5")
+            || l.contains("ps4")
+            // Winlogon reads PlayStation pads via the direct-HID path ("HID slot N").
+            || l.contains("hid slot")
+        {
+            Some(Self::DualSense)
+        } else if l.contains("xbox") || l.contains("xinput") {
+            Some(Self::XboxOne)
+        } else {
+            None
+        }
+    }
+
+    fn png(self) -> &'static [u8] {
+        match self {
+            Self::DualSense => {
+                include_bytes!("../../assets/controller-models/dualsense-controller.png")
+            }
+            Self::XboxOne => {
+                include_bytes!("../../assets/controller-models/xbox-one-controller.png")
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum ControllerIconFamily {
+    Ps5,
+    Xbox,
+}
+
+impl ControllerIconFamily {
+    fn from_label(label: &str) -> Self {
+        let l = label.to_ascii_lowercase();
+        if l.contains("dualsense")
+            || l.contains("dualshock")
+            || l.contains("playstation")
+            || l.contains("ps5")
+            || l.contains("ps4")
+            || l.contains("hid slot")
+        {
+            Self::Ps5
+        } else {
+            Self::Xbox
+        }
+    }
+
+    fn l3_icon(self) -> VkIcon {
+        match self {
+            Self::Ps5 => VkIcon::L3Ps5,
+            Self::Xbox => VkIcon::L3Xbox,
+        }
+    }
+
+    fn hint_icon(self, hint: &str) -> Option<VkIcon> {
+        match (self, hint) {
+            (Self::Ps5, "A") => Some(VkIcon::Ps5Cross),
+            (Self::Ps5, "B") => Some(VkIcon::Ps5Circle),
+            (Self::Ps5, "X") => Some(VkIcon::Ps5Square),
+            (Self::Ps5, "Y") => Some(VkIcon::Ps5Triangle),
+            (Self::Ps5, "LB") => Some(VkIcon::Ps5L1),
+            (Self::Ps5, "RB") => Some(VkIcon::Ps5R1),
+            (Self::Ps5, "LT") => Some(VkIcon::Ps5L2),
+            (Self::Ps5, "RT") => Some(VkIcon::Ps5R2),
+            (Self::Ps5, "L3") => Some(VkIcon::L3Ps5),
+            (Self::Xbox, "A") => Some(VkIcon::XboxA),
+            (Self::Xbox, "B") => Some(VkIcon::XboxB),
+            (Self::Xbox, "X") => Some(VkIcon::XboxX),
+            (Self::Xbox, "Y") => Some(VkIcon::XboxY),
+            (Self::Xbox, "LB") => Some(VkIcon::XboxLb),
+            (Self::Xbox, "RB") => Some(VkIcon::XboxRb),
+            (Self::Xbox, "LT") => Some(VkIcon::XboxLt),
+            (Self::Xbox, "RT") => Some(VkIcon::XboxRt),
+            (Self::Xbox, "L3") => Some(VkIcon::L3Xbox),
+            _ => None,
+        }
+    }
+}
+
+/// Longest edge (px) the cached controller bitmap is prefiltered down to. The
+/// card draws the art at roughly 110px; this keeps a few times that for HiDPI
+/// headroom while still being far enough below the ~1254px source that the GPU's
+/// final resample has no high frequencies left to alias.
+const CONTROLLER_ART_MAX_EDGE: u32 = 384;
+
+/// Area-averaging (box filter) downscale of a premultiplied-BGRA buffer. Returns
+/// the source unchanged when it already fits within `max_edge`. Averaging in
+/// premultiplied space is correct for images with transparency, so edges stay
+/// clean. Runs once per controller art (results are cached).
+fn downscale_bgra_premul(src: &[u8], sw: u32, sh: u32, max_edge: u32) -> (Vec<u8>, u32, u32) {
+    let long_edge = sw.max(sh);
+    if long_edge <= max_edge || sw == 0 || sh == 0 {
+        return (src.to_vec(), sw, sh);
+    }
+    let scale = max_edge as f32 / long_edge as f32;
+    let tw = ((sw as f32 * scale).round() as u32).max(1);
+    let th = ((sh as f32 * scale).round() as u32).max(1);
+    let mut out = vec![0u8; (tw as usize) * (th as usize) * 4];
+    for ty in 0..th {
+        let y0 = (ty * sh / th) as usize;
+        let y1 = (((ty + 1) * sh / th).max(ty * sh / th + 1).min(sh)) as usize;
+        for tx in 0..tw {
+            let x0 = (tx * sw / tw) as usize;
+            let x1 = (((tx + 1) * sw / tw).max(tx * sw / tw + 1).min(sw)) as usize;
+            let (mut b, mut g, mut r, mut a, mut n) = (0u32, 0u32, 0u32, 0u32, 0u32);
+            for sy in y0..y1 {
+                let row = sy * sw as usize * 4;
+                for sx in x0..x1 {
+                    let i = row + sx * 4;
+                    b += src[i] as u32;
+                    g += src[i + 1] as u32;
+                    r += src[i + 2] as u32;
+                    a += src[i + 3] as u32;
+                    n += 1;
+                }
+            }
+            let n = n.max(1);
+            let o = (ty as usize * tw as usize + tx as usize) * 4;
+            out[o] = (b / n) as u8;
+            out[o + 1] = (g / n) as u8;
+            out[o + 2] = (r / n) as u8;
+            out[o + 3] = (a / n) as u8;
+        }
+    }
+    (out, tw, th)
 }
 
 impl VkIcon {
@@ -390,10 +624,53 @@ impl VkIcon {
             VkIcon::Gamepad => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><line x1="6" x2="10" y1="12" y2="12"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="15" x2="15.01" y1="13" y2="13"/><line x1="18" x2="18.01" y1="11" y2="11"/><rect width="20" height="12" x="2" y="6" rx="4"/><path d="M6 18v1a2 2 0 0 0 4 0v-1"/><path d="M14 18v1a2 2 0 0 0 4 0v-1"/></svg>"#
             }
-            // Native-colored chip; has no `currentColor`, so the palette swap in
-            // `draw_svg_icon` is a no-op and it keeps its PlayStation look.
-            VkIcon::L3 => include_str!("../../controller-icons/l3.svg"),
+            // Native-colored chips have no `currentColor`, so the palette swap in
+            // `draw_svg_icon` is a no-op and they keep their controller look.
+            VkIcon::L3Ps5 => include_str!("../../controller-icons/p5_l3_click.svg"),
+            VkIcon::L3Xbox => include_str!("../../controller-icons/x_l3_click.svg"),
+            VkIcon::Ps5Cross => include_str!("../../controller-icons/p5_face_cross_colored.svg"),
+            VkIcon::Ps5Circle => include_str!("../../controller-icons/p5_face_circle_colored.svg"),
+            VkIcon::Ps5Square => include_str!("../../controller-icons/p5_face_square_colored.svg"),
+            VkIcon::Ps5Triangle => {
+                include_str!("../../controller-icons/p5_face_triangle_colored.svg")
+            }
+            VkIcon::Ps5L1 => include_str!("../../controller-icons/p5_shoulder_l1.svg"),
+            VkIcon::Ps5R1 => include_str!("../../controller-icons/p5_shoulder_r1.svg"),
+            VkIcon::Ps5L2 => include_str!("../../controller-icons/p5_trigger_l2.svg"),
+            VkIcon::Ps5R2 => include_str!("../../controller-icons/p5_trigger_r2.svg"),
+            VkIcon::XboxA => include_str!("../../controller-icons/x_face_a_colored.svg"),
+            VkIcon::XboxB => include_str!("../../controller-icons/x_face_b_colored.svg"),
+            VkIcon::XboxX => include_str!("../../controller-icons/x_face_x_colored.svg"),
+            VkIcon::XboxY => include_str!("../../controller-icons/x_face_y_colored.svg"),
+            VkIcon::XboxLb => include_str!("../../controller-icons/x_shoulder_lb.svg"),
+            VkIcon::XboxRb => include_str!("../../controller-icons/x_shoulder_rb.svg"),
+            VkIcon::XboxLt => include_str!("../../controller-icons/x_trigger_lt.svg"),
+            VkIcon::XboxRt => include_str!("../../controller-icons/x_trigger_rt.svg"),
         }
+    }
+
+    fn is_controller_tip(self) -> bool {
+        matches!(
+            self,
+            VkIcon::L3Ps5
+                | VkIcon::L3Xbox
+                | VkIcon::Ps5Cross
+                | VkIcon::Ps5Circle
+                | VkIcon::Ps5Square
+                | VkIcon::Ps5Triangle
+                | VkIcon::Ps5L1
+                | VkIcon::Ps5R1
+                | VkIcon::Ps5L2
+                | VkIcon::Ps5R2
+                | VkIcon::XboxA
+                | VkIcon::XboxB
+                | VkIcon::XboxX
+                | VkIcon::XboxY
+                | VkIcon::XboxLb
+                | VkIcon::XboxRb
+                | VkIcon::XboxLt
+                | VkIcon::XboxRt
+        )
     }
 }
 
@@ -519,6 +796,7 @@ pub struct VkFrame<'a> {
     pub candidates: Option<&'a crate::vk_predict::StripState>,
     pub floating: bool,
     pub modifiers: VkModifiers,
+    pub controller_label: &'a str,
 }
 
 /// Glyph for the Shift key (the Shift-action key reflects `shift`).
@@ -700,6 +978,7 @@ impl VkRenderer {
             chip_format,
             sublabel_format,
             icon_cache: HashMap::new(),
+            controller_art_cache: HashMap::new(),
             prompt_started: Instant::now(),
             _d3d: d3d,
             _d2d_device: d2d_device,
@@ -741,11 +1020,11 @@ impl VkRenderer {
     ) -> Result<(), String> {
         let h = rect.bottom - rect.top;
         let draw_px = match icon {
-            VkIcon::L3 => (h * 0.88).round().clamp(24.0, 64.0),
+            icon if icon.is_controller_tip() => (h * 0.98).round().clamp(24.0, 64.0),
             _ => (h * 0.5).round().clamp(16.0, 96.0),
         };
         let raster_px = match icon {
-            VkIcon::L3 => (draw_px * 3.0).round().clamp(72.0, 192.0),
+            icon if icon.is_controller_tip() => (draw_px * 3.0).round().clamp(54.0, 192.0),
             _ => draw_px,
         } as u32;
         let key = IconCacheKey {
@@ -760,7 +1039,8 @@ impl VkRenderer {
                 .map_err(|e| format!("parse svg icon {icon:?}: {e}"))?;
             let mut pixmap = resvg::tiny_skia::Pixmap::new(raster_px, raster_px)
                 .ok_or_else(|| format!("alloc svg icon pixmap {raster_px}x{raster_px}"))?;
-            let scale = raster_px as f32 / 24.0;
+            let source_px = if icon.is_controller_tip() { 32.0 } else { 24.0 };
+            let scale = raster_px as f32 / source_px;
             resvg::render(
                 &tree,
                 resvg::tiny_skia::Transform::from_scale(scale, scale),
@@ -818,6 +1098,111 @@ impl VkRenderer {
         Ok(())
     }
 
+    unsafe fn draw_controller_art(
+        &mut self,
+        art: ControllerArt,
+        rect: D2D_RECT_F,
+    ) -> Result<(), String> {
+        let key = ControllerArtCacheKey { art };
+        if !self.controller_art_cache.contains_key(&key) {
+            let decoder = png::Decoder::new(std::io::Cursor::new(art.png()));
+            let mut reader = decoder
+                .read_info()
+                .map_err(|e| format!("decode controller art {art:?}: {e}"))?;
+            let out_size = reader
+                .output_buffer_size()
+                .ok_or_else(|| format!("controller art {art:?}: unknown decoded size"))?;
+            let mut decoded = vec![0; out_size];
+            let info = reader
+                .next_frame(&mut decoded)
+                .map_err(|e| format!("read controller art {art:?}: {e}"))?;
+            let bytes = &decoded[..info.buffer_size()];
+            let mut bgra = Vec::with_capacity((info.width * info.height * 4) as usize);
+            match info.color_type {
+                png::ColorType::Rgba => {
+                    for px in bytes.chunks_exact(4) {
+                        let a = px[3] as u16;
+                        let premul = |c: u8| ((c as u16 * a + 127) / 255) as u8;
+                        bgra.extend_from_slice(&[
+                            premul(px[2]),
+                            premul(px[1]),
+                            premul(px[0]),
+                            px[3],
+                        ]);
+                    }
+                }
+                png::ColorType::Rgb => {
+                    for px in bytes.chunks_exact(3) {
+                        bgra.extend_from_slice(&[px[2], px[1], px[0], 255]);
+                    }
+                }
+                other => {
+                    return Err(format!(
+                        "controller art {art:?}: unsupported PNG color {other:?}"
+                    ))
+                }
+            }
+
+            // Prefilter to a modest size so the final GPU resample down to the
+            // ~110px card slot has no aliasing-prone high frequencies left.
+            let (bgra, art_w, art_h) =
+                downscale_bgra_premul(&bgra, info.width, info.height, CONTROLLER_ART_MAX_EDGE);
+
+            let props = D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+                colorContext: ManuallyDrop::new(None),
+            };
+            let bitmap = self
+                .d2d_context
+                .CreateBitmap(
+                    D2D_SIZE_U {
+                        width: art_w,
+                        height: art_h,
+                    },
+                    Some(bgra.as_ptr() as *const core::ffi::c_void),
+                    art_w * 4,
+                    &props,
+                )
+                .map_err(|e| format!("CreateBitmap controller art {art:?}: {e}"))?;
+            self.controller_art_cache
+                .insert(key, (bitmap, art_w, art_h));
+        }
+
+        let (bitmap, width, height) = self
+            .controller_art_cache
+            .get(&key)
+            .ok_or_else(|| format!("missing controller art cache {art:?}"))?;
+        let source_aspect = *width as f32 / *height as f32;
+        let fit_w = rect.right - rect.left;
+        let fit_h = rect.bottom - rect.top;
+        let (draw_w, draw_h) = if fit_w / fit_h > source_aspect {
+            (fit_h * source_aspect, fit_h)
+        } else {
+            (fit_w, fit_w / source_aspect)
+        };
+        let dest = D2D_RECT_F {
+            left: (rect.left + rect.right - draw_w) * 0.5,
+            top: (rect.top + rect.bottom - draw_h) * 0.5,
+            right: (rect.left + rect.right + draw_w) * 0.5,
+            bottom: (rect.top + rect.bottom + draw_h) * 0.5,
+        };
+        self.d2d_context.DrawBitmap(
+            bitmap,
+            Some(&dest),
+            1.0,
+            D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+            None,
+            None,
+        );
+        Ok(())
+    }
+
     pub unsafe fn draw(&mut self, frame: &VkFrame) -> Result<(), String> {
         let VkFrame {
             pal,
@@ -830,7 +1215,9 @@ impl VkRenderer {
             candidates,
             floating,
             modifiers,
+            controller_label,
         } = *frame;
+        let controller_icons = ControllerIconFamily::from_label(controller_label);
         let cw = self.width as f32;
         let ch = self.height as f32;
 
@@ -891,6 +1278,7 @@ impl VkRenderer {
                 &self.chip_format,
                 &self.hint_format,
                 pal,
+                controller_icons,
             )?;
         }
 
@@ -1006,29 +1394,35 @@ impl VkRenderer {
                 }
             }
 
-            // Per-key controller-button badge in the top-left corner.
+            // Per-key controller-button badge in the top-left corner. Keep this
+            // footprint fixed so controller glyphs do not collide with key glyphs.
             if let Some(hint) = key_hint(key) {
-                let kh = kr.bottom - kr.top;
+                let key_h = kr.bottom - kr.top;
+                let badge_size = (key_h * 0.48).clamp(30.0, KEY_HINT_BADGE_MAX);
                 let badge = D2D_RECT_F {
-                    left: kr.left + 2.0,
-                    top: kr.top + 2.0,
-                    right: kr.right - 2.0,
-                    bottom: kr.top + kh * 0.5,
+                    left: kr.left + KEY_HINT_BADGE_INSET,
+                    top: kr.top + KEY_HINT_BADGE_INSET,
+                    right: kr.left + KEY_HINT_BADGE_INSET + badge_size,
+                    bottom: kr.top + KEY_HINT_BADGE_INSET + badge_size,
                 };
-                let badge_brush = if selected {
-                    &sel_text_brush
+                if let Some(icon) = controller_icons.hint_icon(hint) {
+                    self.draw_svg_icon(icon, badge, pal.text)?;
                 } else {
-                    &accent_brush
-                };
-                let w: Vec<u16> = hint.encode_utf16().collect();
-                self.d2d_context.DrawText(
-                    &w,
-                    &self.hint_format,
-                    &badge,
-                    badge_brush,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    DWRITE_MEASURING_MODE_NATURAL,
-                );
+                    let badge_brush = if selected {
+                        &sel_text_brush
+                    } else {
+                        &accent_brush
+                    };
+                    let w: Vec<u16> = hint.encode_utf16().collect();
+                    self.d2d_context.DrawText(
+                        &w,
+                        &self.hint_format,
+                        &badge,
+                        badge_brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
             }
         }
 
@@ -1143,7 +1537,7 @@ impl VkRenderer {
         border: u32,
         text_color: u32,
         title: &str,
-        status: &str,
+        controller_label: &str,
     ) -> Result<(), String> {
         let cw = self.width as f32;
         let ch = self.height as f32;
@@ -1184,10 +1578,17 @@ impl VkRenderer {
         };
         self.d2d_context.SetTransform(&transform);
 
+        // Leave a transparent band at the top so the controller name renders
+        // *outside* (above) the card. The card itself is a narrow pill that only
+        // hugs the controller art; it is centred in the (wider) window so the name
+        // above has room to render without clipping.
+        let card_top = 44.0;
+        let card_w = 196.0_f32.min(cw - 10.0);
+        let card_left = (cw - card_w) * 0.5;
         let panel = D2D_RECT_F {
-            left: 5.0,
-            top: 5.0,
-            right: cw - 5.0,
+            left: card_left,
+            top: card_top,
+            right: cw - card_left,
             bottom: ch - 5.0,
         };
         let rounded = D2D1_ROUNDED_RECT {
@@ -1206,71 +1607,58 @@ impl VkRenderer {
             .DrawRoundedRectangle(&rounded, &border_brush, 1.2, None);
 
         let image_cx = cw * 0.5;
-        let image_y = 48.0 - 7.0 * (1.0 - eased);
-        let shadow = solid_brush(&self.d2d_context, colorref_alpha(0x00000000, 0.26))?;
-
-        let shadow_rect = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: image_cx - 70.0,
-                top: image_y + 60.0,
-                right: image_cx + 70.0,
-                bottom: image_y + 74.0,
-            },
-            radiusX: 18.0,
-            radiusY: 18.0,
-        };
-        self.d2d_context.FillRoundedRectangle(&shadow_rect, &shadow);
+        // The controller name floats *above* the card on the transparent top band;
+        // the artwork is the sole content of the card, centred in it.
+        let name_top = 8.0;
+        let name_bottom = card_top - 6.0;
+        let image_cy = (panel.top + panel.bottom) * 0.5 - 6.0 * (1.0 - eased);
 
         let ring = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F {
-                left: image_cx - 102.0 - 18.0 * pulse,
-                top: image_y - 14.0 - 18.0 * pulse,
-                right: image_cx + 102.0 + 18.0 * pulse,
-                bottom: image_y + 86.0 + 18.0 * pulse,
+                left: image_cx - 74.0 - 10.0 * pulse,
+                top: image_cy - 60.0 - 10.0 * pulse,
+                right: image_cx + 74.0 + 10.0 * pulse,
+                bottom: image_cy + 60.0 + 10.0 * pulse,
             },
-            radiusX: 58.0 + 18.0 * pulse,
-            radiusY: 58.0 + 18.0 * pulse,
+            radiusX: 52.0 + 10.0 * pulse,
+            radiusY: 52.0 + 10.0 * pulse,
         };
         self.d2d_context
             .DrawRoundedRectangle(&ring, &halo_brush, 2.0, None);
         let image_rect = D2D_RECT_F {
-            left: image_cx - 76.0,
-            top: image_y - 6.0,
-            right: image_cx + 76.0,
-            bottom: image_y + 78.0,
+            left: image_cx - 62.0,
+            top: image_cy - 54.0,
+            right: image_cx + 62.0,
+            bottom: image_cy + 54.0,
         };
-        self.draw_svg_icon(VkIcon::Gamepad, image_rect, text_color)?;
+        if let Some(art) = ControllerArt::from_label(controller_label) {
+            self.draw_controller_art(art, image_rect)?;
+        } else {
+            self.draw_svg_icon(VkIcon::Gamepad, image_rect, text_color)?;
+        }
 
         let title_w: Vec<u16> = title.encode_utf16().collect();
-        let status_w: Vec<u16> = status.encode_utf16().collect();
         let text_brush = solid_brush(&self.d2d_context, colorref(text_color))?;
-        let sub_brush = solid_brush(&self.d2d_context, colorref_alpha(text_color, 0.70))?;
+        // The name is a single line above the card; without this it word-wraps and
+        // the short band clips all but the first word. Restore wrap after (the
+        // format is shared with the keyboard label renderer).
+        let _ = self
+            .text_format
+            .SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         self.d2d_context.DrawText(
             &title_w,
             &self.text_format,
             &D2D_RECT_F {
-                left: 24.0,
-                top: ch - 78.0,
-                right: cw - 24.0,
-                bottom: ch - 42.0,
+                left: 0.0,
+                top: name_top,
+                right: cw,
+                bottom: name_bottom,
             },
             &text_brush,
             D2D1_DRAW_TEXT_OPTIONS_NONE,
             DWRITE_MEASURING_MODE_NATURAL,
         );
-        self.d2d_context.DrawText(
-            &status_w,
-            &self.hint_format,
-            &D2D_RECT_F {
-                left: 24.0,
-                top: ch - 42.0,
-                right: cw - 24.0,
-                bottom: ch - 16.0,
-            },
-            &sub_brush,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-            DWRITE_MEASURING_MODE_NATURAL,
-        );
+        let _ = self.text_format.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
 
         let identity = Matrix3x2 {
             M11: 1.0,
@@ -1302,6 +1690,7 @@ impl VkRenderer {
         prefix: &str,
         suffix: &str,
         show_l3: bool,
+        controller_label: &str,
     ) -> Result<(), String> {
         let cw = self.width as f32;
         let ch = self.height as f32;
@@ -1397,7 +1786,8 @@ impl VkRenderer {
                 right: x + chip,
                 bottom: (ch + chip) * 0.5,
             };
-            self.draw_svg_icon(VkIcon::L3, chip_rect, text_color)?;
+            let icon = ControllerIconFamily::from_label(controller_label).l3_icon();
+            self.draw_svg_icon(icon, chip_rect, text_color)?;
             x += chip + gap;
         }
 
@@ -1563,5 +1953,81 @@ mod tests {
         assert_eq!(shift_icon(false), VkIcon::Caps);
         assert_eq!(caps_icon(true), VkIcon::ShiftFilled);
         assert_eq!(caps_icon(false), VkIcon::Shift);
+    }
+
+    #[test]
+    fn controller_art_matches_device_families() {
+        assert_eq!(
+            ControllerArt::from_label("DualSense Wireless Controller"),
+            Some(ControllerArt::DualSense)
+        );
+        assert_eq!(
+            ControllerArt::from_label("Xbox Wireless Controller"),
+            Some(ControllerArt::XboxOne)
+        );
+        // Backend slot labels (secure desktop): HID = PlayStation, XInput = Xbox.
+        assert_eq!(
+            ControllerArt::from_label("HID slot 0"),
+            Some(ControllerArt::DualSense)
+        );
+        assert_eq!(
+            ControllerArt::from_label("XInput slot 0"),
+            Some(ControllerArt::XboxOne)
+        );
+        assert_eq!(ControllerArt::from_label("none"), None);
+    }
+
+    #[test]
+    fn controller_icons_use_ps5_for_playstation_and_xbox_as_generic() {
+        assert_eq!(
+            ControllerIconFamily::from_label("DualSense Wireless Controller"),
+            ControllerIconFamily::Ps5
+        );
+        assert_eq!(
+            ControllerIconFamily::from_label("HID slot 0"),
+            ControllerIconFamily::Ps5
+        );
+        assert_eq!(
+            ControllerIconFamily::from_label("Xbox Wireless Controller"),
+            ControllerIconFamily::Xbox
+        );
+        assert_eq!(
+            ControllerIconFamily::from_label("Nintendo Pro Controller"),
+            ControllerIconFamily::Xbox
+        );
+        assert_eq!(
+            ControllerIconFamily::from_label("none"),
+            ControllerIconFamily::Xbox
+        );
+        assert_eq!(
+            ControllerIconFamily::Ps5.hint_icon("X"),
+            Some(VkIcon::Ps5Square)
+        );
+        assert_eq!(
+            ControllerIconFamily::Xbox.hint_icon("X"),
+            Some(VkIcon::XboxX)
+        );
+        assert_eq!(ControllerIconFamily::Xbox.hint_icon("unknown"), None);
+    }
+
+    #[test]
+    fn downscale_box_filter_shrinks_and_averages() {
+        // 2x2 premultiplied-BGRA source averaged to a single pixel.
+        // Pixels: (b,g,r,a) = (0,0,0,0), (40,40,40,40), (80,80,80,80), (120,120,120,120)
+        let src = vec![
+            0, 0, 0, 0, 40, 40, 40, 40, 80, 80, 80, 80, 120, 120, 120, 120,
+        ];
+        let (out, w, h) = downscale_bgra_premul(&src, 2, 2, 1);
+        assert_eq!((w, h), (1, 1));
+        // Mean of {0,40,80,120} = 60 in every channel.
+        assert_eq!(out, vec![60, 60, 60, 60]);
+    }
+
+    #[test]
+    fn downscale_passes_through_when_already_small() {
+        let src = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let (out, w, h) = downscale_bgra_premul(&src, 2, 1, 64);
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(out, src);
     }
 }

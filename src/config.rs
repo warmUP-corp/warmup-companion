@@ -14,6 +14,10 @@ pub fn service_mode() -> bool {
 const USERLAND_POLL_FILE: &str = "userland-poll.mode";
 #[cfg(feature = "gamepad")]
 const SETTINGS_FILE: &str = "settings.ini";
+#[cfg(feature = "gamepad")]
+const RUNTIME_STATUS_FILE: &str = "runtime-status.ini";
+#[cfg(windows)]
+const PROMPT_USERLAND_DEBUG_FILE: &str = r"C:\ProgramData\WarmupVk\prompt-userland-debug.enabled";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct KeyboardTheme {
@@ -72,6 +76,9 @@ pub struct GamepadSettings {
     /// Standalone companion behavior: sleep the userland gamepad loop when another
     /// fullscreen game-like window is detected, even without warmUP IPC mode pushes.
     pub sleep_on_game: bool,
+    /// Standalone companion behavior: stop the loop when a fullscreen game-like
+    /// window is detected. Ignored while warmUP is connected over IPC.
+    pub auto_stop_on_game: bool,
     pub cursor_deadzone: f32,
     pub cursor_speed: f32,
     pub cursor_accel: f32,
@@ -90,6 +97,7 @@ impl Default for GamepadSettings {
         Self {
             userland_poll_mode: warmup_gamepad::PollMode::Full,
             sleep_on_game: true,
+            auto_stop_on_game: false,
             cursor_deadzone: 0.15,
             cursor_speed: 15.0,
             cursor_accel: 2.0,
@@ -123,9 +131,80 @@ pub fn prompt_overlay_enabled() -> bool {
     !off
 }
 
+#[cfg(windows)]
+pub fn prompt_userland_debug() -> bool {
+    std::env::var_os("WARMUP_PROMPT_USERLAND_DEBUG").is_some_and(|v| v != "0")
+        || std::path::Path::new(r"C:\ProgramData\WarmupVk\prompt-userland-debug.enabled").is_file()
+}
+
 #[cfg(not(windows))]
 pub fn prompt_overlay_enabled() -> bool {
     false
+}
+
+#[cfg(not(windows))]
+pub fn prompt_userland_debug() -> bool {
+    false
+}
+
+/// Enable or disable the userland prompt debug overlay sentinel file.
+#[cfg(windows)]
+pub fn set_prompt_userland_debug(enabled: bool) -> Result<(), String> {
+    let path = std::path::Path::new(PROMPT_USERLAND_DEBUG_FILE);
+    if enabled {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("create prompt debug dir: {e}"))?;
+        }
+        std::fs::write(path, "enabled\n").map_err(|e| format!("write prompt debug sentinel: {e}"))
+    } else if path.is_file() {
+        std::fs::remove_file(path).map_err(|e| format!("remove prompt debug sentinel: {e}"))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+pub fn set_prompt_userland_debug(_enabled: bool) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(feature = "gamepad")]
+pub fn runtime_status_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|base| {
+        std::path::PathBuf::from(base)
+            .join("WarmupVk")
+            .join(RUNTIME_STATUS_FILE)
+    })
+}
+
+#[cfg(feature = "gamepad")]
+pub fn write_userland_poll_paused(paused: bool) -> Result<(), String> {
+    let path = runtime_status_path()
+        .ok_or_else(|| "LOCALAPPDATA is not set; cannot write runtime status".to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create runtime status dir: {e}"))?;
+    }
+    let text = format!(
+        "userland_poll_paused={}\n",
+        if paused { "true" } else { "false" }
+    );
+    std::fs::write(&path, text).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+#[cfg(feature = "gamepad")]
+pub fn read_userland_poll_paused() -> bool {
+    let Some(path) = runtime_status_path() else {
+        return false;
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    text.lines()
+        .find_map(|line| {
+            let (k, v) = line.split_once('=')?;
+            (k.trim() == "userland_poll_paused").then(|| parse_bool(v, false))
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(feature = "gamepad")]
@@ -149,6 +228,9 @@ pub fn gamepad_settings() -> GamepadSettings {
     }
     if let Ok(raw) = std::env::var("WARMUP_VK_SLEEP_ON_GAME") {
         settings.sleep_on_game = parse_bool(&raw, settings.sleep_on_game);
+    }
+    if let Ok(raw) = std::env::var("WARMUP_VK_AUTO_STOP_ON_GAME") {
+        settings.auto_stop_on_game = parse_bool(&raw, settings.auto_stop_on_game);
     }
 
     settings
@@ -181,6 +263,9 @@ fn apply_gamepad_settings_text(settings: &mut GamepadSettings, text: &str) {
             }
             "sleep_on_game" | "game_sleep" | "sleep_when_game_active" => {
                 settings.sleep_on_game = parse_bool(value, settings.sleep_on_game)
+            }
+            "auto_stop_on_game" | "stop_on_game" | "stop_when_game_active" => {
+                settings.auto_stop_on_game = parse_bool(value, settings.auto_stop_on_game)
             }
             "cursor_deadzone" => {
                 settings.cursor_deadzone = parse_unit_f32(value, settings.cursor_deadzone)
@@ -387,16 +472,16 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
             .filter(|v| (0.0..0.95).contains(v))
             .map(|_| ())
             .ok_or_else(|| format!("{key} must be >= 0.0 and < 0.95")),
-        "natural_scroll" => match value.trim().to_ascii_lowercase().as_str() {
+        "natural_scroll"
+        | "sleep_on_game"
+        | "game_sleep"
+        | "sleep_when_game_active"
+        | "auto_stop_on_game"
+        | "stop_on_game"
+        | "stop_when_game_active" => match value.trim().to_ascii_lowercase().as_str() {
             "true" | "false" | "1" | "0" | "yes" | "no" | "on" | "off" => Ok(()),
-            _ => Err("natural_scroll must be a boolean".to_string()),
+            _ => Err(format!("{key} must be a boolean")),
         },
-        "sleep_on_game" | "game_sleep" | "sleep_when_game_active" => {
-            match value.trim().to_ascii_lowercase().as_str() {
-                "true" | "false" | "1" | "0" | "yes" | "no" | "on" | "off" => Ok(()),
-                _ => Err("sleep_on_game must be a boolean".to_string()),
-            }
-        }
         "cursor_speed" | "cursor_accel" | "scroll_speed" | "scroll_accel" => value
             .parse::<f32>()
             .ok()
@@ -465,5 +550,8 @@ mod tests {
 
         apply_gamepad_settings_text(&mut settings, "game_sleep=on\n");
         assert!(settings.sleep_on_game);
+
+        apply_gamepad_settings_text(&mut settings, "auto_stop_on_game=true\n");
+        assert!(settings.auto_stop_on_game);
     }
 }

@@ -71,6 +71,8 @@ const EXTERNAL_GAME_EXE_DENYLIST: &[&str] = &[
     "nile.exe",
     "xboxpcapp.exe",
     "gamingservices.exe",
+    // warmUP itself is fullscreen; never treat the launcher as an external game to sleep on.
+    "warmup.exe",
 ];
 
 #[derive(Clone, Copy)]
@@ -290,7 +292,12 @@ mod tests {
 
     #[test]
     fn denylist_rejects_launcher_clients() {
-        for exe in ["steam.exe", "epicgameslauncher.exe", "chrome.exe"] {
+        for exe in [
+            "steam.exe",
+            "epicgameslauncher.exe",
+            "chrome.exe",
+            "warmup.exe",
+        ] {
             assert!(EXTERNAL_GAME_EXE_DENYLIST.contains(&exe));
         }
     }

@@ -67,14 +67,17 @@ pub enum PadCommand {
 ///     detection when `sleep_on_game` is enabled): a real game owns the screen →
 ///     [`PollMode::Sleep`], only Guide edges flow so the game owns the pad.
 ///   - **launcher** (`launcher_foreground_nav`): the launcher is foreground (incl. woken over a
-///     running game) → full poll so the controller drives the launcher UI.
+///     running game) → full poll so the controller drives the launcher UI. Standalone fullscreen
+///     detection is ignored here — warmUP itself is fullscreen and must not trip game sleep.
 ///   - **desktop** (`!game_active`): no game and the launcher is backgrounded → full poll so the
 ///     controller keeps driving the OS cursor on the Windows desktop.
 fn effective_userland_poll_mode() -> PollMode {
     let settings = crate::config::gamepad_settings();
-    let desktop_game_active =
-        crate::pipe_server::game_active() && !crate::pipe_server::launcher_foreground_nav();
-    let standalone_game_active = settings.sleep_on_game && standalone_game_active();
+    let desktop_connected = crate::pipe_server::desktop_connected();
+    let launcher_foreground = crate::pipe_server::launcher_foreground_nav();
+    let desktop_game_active = crate::pipe_server::game_active() && !launcher_foreground;
+    let standalone_game_active =
+        !desktop_connected && settings.sleep_on_game && standalone_game_active_now();
     if userland_poll_paused() || desktop_game_active || standalone_game_active {
         PollMode::Sleep
     } else {
@@ -83,12 +86,12 @@ fn effective_userland_poll_mode() -> PollMode {
 }
 
 #[cfg(windows)]
-fn standalone_game_active() -> bool {
+pub fn standalone_game_active_now() -> bool {
     crate::win::game_detect::standalone_game_active_cached()
 }
 
 #[cfg(not(windows))]
-fn standalone_game_active() -> bool {
+pub fn standalone_game_active_now() -> bool {
     false
 }
 
@@ -206,11 +209,11 @@ impl GamepadBackend for SdlBackend {
     }
 
     fn rumble(&mut self, strong: f32, weak: f32, duration_ms: u32) {
-        self.input.rumble(strong, weak, duration_ms);
+        let _ = self.input.rumble(strong, weak, duration_ms);
     }
 
     fn trigger_rumble(&mut self, left: f32, right: f32, duration_ms: u32) {
-        self.input.trigger_rumble(left, right, duration_ms);
+        let _ = self.input.trigger_rumble(left, right, duration_ms);
     }
 
     fn button_changes(&mut self) -> Vec<ButtonChange> {
@@ -318,6 +321,19 @@ fn sdl_thread_main(
     tx: mpsc::Sender<Result<(), String>>,
     cmd_rx: mpsc::Receiver<PadCommand>,
 ) {
+    #[cfg(windows)]
+    if !crate::win::input_desktop_name()
+        .map(|n| n.eq_ignore_ascii_case("winlogon"))
+        .unwrap_or(false)
+    {
+        match crate::win::attach_input() {
+            Ok(()) => crate::install::log_line("SDL thread attached to input desktop before init"),
+            Err(e) => crate::install::log_line(&format!(
+                "SDL thread attach input(Default) before init failed: {e}"
+            )),
+        }
+    }
+
     let mut input = match GamepadInput::new(&db) {
         Ok(i) => {
             let _ = tx.send(Ok(()));
@@ -335,10 +351,32 @@ fn sdl_thread_main(
         // because it owns the pad. Drain the whole backlog, newest wins for LED.
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
-                PadCommand::Led { r, g, b } => input.set_led(r, g, b),
-                PadCommand::Rumble { strong, weak, ms } => input.rumble(strong, weak, ms),
+                PadCommand::Led { r, g, b } => {
+                    crate::install::log_line(&format!(
+                        "SDL apply led r={r} g={g} b={b} pad={}",
+                        input
+                            .active_controller_name()
+                            .unwrap_or_else(|| "none".to_string())
+                    ));
+                    input.set_led(r, g, b)
+                }
+                PadCommand::Rumble { strong, weak, ms } => {
+                    let pad = input
+                        .active_controller_name()
+                        .unwrap_or_else(|| "none".to_string());
+                    let ok = input.rumble(strong, weak, ms);
+                    crate::install::log_line(&format!(
+                        "SDL apply rumble full strong={strong} weak={weak} ms={ms} pad={pad} ok={ok}"
+                    ));
+                }
                 PadCommand::TriggerRumble { left, right, ms } => {
-                    input.trigger_rumble(left, right, ms)
+                    let pad = input
+                        .active_controller_name()
+                        .unwrap_or_else(|| "none".to_string());
+                    let ok = input.trigger_rumble(left, right, ms);
+                    crate::install::log_line(&format!(
+                        "SDL apply rumble triggers left={left} right={right} ms={ms} pad={pad} ok={ok}"
+                    ));
                 }
             }
         }

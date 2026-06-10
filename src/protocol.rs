@@ -16,7 +16,12 @@ use serde::{Deserialize, Serialize};
 ///
 /// v3: additive `keyboardTheme.border` (key outline color, matches the webview VK) and the
 /// `config.vkMode` layout selector (`docked` | `floating`).
-pub const PROTOCOL_VERSION: u32 = 3;
+///
+/// v4: additive `companion_settings` down-frame for companion-local runtime settings
+/// (`sleepOnGame`, `autoStopOnGame`, `userlandPollPaused`, `promptUserlandDebug`).
+///
+/// v4 also tolerates additive `axis` up-frames for controller calibration/test UI.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Desktop mode snapshot carried in `hello` and the `mode` down-frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +46,8 @@ pub struct Hello {
     pub config: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<ModeSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub companion_settings: Option<CompanionSettingsPayload>,
 }
 
 /// `connection` frame payload — authoritative controller connection snapshot.
@@ -72,6 +79,17 @@ pub struct CursorMovedPayload {
     pub dy: f64,
 }
 
+/// `axis` frame payload — raw stick snapshot for controller calibration/test UI.
+/// Shape matches the desktop `gamepad:axis` webview event 1:1.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AxisPayload {
+    pub left_x: f32,
+    pub left_y: f32,
+    pub right_x: f32,
+    pub right_y: f32,
+}
+
 /// `battery` frame payload. `percent` is 0–100 or −1 when unknown; `wired` = no
 /// internal battery. Shape matches the desktop `gamepad:battery` webview event 1:1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +119,22 @@ pub struct TouchpadPayload {
     pub fingers: Vec<TouchpadFingerPayload>,
 }
 
+/// Companion-local settings the warmUP desktop can push over IPC. Each field is optional so
+/// the desktop can send partial updates. Persisted settings are written to the companion's
+/// on-disk config; `userlandPollPaused` is runtime-only (mirrored to `runtime-status.ini`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionSettingsPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sleep_on_game: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_stop_on_game: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub userland_poll_paused: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_userland_debug: Option<bool>,
+}
+
 /// `rumble` down-frame payload — one-shot force feedback (#352). Internally tagged by
 /// `kind`: `"full"` drives the main motors, `"triggers"` the adaptive-trigger motors.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -118,6 +152,14 @@ pub enum RumblePayload {
         #[serde(rename = "durationMs")]
         duration_ms: u32,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LedPayload {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
 }
 
 /// Optional native keyboard theme colors. Each field is `#RRGGBB`; absent fields keep
@@ -185,6 +227,7 @@ pub enum UpFrame {
     Connection(ConnectionPayload),
     Button(ButtonPayload),
     CursorMoved(CursorMovedPayload),
+    Axis(AxisPayload),
     Battery(BatteryPayload),
     Touchpad(TouchpadPayload),
     /// A frame whose `type` this slice does not know (added by a later slice).
@@ -201,6 +244,8 @@ pub enum DownFrame {
     Config(ConfigPayload),
     Mode(ModeSnapshot),
     Rumble(RumblePayload),
+    Led(LedPayload),
+    CompanionSettings(CompanionSettingsPayload),
     #[serde(skip)]
     Unknown,
 }
@@ -228,9 +273,8 @@ impl UpFrame {
     pub fn parse_line(line: &str) -> Result<Self, serde_json::Error> {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
-            "hello" | "connection" | "button" | "cursor_moved" | "battery" | "touchpad" => {
-                serde_json::from_str(line)
-            }
+            "hello" | "connection" | "button" | "cursor_moved" | "axis" | "battery"
+            | "touchpad" => serde_json::from_str(line),
             _ => Ok(Self::Unknown),
         }
     }
@@ -243,7 +287,9 @@ impl DownFrame {
     pub fn parse_line(line: &str) -> Result<Self, serde_json::Error> {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
-            "hello" | "config" | "mode" | "rumble" => serde_json::from_str(line),
+            "hello" | "config" | "mode" | "rumble" | "led" | "companion_settings" => {
+                serde_json::from_str(line)
+            }
             _ => Ok(Self::Unknown),
         }
     }
@@ -365,6 +411,21 @@ mod tests {
     }
 
     #[test]
+    fn axis_up_frame_round_trips() {
+        let frame = UpFrame::Axis(AxisPayload {
+            left_x: 0.25,
+            left_y: -0.5,
+            right_x: 0.75,
+            right_y: -1.0,
+        });
+        let line = frame.to_ndjson_line();
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["type"], "axis");
+        assert_eq!(json["payload"]["leftX"], 0.25);
+        assert_eq!(UpFrame::parse_line(line.trim_end()).unwrap(), frame);
+    }
+
+    #[test]
     fn unknown_up_frame_type_is_tolerated() {
         // A future frame (one this version doesn't know) must not break the client.
         let parsed = UpFrame::parse_line(r#"{"type":"gyro","payload":{"pitch":0.1}}"#).unwrap();
@@ -442,11 +503,34 @@ mod tests {
                 clicks_enabled: true,
                 launcher_owns_text_input: false,
             }),
+            companion_settings: Some(CompanionSettingsPayload {
+                sleep_on_game: Some(true),
+                auto_stop_on_game: Some(false),
+                userland_poll_paused: Some(false),
+                prompt_userland_debug: None,
+            }),
         });
         let line = hello.to_ndjson_line();
         let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(json["type"], "hello");
-        assert_eq!(json["payload"]["protocolVersion"], 3);
+        assert_eq!(json["payload"]["protocolVersion"], 4);
         assert_eq!(json["payload"]["mode"]["gameActive"], false);
+        assert_eq!(json["payload"]["companionSettings"]["sleepOnGame"], true);
+    }
+
+    #[test]
+    fn companion_settings_down_frame_round_trips() {
+        let frame = DownFrame::CompanionSettings(CompanionSettingsPayload {
+            sleep_on_game: Some(false),
+            auto_stop_on_game: Some(true),
+            userland_poll_paused: Some(true),
+            prompt_userland_debug: Some(false),
+        });
+        let line = frame.to_ndjson_line();
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["type"], "companion_settings");
+        assert_eq!(json["payload"]["autoStopOnGame"], true);
+        assert_eq!(json["payload"]["userlandPollPaused"], true);
+        assert_eq!(DownFrame::parse_line(line.trim_end()).unwrap(), frame);
     }
 }

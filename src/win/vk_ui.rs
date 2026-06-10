@@ -848,6 +848,7 @@ fn render_frame() {
             let candidates = crate::vk_predict::strip();
             let top_inset = vk_renderer::top_chrome_inset();
             let scale_w = vk_scale_w();
+            let controller_snapshot = crate::debug_state::snapshot();
             let floating = matches!(
                 crate::config::vk_layout_mode(),
                 crate::config::VkLayoutMode::Floating
@@ -865,6 +866,7 @@ fn render_frame() {
                 candidates: candidates.as_ref(),
                 floating,
                 modifiers: vk_renderer::VkModifiers { shift, caps },
+                controller_label: controller_snapshot.name.trim(),
             };
             if let Err(e) = renderer.draw(&frame) {
                 vk_log::log(&format!("renderer draw: {e}"));

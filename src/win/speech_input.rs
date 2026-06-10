@@ -247,9 +247,9 @@ pub fn run_blocking() -> Result<(), String> {
                   args: &Option<SpeechContinuousRecognitionCompletedEventArgs>| {
                 if let Some(args) = args {
                     match args.Status() {
-                        Ok(status) => {
-                            crate::install::log_line(&format!("speech helper completed: {status:?}"))
-                        }
+                        Ok(status) => crate::install::log_line(&format!(
+                            "speech helper completed: {status:?}"
+                        )),
                         Err(e) => crate::install::log_line(&format!(
                             "speech helper completed: status unavailable ({e})"
                         )),
