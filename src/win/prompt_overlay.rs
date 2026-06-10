@@ -372,11 +372,12 @@ fn render_prompt(hwnd: HWND) {
                             // back to a generic pad name only when the backend hasn't
                             // published one yet (no service-mode publish, mid-connect, …).
                             let name = snapshot.name.trim();
-                            let controller_label = if name.is_empty() || name.eq_ignore_ascii_case("none") {
-                                "Xbox Wireless Controller"
-                            } else {
-                                name
-                            };
+                            let controller_label =
+                                if name.is_empty() || name.eq_ignore_ascii_case("none") {
+                                    "Xbox Wireless Controller"
+                                } else {
+                                    name
+                                };
                             let title = connected_card_title(controller_label);
                             r.draw_connected_prompt(bg, border, text, &title, controller_label)
                         }

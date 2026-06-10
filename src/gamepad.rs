@@ -241,6 +241,11 @@ impl GamepadPoll {
             service_log("gamepad backend: HID + XInput (Winlogon)");
             Backend::XInput(XInputBackend::new())
         } else {
+            if let Err(e) = crate::win::attach_input() {
+                service_log(&format!(
+                    "gamepad backend: attach input(Default) before SDL3 failed: {e}"
+                ));
+            }
             // Service userland: SDL on its own thread (off the loop/SendInput thread).
             match SdlThreadBackend::open() {
                 Ok(b) => {
@@ -288,6 +293,16 @@ impl GamepadPoll {
         }
         let using_xinput = matches!(self.backend, Backend::XInput(_));
         if on_winlogon == using_xinput {
+            if !on_winlogon {
+                let current = crate::win::current_desktop_name().unwrap_or_else(|| "?".into());
+                if !current.eq_ignore_ascii_case("default") {
+                    if let Err(e) = crate::win::attach_input() {
+                        service_log(&format!("loop thread attach input(Default) failed: {e}"));
+                    } else {
+                        service_log("loop thread reattached to Default");
+                    }
+                }
+            }
             return;
         }
         self.reset_vk_controls();
@@ -433,6 +448,7 @@ impl GamepadPoll {
         } = self.backend.poll_frame()?;
         self.backend.publish_device_features(&touchpad);
         let (lx, ly, rx, ry) = axes;
+        crate::pipe_server::publish_axis(lx, ly, rx, ry);
 
         #[cfg(windows)]
         if crate::config::service_mode() {

@@ -1445,7 +1445,9 @@ impl VkRenderer {
         // The name is a single line above the card; without this it word-wraps and
         // the short band clips all but the first word. Restore wrap after (the
         // format is shared with the keyboard label renderer).
-        let _ = self.text_format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        let _ = self
+            .text_format
+            .SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         self.d2d_context.DrawText(
             &title_w,
             &self.text_format,

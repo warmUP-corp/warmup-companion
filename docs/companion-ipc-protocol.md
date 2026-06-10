@@ -56,12 +56,13 @@ Each maps to an existing webview event; the desktop re-emits the `payload` uncha
 | `button` | `gamepad:button` | `{ button: string, pressed: bool, controllerType: string }` |
 | `battery` | `gamepad:battery` | `{ percent: i32, charging: bool, wired: bool }` |
 | `cursor_moved` | `gamepad:cursor_moved` | `{ dx: f64, dy: f64 }` |
+| `axis` | `gamepad:axis` | `{ leftX: f32, leftY: f32, rightX: f32, rightY: f32 }` |
 | `touchpad` | `gamepad:touchpad` | `{ fingers: [{ index: u8, down: bool, x: f32, y: f32, pressure: f32 }] }` |
 
 Notes:
-- `connection.controllerType` / `button.controllerType`: `"xbox" | "ps5" | "ps4" | "switch" | "generic"` (existing desktop vocabulary).
+- `connection.controllerType` / `button.controllerType`: `"xbox" | "playstation" | "switch" | "generic"` (existing desktop vocabulary).
 - `battery.percent`: `0–100`, or `-1` when the controller reports no level. `wired` = no internal battery.
-- `cursor_moved` / `touchpad` are throttled by the companion (≈100 ms) exactly as the desktop poll thread does today.
+- `cursor_moved` / `axis` / `touchpad` are throttled by the companion (≈100 ms) exactly as the desktop poll thread does today.
 
 ## Down frames (desktop → companion)
 
@@ -70,6 +71,7 @@ Notes:
 | `config` | full `GamepadConfig` (below) | push tuning on change (`set_gamepad_config`) |
 | `mode` | `{ gameActive: bool, launcherForegroundNav: bool }` | game-active sleep branch + launcher-foreground nav forwarding (#351) |
 | `rumble` | `{ kind: "full", strong: f32, weak: f32, durationMs: u32 }` **or** `{ kind: "triggers", left: f32, right: f32, durationMs: u32 }` | one-shot force feedback (#352) |
+| `led` | `{ r: u8, g: u8, b: u8 }` | immediate LED/lightbar write for controller test actions; config still owns persisted/effect state |
 | `companion_settings` | `{ sleepOnGame?: bool, autoStopOnGame?: bool, userlandPollPaused?: bool, promptUserlandDebug?: bool }` | companion-local runtime/settings control |
 
 ### `GamepadConfig` payload
@@ -136,6 +138,8 @@ fields keep the native keyboard's current dark/light default for that color slot
 ## Versioning policy
 
 - `protocolVersion` is a **single integer**, currently `4`.
+- `axis` is an additive v4-compatible up-frame; old desktop clients ignore it as unknown, old companions simply omit it.
+- `led` is an additive v4-compatible down-frame for one-shot test writes; old companions ignore it as unknown.
 - Any change to the pipe name, framing, `hello` shape, or a frame's `payload` shape bumps it.
 - Additive-only changes still bump (no minor negotiation in v1 — the boundary is between two independently-deployed binaries we control; a hard version gate is simpler and safer than partial compatibility).
 - A version mismatch is resolved by the server closing the connection; the client surfaces a "companion update required" state rather than interpreting unknown frames.

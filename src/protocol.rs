@@ -19,6 +19,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// v4: additive `companion_settings` down-frame for companion-local runtime settings
 /// (`sleepOnGame`, `autoStopOnGame`, `userlandPollPaused`, `promptUserlandDebug`).
+///
+/// v4 also tolerates additive `axis` up-frames for controller calibration/test UI.
 pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Desktop mode snapshot carried in `hello` and the `mode` down-frame.
@@ -75,6 +77,17 @@ pub struct ButtonPayload {
 pub struct CursorMovedPayload {
     pub dx: f64,
     pub dy: f64,
+}
+
+/// `axis` frame payload — raw stick snapshot for controller calibration/test UI.
+/// Shape matches the desktop `gamepad:axis` webview event 1:1.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AxisPayload {
+    pub left_x: f32,
+    pub left_y: f32,
+    pub right_x: f32,
+    pub right_y: f32,
 }
 
 /// `battery` frame payload. `percent` is 0–100 or −1 when unknown; `wired` = no
@@ -139,6 +152,14 @@ pub enum RumblePayload {
         #[serde(rename = "durationMs")]
         duration_ms: u32,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LedPayload {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
 }
 
 /// Optional native keyboard theme colors. Each field is `#RRGGBB`; absent fields keep
@@ -206,6 +227,7 @@ pub enum UpFrame {
     Connection(ConnectionPayload),
     Button(ButtonPayload),
     CursorMoved(CursorMovedPayload),
+    Axis(AxisPayload),
     Battery(BatteryPayload),
     Touchpad(TouchpadPayload),
     /// A frame whose `type` this slice does not know (added by a later slice).
@@ -222,6 +244,7 @@ pub enum DownFrame {
     Config(ConfigPayload),
     Mode(ModeSnapshot),
     Rumble(RumblePayload),
+    Led(LedPayload),
     CompanionSettings(CompanionSettingsPayload),
     #[serde(skip)]
     Unknown,
@@ -250,9 +273,8 @@ impl UpFrame {
     pub fn parse_line(line: &str) -> Result<Self, serde_json::Error> {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
-            "hello" | "connection" | "button" | "cursor_moved" | "battery" | "touchpad" => {
-                serde_json::from_str(line)
-            }
+            "hello" | "connection" | "button" | "cursor_moved" | "axis" | "battery"
+            | "touchpad" => serde_json::from_str(line),
             _ => Ok(Self::Unknown),
         }
     }
@@ -265,7 +287,7 @@ impl DownFrame {
     pub fn parse_line(line: &str) -> Result<Self, serde_json::Error> {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
-            "hello" | "config" | "mode" | "rumble" | "companion_settings" => {
+            "hello" | "config" | "mode" | "rumble" | "led" | "companion_settings" => {
                 serde_json::from_str(line)
             }
             _ => Ok(Self::Unknown),
@@ -385,6 +407,21 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(json["type"], "cursor_moved");
         assert_eq!(json["payload"]["dx"], 1.5);
+        assert_eq!(UpFrame::parse_line(line.trim_end()).unwrap(), frame);
+    }
+
+    #[test]
+    fn axis_up_frame_round_trips() {
+        let frame = UpFrame::Axis(AxisPayload {
+            left_x: 0.25,
+            left_y: -0.5,
+            right_x: 0.75,
+            right_y: -1.0,
+        });
+        let line = frame.to_ndjson_line();
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["type"], "axis");
+        assert_eq!(json["payload"]["leftX"], 0.25);
         assert_eq!(UpFrame::parse_line(line.trim_end()).unwrap(), frame);
     }
 

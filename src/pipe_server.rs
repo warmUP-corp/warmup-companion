@@ -9,8 +9,8 @@
 
 use crate::gamepad_backend::PadCommand;
 use crate::protocol::{
-    BatteryPayload, ButtonPayload, CompanionSettingsPayload, ConnectionPayload, ModeSnapshot,
-    RumblePayload, TouchpadPayload,
+    AxisPayload, BatteryPayload, ButtonPayload, CompanionSettingsPayload, ConnectionPayload,
+    ModeSnapshot, RumblePayload, TouchpadPayload,
 };
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -96,6 +96,8 @@ fn take_cursor_moved() -> Option<crate::protocol::CursorMovedPayload> {
 
 /// Latest battery snapshot from the gamepad loop. The server sends it on change.
 static BATTERY: OnceLock<Mutex<Option<BatteryPayload>>> = OnceLock::new();
+/// Latest raw stick snapshot from the gamepad loop. The server sends it throttled.
+static AXIS: OnceLock<Mutex<Option<AxisPayload>>> = OnceLock::new();
 /// Latest touchpad sample + a dirty flag, coalesced like `cursor_moved` and sent throttled.
 static TOUCHPAD: OnceLock<Mutex<(Option<TouchpadPayload>, bool)>> = OnceLock::new();
 /// Device write commands pushed by inbound `config`/`rumble` frames, drained by the
@@ -105,6 +107,10 @@ const DEVICE_CMD_CAP: usize = 64;
 
 fn battery_slot() -> &'static Mutex<Option<BatteryPayload>> {
     BATTERY.get_or_init(|| Mutex::new(None))
+}
+
+fn axis_slot() -> &'static Mutex<Option<AxisPayload>> {
+    AXIS.get_or_init(|| Mutex::new(None))
 }
 
 fn touchpad_slot() -> &'static Mutex<(Option<TouchpadPayload>, bool)> {
@@ -126,6 +132,18 @@ pub fn publish_battery(percent: i32, charging: bool, wired: bool) {
     }
 }
 
+/// Publish the latest raw stick snapshot (read by the server, sent throttled).
+pub fn publish_axis(left_x: f32, left_y: f32, right_x: f32, right_y: f32) {
+    if let Ok(mut a) = axis_slot().lock() {
+        *a = Some(AxisPayload {
+            left_x,
+            left_y,
+            right_x,
+            right_y,
+        });
+    }
+}
+
 /// Publish the latest touchpad sample (coalesced; the server sends it throttled).
 pub fn publish_touchpad(payload: TouchpadPayload) {
     if let Ok(mut t) = touchpad_slot().lock() {
@@ -137,6 +155,11 @@ pub fn publish_touchpad(payload: TouchpadPayload) {
 #[cfg_attr(not(windows), allow(dead_code))]
 fn current_battery() -> Option<BatteryPayload> {
     battery_slot().lock().ok().and_then(|b| *b)
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn current_axis() -> Option<AxisPayload> {
+    axis_slot().lock().ok().and_then(|a| *a)
 }
 
 /// Take the latest touchpad sample if it changed since the last send.
@@ -357,22 +380,42 @@ fn apply_rumble(p: &RumblePayload) {
             strong,
             weak,
             duration_ms,
-        } => PadCommand::Rumble {
-            strong,
-            weak,
-            ms: duration_ms,
-        },
+        } => {
+            crate::install::log_line(&format!(
+                "pipe inbound rumble full strong={strong} weak={weak} ms={duration_ms}"
+            ));
+            PadCommand::Rumble {
+                strong,
+                weak,
+                ms: duration_ms,
+            }
+        }
         RumblePayload::Triggers {
             left,
             right,
             duration_ms,
-        } => PadCommand::TriggerRumble {
-            left,
-            right,
-            ms: duration_ms,
-        },
+        } => {
+            crate::install::log_line(&format!(
+                "pipe inbound rumble triggers left={left} right={right} ms={duration_ms}"
+            ));
+            PadCommand::TriggerRumble {
+                left,
+                right,
+                ms: duration_ms,
+            }
+        }
     };
     push_device_command(cmd);
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn apply_led(p: &crate::protocol::LedPayload) {
+    crate::install::log_line(&format!("pipe inbound led r={} g={} b={}", p.r, p.g, p.b));
+    push_device_command(PadCommand::Led {
+        r: p.r,
+        g: p.g,
+        b: p.b,
+    });
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -498,9 +541,9 @@ fn controller_type_for(label: &str) -> String {
     if l.contains("xbox") {
         "xbox".into()
     } else if l.contains("dualsense") || l.contains("ps5") {
-        "ps5".into()
+        "playstation".into()
     } else if l.contains("dualshock") || l.contains("ps4") {
-        "ps4".into()
+        "playstation".into()
     } else if l.contains("nintendo") || l.contains("switch") || l.contains("pro controller") {
         "switch".into()
     } else {
@@ -578,12 +621,12 @@ pub fn spawn() {}
 #[cfg(windows)]
 mod server {
     use super::{
-        apply_companion_settings, apply_config, apply_mode, apply_rumble, clear_desktop_mode,
-        current, current_battery, drain_buttons, reset_button_stream, take_cursor_moved,
-        take_touchpad, DESKTOP_CONNECTED,
+        apply_companion_settings, apply_config, apply_led, apply_mode, apply_rumble,
+        clear_desktop_mode, current, current_axis, current_battery, drain_buttons,
+        reset_button_stream, take_cursor_moved, take_touchpad, DESKTOP_CONNECTED,
     };
     use crate::protocol::{
-        BatteryPayload, ConnectionPayload, DownFrame, Hello, UpFrame, PROTOCOL_VERSION,
+        AxisPayload, BatteryPayload, ConnectionPayload, DownFrame, Hello, UpFrame, PROTOCOL_VERSION,
     };
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
@@ -728,6 +771,7 @@ mod server {
     fn stream(pipe: HANDLE) {
         let mut last: Option<ConnectionPayload> = None;
         let mut last_battery: Option<BatteryPayload> = None;
+        let mut last_axis: Option<AxisPayload> = None;
         let mut last_conn_write = Instant::now()
             .checked_sub(KEEPALIVE)
             .unwrap_or_else(Instant::now);
@@ -761,6 +805,15 @@ mod server {
                     }
                 }
                 // Touchpad shares the cursor throttle (both are ≈100 ms visual hints).
+                let axis = current_axis();
+                if axis.is_some() && axis != last_axis {
+                    if let Some(a) = axis {
+                        if write_all(pipe, UpFrame::Axis(a).to_ndjson_line().as_bytes()).is_err() {
+                            return;
+                        }
+                        last_axis = Some(a);
+                    }
+                }
                 if let Some(tp) = take_touchpad() {
                     if write_all(pipe, UpFrame::Touchpad(tp).to_ndjson_line().as_bytes()).is_err() {
                         return;
@@ -797,6 +850,7 @@ mod server {
                 Ok(DownFrame::Config(p)) => apply_config(&p),
                 Ok(DownFrame::Mode(p)) => apply_mode(&p),
                 Ok(DownFrame::Rumble(p)) => apply_rumble(&p),
+                Ok(DownFrame::Led(p)) => apply_led(&p),
                 Ok(DownFrame::CompanionSettings(p)) => apply_companion_settings(&p),
                 _ => {}
             }
