@@ -391,7 +391,6 @@ enum VkIcon {
     Enter,
     MicOff,
     Space,
-    Paste,
     Shift,
     ShiftFilled,
     Caps,
@@ -407,6 +406,13 @@ enum VkIcon {
     /// extracted from the controller-icon atlas.
     L3Ps5,
     L3Xbox,
+    R3Ps5,
+    R3Xbox,
+    /// Select/Start chips (PS5 Share/Options, Xbox View/Menu).
+    SelectPs5,
+    SelectXbox,
+    StartPs5,
+    StartXbox,
     Ps5Cross,
     Ps5Circle,
     Ps5Square,
@@ -514,6 +520,9 @@ impl ControllerIconFamily {
             (Self::Ps5, "LT") => Some(VkIcon::Ps5L2),
             (Self::Ps5, "RT") => Some(VkIcon::Ps5R2),
             (Self::Ps5, "L3") => Some(VkIcon::L3Ps5),
+            (Self::Ps5, "R3") => Some(VkIcon::R3Ps5),
+            (Self::Ps5, "SELECT") => Some(VkIcon::SelectPs5),
+            (Self::Ps5, "START") => Some(VkIcon::StartPs5),
             (Self::Xbox, "A") => Some(VkIcon::XboxA),
             (Self::Xbox, "B") => Some(VkIcon::XboxB),
             (Self::Xbox, "X") => Some(VkIcon::XboxX),
@@ -523,6 +532,9 @@ impl ControllerIconFamily {
             (Self::Xbox, "LT") => Some(VkIcon::XboxLt),
             (Self::Xbox, "RT") => Some(VkIcon::XboxRt),
             (Self::Xbox, "L3") => Some(VkIcon::L3Xbox),
+            (Self::Xbox, "R3") => Some(VkIcon::R3Xbox),
+            (Self::Xbox, "SELECT") => Some(VkIcon::SelectXbox),
+            (Self::Xbox, "START") => Some(VkIcon::StartXbox),
             _ => None,
         }
     }
@@ -594,9 +606,6 @@ impl VkIcon {
             VkIcon::Space => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 17v1c0 .5-.5 1-1 1H3c-.5 0-1-.5-1-1v-1"/></svg>"#
             }
-            VkIcon::Paste => {
-                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 14h10"/><path d="M16 4h2a2 2 0 0 1 2 2v1.344"/><path d="m17 18 4-4-4-4"/><path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 1.793-1.113"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>"#
-            }
             VkIcon::Shift => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 16a1 1 0 0 0 1-1v-2a1 1 0 0 1 1-1h3.293a.707.707 0 0 0 .5-1.207l-6.939-6.939a1.207 1.207 0 0 0-1.708 0l-6.94 6.94a.707.707 0 0 0 .5 1.206H8a1 1 0 0 1 1 1v2a1 1 0 0 0 1 1z"/><path d="M9 20h6"/></svg>"#
             }
@@ -628,6 +637,12 @@ impl VkIcon {
             // `draw_svg_icon` is a no-op and they keep their controller look.
             VkIcon::L3Ps5 => include_str!("../../controller-icons/p5_l3_click.svg"),
             VkIcon::L3Xbox => include_str!("../../controller-icons/x_l3_click.svg"),
+            VkIcon::R3Ps5 => include_str!("../../controller-icons/p5_r3_click.svg"),
+            VkIcon::R3Xbox => include_str!("../../controller-icons/x_r3_click.svg"),
+            VkIcon::SelectPs5 => include_str!("../../controller-icons/p5_share.svg"),
+            VkIcon::SelectXbox => include_str!("../../controller-icons/x_menu_view.svg"),
+            VkIcon::StartPs5 => include_str!("../../controller-icons/p5_options.svg"),
+            VkIcon::StartXbox => include_str!("../../controller-icons/x_menu_menu.svg"),
             VkIcon::Ps5Cross => include_str!("../../controller-icons/p5_face_cross_colored.svg"),
             VkIcon::Ps5Circle => include_str!("../../controller-icons/p5_face_circle_colored.svg"),
             VkIcon::Ps5Square => include_str!("../../controller-icons/p5_face_square_colored.svg"),
@@ -654,6 +669,12 @@ impl VkIcon {
             self,
             VkIcon::L3Ps5
                 | VkIcon::L3Xbox
+                | VkIcon::R3Ps5
+                | VkIcon::R3Xbox
+                | VkIcon::SelectPs5
+                | VkIcon::SelectXbox
+                | VkIcon::StartPs5
+                | VkIcon::StartXbox
                 | VkIcon::Ps5Cross
                 | VkIcon::Ps5Circle
                 | VkIcon::Ps5Square
@@ -717,18 +738,6 @@ fn row_pixel_width(row: &KeyRow, kw: f32, gap: f32) -> f32 {
         + gap * (row.keys.len().saturating_sub(1) as f32)
 }
 
-/// Which key in each row absorbs width slack so every row shares the same left/right edge.
-fn row_stretch_key(row_index: usize, key_count: usize) -> usize {
-    match row_index {
-        0 => key_count - 1, // Backspace
-        1 => 0,             // Tab
-        2 => key_count - 1, // Enter
-        3 => key_count - 1, // Right Shift
-        4 => 0,             // Space
-        _ => key_count.saturating_sub(1),
-    }
-}
-
 /// `scale_w` drives key size (always the monitor width, so floating keys match the
 /// docked bar); `client_w`/`client_h` drive centering within the target window.
 pub fn key_rects(
@@ -750,15 +759,14 @@ pub fn key_rects(
     let grid_left = (client_w - grid_w) / 2.0;
     let mut out = Vec::new();
     for (ri, row) in rows.iter().enumerate() {
-        let row_w = row_pixel_width(row, kw, gap);
-        let extra = grid_w - row_w;
-        let stretch = row_stretch_key(ri, row.keys.len());
+        // Flex-grow parity with the web rows: distribute the row's slack across
+        // every key proportionally so all rows share the same left/right edge.
+        let gaps_w = gap * (row.keys.len().saturating_sub(1) as f32);
+        let row_keys_w = (row_pixel_width(row, kw, gap) - gaps_w).max(1.0);
+        let scale = (grid_w - gaps_w).max(1.0) / row_keys_w;
         let mut left = grid_left;
         for (ci, key) in row.keys.iter().enumerate() {
-            let mut w = key_width(kw, gap, key.span);
-            if ci == stretch {
-                w = (w + extra).max(kw);
-            }
+            let w = key_width(kw, gap, key.span) * scale;
             out.push(KeyRect {
                 pos: KeyPos { row: ri, col: ci },
                 left,
@@ -808,7 +816,8 @@ fn shift_icon(shift: bool) -> VkIcon {
     }
 }
 
-/// Glyph for the CapsLock key (the CapsLock-action key reflects `caps`).
+/// Glyph for sticky caps (kept for the Shift key's promoted state).
+#[allow(dead_code)]
 fn caps_icon(caps: bool) -> VkIcon {
     if caps {
         VkIcon::ShiftFilled
@@ -1355,14 +1364,15 @@ impl VkRenderer {
             } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_DOWN)
             {
                 self.draw_svg_icon(VkIcon::ChevronDown, rect.rect, label_color)?;
-            } else if matches!(key.action, KeyAction::Paste) {
-                self.draw_svg_icon(VkIcon::Paste, rect.rect, label_color)?;
-            } else if matches!(key.action, KeyAction::CloseVk) {
+            } else if matches!(key.action, KeyAction::PredictPrev) {
+                self.draw_svg_icon(VkIcon::ChevronLeft, rect.rect, label_color)?;
+            } else if matches!(key.action, KeyAction::PredictNext) {
+                self.draw_svg_icon(VkIcon::ChevronRight, rect.rect, label_color)?;
+            } else if matches!(key.action, KeyAction::CloseVk) && key.label.is_empty() {
+                // The labeled close key ("Esc") falls through to the text path.
                 self.draw_svg_icon(VkIcon::Close, rect.rect, label_color)?;
             } else if matches!(key.action, KeyAction::Shift) {
                 self.draw_svg_icon(shift_icon(modifiers.shift), rect.rect, label_color)?;
-            } else if matches!(key.action, KeyAction::CapsLock) {
-                self.draw_svg_icon(caps_icon(modifiers.caps), rect.rect, label_color)?;
             } else {
                 let (glyph, symbol_font) = key_glyph(key);
                 if !glyph.is_empty() {

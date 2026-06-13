@@ -349,17 +349,12 @@ fn sdl_thread_main(
     while !stop.load(Ordering::Relaxed) {
         // Apply queued writes (LED/rumble) first — they must run on this thread
         // because it owns the pad. Drain the whole backlog, newest wins for LED.
+        let mut last_led = None;
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
-                PadCommand::Led { r, g, b } => {
-                    crate::install::log_line(&format!(
-                        "SDL apply led r={r} g={g} b={b} pad={}",
-                        input
-                            .active_controller_name()
-                            .unwrap_or_else(|| "none".to_string())
-                    ));
-                    input.set_led(r, g, b)
-                }
+                // No per-command log: animated LED effects (breathing/rainbow) push ~30
+                // commands/s — a log_line per write would be a disk write per frame.
+                PadCommand::Led { .. } => last_led = Some(cmd),
                 PadCommand::Rumble { strong, weak, ms } => {
                     let pad = input
                         .active_controller_name()
@@ -379,6 +374,9 @@ fn sdl_thread_main(
                     ));
                 }
             }
+        }
+        if let Some(PadCommand::Led { r, g, b }) = last_led {
+            input.set_led(r, g, b);
         }
 
         let mode = effective_userland_poll_mode();

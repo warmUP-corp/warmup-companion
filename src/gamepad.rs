@@ -194,7 +194,6 @@ impl Backend {
 pub struct GamepadPoll {
     backend: Backend,
     vk_down: bool,
-    a_down_while_vk: bool,
     a_cursor_down: bool,
     touchpad_cursor_down: bool,
     last_vk_open: bool,
@@ -348,7 +347,6 @@ impl GamepadPoll {
         Self {
             backend,
             vk_down: false,
-            a_down_while_vk: false,
             a_cursor_down: false,
             touchpad_cursor_down: false,
             last_vk_open: false,
@@ -371,7 +369,6 @@ impl GamepadPoll {
     /// Clear VK navigation / Y-latch state after close, desktop change, or reopen.
     pub fn reset_vk_controls(&mut self) {
         self.vk_down = false;
-        self.a_down_while_vk = false;
         self.a_cursor_down = false;
         self.touchpad_cursor_down = false;
         self.vk_toggle_need_release = false;
@@ -388,7 +385,6 @@ impl GamepadPoll {
 
     pub fn on_vk_opened(&mut self) {
         self.vk_down = false;
-        self.a_down_while_vk = false;
         self.vk_toggle_need_release = true;
         self.vk_nav_grace_until = Some(Instant::now() + VK_NAV_INPUT_GRACE);
         #[cfg(windows)]
@@ -436,6 +432,17 @@ impl GamepadPoll {
             // the loop thread is attached there, so inline SendInput reaches the PIN
             // keypad; post-login the Default-desktop injector thread is used.
             cursor.set_on_winlogon(Self::input_desktop_is_winlogon());
+        }
+
+        // Desktop `native_vk` request (open/close the companion keyboard via IPC).
+        if let Some(open) = crate::pipe_server::take_native_vk_request() {
+            if open != vk_open {
+                return Ok(vec![if open {
+                    VkLoopAction::Toggle
+                } else {
+                    VkLoopAction::Close
+                }]);
+            }
         }
 
         // Apply any LED/rumble commands the desktop pushed since the last poll, then
@@ -618,8 +625,10 @@ impl GamepadPoll {
             return None;
         }
 
-        // A=activate, B=backspace, X=space, Y=voice input, LB=page, RB=Enter, LT=shift, RT=caps, L3=close,
-        // D-pad/L-stick axis=move focus.
+        // Web VK shortcut map (L3/X swapped: L3 keeps the native open/close toggle,
+        // X takes the language flip): A/Touchpad=activate, B=backspace, Y=space,
+        // Select=engage suggestion strip, LB/RB=cycle chips, Start=Enter,
+        // LT=symbols, RT=shift, R3=voice, D-pad/L-stick axis=move focus.
         match (change.button, change.pressed) {
             (VK_BUTTON, true) => {
                 // Same press that opened the VK is still held — wait for release.
@@ -644,62 +653,86 @@ impl GamepadPoll {
                 vk_nav::dpad_released(change.button);
                 None
             }
-            (Button::A, true) => {
-                self.a_down_while_vk = true;
-                None
-            }
-            (Button::A, false) if self.a_down_while_vk => {
-                self.a_down_while_vk = false;
+            (Button::A | Button::Touchpad, true) => {
+                // Fire on press (not release) so holding the button auto-repeats.
                 let mut sink = vk_nav::SendInputSink;
                 if crate::vk_predict::commit_if_engaged(&mut sink).is_none() {
                     vk_nav::activate_selection();
+                    vk_nav::repeat_pressed(vk_nav::RepeatKey::Activate);
                 }
                 vk_ui::request_repaint();
                 None
             }
+            (Button::A | Button::Touchpad, false) => {
+                vk_nav::repeat_released(vk_nav::RepeatKey::Activate);
+                None
+            }
             (Button::B, true) => {
                 vk_nav::backspace();
+                vk_nav::repeat_pressed(vk_nav::RepeatKey::Backspace);
                 vk_ui::request_repaint();
+                None
+            }
+            (Button::B, false) => {
+                vk_nav::repeat_released(vk_nav::RepeatKey::Backspace);
                 None
             }
             (Button::X, true) => {
-                vk_nav::space();
-                vk_ui::request_repaint();
+                // L3 keeps its open/close toggle role, so the web's L3 language
+                // flip lives on the otherwise-free X button.
+                vk_nav::toggle_language();
+                self.backend.haptic_confirm();
                 None
             }
             (Button::Y, true) => {
-                vk_nav::start_voice_input();
+                vk_nav::space();
+                vk_nav::repeat_pressed(vk_nav::RepeatKey::Space);
                 vk_ui::request_repaint();
-                self.backend.haptic_alert();
+                None
+            }
+            (Button::Y, false) => {
+                vk_nav::repeat_released(vk_nav::RepeatKey::Space);
+                None
+            }
+            (Button::Select, true) => {
+                // Web SELECT: jump into the suggestion strip when populated.
+                if crate::vk_predict::cycle_next() {
+                    vk_ui::request_repaint();
+                }
                 None
             }
             (Button::Lb, true) => {
-                // cycle_prev returns true iff the strip was active (context swap).
+                // Shoulders own the autocomplete chips (strip draws LB/RB pills).
                 if crate::vk_predict::cycle_prev() {
                     vk_ui::request_repaint();
-                } else {
-                    vk_nav::next_layer();
                 }
                 None
             }
             (Button::Rb, true) => {
                 if crate::vk_predict::cycle_next() {
                     vk_ui::request_repaint();
-                } else {
-                    vk_nav::enter();
                 }
                 None
             }
             (Button::Lt, true) => {
-                vk_nav::set_shift(true);
-                None
-            }
-            (Button::Lt, false) => {
-                vk_nav::set_shift(false);
+                vk_nav::toggle_symbols();
                 None
             }
             (Button::Rt, true) => {
-                vk_nav::toggle_caps();
+                vk_nav::toggle_shift();
+                None
+            }
+            (Button::R3, true) => {
+                vk_nav::start_voice_input();
+                vk_ui::request_repaint();
+                self.backend.haptic_alert();
+                None
+            }
+            (Button::Start, true) => {
+                // Web START: confirm — commit the line; the VK stays open
+                // (L3 / Esc handle dismissal).
+                vk_nav::enter();
+                self.backend.haptic_confirm();
                 None
             }
             _ => None,
@@ -887,13 +920,17 @@ where
         println!("  L3 (stick click) → open keyboard");
         println!("Controls (VK open):");
         println!("  D-pad/L-stick → move key focus");
-        println!("  A            → type selected key");
+        println!("  A / Touchpad → type selected key");
         println!("  B            → backspace");
-        println!("  X            → space");
+        println!("  X            → language (QWERTY/QWERTZ)");
+        println!("  Y            → space");
+        println!("  Select       → suggestion strip");
+        println!("  Start        → Enter");
+        println!("  LB / RB      → cycle autocomplete chips");
+        println!("  LT           → &123 symbols");
+        println!("  RT           → shift");
         println!("  L3           → close keyboard");
-        println!("  LB           → next page (#+= symbols, ABC)");
-        println!("  RB           → Enter");
-        println!("  Shift        → on-screen ⇧ key + A");
+        println!("  R3           → voice input");
         println!("Ctrl+C to stop.");
     } else {
         #[cfg(windows)]

@@ -234,6 +234,10 @@ pub struct GamepadInput {
     poll_mode: PollMode,
     /// Last known position of touchpad 0 finger 0 while it was down; used for delta computation.
     prev_touchpad_pos: Option<(f32, f32)>,
+    /// Pad instance whose SDL player-index lightbar override has been cleared. The clear
+    /// itself sends an output report, so doing it on every `set_led` call makes animated
+    /// LED effects (breathing/rainbow at ~30 Hz) visibly flicker — clear once per pad.
+    led_player_cleared_for: Option<u32>,
 }
 
 impl GamepadInput {
@@ -272,6 +276,7 @@ impl GamepadInput {
             touchpad_samples: Vec::new(),
             poll_mode: PollMode::Full,
             prev_touchpad_pos: None,
+            led_player_cleared_for: None,
         };
         // Baseline all buttons to suppress press storms on startup (Xbox triggers at rest = pressed).
         input.sync_prev_buttons_to_current();
@@ -455,8 +460,16 @@ impl GamepadInput {
                 player_index: ::std::ffi::c_int,
             ) -> bool;
         }
+        // The player-index clear sends its own output report; repeating it on every LED
+        // write makes ~30 Hz animated effects flicker. Clear once per pad instance.
+        let raw_id = id.into();
+        if self.led_player_cleared_for != Some(raw_id) {
+            unsafe {
+                SDL_SetGamepadPlayerIndex(raw, -1);
+            }
+            self.led_player_cleared_for = Some(raw_id);
+        }
         unsafe {
-            SDL_SetGamepadPlayerIndex(raw, -1);
             SDL_SetGamepadLED(raw, r, g, b);
         }
     }

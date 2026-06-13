@@ -140,14 +140,13 @@ fn is_dark_theme() -> bool {
 /// which Segoe UI Symbol covers reliably.
 /// Returns `(text, is_symbol_font)`.
 fn key_glyph(key: &KeyCell) -> (String, bool) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_RETURN, VK_SPACE};
+    use windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE;
     match &key.action {
-        KeyAction::Shift | KeyAction::CapsLock => (key.label.clone(), false),
-        KeyAction::CloseVk => ("\u{2325}".to_string(), true), // keyboard dismiss
+        KeyAction::Shift => (key.label.clone(), false),
+        // Labeled close ("Esc") renders text; the unlabeled side key gets the
+        // renderer's close icon.
+        KeyAction::CloseVk => (key.label.clone(), false),
         KeyAction::VoiceInput => (String::new(), false),
-        KeyAction::Paste => (key.label.clone(), false),
-        KeyAction::Vk(vk) if *vk == VK_BACK => (key.label.clone(), false),
-        KeyAction::Vk(vk) if *vk == VK_RETURN => (key.label.clone(), false),
         KeyAction::Vk(vk) if *vk == VK_SPACE => (String::new(), false),
         _ => (key.label.clone(), false),
     }
@@ -156,14 +155,17 @@ fn key_glyph(key: &KeyCell) -> (String, bool) {
 fn key_hint(key: &KeyCell) -> Option<&'static str> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_RETURN, VK_SPACE};
     match &key.action {
-        // Badges only for face buttons that fire without selecting the key first
-        // (`gamepad::handle_vk_open_button`).
+        // Badges mirror the web VK's controller hints
+        // (`getIntegratedBadge` / `gamepad::handle_vk_open_button`). Select engages
+        // the suggestion strip, not Tab, so the Tab key carries no badge.
         KeyAction::Vk(vk) if *vk == VK_BACK => Some("B"),
-        KeyAction::Vk(vk) if *vk == VK_RETURN => Some("RB"),
-        KeyAction::Vk(vk) if *vk == VK_SPACE => Some("X"),
-        KeyAction::Shift => Some("LT"),
-        KeyAction::CapsLock => Some("RT"),
-        KeyAction::VoiceInput => Some("Y"),
+        KeyAction::Vk(vk) if *vk == VK_RETURN => Some("START"),
+        KeyAction::Vk(vk) if *vk == VK_SPACE => Some("Y"),
+        KeyAction::Shift => Some("RT"),
+        KeyAction::Symbols => Some("LT"),
+        KeyAction::PredictPrev => Some("LB"),
+        KeyAction::PredictNext => Some("RB"),
+        KeyAction::VoiceInput => Some("R3"),
         KeyAction::CloseVk => Some("L3"),
         _ => None,
     }
@@ -270,7 +272,9 @@ pub fn request_hide() {
 
 #[cfg(feature = "gamepad")]
 pub fn tick_dpad_hold(now: Instant) -> bool {
-    if vk_nav::tick_dpad_hold(now) {
+    let moved = vk_nav::tick_dpad_hold(now);
+    let repeated = vk_nav::tick_key_repeat(now);
+    if moved || repeated {
         request_repaint();
         true
     } else {

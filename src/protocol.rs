@@ -143,13 +143,15 @@ pub enum RumblePayload {
     Full {
         strong: f32,
         weak: f32,
-        #[serde(rename = "durationMs")]
+        // Contract field is `durationMs`; the alias tolerates warmUp builds whose serde
+        // enum-level rename did not reach variant fields and emitted `duration_ms`.
+        #[serde(rename = "durationMs", alias = "duration_ms")]
         duration_ms: u32,
     },
     Triggers {
         left: f32,
         right: f32,
-        #[serde(rename = "durationMs")]
+        #[serde(rename = "durationMs", alias = "duration_ms")]
         duration_ms: u32,
     },
 }
@@ -160,6 +162,14 @@ pub struct LedPayload {
     pub r: u8,
     pub g: u8,
     pub b: u8,
+}
+
+/// `native_vk` down-frame payload — desktop request to drive the companion's
+/// native on-screen keyboard (`action`: `"open"` | `"close"`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeVkPayload {
+    pub action: String,
 }
 
 /// Optional native keyboard theme colors. Each field is `#RRGGBB`; absent fields keep
@@ -198,7 +208,10 @@ pub struct ConfigPayload {
     /// Absent leaves the current colour untouched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub led_color: Option<String>,
-    /// Lightbar animation: `solid` | `breathing` | `rainbow` | `off`. Absent keeps the current effect.
+    /// Second lightbar colour for `gradient` mode. Absent leaves the current secondary colour untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub led_secondary_color: Option<String>,
+    /// Lightbar animation: `solid` | `breathing` | `rainbow` | `gradient` | `off`. Absent keeps the current effect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub led_effect: Option<String>,
     /// Lightbar brightness 0.0–1.0. Absent keeps the current brightness.
@@ -246,6 +259,7 @@ pub enum DownFrame {
     Rumble(RumblePayload),
     Led(LedPayload),
     CompanionSettings(CompanionSettingsPayload),
+    NativeVk(NativeVkPayload),
     #[serde(skip)]
     Unknown,
 }
@@ -287,9 +301,8 @@ impl DownFrame {
     pub fn parse_line(line: &str) -> Result<Self, serde_json::Error> {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
-            "hello" | "config" | "mode" | "rumble" | "led" | "companion_settings" => {
-                serde_json::from_str(line)
-            }
+            "hello" | "config" | "mode" | "rumble" | "led" | "companion_settings"
+            | "native_vk" => serde_json::from_str(line),
             _ => Ok(Self::Unknown),
         }
     }
@@ -356,7 +369,8 @@ mod tests {
             enabled: true,
             clicks_enabled: false,
             led_color: Some("#b6a0ff".into()),
-            led_effect: Some("breathing".into()),
+            led_secondary_color: Some("#4c7b99".into()),
+            led_effect: Some("gradient".into()),
             led_brightness: Some(0.8),
             natural_scroll: true,
             cursor_smoothing: 0.25,
@@ -375,7 +389,8 @@ mod tests {
         assert_eq!(json["type"], "config");
         assert_eq!(json["payload"]["clicksEnabled"], false);
         assert_eq!(json["payload"]["ledColor"], "#b6a0ff");
-        assert_eq!(json["payload"]["ledEffect"], "breathing");
+        assert_eq!(json["payload"]["ledSecondaryColor"], "#4c7b99");
+        assert_eq!(json["payload"]["ledEffect"], "gradient");
         assert_eq!(json["payload"]["naturalScroll"], true);
         assert_eq!(json["payload"]["accelerationExp"], 2.0);
         assert_eq!(json["payload"]["keyboardTheme"]["background"], "#101010");
