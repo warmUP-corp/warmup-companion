@@ -15,15 +15,58 @@ Use this before publishing an OSS release or binary.
 - `README.md`, `PRIVACY.md`, `SECURITY.md`, `LICENSE`, and `CONTRIBUTING.md`
   are present in the repo.
 - Installer copies trust docs to `C:\ProgramData\WarmupVk`.
+- Installer runs silently (no PowerShell window) when started in its own
+  process and writes its output to `C:\ProgramData\WarmupVk\install.log`.
 - Release notes list service name, install path, log path, uninstall command,
-  Sentry opt-in behavior, and native keyboard suppression/restoration behavior.
+  silent-install behavior and install log path, Sentry opt-in behavior, and
+  native keyboard suppression/restoration behavior.
 - Crash-dump handling is documented.
 
 ## Binary Signing
 
 - Sign `warmup-companion.exe` before publishing.
+- Sign `install\Install-WarmupVk.ps1` with the same certificate
+  (`Set-AuthenticodeSignature`); the installer is part of the trust story.
 - Include certificate subject and thumbprint in release notes.
 - Publish SHA-256 checksums for release assets.
+
+Download-verification command published in the release notes:
+
+```powershell
+(Get-FileHash .\warmup-companion.exe -Algorithm SHA256).Hash.ToLower()
+```
+
+### Getting a certificate (open source)
+
+Since June 2023, code-signing keys (OV and EV) must live on FIPS-140 hardware
+or a cloud HSM; downloadable `.pfx` files are no longer issued. Choose a key
+custodian first, then sign in CI.
+
+- **SignPath Foundation** — recommended; free for qualifying open-source
+  projects. Sponsored OV certificate, key held in SignPath's cloud HSM, signing
+  wired into GitHub Actions. Requires an OSI-approved license and a minimum
+  project-activity bar.
+- **Certum Open Source** — low-cost OV certificate issued to an individual after
+  ID verification; key on Certum SimplySign cloud or a USB card.
+- **Azure Trusted Signing** — low-cost Microsoft-run signing with HSM included
+  and first-class GitHub Actions support; individual eligibility needs a
+  verifiable multi-year identity history.
+
+### SmartScreen reputation
+
+- An OV signature removes the "Unknown publisher" label, but SmartScreen
+  reputation accrues over downloads; early downloads may still warn.
+- Only an EV certificate grants instant SmartScreen reputation, and EV is not
+  available for free.
+- MSIX / Microsoft Store signing is not viable here: the app installs a
+  LocalSystem service for secure-desktop input, which does not fit the Store
+  sandbox.
+
+### Until a certificate is in place
+
+- Ship unsigned with a published SHA-256 checksum and document the SmartScreen
+  "More info -> Run anyway" step. This is a documented stopgap, not the final
+  state.
 
 ## Privacy / Telemetry
 
