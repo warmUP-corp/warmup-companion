@@ -22,9 +22,26 @@ Use this before publishing an OSS release or binary.
   native keyboard suppression/restoration behavior.
 - Crash-dump handling is documented.
 
+## Installer
+
+- Build the installer from the release binary:
+
+```powershell
+cargo build --release
+makensis install\warmup-companion.nsi
+```
+
+- Output: `target\warmup-companion-setup.exe` (NSIS; UAC-elevated; supports
+  silent `/S`).
+- Attach both `warmup-companion-setup.exe` and the bare `warmup-companion.exe`
+  to the release, each with a SHA-256 checksum.
+- Sign both before publishing (see Binary Signing).
+
 ## Binary Signing
 
 - Sign `warmup-companion.exe` before publishing.
+- Sign `target\warmup-companion-setup.exe` (the NSIS installer) before
+  publishing.
 - Sign `install\Install-WarmupVk.ps1` with the same certificate
   (`Set-AuthenticodeSignature`); the installer is part of the trust story.
 - Include certificate subject and thumbprint in release notes.

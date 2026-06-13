@@ -26,13 +26,28 @@ session.
 
 ## Install
 
+### Installer (recommended)
+
+Download `warmup-companion-setup.exe` from the
+[latest release](https://github.com/warmUP-corp/warmup-companion/releases/latest),
+run it, and approve the UAC prompt. It installs and starts the service and adds
+an Add/Remove Programs entry. Silent install is supported:
+
+```powershell
+warmup-companion-setup.exe /S
+```
+
+### From source (PowerShell)
+
 From an Administrator PowerShell:
 
 ```powershell
 .\install\Install-WarmupVk.ps1
 ```
 
-The installer builds the release binary, installs:
+This builds the release binary first, then installs it.
+
+Either path installs:
 
 - service: `WarmupVkSvc`
 - binary: `C:\ProgramData\WarmupVk\bin\warmup-companion.exe`
@@ -43,7 +58,14 @@ controller VK button.
 
 ## Uninstall
 
-From an Administrator PowerShell:
+If you installed with `warmup-companion-setup.exe`, uninstall from
+**Settings -> Apps** (Add/Remove Programs), or run the uninstaller silently:
+
+```powershell
+"C:\Program Files\WarmupVk\uninstall.exe" /S
+```
+
+Otherwise, from an Administrator PowerShell:
 
 ```powershell
 .\target\release\warmup-companion.exe uninstall
