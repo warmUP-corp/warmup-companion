@@ -91,6 +91,9 @@ camelCase, matching the desktop serde shape:
   "gyroScrollEnabled": false,
   "gyroScrollSensitivity": 1.0,
   "ledColor": "#b6a0ff",
+  "ledSecondaryColor": "#4c7b99",
+  "ledEffect": "gradient",
+  "ledBrightness": 0.8,
   "vkMode": "docked",
   "keyboardTheme": {
     "background": "#1f1f1f",
@@ -102,6 +105,10 @@ camelCase, matching the desktop serde shape:
   }
 }
 ```
+
+`ledEffect` accepts `"solid"`, `"breathing"`, `"rainbow"`, `"gradient"`, or `"off"`.
+`gradient` smoothly cycles between `ledColor` and `ledSecondaryColor`.
+`ledBrightness` is a `0.0`-`1.0` multiplier applied to all companion-driven LED writes.
 
 Added in v3: `keyboardTheme.border` (key outline, derived desktop-side from `key` to match the
 webview VK) and `vkMode` (`"docked"` | `"floating"`; floating renders a compact panel near the

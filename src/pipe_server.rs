@@ -13,7 +13,7 @@ use crate::protocol::{
     ModeSnapshot, RumblePayload, TouchpadPayload,
 };
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Mutex, Once, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -70,6 +70,33 @@ pub fn launcher_foreground_nav() -> bool {
 /// Whether warmUP is connected and should be the source of truth for mode state.
 pub fn desktop_connected() -> bool {
     DESKTOP_CONNECTED.load(Ordering::Relaxed)
+}
+
+/// Pending `native_vk` request from the desktop: 0 = none, 1 = open, 2 = close.
+/// Set by the inbound frame reader, drained by the gamepad loop (which owns VK state).
+static NATIVE_VK_REQUEST: AtomicU8 = AtomicU8::new(0);
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn set_native_vk_request(p: &crate::protocol::NativeVkPayload) {
+    let v = match p.action.as_str() {
+        "open" => 1,
+        "close" => 2,
+        other => {
+            crate::install::log_line(&format!("pipe inbound native_vk unknown action {other:?}"));
+            return;
+        }
+    };
+    crate::install::log_line(&format!("pipe inbound native_vk action={}", p.action));
+    NATIVE_VK_REQUEST.store(v, Ordering::Relaxed);
+}
+
+/// Take the pending desktop VK request, if any. `Some(true)` = open, `Some(false)` = close.
+pub fn take_native_vk_request() -> Option<bool> {
+    match NATIVE_VK_REQUEST.swap(0, Ordering::Relaxed) {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
 }
 
 /// Accumulate a visual-cursor hint. The companion has already injected the OS move; this
@@ -188,16 +215,35 @@ fn push_device_command(cmd: PadCommand) {
 pub fn drain_device_commands() -> Vec<PadCommand> {
     device_cmds()
         .lock()
-        .map(|mut q| q.drain(..).collect())
+        .map(|mut q| coalesce_led_commands(q.drain(..)))
         .unwrap_or_default()
 }
 
+fn coalesce_led_commands<I>(cmds: I) -> Vec<PadCommand>
+where
+    I: IntoIterator<Item = PadCommand>,
+{
+    let mut out = Vec::new();
+    let mut last_led = None;
+    for cmd in cmds {
+        match cmd {
+            PadCommand::Led { .. } => last_led = Some(cmd),
+            _ => out.push(cmd),
+        }
+    }
+    if let Some(cmd) = last_led {
+        out.push(cmd);
+    }
+    out
+}
+
 /// Lightbar animation the companion drives. Mirrors the desktop `ledEffect` vocabulary.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LedEffect {
     Solid,
     Breathing,
     Rainbow,
+    Gradient,
     Off,
 }
 
@@ -207,6 +253,7 @@ impl LedEffect {
             "off" => Self::Off,
             "breathing" => Self::Breathing,
             "rainbow" => Self::Rainbow,
+            "gradient" => Self::Gradient,
             _ => Self::Solid,
         }
     }
@@ -220,6 +267,10 @@ struct LedState {
     r: u8,
     g: u8,
     b: u8,
+    /// Secondary colour for `gradient` effect.
+    r2: u8,
+    g2: u8,
+    b2: u8,
     /// 0.0–1.0 brightness multiplier.
     brightness: f32,
 }
@@ -232,6 +283,9 @@ impl Default for LedState {
             r: 0xb6,
             g: 0xa0,
             b: 0xff,
+            r2: 0x4c,
+            g2: 0x7b,
+            b2: 0x99,
             brightness: 1.0,
         }
     }
@@ -268,6 +322,11 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
     )
 }
 
+fn blend_channel(a: u8, b: u8, t: f32, brightness: f32) -> u8 {
+    let c = a as f32 + (b as f32 - a as f32) * t.clamp(0.0, 1.0);
+    scale_channel(c.round() as u8, brightness)
+}
+
 /// Effective lightbar colour for `state` at elapsed time `t` seconds.
 fn led_color_at(state: &LedState, t: f32) -> (u8, u8, u8) {
     match state.effect {
@@ -289,6 +348,15 @@ fn led_color_at(state: &LedState, t: f32) -> (u8, u8, u8) {
         }
         // ~6 s hue sweep; the base colour is replaced by the cycling hue.
         LedEffect::Rainbow => hsv_to_rgb((t / 6.0).fract(), 1.0, state.brightness),
+        LedEffect::Gradient => {
+            // Smoothly ping-pong between the two configured colours over ~5 seconds.
+            let mix = 0.5 - 0.5 * (t * std::f32::consts::TAU / 5.0).cos();
+            (
+                blend_channel(state.r, state.r2, mix, state.brightness),
+                blend_channel(state.g, state.g2, mix, state.brightness),
+                blend_channel(state.b, state.b2, mix, state.brightness),
+            )
+        }
     }
 }
 
@@ -334,6 +402,15 @@ fn apply_led_config(p: &crate::protocol::ConfigPayload) {
             st.r = (cref & 0xff) as u8;
             st.g = ((cref >> 8) & 0xff) as u8;
             st.b = ((cref >> 16) & 0xff) as u8;
+        }
+        if let Some(cref) = p
+            .led_secondary_color
+            .as_deref()
+            .and_then(crate::config::parse_theme_color)
+        {
+            st.r2 = (cref & 0xff) as u8;
+            st.g2 = ((cref >> 8) & 0xff) as u8;
+            st.b2 = ((cref >> 16) & 0xff) as u8;
         }
         if let Some(effect) = p.led_effect.as_deref() {
             st.effect = LedEffect::parse(effect);
@@ -411,11 +488,36 @@ fn apply_rumble(p: &RumblePayload) {
 #[cfg_attr(not(windows), allow(dead_code))]
 fn apply_led(p: &crate::protocol::LedPayload) {
     crate::install::log_line(&format!("pipe inbound led r={} g={} b={}", p.r, p.g, p.b));
-    push_device_command(PadCommand::Led {
-        r: p.r,
-        g: p.g,
-        b: p.b,
-    });
+    let mut immediate = None;
+    if let Ok(mut st) = led_state().lock() {
+        match st.effect {
+            LedEffect::Solid => {
+                st.effect = LedEffect::Solid;
+                st.r = p.r;
+                st.g = p.g;
+                st.b = p.b;
+                immediate = Some(led_color_at(&st, 0.0));
+            }
+            LedEffect::Off => {
+                immediate = Some((0, 0, 0));
+            }
+            LedEffect::Breathing | LedEffect::Gradient => {
+                st.r = p.r;
+                st.g = p.g;
+                st.b = p.b;
+            }
+            LedEffect::Rainbow => {}
+        }
+    } else {
+        immediate = Some((p.r, p.g, p.b));
+    }
+    if let Some(color) = immediate {
+        push_device_command(PadCommand::Led {
+            r: color.0,
+            g: color.1,
+            b: color.2,
+        });
+    }
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -623,7 +725,8 @@ mod server {
     use super::{
         apply_companion_settings, apply_config, apply_led, apply_mode, apply_rumble,
         clear_desktop_mode, current, current_axis, current_battery, drain_buttons,
-        reset_button_stream, take_cursor_moved, take_touchpad, DESKTOP_CONNECTED,
+        reset_button_stream, set_native_vk_request, take_cursor_moved, take_touchpad,
+        DESKTOP_CONNECTED,
     };
     use crate::protocol::{
         AxisPayload, BatteryPayload, ConnectionPayload, DownFrame, Hello, UpFrame, PROTOCOL_VERSION,
@@ -852,6 +955,12 @@ mod server {
                 Ok(DownFrame::Rumble(p)) => apply_rumble(&p),
                 Ok(DownFrame::Led(p)) => apply_led(&p),
                 Ok(DownFrame::CompanionSettings(p)) => apply_companion_settings(&p),
+                Ok(DownFrame::NativeVk(p)) => set_native_vk_request(&p),
+                // A malformed known-type frame is a contract break (e.g. the rumble
+                // durationMs mismatch) — log it instead of dropping silently.
+                Err(e) => {
+                    crate::install::log_line(&format!("pipe inbound frame parse error: {e}"));
+                }
                 _ => {}
             }
         }
@@ -915,6 +1024,12 @@ mod server {
 mod tests {
     use super::*;
 
+    static TEST_LED_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn test_led_lock() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LED_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
     #[test]
     fn none_or_empty_label_is_disconnected() {
         assert!(!label_to_payload("none").connected);
@@ -930,10 +1045,11 @@ mod tests {
     }
 
     #[test]
-    fn dualsense_maps_to_ps5() {
+    fn dualsense_maps_to_playstation() {
+        // warmUp's `ControllerType` vocabulary is 'xbox' | 'playstation' | 'switch' | 'generic'.
         assert_eq!(
             label_to_payload("DualSense Wireless Controller").controller_type,
-            "ps5"
+            "playstation"
         );
     }
 
@@ -977,6 +1093,33 @@ mod tests {
         publish_button("B", true);
         reset_button_stream();
         assert!(drain_buttons().is_empty());
+    }
+
+    #[test]
+    fn device_command_drain_coalesces_led_bursts() {
+        push_device_command(PadCommand::Led { r: 1, g: 2, b: 3 });
+        push_device_command(PadCommand::Led { r: 4, g: 5, b: 6 });
+        push_device_command(PadCommand::Rumble {
+            strong: 0.1,
+            weak: 0.2,
+            ms: 30,
+        });
+        push_device_command(PadCommand::Led { r: 7, g: 8, b: 9 });
+
+        let cmds = drain_device_commands();
+        assert_eq!(cmds.len(), 2);
+        assert!(matches!(
+            cmds[0],
+            PadCommand::Rumble {
+                strong: 0.1,
+                weak: 0.2,
+                ms: 30,
+            }
+        ));
+        assert!(matches!(
+            cmds[1],
+            PadCommand::Led { r: 7, g: 8, b: 9 }
+        ));
     }
 
     #[test]
@@ -1028,5 +1171,133 @@ mod tests {
         clear_desktop_mode();
         assert!(!game_active());
         assert!(!launcher_foreground_nav());
+    }
+
+    fn test_config(
+        led_color: Option<&str>,
+        led_effect: Option<&str>,
+        led_brightness: Option<f32>,
+    ) -> crate::protocol::ConfigPayload {
+        crate::protocol::ConfigPayload {
+            deadzone: 0.15,
+            sensitivity: 15.0,
+            acceleration_exp: 2.0,
+            scroll_sensitivity: 5.0,
+            enabled: true,
+            clicks_enabled: true,
+            led_color: led_color.map(str::to_string),
+            led_secondary_color: None,
+            led_effect: led_effect.map(str::to_string),
+            led_brightness,
+            natural_scroll: false,
+            cursor_smoothing: 0.0,
+            keyboard_theme: None,
+            vk_mode: None,
+        }
+    }
+
+    #[test]
+    fn led_config_updates_effect_color_and_brightness() {
+        let _guard = test_led_lock();
+        apply_led_config(&test_config(Some("#112233"), Some("breathing"), Some(0.5)));
+        let st = *led_state().lock().unwrap();
+        assert_eq!(st.effect, LedEffect::Breathing);
+        assert_eq!((st.r, st.g, st.b), (0x11, 0x22, 0x33));
+        assert_eq!(st.brightness, 0.5);
+        assert_eq!(led_color_at(&st, 0.0), (1, 3, 4));
+    }
+
+    #[test]
+    fn one_shot_led_does_not_flash_over_rainbow() {
+        let _guard = test_led_lock();
+        apply_led_config(&test_config(Some("#112233"), Some("rainbow"), Some(0.5)));
+        drain_device_commands();
+        let before = *led_state().lock().unwrap();
+        apply_led(&crate::protocol::LedPayload {
+            r: 0xaa,
+            g: 0xbb,
+            b: 0xcc,
+        });
+        let cmds = drain_device_commands();
+        assert!(
+            !cmds.iter().any(|cmd| matches!(
+                cmd,
+                PadCommand::Led {
+                    r: 0x55,
+                    g: 0x5e,
+                    b: 0x66,
+                }
+            )),
+            "one-shot LED command must not interleave steady color with animated engine output"
+        );
+
+        let after = *led_state().lock().unwrap();
+        assert_eq!(after.effect, before.effect);
+        assert_eq!((after.r, after.g, after.b), (before.r, before.g, before.b));
+        assert_eq!(after.brightness, 0.5);
+        assert_ne!(led_color_at(&after, 0.0), led_color_at(&after, 1.0));
+    }
+
+    #[test]
+    fn one_shot_led_updates_breathing_base_without_direct_flash() {
+        let _guard = test_led_lock();
+        apply_led_config(&test_config(Some("#112233"), Some("breathing"), Some(0.5)));
+        drain_device_commands();
+        apply_led(&crate::protocol::LedPayload {
+            r: 0xaa,
+            g: 0xbb,
+            b: 0xcc,
+        });
+
+        let cmds = drain_device_commands();
+        assert!(
+            !cmds.iter().any(|cmd| matches!(
+                cmd,
+                PadCommand::Led {
+                    r: 0x55,
+                    g: 0x5e,
+                    b: 0x66,
+                }
+            )),
+            "breathing engine should own animated LED output"
+        );
+        let st = *led_state().lock().unwrap();
+        assert_eq!(st.effect, LedEffect::Breathing);
+        assert_eq!((st.r, st.g, st.b), (0xaa, 0xbb, 0xcc));
+        assert_eq!(st.brightness, 0.5);
+    }
+
+    #[test]
+    fn one_shot_led_does_not_turn_off_effect_back_on() {
+        let _guard = test_led_lock();
+        apply_led_config(&test_config(Some("#112233"), Some("off"), Some(0.5)));
+        drain_device_commands();
+        apply_led(&crate::protocol::LedPayload {
+            r: 0xaa,
+            g: 0xbb,
+            b: 0xcc,
+        });
+
+        let cmds = drain_device_commands();
+        assert!(cmds
+            .iter()
+            .any(|cmd| matches!(cmd, PadCommand::Led { r: 0, g: 0, b: 0 })));
+        let st = *led_state().lock().unwrap();
+        assert_eq!(st.effect, LedEffect::Off);
+        assert_eq!(led_color_at(&st, 0.0), (0, 0, 0));
+    }
+
+    #[test]
+    fn gradient_cycles_between_primary_and_secondary_colors() {
+        let _guard = test_led_lock();
+        let mut p = test_config(Some("#000000"), Some("gradient"), Some(1.0));
+        p.led_secondary_color = Some("#ffffff".into());
+        apply_led_config(&p);
+
+        let st = *led_state().lock().unwrap();
+        assert_eq!(st.effect, LedEffect::Gradient);
+        assert_eq!(led_color_at(&st, 0.0), (0x00, 0x00, 0x00));
+        assert_eq!(led_color_at(&st, 2.5), (0xff, 0xff, 0xff));
+        assert_eq!(led_color_at(&st, 5.0), (0x00, 0x00, 0x00));
     }
 }

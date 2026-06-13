@@ -7,21 +7,23 @@ use std::time::{Duration, Instant};
 use crate::gamepad_backend::Button;
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, GetKeyboardLayout, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DOWN,
-    VK_END, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
+    GetKeyboardLayout, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_END, VK_RETURN, VK_SPACE, VK_TAB,
 };
 
 #[derive(Clone)]
 pub enum KeyAction {
     Char(char),
     Vk(VIRTUAL_KEY),
-    /// Shift: LT hold or on-screen shift keys (toggle).
+    /// Shift: RT or the on-screen Shift key (web `toggleShift`: one-shot,
+    /// double-tap promotes to sticky caps).
     Shift,
-    /// Caps lock toggle.
-    CapsLock,
-    /// Ctrl+V paste.
-    Paste,
+    /// Symbol layer: LT or the on-screen `&123` key (web `toggleSymbols`).
+    Symbols,
+    /// Previous prediction-strip candidate (`<` key).
+    PredictPrev,
+    /// Next prediction-strip candidate (`>` key).
+    PredictNext,
     /// Start background Windows speech recognition.
     VoiceInput,
     /// Dismiss the on-screen keyboard.
@@ -47,36 +49,20 @@ impl KeyCell {
             span: 1.0,
         }
     }
-    fn pair(base: char, shifted: char, shift: bool, caps: bool) -> Self {
-        // Shift or caps alone → alternate symbol; both → base (same as letters).
-        let alt = shift ^ caps;
-        if alt {
-            KeyCell {
-                label: shifted.to_string(),
-                sublabel: Some(base.to_string()),
-                action: KeyAction::Char(shifted),
-                span: 1.0,
-            }
-        } else {
-            KeyCell {
-                label: base.to_string(),
-                sublabel: Some(shifted.to_string()),
-                action: KeyAction::Char(base),
-                span: 1.0,
-            }
-        }
-    }
-    fn alpha(c: char, shift: bool, caps: bool) -> Self {
-        if shift ^ caps {
-            let u = c.to_uppercase().next().unwrap_or(c);
-            KeyCell {
-                label: u.to_string(),
-                sublabel: None,
-                action: KeyAction::Char(u),
-                span: 1.0,
-            }
-        } else {
-            KeyCell::ch(c)
+    /// Character key with web semantics: `lower`/`upper`/`symbol` resolved by the
+    /// active layer; the corner accent shows the symbol (or, on the symbol layer,
+    /// the uppercase letter), matching `resolveVirtualKeyboardKeyAccent`.
+    fn tri(lower: char, upper: char, symbol: char, layer: Layer) -> Self {
+        let (c, accent) = match layer {
+            Layer::Lower => (lower, symbol),
+            Layer::Upper => (upper, symbol),
+            Layer::Symbol => (symbol, upper),
+        };
+        KeyCell {
+            label: c.to_string(),
+            sublabel: Some(accent.to_string()),
+            action: KeyAction::Char(c),
+            span: 1.0,
         }
     }
     fn named(label: &str, action: KeyAction, span: f32) -> Self {
@@ -95,14 +81,6 @@ impl KeyCell {
             span,
         }
     }
-    fn shift_key(span: f32) -> Self {
-        KeyCell {
-            label: "Shift".to_string(),
-            sublabel: None,
-            action: KeyAction::Shift,
-            span,
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -116,132 +94,163 @@ pub struct KeyPos {
     pub col: usize,
 }
 
+/// Active render layer, mirroring the web VK's `VirtualKeyboardLayer`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Layer {
+    Lower,
+    Upper,
+    Symbol,
+}
+
 struct NavState {
     pos: KeyPos,
-    shift: bool,
-    caps: bool,
+    layer: Layer,
+    /// Upper layer reverts after one character unless promoted by double-tap.
+    one_shot_shift: bool,
+    /// Symbol layer reverts after one character unless promoted by double-tap.
+    one_shot_symbol: bool,
+    last_shift_at: Option<Instant>,
+    last_symbol_at: Option<Instant>,
+    /// QWERTZ letter rows (web `de-DE` language toggle on L3).
+    lang_de: bool,
     voice_input: bool,
     rows: Vec<KeyRow>,
     #[cfg(feature = "gamepad")]
     hold_button: Option<Button>,
     hold_count: u32,
     hold_deadline: Option<Instant>,
+    /// Held input button (A/B/Y) auto-repeating its action.
+    repeat_key: Option<RepeatKey>,
+    repeat_deadline: Option<Instant>,
 }
 
 static NAV: Mutex<NavState> = Mutex::new(NavState {
     pos: KeyPos { row: 0, col: 0 },
-    shift: false,
-    caps: false,
+    layer: Layer::Lower,
+    one_shot_shift: false,
+    one_shot_symbol: false,
+    last_shift_at: None,
+    last_symbol_at: None,
+    lang_de: false,
     voice_input: false,
     rows: Vec::new(),
     #[cfg(feature = "gamepad")]
     hold_button: None,
     hold_count: 0,
     hold_deadline: None,
+    repeat_key: None,
+    repeat_deadline: None,
 });
 
-#[cfg(feature = "gamepad")]
+/// Which held button drives the key auto-repeat.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RepeatKey {
+    /// A/Touchpad held on the focused key.
+    Activate,
+    /// B held — backspace.
+    Backspace,
+    /// Y held — space.
+    Space,
+}
+
 const HOLD_INITIAL: Duration = Duration::from_millis(350);
-#[cfg(feature = "gamepad")]
 const HOLD_REPEAT: Duration = Duration::from_millis(70);
+/// Second shift/symbol tap inside this window promotes one-shot to sticky
+/// (web `DOUBLE_TAP_SHIFT_MS`).
+const DOUBLE_TAP_STICKY: Duration = Duration::from_millis(400);
 
-/// Every row spans this many key-units so the block is one rectangle.
-const GRID_UNITS: f32 = 15.0;
+/// Edge action keys are 1.45 key-units wide, the space bar 5.15 — same flex
+/// ratios as the web layout (`LEFT_ACTION_KEY_WIDTH` / `action-space`).
+const SPAN_ACTION: f32 = 1.45;
+const SPAN_SPACE: f32 = 5.15;
 
-/// Five-row US QWERTY.
-fn build_pc_layout(shift: bool, caps: bool) -> Vec<KeyRow> {
-    let a = |c: char| KeyCell::alpha(c, shift, caps);
-    let p = |base: char, shifted: char| KeyCell::pair(base, shifted, shift, caps);
+const TOP_LETTERS_EN: [char; 10] = ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'];
+const TOP_LETTERS_DE: [char; 10] = ['q', 'w', 'e', 'r', 't', 'z', 'u', 'i', 'o', 'p'];
+const MID_LETTERS: [char; 9] = ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'];
+const BOTTOM_LETTERS_EN: [char; 7] = ['z', 'x', 'c', 'v', 'b', 'n', 'm'];
+const BOTTOM_LETTERS_DE: [char; 7] = ['y', 'x', 'c', 'v', 'b', 'n', 'm'];
+
+const TOP_SYMBOLS: [char; 10] = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
+const MID_SYMBOLS: [char; 9] = ['@', '#', '$', '%', '&', '-', '+', '(', ')'];
+const BOTTOM_SYMBOLS: [char; 7] = ['!', '?', '.', ',', ':', ';', '_'];
+
+/// Quick-insert chips (web `PROFILE_QUICK_INSERTS.text`) — insert the same
+/// character on every layer.
+const QUICK_INSERTS: [char; 4] = ['-', '\'', '.', ','];
+
+/// Four-row web VK card layout (`createVirtualKeyboardLayoutForLanguage`).
+fn build_web_layout(layer: Layer, lang_de: bool) -> Vec<KeyRow> {
+    let t = |lower: char, symbol: char| {
+        let upper = lower.to_uppercase().next().unwrap_or(lower);
+        KeyCell::tri(lower, upper, symbol, layer)
+    };
+    let top = if lang_de {
+        TOP_LETTERS_DE
+    } else {
+        TOP_LETTERS_EN
+    };
+    let bottom = if lang_de {
+        BOTTOM_LETTERS_DE
+    } else {
+        BOTTOM_LETTERS_EN
+    };
+
+    let mut row_top = vec![KeyCell::named("Esc", KeyAction::CloseVk, SPAN_ACTION)];
+    row_top.extend(
+        top.iter()
+            .zip(TOP_SYMBOLS)
+            .map(|(&l, s)| t(l, s)),
+    );
+    row_top.push(KeyCell::vk("Backspace", VK_BACK, SPAN_ACTION));
+
+    let mut row_mid = vec![KeyCell::vk("Tab", VK_TAB, SPAN_ACTION)];
+    row_mid.extend(
+        MID_LETTERS
+            .iter()
+            .zip(MID_SYMBOLS)
+            .map(|(&l, s)| t(l, s)),
+    );
+    row_mid.push(KeyCell::tri('\'', '"', '/', layer));
+    row_mid.push(KeyCell::vk("Enter", VK_RETURN, SPAN_ACTION));
+
+    let mut row_bottom = vec![KeyCell::named("Shift", KeyAction::Shift, SPAN_ACTION)];
+    row_bottom.extend(
+        bottom
+            .iter()
+            .zip(BOTTOM_SYMBOLS)
+            .map(|(&l, s)| t(l, s)),
+    );
+    row_bottom.push(KeyCell::tri(';', ':', '[', layer));
+    row_bottom.push(KeyCell::tri('.', '!', ']', layer));
+    // No dedicated close key: L3 toggles the keyboard open/closed, and the Esc
+    // key in the top row covers on-grid dismissal.
+    row_bottom.push(KeyCell::tri('?', '/', '\\', layer));
+
+    let mut space = KeyCell::vk("Space", VK_SPACE, SPAN_SPACE);
+    // Language badge on the space bar (web shows ENG/DE next to the L3 hint).
+    space.sublabel = Some(if lang_de { "DE" } else { "ENG" }.to_string());
+    let row_utility = vec![
+        KeyCell::named("&123", KeyAction::Symbols, SPAN_ACTION),
+        KeyCell::ch(QUICK_INSERTS[0]),
+        KeyCell::ch(QUICK_INSERTS[1]),
+        KeyCell::ch(QUICK_INSERTS[2]),
+        space,
+        KeyCell::named("Mic", KeyAction::VoiceInput, SPAN_ACTION),
+        KeyCell::ch(QUICK_INSERTS[3]),
+        KeyCell::named("<", KeyAction::PredictPrev, SPAN_ACTION),
+        KeyCell::named(">", KeyAction::PredictNext, SPAN_ACTION),
+    ];
+
     vec![
-        KeyRow {
-            keys: vec![
-                p('`', '~'),
-                p('1', '!'),
-                p('2', '@'),
-                p('3', '#'),
-                p('4', '$'),
-                p('5', '%'),
-                p('6', '^'),
-                p('7', '&'),
-                p('8', '*'),
-                p('9', '('),
-                p('0', ')'),
-                p('-', '_'),
-                p('=', '+'),
-                KeyCell::vk("Backspace", VK_BACK, 2.0),
-            ],
-        },
-        KeyRow {
-            keys: vec![
-                KeyCell::vk("Tab", VK_TAB, 1.5),
-                a('q'),
-                a('w'),
-                a('e'),
-                a('r'),
-                a('t'),
-                a('y'),
-                a('u'),
-                a('i'),
-                a('o'),
-                a('p'),
-                p('[', '{'),
-                p(']', '}'),
-                p('\\', '|'),
-            ],
-        },
-        KeyRow {
-            keys: vec![
-                KeyCell::named("Caps", KeyAction::CapsLock, 1.75),
-                a('a'),
-                a('s'),
-                a('d'),
-                a('f'),
-                a('g'),
-                a('h'),
-                a('j'),
-                a('k'),
-                a('l'),
-                p(';', ':'),
-                p('\'', '"'),
-                KeyCell::vk("Enter", VK_RETURN, 2.25),
-            ],
-        },
-        KeyRow {
-            keys: vec![
-                KeyCell::shift_key(2.25),
-                a('z'),
-                a('x'),
-                a('c'),
-                a('v'),
-                a('b'),
-                a('n'),
-                a('m'),
-                p(',', '<'),
-                p('.', '>'),
-                p('/', '?'),
-                KeyCell::shift_key(2.75),
-            ],
-        },
-        KeyRow {
-            keys: vec![
-                // Space shrinks by the 4 arrow units so the row still sums to GRID_UNITS.
-                KeyCell::vk("", VK_SPACE, GRID_UNITS - 1.5 - 1.5 - 1.5 - 4.0),
-                // Move the text caret without leaving the VK: select with the d-pad,
-                // press A to fire. inject_vk lands VK_LEFT/RIGHT/UP/DOWN in the focused field.
-                KeyCell::vk("\u{2190}", VK_LEFT, 1.0),
-                KeyCell::vk("\u{2191}", VK_UP, 1.0),
-                KeyCell::vk("\u{2193}", VK_DOWN, 1.0),
-                KeyCell::vk("\u{2192}", VK_RIGHT, 1.0),
-                KeyCell::named("Mic", KeyAction::VoiceInput, 1.5),
-                KeyCell::named("Paste", KeyAction::Paste, 1.5),
-                KeyCell::named("", KeyAction::CloseVk, 1.5),
-            ],
-        },
+        KeyRow { keys: row_top },
+        KeyRow { keys: row_mid },
+        KeyRow { keys: row_bottom },
+        KeyRow { keys: row_utility },
     ]
 }
 
 fn rebuild(nav: &mut NavState) {
-    nav.rows = build_pc_layout(nav.shift, nav.caps);
+    nav.rows = build_web_layout(nav.layer, nav.lang_de);
     clamp_pos(nav);
 }
 
@@ -261,22 +270,27 @@ fn clamp_pos(nav: &mut NavState) {
     }
 }
 
-fn caps_lock_on() -> bool {
-    unsafe { GetKeyState(VK_CAPITAL.0 as i32) & 1 != 0 }
-}
-
-/// Reset focus when the keyboard opens.
+/// Reset focus when the keyboard opens. Web parity: text fields open on the
+/// upper layer (`resolveInitialVirtualKeyboardLayer`) with focus on the `a` key
+/// (`getInitialVirtualKeyboardSelection` -> rows[1].keys[1]).
 pub fn reset_selection() {
     if let Ok(mut nav) = NAV.lock() {
-        nav.shift = false;
-        nav.caps = caps_lock_on();
-        nav.pos = KeyPos { row: 2, col: 4 };
+        nav.layer = Layer::Upper;
+        // One-shot, not sticky: the opening uppercase layer reverts after the
+        // first character (sentence case), like a fresh shift tap.
+        nav.one_shot_shift = true;
+        nav.one_shot_symbol = false;
+        nav.last_shift_at = None;
+        nav.last_symbol_at = None;
+        nav.pos = KeyPos { row: 1, col: 1 };
         #[cfg(feature = "gamepad")]
         {
             nav.hold_button = None;
         }
         nav.hold_count = 0;
         nav.hold_deadline = None;
+        nav.repeat_key = None;
+        nav.repeat_deadline = None;
         rebuild(&mut nav);
     }
     crate::vk_predict::reset();
@@ -306,8 +320,44 @@ pub fn set_voice_input_active(active: bool) {
     request_ui_repaint();
 }
 
+/// `(shift, caps)` for the renderer: shift = upper layer active; caps = upper
+/// layer promoted to sticky (web `shiftEnabled && !oneShotShift`).
 pub fn modifier_state() -> (bool, bool) {
-    NAV.lock().map(|n| (n.shift, n.caps)).unwrap_or_default()
+    NAV.lock()
+        .map(|n| {
+            let up = n.layer == Layer::Upper;
+            (up, up && !n.one_shot_shift)
+        })
+        .unwrap_or_default()
+}
+
+/// `(start, end)` of a key inside its row, normalized to `0.0..=1.0` of the row's
+/// total span. The renderer flex-scales every row to the same pixel width, so rows
+/// with different span totals only line up in normalized units, not raw key-units.
+fn span_bounds(row: &KeyRow, col: usize) -> (f32, f32) {
+    let total: f32 = row.keys.iter().map(|k| k.span).sum();
+    let total = total.max(f32::EPSILON);
+    let start: f32 = row.keys[..col].iter().map(|k| k.span).sum();
+    (start / total, (start + row.keys[col].span) / total)
+}
+
+/// Nearest key in `target_row` by the web's scoring (`chooseNearestNode`):
+/// `|center distance| - overlap * 0.65` over normalized row-relative units.
+fn nearest_col(rows: &[KeyRow], from: KeyPos, target_row: usize) -> usize {
+    let (cur_start, cur_end) = span_bounds(&rows[from.row], from.col);
+    let cur_center = (cur_start + cur_end) / 2.0;
+    let mut best = 0usize;
+    let mut best_score = f32::INFINITY;
+    for col in 0..rows[target_row].keys.len() {
+        let (start, end) = span_bounds(&rows[target_row], col);
+        let overlap = (cur_end.min(end) - cur_start.max(start)).max(0.0);
+        let score = ((start + end) / 2.0 - cur_center).abs() - overlap * 0.65;
+        if score < best_score {
+            best_score = score;
+            best = col;
+        }
+    }
+    best
 }
 
 #[cfg(feature = "gamepad")]
@@ -320,22 +370,20 @@ pub fn move_selection(dir: Button) -> bool {
         return false;
     }
     let mut pos = nav.pos;
+    // Web `moveVirtualKeyboardSelection`: LEFT/RIGHT stop at row edges (no
+    // wrap, no cross-row snake); UP/DOWN pick the nearest key by span center.
     let changed = match dir {
         Button::Left => {
-            // Wrap around the row: left from the first key lands on the last.
-            let cols = nav.rows[pos.row].keys.len();
-            if cols > 0 {
-                pos.col = if pos.col > 0 { pos.col - 1 } else { cols - 1 };
+            if pos.col > 0 {
+                pos.col -= 1;
                 true
             } else {
                 false
             }
         }
         Button::Right => {
-            // Wrap around the row: right from the last key lands on the first.
-            let cols = nav.rows[pos.row].keys.len();
-            if cols > 0 {
-                pos.col = if pos.col + 1 < cols { pos.col + 1 } else { 0 };
+            if pos.col + 1 < nav.rows[pos.row].keys.len() {
+                pos.col += 1;
                 true
             } else {
                 false
@@ -343,8 +391,8 @@ pub fn move_selection(dir: Button) -> bool {
         }
         Button::Up => {
             if pos.row > 0 {
+                pos.col = nearest_col(&nav.rows, pos, pos.row - 1);
                 pos.row -= 1;
-                pos.col = pos.col.min(nav.rows[pos.row].keys.len().saturating_sub(1));
                 true
             } else {
                 false
@@ -352,8 +400,8 @@ pub fn move_selection(dir: Button) -> bool {
         }
         Button::Down => {
             if pos.row + 1 < nav.rows.len() {
+                pos.col = nearest_col(&nav.rows, pos, pos.row + 1);
                 pos.row += 1;
-                pos.col = pos.col.min(nav.rows[pos.row].keys.len().saturating_sub(1));
                 true
             } else {
                 false
@@ -404,6 +452,69 @@ pub fn dpad_pressed(dir: Button) {
     refocus_after_nav_move();
 }
 
+/// Only character and virtual-key keys auto-repeat; toggles (Shift, &123,
+/// language, voice, close) and chip cycling fire once per press.
+fn key_repeats(key: &KeyCell) -> bool {
+    matches!(key.action, KeyAction::Char(_) | KeyAction::Vk(_))
+}
+
+/// Arm auto-repeat for a held button. For `Activate`, only when the focused
+/// key produces input. Call after the first action already fired.
+pub fn repeat_pressed(kind: RepeatKey) {
+    if kind == RepeatKey::Activate && !selected_key().as_ref().is_some_and(key_repeats) {
+        return;
+    }
+    if let Ok(mut nav) = NAV.lock() {
+        nav.repeat_key = Some(kind);
+        nav.repeat_deadline = Some(Instant::now() + HOLD_INITIAL);
+    }
+}
+
+pub fn repeat_released(kind: RepeatKey) {
+    if let Ok(mut nav) = NAV.lock() {
+        if nav.repeat_key == Some(kind) {
+            nav.repeat_key = None;
+            nav.repeat_deadline = None;
+        }
+    }
+}
+
+/// Fire the held button's action when its repeat deadline passes. Driven from
+/// the gamepad poll alongside [`tick_dpad_hold`].
+pub fn tick_key_repeat(now: Instant) -> bool {
+    let kind = {
+        let Ok(mut nav) = NAV.lock() else {
+            return false;
+        };
+        let Some(kind) = nav.repeat_key else {
+            return false;
+        };
+        let Some(deadline) = nav.repeat_deadline else {
+            return false;
+        };
+        if now < deadline {
+            return false;
+        }
+        nav.repeat_deadline = Some(now + HOLD_REPEAT);
+        kind
+    };
+    match kind {
+        RepeatKey::Activate => {
+            // Selection may have moved mid-hold; stop if the key under focus
+            // no longer repeats (e.g. d-pad onto Shift while holding A).
+            if let Some(key) = selected_key().filter(key_repeats) {
+                activate_key(&key);
+            } else {
+                repeat_released(RepeatKey::Activate);
+                return false;
+            }
+        }
+        RepeatKey::Backspace => backspace(),
+        RepeatKey::Space => space(),
+    }
+    true
+}
+
 #[cfg(feature = "gamepad")]
 pub fn dpad_released(dir: Button) {
     let Ok(mut nav) = NAV.lock() else {
@@ -422,39 +533,81 @@ pub fn activate_selection() {
     }
 }
 
-pub fn set_shift(on: bool) {
-    let mut changed = false;
-    if let Ok(mut nav) = NAV.lock() {
-        if nav.shift != on {
-            nav.shift = on;
-            rebuild(&mut nav);
-            changed = true;
-        }
-    }
-    if changed || !on {
-        request_ui_repaint();
-    }
-}
-
+/// Web `toggleShift`: off -> one-shot upper; double-tap inside 400ms -> sticky
+/// caps; any further tap -> lower.
 pub fn toggle_shift() {
     if let Ok(mut nav) = NAV.lock() {
-        nav.shift = !nav.shift;
+        let now = Instant::now();
+        if nav.layer != Layer::Upper {
+            nav.layer = Layer::Upper;
+            nav.one_shot_shift = true;
+            nav.one_shot_symbol = false;
+        } else if nav.one_shot_shift
+            && nav
+                .last_shift_at
+                .is_some_and(|t| now.duration_since(t) < DOUBLE_TAP_STICKY)
+        {
+            nav.one_shot_shift = false;
+        } else {
+            nav.layer = Layer::Lower;
+            nav.one_shot_shift = false;
+        }
+        nav.last_shift_at = Some(now);
         rebuild(&mut nav);
     }
     request_ui_repaint();
 }
 
-pub fn toggle_caps() {
+/// Web `toggleSymbols`: same one-shot/double-tap-sticky cycle for the symbol layer.
+pub fn toggle_symbols() {
     if let Ok(mut nav) = NAV.lock() {
-        nav.caps = !nav.caps;
+        let now = Instant::now();
+        if nav.layer != Layer::Symbol {
+            nav.layer = Layer::Symbol;
+            nav.one_shot_symbol = true;
+            nav.one_shot_shift = false;
+        } else if nav.one_shot_symbol
+            && nav
+                .last_symbol_at
+                .is_some_and(|t| now.duration_since(t) < DOUBLE_TAP_STICKY)
+        {
+            nav.one_shot_symbol = false;
+        } else {
+            nav.layer = Layer::Lower;
+            nav.one_shot_symbol = false;
+        }
+        nav.last_symbol_at = Some(now);
         rebuild(&mut nav);
     }
-    inject_vk(VK_CAPITAL);
     request_ui_repaint();
 }
 
-/// Layer cycle — no-op on the PC layout (kept for gamepad LB wiring).
-pub fn next_layer() {
+/// Web L3: flip between QWERTY (en-US) and QWERTZ (de-DE) letter rows.
+pub fn toggle_language() {
+    if let Ok(mut nav) = NAV.lock() {
+        nav.lang_de = !nav.lang_de;
+        rebuild(&mut nav);
+    }
+    request_ui_repaint();
+}
+
+/// Layer reset after an insert (web `insertText`): one-shot layers revert to
+/// lower after one character or space; double-tap-promoted sticky layers
+/// (caps / sticky symbols) persist until toggled off.
+fn after_insert() {
+    if let Ok(mut nav) = NAV.lock() {
+        let reset = match nav.layer {
+            Layer::Upper => nav.one_shot_shift,
+            Layer::Symbol => nav.one_shot_symbol,
+            Layer::Lower => false,
+        };
+        if reset {
+            nav.layer = Layer::Lower;
+            nav.one_shot_shift = false;
+            nav.one_shot_symbol = false;
+            rebuild(&mut nav);
+        }
+    }
     request_ui_repaint();
 }
 
@@ -463,14 +616,25 @@ pub fn activate_key(key: &KeyCell) {
         KeyAction::Char(c) => {
             send_unicode(&[*c as u16]);
             crate::vk_predict::on_char(*c);
+            after_insert();
         }
         KeyAction::Vk(vk) => {
             notify_vk_key(*vk);
             inject_vk(*vk);
+            if *vk == VK_SPACE {
+                after_insert();
+            }
         }
         KeyAction::Shift => toggle_shift(),
-        KeyAction::CapsLock => toggle_caps(),
-        KeyAction::Paste => send_paste(),
+        KeyAction::Symbols => toggle_symbols(),
+        KeyAction::PredictPrev => {
+            let _ = crate::vk_predict::cycle_prev();
+            request_ui_repaint();
+        }
+        KeyAction::PredictNext => {
+            let _ = crate::vk_predict::cycle_next();
+            request_ui_repaint();
+        }
         KeyAction::VoiceInput => start_voice_input(),
         KeyAction::CloseVk => crate::win::vk_ui::request_hide(),
     }
@@ -538,28 +702,12 @@ pub fn backspace() {
 pub fn space() {
     crate::vk_predict::on_space();
     inject_vk(VK_SPACE);
+    after_insert();
 }
 
 pub fn enter() {
     crate::vk_predict::on_boundary();
     inject_vk(VK_RETURN);
-}
-
-fn send_paste() {
-    let collapse = focus_for_inject();
-    let v = VIRTUAL_KEY(b'V' as u16);
-    let mut batch: Vec<INPUT> = Vec::with_capacity(6);
-    // Caret-to-end first, as standalone End presses, so the select-on-focus
-    // selection collapses before Ctrl is held (a held Ctrl would make it Ctrl+End).
-    push_collapse(&mut batch, collapse);
-    batch.push(vk_event(VK_CONTROL, false));
-    batch.push(vk_event(v, false));
-    batch.push(vk_event(v, true));
-    batch.push(vk_event(VK_CONTROL, true));
-    unsafe {
-        let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
-    }
-    suppress_native_keyboard_after_winlogon_inject(collapse);
 }
 
 pub fn start_voice_input() {
