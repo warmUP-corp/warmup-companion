@@ -12,6 +12,13 @@
 
   Service binary (SCM): C:\ProgramData\WarmupVk\bin\warmup-companion.exe
   Log: C:\ProgramData\WarmupVk\service.log
+  Install log (silent runs): C:\ProgramData\WarmupVk\install.log
+
+  Runs silently with no PowerShell window when started in its own process
+  (double-clicked / "Run with PowerShell", launched with -File/-Command, or via
+  the elevated relaunch below). In that case output is captured to install.log
+  instead. When run from an interactive PowerShell session, output is shown in
+  that session as usual and no window is hidden.
 
   C:\Program Files\WarmupVk\ is NOT used (legacy manual copies only).
 #>
@@ -24,6 +31,44 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
+# Silent installer: show no PowerShell window.
+#
+# When this script runs in its own PowerShell process (the elevated relaunch
+# below, a "Run with PowerShell" double-click, or any launcher that starts it
+# with -File/-Command) we hide the console window so nothing flashes on screen.
+# We deliberately skip this when the script is run inside an interactive
+# PowerShell session, so we never hide a terminal the user is actively using.
+# In silent runs, output is captured to install.log instead (see below).
+$script:WarmupSilent = $false
+function Hide-WarmupConsoleWindow {
+    $launchedAsScript = $false
+    foreach ($a in [Environment]::GetCommandLineArgs()) {
+        if ($a -ieq "-File" -or $a -ieq "-Command" -or $a -ieq "-c" -or
+            $a -ieq "-EncodedCommand" -or $a -ieq "-e" -or $a -ieq "-ec") {
+            $launchedAsScript = $true
+            break
+        }
+    }
+    if (-not $launchedAsScript) { return }
+    $script:WarmupSilent = $true
+
+    if (-not ("WarmupVk.NativeWindow" -as [type])) {
+        try {
+            Add-Type -Namespace WarmupVk -Name NativeWindow -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern System.IntPtr GetConsoleWindow();
+[DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
+'@
+        } catch { return }
+    }
+    try {
+        $hwnd = [WarmupVk.NativeWindow]::GetConsoleWindow()
+        if ($hwnd -ne [IntPtr]::Zero) {
+            [void][WarmupVk.NativeWindow]::ShowWindow($hwnd, 0)  # 0 = SW_HIDE
+        }
+    } catch { }
+}
+Hide-WarmupConsoleWindow
+
 function Test-Admin {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]$identity
@@ -33,6 +78,8 @@ function Test-Admin {
 if (-not (Test-Admin)) {
     $args = @(
         "-NoProfile",
+        "-WindowStyle",
+        "Hidden",
         "-ExecutionPolicy",
         "Bypass",
         "-File",
@@ -49,6 +96,19 @@ if (-not (Test-Admin)) {
     }
     Write-Host "Elevated installer finished. Run .\install\Collect-WarmupVkDiagnostics.ps1 to verify the installed service binary and logs."
     exit 0
+}
+
+# Running silently (no window): capture the disclosure and status output to a
+# log so the install can still be reviewed. The transcript ends when this
+# dedicated installer process exits.
+if ($script:WarmupSilent) {
+    $WarmupInstallLogDir = "C:\ProgramData\WarmupVk"
+    try {
+        if (-not (Test-Path $WarmupInstallLogDir)) {
+            New-Item -ItemType Directory -Path $WarmupInstallLogDir -Force | Out-Null
+        }
+        Start-Transcript -Path (Join-Path $WarmupInstallLogDir "install.log") -Append | Out-Null
+    } catch { }
 }
 
 $BinDir = "C:\ProgramData\WarmupVk\bin"
