@@ -38,7 +38,10 @@ Unicode true
 
 Name "${APPNAME}"
 OutFile "${SRCROOT}\target\warmup-companion-setup.exe"
-InstallDir "$PROGRAMFILES64\WarmupVk"
+; Must NOT be C:\Program Files\WarmupVk: `warmup-companion.exe install` treats
+; that exact path as a legacy install and purges it (taskkill /F /IM ...), which
+; would kill the install process itself. See install.rs remove_legacy_install_artifacts.
+InstallDir "$PROGRAMFILES64\WarmupCompanion"
 RequestExecutionLevel admin       ; service install needs admin; elevate the whole installer
 ShowInstDetails show
 ShowUninstDetails show
@@ -67,6 +70,7 @@ VIAddVersionKey "LegalCopyright"  "${COMPANY}"
 !insertmacro MUI_LANGUAGE "English"
 
 Section "Install"
+  SetRegView 64                   ; write the uninstall key to the native 64-bit hive
   ; Keep a copy of the binary + trust docs in the app dir.
   SetOutPath "$INSTDIR"
   File "${BIN}"
@@ -106,6 +110,7 @@ Section "Install"
 SectionEnd
 
 Section "Uninstall"
+  SetRegView 64                   ; match the install section's hive
   ; Stop + delete the service and remove the ProgramData service binary.
   nsExec::ExecToLog '"$INSTDIR\warmup-companion.exe" uninstall'
   Pop $0

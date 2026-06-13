@@ -62,7 +62,7 @@ If you installed with `warmup-companion-setup.exe`, uninstall from
 **Settings -> Apps** (Add/Remove Programs), or run the uninstaller silently:
 
 ```powershell
-"C:\Program Files\WarmupVk\uninstall.exe" /S
+"C:\Program Files\WarmupCompanion\uninstall.exe" /S
 ```
 
 Otherwise, from an Administrator PowerShell:
