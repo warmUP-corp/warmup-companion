@@ -18,6 +18,7 @@ pub const DATA_DIR: &str = r"C:\ProgramData\WarmupVk";
 const EXE_NAME: &str = "warmup-companion.exe";
 const LEGACY_EXE_NAME: &str = "warmup-vk-prototype.exe";
 const LOG_NAME: &str = "service.log";
+const MAX_LOG_BYTES: u64 = 1024 * 1024;
 const DEBUG_UI_FLAG: &str = r"C:\ProgramData\WarmupVk\debug-ui.enabled";
 
 /// Leftover names from manual `sc create` debugging — removed on install/uninstall.
@@ -97,6 +98,7 @@ fn install_inner(debug_ui: bool) -> Result<(), String> {
     let src = std::env::current_exe().map_err(|e| e.to_string())?;
     fs::create_dir_all(INSTALL_DIR).map_err(|e| e.to_string())?;
     fs::create_dir_all(DATA_DIR).map_err(|e| e.to_string())?;
+    restrict_data_dir_acl()?;
     set_debug_ui_flag(debug_ui)?;
 
     // Stop + delete BEFORE copying — old exe is locked by the running service.
@@ -265,6 +267,26 @@ fn copy_gamecontroller_db() -> Result<(), String> {
     Ok(())
 }
 
+fn restrict_data_dir_acl() -> Result<(), String> {
+    let out = Command::new("icacls.exe")
+        .args([
+            DATA_DIR,
+            "/inheritance:r",
+            "/grant:r",
+            "SYSTEM:(OI)(CI)F",
+            "Administrators:(OI)(CI)F",
+        ])
+        .output()
+        .map_err(|e| format!("icacls.exe: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        Err(format!("lock down {DATA_DIR} ACL failed: {stdout}{stderr}"))
+    }
+}
+
 fn sc(args: &[&str]) -> Result<(), String> {
     let out = Command::new("sc.exe")
         .args(args)
@@ -327,9 +349,20 @@ fn log_line_inner(msg: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
+    rotate_log_if_needed(&path)?;
     let mut f = OpenOptions::new().create(true).append(true).open(path)?;
     let ts = chrono_lite_timestamp();
     writeln!(f, "[{ts}] {msg}")?;
+    Ok(())
+}
+
+fn rotate_log_if_needed(path: &Path) -> std::io::Result<()> {
+    if fs::metadata(path).map(|m| m.len()).unwrap_or(0) < MAX_LOG_BYTES {
+        return Ok(());
+    }
+    let rotated = path.with_extension("log.1");
+    let _ = fs::remove_file(&rotated);
+    fs::rename(path, rotated)?;
     Ok(())
 }
 
