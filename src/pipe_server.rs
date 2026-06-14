@@ -86,7 +86,7 @@ fn set_native_vk_request(p: &crate::protocol::NativeVkPayload) {
             return;
         }
     };
-    crate::install::log_line(&format!("pipe inbound native_vk action={}", p.action));
+    crate::install::log_line("pipe inbound native_vk action");
     NATIVE_VK_REQUEST.store(v, Ordering::Relaxed);
 }
 
@@ -458,9 +458,7 @@ fn apply_rumble(p: &RumblePayload) {
             weak,
             duration_ms,
         } => {
-            crate::install::log_line(&format!(
-                "pipe inbound rumble full strong={strong} weak={weak} ms={duration_ms}"
-            ));
+            crate::install::log_line("pipe inbound rumble full");
             PadCommand::Rumble {
                 strong,
                 weak,
@@ -472,9 +470,7 @@ fn apply_rumble(p: &RumblePayload) {
             right,
             duration_ms,
         } => {
-            crate::install::log_line(&format!(
-                "pipe inbound rumble triggers left={left} right={right} ms={duration_ms}"
-            ));
+            crate::install::log_line("pipe inbound rumble triggers");
             PadCommand::TriggerRumble {
                 left,
                 right,
@@ -487,7 +483,7 @@ fn apply_rumble(p: &RumblePayload) {
 
 #[cfg_attr(not(windows), allow(dead_code))]
 fn apply_led(p: &crate::protocol::LedPayload) {
-    crate::install::log_line(&format!("pipe inbound led r={} g={} b={}", p.r, p.g, p.b));
+    crate::install::log_line("pipe inbound led");
     let mut immediate = None;
     if let Ok(mut st) = led_state().lock() {
         match st.effect {
@@ -735,14 +731,21 @@ mod server {
     use std::time::{Duration, Instant};
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
-        CloseHandle, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
+        CloseHandle, GetLastError, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
     };
     use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
     use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
-    use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile, PIPE_ACCESS_DUPLEX};
+    use windows::Win32::Storage::FileSystem::{
+        ReadFile, WriteFile, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_ACCESS_DUPLEX,
+    };
     use windows::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PeekNamedPipe, PIPE_READMODE_BYTE,
-        PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
+        PeekNamedPipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    };
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
     const PIPE_NAME: &str = r"\\.\pipe\warmup-input";
@@ -777,7 +780,9 @@ mod server {
             let handle = unsafe {
                 CreateNamedPipeW(
                     PCWSTR(name.as_ptr()),
-                    PIPE_ACCESS_DUPLEX,
+                    FILE_FLAGS_AND_ATTRIBUTES(
+                        PIPE_ACCESS_DUPLEX.0 | FILE_FLAG_FIRST_PIPE_INSTANCE.0,
+                    ),
                     PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                     PIPE_UNLIMITED_INSTANCES,
                     64 * 1024,
@@ -793,6 +798,10 @@ mod server {
                 }
             }
             if handle == INVALID_HANDLE_VALUE {
+                crate::install::log_line(&format!(
+                    "pipe bind failed for {PIPE_NAME}: {}",
+                    unsafe { GetLastError().0 }
+                ));
                 std::thread::sleep(Duration::from_secs(1));
                 continue;
             }
@@ -827,6 +836,13 @@ mod server {
     fn serve_one(pipe: HANDLE) {
         // Block until a client connects. ERROR_PIPE_CONNECTED (client beat us to it) is fine.
         let _ = unsafe { ConnectNamedPipe(pipe, None) };
+        if !client_process_allowed(pipe) {
+            crate::install::log_line("pipe client rejected");
+            unsafe {
+                let _ = DisconnectNamedPipe(pipe);
+            }
+            return;
+        }
         if handshake(pipe).is_ok() {
             // Drop edges queued before this client connected (stale to it).
             reset_button_stream();
@@ -838,6 +854,40 @@ mod server {
         unsafe {
             let _ = DisconnectNamedPipe(pipe);
         }
+    }
+
+    fn client_process_allowed(pipe: HANDLE) -> bool {
+        let mut pid = 0u32;
+        if unsafe { GetNamedPipeClientProcessId(pipe, &mut pid) }.is_err() {
+            return false;
+        }
+        let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) })
+        else {
+            return false;
+        };
+        let mut buf = [0u16; 32768];
+        let mut len = buf.len() as u32;
+        let ok = unsafe {
+            QueryFullProcessImageNameW(
+                process,
+                PROCESS_NAME_FORMAT(0),
+                windows::core::PWSTR(buf.as_mut_ptr()),
+                &mut len,
+            )
+        }
+        .is_ok();
+        unsafe {
+            let _ = CloseHandle(process);
+        }
+        if !ok || len == 0 {
+            return false;
+        }
+        let image = String::from_utf16_lossy(&buf[..len as usize]);
+        let name = std::path::Path::new(&image)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        name.eq_ignore_ascii_case("warmUP.exe")
     }
 
     /// Read the client `hello`, reject on version mismatch, reply with our `hello`.
@@ -1116,10 +1166,7 @@ mod tests {
                 ms: 30,
             }
         ));
-        assert!(matches!(
-            cmds[1],
-            PadCommand::Led { r: 7, g: 8, b: 9 }
-        ));
+        assert!(matches!(cmds[1], PadCommand::Led { r: 7, g: 8, b: 9 }));
     }
 
     #[test]
