@@ -89,7 +89,7 @@ unsafe fn write_minidump(info: *const EXCEPTION_POINTERS) {
         }
     };
 
-    let mut exc = MINIDUMP_EXCEPTION_INFORMATION {
+    let exc = MINIDUMP_EXCEPTION_INFORMATION {
         ThreadId: GetCurrentThreadId(),
         ExceptionPointers: info as *mut EXCEPTION_POINTERS,
         ClientPointers: false.into(),
@@ -102,7 +102,7 @@ unsafe fn write_minidump(info: *const EXCEPTION_POINTERS) {
         pid,
         file,
         dump_type,
-        Some(&mut exc),
+        Some(&exc),
         None,
         None,
     );

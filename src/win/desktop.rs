@@ -119,7 +119,7 @@ unsafe fn desktop_name(h: HDESK) -> Option<String> {
     let mut needed = 0u32;
     GetUserObjectInformationW(
         HANDLE(h.0),
-        USER_OBJECT_INFORMATION_INDEX(UOI_NAME.0 as i32),
+        USER_OBJECT_INFORMATION_INDEX(UOI_NAME.0),
         Some(buf.as_mut_ptr().cast()),
         (buf.len() * 2) as u32,
         Some(&mut needed),

@@ -86,10 +86,14 @@ pub fn mix_color(fg: u32, bg: u32, amount: f32) -> u32 {
     colorref_mix(fg, bg, amount)
 }
 
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
 fn configure_d2d_quality(ctx: &ID2D1DeviceContext) {
     // Default D2D text path can look aliased on our DXGI composition target.
-    let _ = unsafe { ctx.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE) };
-    let _ = unsafe { ctx.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+    unsafe { ctx.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE) };
+    unsafe { ctx.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
 }
 
 fn chip_width(word: &str) -> f32 {
@@ -101,7 +105,6 @@ unsafe fn draw_candidate_strip(
     ctx: &ID2D1DeviceContext,
     cw: f32,
     strip: &crate::vk_predict::StripState,
-    key_brush: &ID2D1SolidColorBrush,
     accent_brush: &ID2D1SolidColorBrush,
     text_brush: &ID2D1SolidColorBrush,
     sel_text_brush: &ID2D1SolidColorBrush,
@@ -124,17 +127,46 @@ unsafe fn draw_candidate_strip(
     }
 
     let total_w: f32 = widths.iter().sum::<f32>() + CHIP_GAP * (count.saturating_sub(1) as f32);
-    let mut x = (cw - total_w) / 2.0;
-    let outline = solid_brush(&ctx, colorref_alpha(pal.text, 0.28))?;
-    let hint_fill = solid_brush(&ctx, colorref_alpha(pal.text, 0.10))?;
-    let hint_text = solid_brush(&ctx, colorref_alpha(pal.text, 0.72))?;
-    let radius = CHIP_H * 0.42;
+    let chips_left = (cw - total_w) / 2.0;
+    let outline = solid_brush(ctx, colorref_alpha(pal.text, 0.22))?;
+    let hint_fill = solid_brush(ctx, colorref_alpha(pal.text, 0.10))?;
+    let hint_text = solid_brush(ctx, colorref_alpha(pal.text, 0.72))?;
 
+    // One pill in the band reserved above the keys (the key layout leaves room, so
+    // the keyboard never shifts). Elevated surface + border + a soft offset shadow
+    // so it reads as a distinct suggestion bar sitting above the keys.
+    let pill = D2D_RECT_F {
+        left: chips_left - CHIP_PAD_X,
+        top: CHIP_TOP,
+        right: chips_left + total_w + CHIP_PAD_X,
+        bottom: CHIP_TOP + CHIP_H,
+    };
+    let pill_radius = (pill.bottom - pill.top) * 0.5;
+    let rounded = |r: D2D_RECT_F| D2D1_ROUNDED_RECT {
+        rect: r,
+        radiusX: pill_radius,
+        radiusY: pill_radius,
+    };
+    let shadow = solid_brush(ctx, colorref_alpha(0x000000, 0.30))?;
+    ctx.FillRoundedRectangle(
+        &rounded(D2D_RECT_F {
+            top: pill.top + 3.0,
+            bottom: pill.bottom + 3.0,
+            ..pill
+        }),
+        &shadow,
+    );
+    let surface = solid_brush(ctx, colorref(mix_color(0xFFFFFF, pal.key, 0.10)))?;
+    let border = solid_brush(ctx, colorref(pal.border))?;
+    ctx.FillRoundedRectangle(&rounded(pill), &surface);
+    ctx.DrawRoundedRectangle(&rounded(pill), &border, 1.25, None);
+
+    // LB / RB cycle hints flank the pill.
     draw_shortcut_pill(
         ctx,
         "LB",
         controller_icons.hint_icon("LB"),
-        x - HINT_PILL_W - HINT_GAP,
+        pill.left - HINT_PILL_W - HINT_GAP,
         &hint_fill,
         &outline,
         &hint_text,
@@ -144,49 +176,44 @@ unsafe fn draw_candidate_strip(
         ctx,
         "RB",
         controller_icons.hint_icon("RB"),
-        x + total_w + HINT_GAP,
+        pill.right + HINT_GAP,
         &hint_fill,
         &outline,
         &hint_text,
         hint_format,
     )?;
 
+    // Words inside the pill; the highlighted one gets an accent inner fill.
+    let inner_radius = CHIP_H * 0.42;
+    let mut x = chips_left;
     for (i, word) in strip.visible.iter().enumerate() {
         if word.is_empty() {
             continue;
         }
         let w = widths[i];
         let selected = strip.engaged && i == strip.highlight_slot;
-        let rect = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: x,
-                top: CHIP_TOP,
-                right: x + w,
-                bottom: CHIP_TOP + CHIP_H,
-            },
-            radiusX: radius,
-            radiusY: radius,
+        let slot = D2D_RECT_F {
+            left: x,
+            top: CHIP_TOP,
+            right: x + w,
+            bottom: CHIP_TOP + CHIP_H,
         };
-        let (fill, label) = if selected {
-            (accent_brush, sel_text_brush)
-        } else {
-            (key_brush, text_brush)
-        };
-        ctx.FillRoundedRectangle(&rect, fill);
-        if !selected {
-            ctx.DrawRoundedRectangle(&rect, &outline, 1.25, None);
-        }
-        let label_rect = D2D_RECT_F {
-            left: rect.rect.left + CHIP_LABEL_INSET_X,
-            top: rect.rect.top + CHIP_LABEL_INSET_Y,
-            right: rect.rect.right
-                - CHIP_LABEL_INSET_X
-                - if selected {
-                    HINT_PILL_W + HINT_INSET
-                } else {
-                    0.0
+        if selected {
+            ctx.FillRoundedRectangle(
+                &D2D1_ROUNDED_RECT {
+                    rect: slot,
+                    radiusX: inner_radius,
+                    radiusY: inner_radius,
                 },
-            bottom: rect.rect.bottom - CHIP_LABEL_INSET_Y,
+                accent_brush,
+            );
+        }
+        let label = if selected { sel_text_brush } else { text_brush };
+        let label_rect = D2D_RECT_F {
+            left: slot.left + CHIP_LABEL_INSET_X,
+            top: slot.top + CHIP_LABEL_INSET_Y,
+            right: slot.right - CHIP_LABEL_INSET_X,
+            bottom: slot.bottom - CHIP_LABEL_INSET_Y,
         };
         let wide: Vec<u16> = word.encode_utf16().collect();
         ctx.DrawText(
@@ -197,18 +224,6 @@ unsafe fn draw_candidate_strip(
             D2D1_DRAW_TEXT_OPTIONS_CLIP,
             DWRITE_MEASURING_MODE_NATURAL,
         );
-        if selected {
-            draw_shortcut_pill(
-                ctx,
-                "A",
-                controller_icons.hint_icon("A"),
-                rect.rect.right - HINT_PILL_W - HINT_INSET,
-                &hint_fill,
-                &outline,
-                sel_text_brush,
-                hint_format,
-            )?;
-        }
         x += w + CHIP_GAP;
     }
     Ok(())
@@ -344,6 +359,11 @@ pub struct VkRenderer {
     icon_cache: HashMap<IconCacheKey, ID2D1Bitmap1>,
     controller_art_cache: HashMap<ControllerArtCacheKey, (ID2D1Bitmap1, u32, u32)>,
     prompt_started: Instant,
+    /// Gliding focus-ring rect (client px) + the previous draw time, so the ring
+    /// eases toward the selected key frame-rate-independently. `None` until the
+    /// first frame, where it snaps to the selection.
+    anim_sel: Option<D2D_RECT_F>,
+    last_draw: Option<Instant>,
     _d3d: ID3D11Device,
     _d2d_device: ID2D1Device,
     _dcomp_device: IDCompositionDevice,
@@ -361,8 +381,9 @@ const KEY_ASPECT: f32 = 68.0 / 92.0;
 const REF_GAP: f32 = 4.0;
 /// Corner radius as a fraction of key height (6.8/68).
 const RADIUS_FRAC: f32 = 6.8 / 68.0;
-/// Prefix-completion candidate strip (reclaims former legend/tooltip row).
-pub const CANDIDATE_STRIP_H: f32 = 70.0;
+/// Time constant for the focus ring gliding to the selected key. Small =
+/// snappy (~90 ms settle); the fill stays instant so labels never tear.
+const SEL_GLIDE_TAU: f32 = 0.045;
 
 /// Uniform padding between the floating card's rounded edge and its key grid.
 pub const FLOATING_PAD: f32 = 18.0;
@@ -372,6 +393,10 @@ const CHIP_GAP: f32 = 10.0;
 const CHIP_PAD_X: f32 = 14.0;
 const CHIP_MIN_W: f32 = 58.0;
 const CHIP_TOP: f32 = 11.0;
+/// Band reserved above the key grid for the suggestion pill, so chips sit ABOVE
+/// the keyboard (not over the keys). Constant, so the keys never shift; sized to
+/// the pill (`CHIP_TOP + CHIP_H`) plus a gap before the first key row.
+pub const STRIP_BAND_H: f32 = CHIP_TOP + CHIP_H + 8.0;
 const CHIP_LABEL_INSET_X: f32 = 8.0;
 const CHIP_LABEL_INSET_Y: f32 = 4.0;
 /// Chip label size in DIPs — independent of key label scaling.
@@ -380,7 +405,6 @@ const HINT_PILL_W: f32 = 40.0;
 const HINT_PILL_H: f32 = 32.0;
 const HINT_TOP: f32 = CHIP_TOP + (CHIP_H - HINT_PILL_H) * 0.5;
 const HINT_GAP: f32 = 12.0;
-const HINT_INSET: f32 = 8.0;
 const KEY_HINT_BADGE_MAX: f32 = 38.0;
 const KEY_HINT_BADGE_INSET: f32 = 7.0;
 
@@ -389,6 +413,7 @@ enum VkIcon {
     Backspace,
     Close,
     Enter,
+    Mic,
     MicOff,
     Space,
     Shift,
@@ -600,6 +625,9 @@ impl VkIcon {
             VkIcon::Enter => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 4v7a4 4 0 0 1-4 4H4"/><path d="m9 10-5 5 5 5"/></svg>"#
             }
+            VkIcon::Mic => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></svg>"#
+            }
             VkIcon::MicOff => {
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M16.95 16.95A7 7 0 0 1 5 12v-2"/><path d="M18.89 13.23A7 7 0 0 0 19 12v-2"/><path d="m2 2 20 20"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/></svg>"#
             }
@@ -695,11 +723,6 @@ impl VkIcon {
     }
 }
 
-/// Top chrome always reserved so keys do not shift when chips appear.
-pub fn top_chrome_inset() -> f32 {
-    CANDIDATE_STRIP_H
-}
-
 /// Natural bounding box `(width, height)` of the key grid at `scale_w`, excluding
 /// card padding and top chrome. Lets the floating card be sized to wrap keys that
 /// render at the same scale as the docked bar.
@@ -793,6 +816,15 @@ pub struct VkModifiers {
 /// `render_frame` assembles it from a single logical read of nav/predict state;
 /// `draw` consumes only `&VkFrame` and performs no global reads, so the
 /// selection/glyph-branch logic is testable without a NAV lock or a D2D device.
+/// Voice helper phase, for the phase-coded mic halo (so startup/transcribe don't
+/// look identical to idle listening).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum VoicePhase {
+    Starting,
+    Listening,
+    Transcribing,
+}
+
 pub struct VkFrame<'a> {
     pub pal: &'a VkPalette,
     pub rows: &'a [KeyRow],
@@ -805,6 +837,13 @@ pub struct VkFrame<'a> {
     pub floating: bool,
     pub modifiers: VkModifiers,
     pub controller_label: &'a str,
+    /// Voice input is reachable on this surface (false on Winlogon, where
+    /// LocalSystem has no mic consent). Drives the mic key's truthful state.
+    pub voice_available: bool,
+    /// Voice recognition is currently listening.
+    pub voice_active: bool,
+    /// Helper phase, for a phase-coded mic halo (only read when `voice_active`).
+    pub voice_phase: VoicePhase,
 }
 
 /// Glyph for the Shift key (the Shift-action key reflects `shift`).
@@ -989,6 +1028,8 @@ impl VkRenderer {
             icon_cache: HashMap::new(),
             controller_art_cache: HashMap::new(),
             prompt_started: Instant::now(),
+            anim_sel: None,
+            last_draw: None,
             _d3d: d3d,
             _d2d_device: d2d_device,
             _dcomp_device: dcomp_device,
@@ -1225,6 +1266,9 @@ impl VkRenderer {
             floating,
             modifiers,
             controller_label,
+            voice_available,
+            voice_active,
+            voice_phase,
         } = *frame;
         let controller_icons = ControllerIconFamily::from_label(controller_label);
         let cw = self.width as f32;
@@ -1233,6 +1277,39 @@ impl VkRenderer {
         self.d2d_context.BeginDraw();
 
         let rects = key_rects(cw, ch, scale_w, rows, top_inset);
+
+        // Ease the focus ring toward the selected key. The accent fill still snaps
+        // (so each key's label colour is unambiguous); only the bright ring glides,
+        // which reads as the cursor moving. Frame-rate-independent via dt.
+        if let Some(tgt) = rects
+            .iter()
+            .find(|kr| kr.pos.row == sel.row && kr.pos.col == sel.col)
+            .map(|kr| D2D_RECT_F {
+                left: kr.left,
+                top: kr.top,
+                right: kr.right,
+                bottom: kr.bottom,
+            })
+        {
+            let now = Instant::now();
+            let dt = self
+                .last_draw
+                .map(|t| now.duration_since(t).as_secs_f32())
+                .unwrap_or(0.0);
+            self.last_draw = Some(now);
+            self.anim_sel = Some(match self.anim_sel {
+                Some(cur) if dt > 0.0 => {
+                    let t = (1.0 - (-dt / SEL_GLIDE_TAU).exp()).clamp(0.0, 1.0);
+                    D2D_RECT_F {
+                        left: lerp(cur.left, tgt.left, t),
+                        top: lerp(cur.top, tgt.top, t),
+                        right: lerp(cur.right, tgt.right, t),
+                        bottom: lerp(cur.bottom, tgt.bottom, t),
+                    }
+                }
+                _ => tgt, // first frame (or no dt): snap onto the selection
+            });
+        }
 
         if floating {
             // Floating layout emulates the webview VK card. The window is already sized to wrap
@@ -1274,22 +1351,11 @@ impl VkRenderer {
         let text_brush = solid_brush(&self.d2d_context, colorref(pal.text))?;
         let sel_text_brush = solid_brush(&self.d2d_context, colorref(pal.sel_text))?;
         let border_brush = solid_brush(&self.d2d_context, colorref(pal.border))?;
-
-        if let Some(strip) = candidates {
-            draw_candidate_strip(
-                &self.d2d_context,
-                cw,
-                strip,
-                &key_brush,
-                &accent_brush,
-                &text_brush,
-                &sel_text_brush,
-                &self.chip_format,
-                &self.hint_format,
-                pal,
-                controller_icons,
-            )?;
-        }
+        // Bright accent ring on the selected key — lifts it off the grid so the
+        // cursor reads at a glance, not by fill colour alone. (A blurred outer
+        // glow would need extra composition layers; deferred — the ring carries it.)
+        let sel_ring_brush =
+            solid_brush(&self.d2d_context, colorref(mix_color(0xFFFFFF, pal.accent, 0.5)))?;
 
         for kr in &rects {
             let key = &rows[kr.pos.row].keys[kr.pos.col];
@@ -1314,8 +1380,8 @@ impl VkRenderer {
             };
             let label_color = if selected { pal.sel_text } else { pal.text };
             self.d2d_context.FillRoundedRectangle(&rect, fill);
-            // Outline non-selected keys to match the webview VK border; the selected key keeps a
-            // clean accent fill.
+            // Non-selected keys get the subtle webview border; the selected key's
+            // ring is drawn after the loop so it can glide between keys.
             if !selected {
                 self.d2d_context
                     .DrawRoundedRectangle(&rect, &border_brush, 1.25, None);
@@ -1341,8 +1407,30 @@ impl VkRenderer {
             }
 
             if matches!(key.action, KeyAction::VoiceInput) {
-                let disabled_color = colorref_mix(label_color, pal.key, 0.42);
-                self.draw_svg_icon(VkIcon::MicOff, rect.rect, disabled_color)?;
+                // Tell the truth: dimmed mic-off when voice can't run here — on
+                // Winlogon, or in userland with the optional whisper model not
+                // installed. Otherwise a live mic, accent + a breathing halo while
+                // it's actually listening.
+                if !voice_available {
+                    let disabled_color = colorref_mix(label_color, pal.key, 0.42);
+                    self.draw_svg_icon(VkIcon::MicOff, rect.rect, disabled_color)?;
+                } else if voice_active {
+                    let on_color = if selected { pal.sel_text } else { pal.accent };
+                    self.draw_svg_icon(VkIcon::Mic, rect.rect, on_color)?;
+                    let t = self.prompt_started.elapsed().as_secs_f32();
+                    // Phase-coded halo so it reads as working, not stuck: starting =
+                    // faint slow, listening = steady breathe, transcribing = bright fast.
+                    let (hz, amp) = match voice_phase {
+                        VoicePhase::Starting => (0.5_f32, 0.25_f32),
+                        VoicePhase::Listening => (0.6, 0.5),
+                        VoicePhase::Transcribing => (1.6, 0.9),
+                    };
+                    let pulse = ((t * std::f32::consts::TAU * hz).sin() * 0.5 + 0.5) * amp;
+                    let halo = solid_brush(&self.d2d_context, colorref_alpha(pal.accent, pulse))?;
+                    self.d2d_context.DrawRoundedRectangle(&rect, &halo, 2.5, None);
+                } else {
+                    self.draw_svg_icon(VkIcon::Mic, rect.rect, label_color)?;
+                }
             } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE)
             {
                 self.draw_svg_icon(VkIcon::Space, rect.rect, label_color)?;
@@ -1434,6 +1522,34 @@ impl VkRenderer {
                     );
                 }
             }
+        }
+
+        // Gliding focus ring on top of the keys, at the eased position.
+        if let Some(ring) = self.anim_sel {
+            let radius = (ring.bottom - ring.top) * RADIUS_FRAC;
+            let rr = D2D1_ROUNDED_RECT {
+                rect: ring,
+                radiusX: radius,
+                radiusY: radius,
+            };
+            self.d2d_context
+                .DrawRoundedRectangle(&rr, &sel_ring_brush, 2.5, None);
+        }
+
+        // Suggestion pill last, so it floats on top of the keys (and the ring).
+        if let Some(strip) = candidates {
+            draw_candidate_strip(
+                &self.d2d_context,
+                cw,
+                strip,
+                &accent_brush,
+                &text_brush,
+                &sel_text_brush,
+                &self.chip_format,
+                &self.hint_format,
+                pal,
+                controller_icons,
+            )?;
         }
 
         drop(key_brush);

@@ -229,17 +229,23 @@ fn build_web_layout(layer: Layer, lang_de: bool) -> Vec<KeyRow> {
     let mut space = KeyCell::vk("Space", VK_SPACE, SPAN_SPACE);
     // Language badge on the space bar (web shows ENG/DE next to the L3 hint).
     space.sublabel = Some(if lang_de { "DE" } else { "ENG" }.to_string());
-    let row_utility = vec![
+    let mut row_utility = vec![
         KeyCell::named("&123", KeyAction::Symbols, SPAN_ACTION),
         KeyCell::ch(QUICK_INSERTS[0]),
         KeyCell::ch(QUICK_INSERTS[1]),
         KeyCell::ch(QUICK_INSERTS[2]),
         space,
-        KeyCell::named("Mic", KeyAction::VoiceInput, SPAN_ACTION),
+    ];
+    // Mic key only when offline dictation is installed (whisper sidecar + model);
+    // otherwise it's hidden, so an install that skipped speech shows no dead key.
+    if crate::win::speech_input::available() {
+        row_utility.push(KeyCell::named("Mic", KeyAction::VoiceInput, SPAN_ACTION));
+    }
+    row_utility.extend([
         KeyCell::ch(QUICK_INSERTS[3]),
         KeyCell::named("<", KeyAction::PredictPrev, SPAN_ACTION),
         KeyCell::named(">", KeyAction::PredictNext, SPAN_ACTION),
-    ];
+    ]);
 
     vec![
         KeyRow { keys: row_top },
@@ -373,40 +379,28 @@ pub fn move_selection(dir: Button) -> bool {
     // Web `moveVirtualKeyboardSelection`: LEFT/RIGHT stop at row edges (no
     // wrap, no cross-row snake); UP/DOWN pick the nearest key by span center.
     let changed = match dir {
-        Button::Left => {
-            if pos.col > 0 {
+        Button::Left
+            if pos.col > 0 => {
                 pos.col -= 1;
                 true
-            } else {
-                false
             }
-        }
-        Button::Right => {
-            if pos.col + 1 < nav.rows[pos.row].keys.len() {
+        Button::Right
+            if pos.col + 1 < nav.rows[pos.row].keys.len() => {
                 pos.col += 1;
                 true
-            } else {
-                false
             }
-        }
-        Button::Up => {
-            if pos.row > 0 {
+        Button::Up
+            if pos.row > 0 => {
                 pos.col = nearest_col(&nav.rows, pos, pos.row - 1);
                 pos.row -= 1;
                 true
-            } else {
-                false
             }
-        }
-        Button::Down => {
-            if pos.row + 1 < nav.rows.len() {
+        Button::Down
+            if pos.row + 1 < nav.rows.len() => {
                 pos.col = nearest_col(&nav.rows, pos, pos.row + 1);
                 pos.row += 1;
                 true
-            } else {
-                false
             }
-        }
         _ => false,
     };
     if changed {
@@ -438,18 +432,21 @@ pub fn tick_dpad_hold(now: Instant) -> bool {
     moved
 }
 
+/// Returns whether the press actually moved the selection (false at a grid
+/// edge), so the caller can fire a haptic tick only on a real move.
 #[cfg(feature = "gamepad")]
-pub fn dpad_pressed(dir: Button) {
+pub fn dpad_pressed(dir: Button) -> bool {
     let mut nav = match NAV.lock() {
         Ok(n) => n,
-        Err(_) => return,
+        Err(_) => return false,
     };
     nav.hold_button = Some(dir);
     nav.hold_count = 0;
     nav.hold_deadline = Some(Instant::now() + HOLD_INITIAL);
     drop(nav);
-    let _ = move_selection(dir);
+    let moved = move_selection(dir);
     refocus_after_nav_move();
+    moved
 }
 
 /// Only character and virtual-key keys auto-repeat; toggles (Shift, &123,
@@ -584,10 +581,14 @@ pub fn toggle_symbols() {
 
 /// Web L3: flip between QWERTY (en-US) and QWERTZ (de-DE) letter rows.
 pub fn toggle_language() {
+    let mut de = false;
     if let Ok(mut nav) = NAV.lock() {
         nav.lang_de = !nav.lang_de;
+        de = nav.lang_de;
         rebuild(&mut nav);
     }
+    // Drive whisper recognition with the VK language (live; helper reads it per utterance).
+    crate::win::speech_input::set_vk_language(de);
     request_ui_repaint();
 }
 
@@ -669,8 +670,7 @@ impl crate::vk_commit::TextSink for SendInputSink {
         if sent as usize == batch.len() {
             Ok(())
         } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(std::io::Error::other(
                 format!("SendInput inserted {sent}/{} events", batch.len()),
             ))
         }
@@ -678,14 +678,13 @@ impl crate::vk_commit::TextSink for SendInputSink {
 }
 
 fn notify_vk_key(vk: VIRTUAL_KEY) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_RETURN, VK_SPACE};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_SPACE};
     if vk == VK_BACK {
         crate::vk_predict::on_backspace();
     } else if vk == VK_SPACE {
         crate::vk_predict::on_space();
-    } else if vk == VK_RETURN {
-        crate::vk_predict::on_boundary();
     } else {
+        // Return and every other committed key act as a word boundary.
         crate::vk_predict::on_boundary();
     }
 }
@@ -716,16 +715,22 @@ pub fn start_voice_input() {
         return;
     }
 
-    // Toggle off the user's mic helper if the indicator says it is on.
+    // Toggle off: ask the helper to FINISH — it transcribes the whole monologue
+    // and injects it, then exits. Not a kill (that would drop the recording).
     if voice_input_active() {
-        crate::win::speech_input::stop_helper();
+        crate::install::log_line("vk voice input: OFF (finishing — transcribe on stop)");
+        crate::win::speech_input::request_stop();
         set_voice_input_active(false);
         return;
     }
 
     // Turn on: the worker runs as SYSTEM with no mic consent, so recognition runs
     // in a helper process launched as the real logged-in user (see speech_input).
+    crate::install::log_line("vk voice input: ON (spawning helper)");
     set_voice_input_active(true);
+    // Pin the current VK language for the helper before it starts.
+    let de = NAV.lock().map(|n| n.lang_de).unwrap_or(false);
+    crate::win::speech_input::set_vk_language(de);
     if let Err(e) = crate::win::speech_input::start_helper() {
         set_voice_input_active(false);
         crate::install::log_line(&format!("speech helper start failed: {e}"));
@@ -845,4 +850,34 @@ fn suppress_native_keyboard_after_winlogon_inject(on_winlogon: bool) {
 fn active_langid() -> u32 {
     let hkl = unsafe { GetKeyboardLayout(0) };
     (hkl.0 as usize as u32) & 0xffff
+}
+
+#[cfg(all(test, feature = "gamepad"))]
+mod tests {
+    use super::*;
+    use crate::gamepad_backend::Button;
+
+    #[test]
+    fn move_reports_real_moves_not_edges() {
+        // The typing-loop haptic ticks only when the cursor actually moves. A
+        // press into a row edge must report `false` so it stays silent — a
+        // phantom buzz at every wall would be worse than no haptics.
+        //
+        // Seed NAV directly (not via reset_selection) so this test never touches
+        // the shared vk_predict global that the predict tests run against.
+        {
+            let mut nav = NAV.lock().unwrap();
+            nav.layer = Layer::Upper;
+            nav.pos = KeyPos { row: 1, col: 1 }; // 'a' in the middle row
+            rebuild(&mut nav);
+        }
+        assert!(
+            move_selection(Button::Left),
+            "interior move should report moved"
+        );
+        assert!(
+            !move_selection(Button::Left),
+            "at the left edge there is no move"
+        );
+    }
 }

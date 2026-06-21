@@ -24,7 +24,12 @@
 #>
 param(
     [Alias("Debug")]
-    [switch]$DebugUi
+    [switch]$DebugUi,
+    # Optional offline voice typing: download the whisper.cpp runner + a model so
+    # the on-screen Mic key appears. Omitted = no download, Mic key stays hidden.
+    [switch]$Speech,
+    [ValidateSet("tiny", "base", "small", "medium")]
+    [string]$SpeechModel = "medium"
 )
 
 $ErrorActionPreference = "Stop"
@@ -88,6 +93,10 @@ if (-not (Test-Admin)) {
     if ($DebugUi) {
         $args += "-DebugUi"
     }
+    if ($Speech) {
+        $args += "-Speech"
+        $args += @("-SpeechModel", $SpeechModel)
+    }
     Write-Host "Administrator rights are required; opening an elevated installer..."
     try {
         Start-Process -FilePath "powershell.exe" -ArgumentList $args -Verb RunAs -WindowStyle Hidden -Wait
@@ -140,6 +149,7 @@ Write-Host "Telemetry:     disabled unless WARMUP_SENTRY_DSN is set"
 Write-Host "Privacy:       no host-control text reads for prediction; VK-only local context"
 Write-Host "Game sleep:    enabled by default; fullscreen game detection sleeps poll to Guide-only"
 Write-Host "Recovery:      tray menu and CLI command 'restore-keyboard' restore Windows keyboard services"
+Write-Host "Voice typing:  $(if ($Speech) { "downloading whisper '$SpeechModel' (offline, opt-in)" } else { 'skipped — Mic key hidden (pass -Speech to enable)' })"
 Write-Host ""
 
 Write-Host "Building release (default service + gamepad features)..."
@@ -173,6 +183,19 @@ if ($DebugUi) {
 }
 & $Exe @InstallArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Optional offline voice typing. Non-fatal: a download failure must not undo the
+# service install — the companion runs fine without it (Mic key just stays hidden).
+if ($Speech) {
+    Write-Host "Installing offline voice typing (whisper '$SpeechModel')..."
+    try {
+        & (Join-Path $PSScriptRoot "Get-WarmupSpeech.ps1") -Model $SpeechModel
+    } catch {
+        Write-Host "WARNING: voice-typing download failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "         The companion works without it; re-run with -Speech later, or drop" -ForegroundColor Yellow
+        Write-Host "         whisper-server.exe + a ggml-*.bin into C:\ProgramData\WarmupVk\speech." -ForegroundColor Yellow
+    }
+}
 
 if (Test-Path $IconSrc) {
     Copy-Item -LiteralPath $IconSrc -Destination $IconDest -Force

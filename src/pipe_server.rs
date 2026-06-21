@@ -371,16 +371,22 @@ fn ensure_led_engine() {
                 let start = Instant::now();
                 let mut last: Option<(u8, u8, u8)> = None;
                 loop {
-                    let state = led_state().lock().map(|s| *s).unwrap_or_default();
-                    let color = led_color_at(&state, start.elapsed().as_secs_f32());
-                    if last != Some(color) {
-                        push_device_command(PadCommand::Led {
-                            r: color.0,
-                            g: color.1,
-                            b: color.2,
-                        });
-                        last = Some(color);
-                    }
+                    // Guard the body so a panic (push failure, future logic) can't
+                    // silently kill the LED thread and freeze the lightbar until a
+                    // service restart. Sleep stays outside, so a persistent panic
+                    // paces at 33ms instead of busy-spinning.
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let state = led_state().lock().map(|s| *s).unwrap_or_default();
+                        let color = led_color_at(&state, start.elapsed().as_secs_f32());
+                        if last != Some(color) {
+                            push_device_command(PadCommand::Led {
+                                r: color.0,
+                                g: color.1,
+                                b: color.2,
+                            });
+                            last = Some(color);
+                        }
+                    }));
                     std::thread::sleep(Duration::from_millis(33));
                 }
             });
@@ -638,9 +644,7 @@ fn controller_type_for(label: &str) -> String {
     let l = label.to_ascii_lowercase();
     if l.contains("xbox") {
         "xbox".into()
-    } else if l.contains("dualsense") || l.contains("ps5") {
-        "playstation".into()
-    } else if l.contains("dualshock") || l.contains("ps4") {
+    } else if l.contains("dualsense") || l.contains("ps5") || l.contains("dualshock") || l.contains("ps4") {
         "playstation".into()
     } else if l.contains("nintendo") || l.contains("switch") || l.contains("pro controller") {
         "switch".into()
@@ -709,7 +713,7 @@ fn reset_button_stream() {
 pub fn spawn() {
     std::thread::Builder::new()
         .name("warmup-pipe-server".into())
-        .spawn(|| server::serve_forever())
+        .spawn(server::serve_forever)
         .ok();
 }
 
@@ -763,7 +767,7 @@ mod server {
     }
 
     fn io_err(msg: &str) -> std::io::Error {
-        std::io::Error::new(std::io::ErrorKind::Other, msg)
+        std::io::Error::other(msg)
     }
 
     fn to_io(e: windows::core::Error) -> std::io::Error {

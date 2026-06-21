@@ -90,7 +90,6 @@ fn gcdb_hints() -> &'static [GcdbHint] {
 
 /// Per-`hDevice` state cached on the secure poll thread.
 pub struct DeviceState {
-    pub handle_key: usize,
     pub vid: u16,
     pub pid: u16,
     pub profile: HidProfile,
@@ -128,7 +127,6 @@ impl DeviceState {
 pub fn open_device(hdevice: isize) -> Option<DeviceState> {
     let (vid, pid, name) = device_vid_pid_name(hdevice)?;
     let profile = profile_for_vid_pid(vid, pid, &name);
-    let handle_key = hdevice as usize;
     let mut preparsed_storage = Vec::new();
     let mut bytes = 0u32;
     let handle = HANDLE(hdevice as _);
@@ -151,7 +149,6 @@ pub fn open_device(hdevice: isize) -> Option<DeviceState> {
         }
     }
     Some(DeviceState {
-        handle_key,
         vid,
         pid,
         profile,
@@ -467,31 +464,6 @@ fn ds4_dpad_hat(hat: u8) -> u16 {
     }
 }
 
-fn stick_active_for_profile(profile: HidProfile, report: &[u8]) -> bool {
-    match profile {
-        HidProfile::Xusb | HidProfile::XusbButtonByte => xusb_stick_active(report),
-        HidProfile::SonyDs4Usb
-        | HidProfile::SonyDs4Bluetooth
-        | HidProfile::SonyDs5Usb
-        | HidProfile::SonyDs5Bluetooth => sony_stick_active(profile, report),
-        HidProfile::GenericHidP => false,
-    }
-}
-
-fn xusb_stick_active(report: &[u8]) -> bool {
-    for (lx, ly) in [(6usize, 8), (7, 9), (4, 6)] {
-        if ly + 2 > report.len() {
-            continue;
-        }
-        let lx_v = i16::from_le_bytes([report[lx], report[lx + 1]]);
-        let ly_v = i16::from_le_bytes([report[ly], report[ly + 1]]);
-        if lx_v.abs() > STICK_DEADZONE || ly_v.abs() > STICK_DEADZONE {
-            return true;
-        }
-    }
-    false
-}
-
 fn sony_stick_offset(profile: HidProfile, report: &[u8]) -> Option<usize> {
     match profile {
         HidProfile::SonyDs4Usb | HidProfile::SonyDs5Usb => {
@@ -529,24 +501,6 @@ fn sony_stick_offset(profile: HidProfile, report: &[u8]) -> Option<usize> {
         }
         _ => None,
     }
-}
-
-fn sony_stick_active(profile: HidProfile, report: &[u8]) -> bool {
-    if report.len() < 5 {
-        return false;
-    }
-    let Some(start) = sony_stick_offset(profile, report) else {
-        return false;
-    };
-    for i in start..start + 4 {
-        if i >= report.len() {
-            break;
-        }
-        if (report[i] as i16 - 128).abs() > 28 {
-            return true;
-        }
-    }
-    false
 }
 
 fn sticks_for_profile(profile: HidProfile, report: &[u8]) -> (f32, f32, f32, f32) {
@@ -644,7 +598,7 @@ fn hidp_page_buttons(preparsed: PHIDP_PREPARSED_DATA, report: &[u8], page: u16) 
 fn hidp_usages_ex(preparsed: PHIDP_PREPARSED_DATA, report: &[u8]) -> u16 {
     let mut usages = [USAGE_AND_PAGE::default(); 64];
     let mut usage_len = usages.len() as u32;
-    let mut report_buf = report.to_vec();
+    let report_buf = report.to_vec();
     let status = unsafe {
         HidP_GetUsagesEx(
             HidP_Input,
@@ -652,7 +606,7 @@ fn hidp_usages_ex(preparsed: PHIDP_PREPARSED_DATA, report: &[u8]) -> u16 {
             usages.as_mut_ptr(),
             &mut usage_len,
             preparsed,
-            &mut report_buf,
+            &report_buf,
         )
     };
     if status != HIDP_STATUS_SUCCESS {
@@ -827,7 +781,7 @@ pub fn process_raw_input(
     }
     let key = raw.header.hDevice.0 as usize;
     let mut just_opened = None;
-    if !devices.contains_key(&key) {
+    if let std::collections::hash_map::Entry::Vacant(e) = devices.entry(key) {
         let device = open_device(raw.header.hDevice.0 as isize)?;
         just_opened = Some(format!(
             "opened {} {:04x}:{:04x} {}",
@@ -836,7 +790,7 @@ pub fn process_raw_input(
             device.pid,
             device.name
         ));
-        devices.insert(key, device);
+        e.insert(device);
     }
     let device = devices.get_mut(&key)?;
     let hid = unsafe { raw.data.hid };
@@ -1103,7 +1057,6 @@ mod tests {
 
     fn sony_device(profile: HidProfile) -> DeviceState {
         DeviceState {
-            handle_key: 1,
             vid: 0x054c,
             pid: 0x05c4,
             profile,

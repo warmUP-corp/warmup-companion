@@ -23,6 +23,9 @@ const VK_NAV_INPUT_GRACE: Duration = Duration::from_millis(450);
 const DESKTOP_SYNC_LOG_INTERVAL: Duration = Duration::from_secs(120);
 const HAPTIC_CONFIRM_MS: u32 = 14;
 const HAPTIC_ALERT_MS: u32 = 45;
+/// Featherweight pulse for the high-frequency typing loop (key press, cursor
+/// move, chip cycle) — short and faint so fast typing reads as texture, not buzz.
+const HAPTIC_TICK_MS: u32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VkLoopAction {
@@ -162,6 +165,10 @@ impl Backend {
 
     fn haptic_confirm(&mut self) {
         self.rumble(0.0, 0.07, HAPTIC_CONFIRM_MS);
+    }
+
+    fn haptic_tick(&mut self) {
+        self.rumble(0.0, 0.045, HAPTIC_TICK_MS);
     }
 
     fn haptic_alert(&mut self) {
@@ -474,6 +481,8 @@ impl GamepadPoll {
             {
                 self.sync_stick_nav(lx, ly);
                 if crate::win::vk_ui::tick_dpad_hold(Instant::now()) {
+                    // Held d-pad move or held-key auto-repeat fired — ratchet tick.
+                    self.backend.haptic_tick();
                     crate::win::vk_ui::request_repaint();
                 }
             }
@@ -645,7 +654,9 @@ impl GamepadPoll {
                 None
             }
             (Button::Up | Button::Down | Button::Left | Button::Right, true) => {
-                vk_nav::dpad_pressed(change.button);
+                if vk_nav::dpad_pressed(change.button) {
+                    self.backend.haptic_tick();
+                }
                 vk_ui::request_repaint();
                 None
             }
@@ -656,9 +667,13 @@ impl GamepadPoll {
             (Button::A | Button::Touchpad, true) => {
                 // Fire on press (not release) so holding the button auto-repeats.
                 let mut sink = vk_nav::SendInputSink;
-                if crate::vk_predict::commit_if_engaged(&mut sink).is_none() {
+                if crate::vk_predict::commit_if_engaged(&mut sink).is_some() {
+                    // A landed suggestion commit — a firmer confirm than a key tap.
+                    self.backend.haptic_confirm();
+                } else {
                     vk_nav::activate_selection();
                     vk_nav::repeat_pressed(vk_nav::RepeatKey::Activate);
+                    self.backend.haptic_tick();
                 }
                 vk_ui::request_repaint();
                 None
@@ -670,6 +685,7 @@ impl GamepadPoll {
             (Button::B, true) => {
                 vk_nav::backspace();
                 vk_nav::repeat_pressed(vk_nav::RepeatKey::Backspace);
+                self.backend.haptic_tick();
                 vk_ui::request_repaint();
                 None
             }
@@ -687,6 +703,7 @@ impl GamepadPoll {
             (Button::Y, true) => {
                 vk_nav::space();
                 vk_nav::repeat_pressed(vk_nav::RepeatKey::Space);
+                self.backend.haptic_tick();
                 vk_ui::request_repaint();
                 None
             }
@@ -697,6 +714,7 @@ impl GamepadPoll {
             (Button::Select, true) => {
                 // Web SELECT: jump into the suggestion strip when populated.
                 if crate::vk_predict::cycle_next() {
+                    self.backend.haptic_tick();
                     vk_ui::request_repaint();
                 }
                 None
@@ -704,22 +722,26 @@ impl GamepadPoll {
             (Button::Lb, true) => {
                 // Shoulders own the autocomplete chips (strip draws LB/RB pills).
                 if crate::vk_predict::cycle_prev() {
+                    self.backend.haptic_tick();
                     vk_ui::request_repaint();
                 }
                 None
             }
             (Button::Rb, true) => {
                 if crate::vk_predict::cycle_next() {
+                    self.backend.haptic_tick();
                     vk_ui::request_repaint();
                 }
                 None
             }
             (Button::Lt, true) => {
                 vk_nav::toggle_symbols();
+                self.backend.haptic_confirm();
                 None
             }
             (Button::Rt, true) => {
                 vk_nav::toggle_shift();
+                self.backend.haptic_confirm();
                 None
             }
             (Button::R3, true) => {
@@ -766,13 +788,17 @@ impl GamepadPoll {
         match (self.stick_nav, dir) {
             (None, None) => {}
             (None, Some(d)) => {
-                vk_nav::dpad_pressed(d);
+                if vk_nav::dpad_pressed(d) {
+                    self.backend.haptic_tick();
+                }
                 vk_ui::request_repaint();
             }
             (Some(old), None) => vk_nav::dpad_released(old),
             (Some(old), Some(d)) if old != d => {
                 vk_nav::dpad_released(old);
-                vk_nav::dpad_pressed(d);
+                if vk_nav::dpad_pressed(d) {
+                    self.backend.haptic_tick();
+                }
                 vk_ui::request_repaint();
             }
             _ => {}
@@ -892,10 +918,7 @@ where
             return GamepadPoll::open_service();
         }
     } else {
-        match GamepadPoll::open_desktop() {
-            Ok(p) => p,
-            Err(e) => return Err(e),
-        }
+        GamepadPoll::open_desktop()?
     };
 
     #[cfg(windows)]

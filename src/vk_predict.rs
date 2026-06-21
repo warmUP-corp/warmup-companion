@@ -50,7 +50,7 @@ fn lexicon() -> &'static [&'static str] {
     predict_ngram::lexicon()
 }
 
-fn words_with_prefix<'a>(prefix: &'a str) -> impl Iterator<Item = &'a str> {
+fn words_with_prefix(prefix: &str) -> impl Iterator<Item = &str> {
     let lex = lexicon();
     let start = lex.partition_point(|w| *w < prefix);
     lex[start..]
@@ -104,7 +104,7 @@ fn flush_personal(from: &HashSet<String>) {
 pub fn predictions_enabled() -> bool {
     #[cfg(test)]
     {
-        return true;
+        true
     }
     #[cfg(not(test))]
     {

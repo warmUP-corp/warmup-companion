@@ -126,6 +126,21 @@ fn install_inner(debug_ui: bool) -> Result<(), String> {
     sc(&["config", SERVICE_NAME, "start=", "auto"])?;
     sc(&["config", SERVICE_NAME, "DisplayName=", DISPLAY_NAME])?;
     sc(&["description", SERVICE_NAME, "Description=", DESCRIPTION])?;
+    // Auto-restart on crash. Without this, a single panic/abort leaves the service
+    // — and therefore all controller input — dead until manual restart or reboot.
+    // restart 60s after the 1st and 2nd failure; the last action repeats for any
+    // further failure, so every crash self-heals. reset= (1 day) just bounds the
+    // failure counter. Non-fatal if it fails on older SCMs — log and continue.
+    if let Err(e) = sc(&[
+        "failure",
+        SERVICE_NAME,
+        "reset=",
+        "86400",
+        "actions=",
+        "restart/60000/restart/60000",
+    ]) {
+        log_line(&format!("sc failure (auto-restart) config failed: {e}"));
+    }
     // LocalSystem (default) — required for winlogon / sign-in desktop.
     sc(&["start", SERVICE_NAME])?;
     verify_service_running()?;
@@ -246,10 +261,7 @@ fn remove_legacy_install_artifacts() {
 fn remove_test_services() {
     for name in TEST_SERVICE_NAMES {
         let _ = sc(&["stop", name]);
-        match sc(&["delete", name]) {
-            Ok(()) => log_line(&format!("removed test service {name}")),
-            Err(_) => {}
-        }
+        if let Ok(()) = sc(&["delete", name]) { log_line(&format!("removed test service {name}")) }
     }
 }
 
@@ -268,13 +280,16 @@ fn copy_gamecontroller_db() -> Result<(), String> {
 }
 
 fn restrict_data_dir_acl() -> Result<(), String> {
+    // Grant by well-known SID, not name: "Administrators"/"SYSTEM" don't resolve
+    // on non-English Windows (e.g. German "Administratoren"). *S-1-5-18 = SYSTEM,
+    // *S-1-5-32-544 = BUILTIN\Administrators.
     let out = Command::new("icacls.exe")
         .args([
             DATA_DIR,
             "/inheritance:r",
             "/grant:r",
-            "SYSTEM:(OI)(CI)F",
-            "Administrators:(OI)(CI)F",
+            "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:(OI)(CI)F",
         ])
         .output()
         .map_err(|e| format!("icacls.exe: {e}"))?;
