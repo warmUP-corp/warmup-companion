@@ -911,9 +911,9 @@ fn render_frame() {
                 // installed. Otherwise the mic key shows honestly disabled.
                 voice_available: !crate::win::logon_focus::is_active()
                     && crate::win::speech_input::available_cached(),
-                // Busy = toggled on OR the helper is still alive (e.g. transcribing
-                // after the user stopped). The halo phase comes from the helper.
-                voice_active: vk_nav::voice_input_active() || phase_str.is_some(),
+                // Busy = the helper is alive (recording, or transcribing after stop,
+                // including auto-stop). The halo phase comes from the helper.
+                voice_active: phase_str.is_some(),
                 voice_phase: match phase_str.as_deref() {
                     Some("transcribing") => vk_renderer::VoicePhase::Transcribing,
                     Some("starting") => vk_renderer::VoicePhase::Starting,

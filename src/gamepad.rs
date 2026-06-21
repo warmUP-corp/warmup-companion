@@ -208,6 +208,7 @@ pub struct GamepadPoll {
     vk_down: bool,
     a_cursor_down: bool,
     touchpad_cursor_down: bool,
+    b_cursor_down: bool,
     last_vk_open: bool,
     /// The L3 press that opened the VK is still physically down; close only on the
     /// *next* press. Release-gated, not time-gated — close is instant once L3 lifts.
@@ -361,6 +362,7 @@ impl GamepadPoll {
             vk_down: false,
             a_cursor_down: false,
             touchpad_cursor_down: false,
+            b_cursor_down: false,
             last_vk_open: false,
             vk_toggle_need_release: false,
             vk_nav_grace_until: None,
@@ -383,6 +385,7 @@ impl GamepadPoll {
         self.vk_down = false;
         self.a_cursor_down = false;
         self.touchpad_cursor_down = false;
+        self.b_cursor_down = false;
         self.vk_toggle_need_release = false;
         self.vk_nav_grace_until = None;
         self.stick_nav = None;
@@ -429,6 +432,7 @@ impl GamepadPoll {
         if crate::gamepad_backend::userland_poll_paused() {
             self.backend.apply_device_commands();
             cursor.set_left_button(false);
+            cursor.set_right_button(false);
             return Ok(Vec::new());
         }
 
@@ -437,7 +441,9 @@ impl GamepadPoll {
             self.backend.haptic_confirm();
             self.a_cursor_down = false;
             self.touchpad_cursor_down = false;
+            self.b_cursor_down = false;
             cursor.set_left_button(false);
+            cursor.set_right_button(false);
         }
         self.last_vk_open = vk_open;
 
@@ -540,6 +546,30 @@ impl GamepadPoll {
                 }
                 let any_click_down = self.a_cursor_down || self.touchpad_cursor_down;
                 cursor.set_left_button(any_click_down && crate::pipe_server::clicks_enabled());
+            }
+            // B → right-click HOLD on the OS cursor (A=left, B=right, console convention).
+            // Gated by clicks_enabled so it stays quiet while the launcher/game owns input;
+            // B still forwards to the launcher above for back-nav.
+            if change.button == Button::B {
+                self.b_cursor_down = change.pressed;
+                cursor.set_right_button(self.b_cursor_down && crate::pipe_server::clicks_enabled());
+            }
+            // Share (SELECT) → Enter into the focused app even with the VK closed, so
+            // submit/confirm is one tap. NOT gated by clicks_enabled (that's OS-cursor
+            // mode); only suppressed when warmUP owns text input or a game is active.
+            // ponytail: also fires on the SELECT edge of the SELECT+LB+X launch combo —
+            // one stray Enter during that 3-finger hold; split to release-edge if it bites.
+            if change.button == Button::Select && change.pressed {
+                let suppressed = crate::pipe_server::native_vk_suppressed();
+                crate::install::log_line(&format!(
+                    "SELECT press, vk closed: suppressed={suppressed} clicks_enabled={} -> {}",
+                    crate::pipe_server::clicks_enabled(),
+                    if suppressed { "skip" } else { "Enter" }
+                ));
+                if !suppressed {
+                    cursor.tap_enter();
+                    self.backend.haptic_confirm();
+                }
             }
             if crate::pipe_server::native_vk_suppressed() {
                 continue;

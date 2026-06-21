@@ -74,9 +74,36 @@ pub fn start_helper() -> Result<(), String> {
     }
 
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
-    let process = spawn_helper_as_user(&exe)?;
+    // Parakeet keeps its ~650MB model resident in a separate server process so it
+    // isn't reloaded on every mic press. Spawn it here, in the SYSTEM worker — the
+    // user-session helper can't execute the ACL-locked bin exe (Access denied).
+    ensure_parakeet_server();
+    let process = spawn_as_user(&exe, "--speech-helper")?;
     *guard = Some(Helper { process });
     Ok(())
+}
+
+/// Ensure the resident parakeet model host is up. Idempotent + cheap: only spawns
+/// when parakeet is the selected engine and nothing is listening on its port yet.
+/// Fire-and-forget — the mic helper waits for readiness when it needs to transcribe.
+fn ensure_parakeet_server() {
+    if engine() != "parakeet" || !parakeet_available() || parakeet_server_up() {
+        return;
+    }
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            crate::install::log_line(&format!("parakeet-server: current_exe failed: {e}"));
+            return;
+        }
+    };
+    match spawn_as_user(&exe, "--parakeet-server") {
+        // Detached + persistent; we don't track its handle (it outlives the helper).
+        Ok(h) => unsafe {
+            let _ = CloseHandle(h);
+        },
+        Err(e) => crate::install::log_line(&format!("parakeet-server spawn failed: {e}")),
+    }
 }
 
 /// Kill the running helper, if any. Safe to call when none is running.
@@ -93,18 +120,24 @@ pub fn stop_helper() {
 /// What the mic UI should show: the live helper's phase while it's running, else
 /// None (idle). Keyed off the live helper (not the toggle), so the "transcribing"
 /// halo persists after the user stops — until the text lands and the helper exits.
-pub fn voice_ui_phase() -> Option<String> {
-    let alive = HELPER
+/// True while the user-session speech helper process is still running. The helper
+/// can exit on its own (auto-stop on silence), so this is the real "voice is on".
+pub fn helper_alive() -> bool {
+    HELPER
         .lock()
         .ok()
         .and_then(|g| g.as_ref().map(|h| process_alive(h.process)))
-        .unwrap_or(false);
-    alive.then(|| current_phase().unwrap_or_else(|| "starting".to_string()))
+        .unwrap_or(false)
 }
 
-/// Launch `<exe> --speech-helper` as the active console user on `winsta0\default`.
-/// Mirrors `main::spawn_warmup_as_active_user`; returns the child process handle.
-fn spawn_helper_as_user(exe: &std::path::Path) -> Result<HANDLE, String> {
+pub fn voice_ui_phase() -> Option<String> {
+    helper_alive().then(|| current_phase().unwrap_or_else(|| "starting".to_string()))
+}
+
+/// Launch `<exe> <flag>` as the active console user on `winsta0\default` (used for
+/// `--speech-helper` and `--parakeet-server`). Mirrors `main::spawn_warmup_as_active_user`;
+/// returns the child process handle.
+fn spawn_as_user(exe: &std::path::Path, flag: &str) -> Result<HANDLE, String> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
 
@@ -126,9 +159,15 @@ fn spawn_helper_as_user(exe: &std::path::Path) -> Result<HANDLE, String> {
         let mut token = HANDLE::default();
         WTSQueryUserToken(session_id, &mut token)
             .map_err(|e| format!("WTSQueryUserToken(session={session_id}): {e}"))?;
+        // Prefer the user's full (elevated, High-integrity) token so the spawned helper
+        // can inject dictation into elevated windows — UIPI blocks synthetic input from
+        // a Medium process to a High one (e.g. an "as administrator" terminal). For a
+        // standard (non-admin) user there is no linked token, so we keep the WTS one.
+        let elevated = elevated_primary_token(token);
+        let spawn_token = elevated.unwrap_or(token);
 
         let exe_w = wide_os(exe.as_os_str());
-        let mut cmd_w = wide(&format!("\"{}\" --speech-helper", exe.display()));
+        let mut cmd_w = wide(&format!("\"{}\" {flag}", exe.display()));
         let cwd_w = exe.parent().map(|parent| wide_os(parent.as_os_str()));
         let mut desktop = wide("winsta0\\default");
         let startup = STARTUPINFOW {
@@ -138,7 +177,7 @@ fn spawn_helper_as_user(exe: &std::path::Path) -> Result<HANDLE, String> {
         };
         let mut info = PROCESS_INFORMATION::default();
         let mut env = std::ptr::null_mut();
-        let env_created = CreateEnvironmentBlock(&mut env, token, false).is_ok();
+        let env_created = CreateEnvironmentBlock(&mut env, spawn_token, false).is_ok();
         let env_arg = if env_created {
             Some(env.cast_const().cast())
         } else {
@@ -152,7 +191,7 @@ fn spawn_helper_as_user(exe: &std::path::Path) -> Result<HANDLE, String> {
             | PROCESS_CREATION_FLAGS(DETACHED_PROCESS.0 | CREATE_NEW_PROCESS_GROUP.0);
 
         let created = CreateProcessAsUserW(
-            token,
+            spawn_token,
             PCWSTR(exe_w.as_ptr()),
             PWSTR(cmd_w.as_mut_ptr()),
             None,
@@ -167,11 +206,50 @@ fn spawn_helper_as_user(exe: &std::path::Path) -> Result<HANDLE, String> {
         if env_created {
             let _ = DestroyEnvironmentBlock(env);
         }
+        if let Some(e) = elevated {
+            let _ = CloseHandle(e);
+        }
         let _ = CloseHandle(token);
         created.map_err(|e| format!("CreateProcessAsUserW({}): {e}", exe.display()))?;
         let _ = CloseHandle(info.hThread);
         Ok(info.hProcess)
     }
+}
+
+/// If the logged-in user is a split-token administrator, return a *primary* copy of
+/// their full (elevated, High-integrity) token; `None` for a standard user or if the
+/// query fails. `CreateProcessAsUserW` needs a primary token, but the linked token is
+/// an impersonation token, so we duplicate it. Caller owns the returned handle.
+unsafe fn elevated_primary_token(token: HANDLE) -> Option<HANDLE> {
+    use windows::Win32::Security::{
+        DuplicateTokenEx, GetTokenInformation, SecurityImpersonation, TokenLinkedToken,
+        TokenPrimary, TOKEN_ALL_ACCESS, TOKEN_LINKED_TOKEN,
+    };
+    let mut linked = TOKEN_LINKED_TOKEN::default();
+    let mut ret = 0u32;
+    GetTokenInformation(
+        token,
+        TokenLinkedToken,
+        Some(&mut linked as *mut _ as *mut core::ffi::c_void),
+        std::mem::size_of::<TOKEN_LINKED_TOKEN>() as u32,
+        &mut ret,
+    )
+    .ok()?;
+    if linked.LinkedToken.is_invalid() {
+        return None;
+    }
+    let mut primary = HANDLE::default();
+    let dup = DuplicateTokenEx(
+        linked.LinkedToken,
+        TOKEN_ALL_ACCESS,
+        None,
+        SecurityImpersonation,
+        TokenPrimary,
+        &mut primary,
+    );
+    let _ = CloseHandle(linked.LinkedToken);
+    dup.ok()?;
+    Some(primary)
 }
 
 // ---------------------------------------------------------------------------
@@ -181,9 +259,20 @@ fn spawn_helper_as_user(exe: &std::path::Path) -> Result<HANDLE, String> {
 
 #[cfg(feature = "speech")]
 pub use engine::{
-    available, current_phase, list_mics, mic_choice, request_stop, run_blocking, set_mic_choice,
-    set_vk_language,
+    available, current_phase, engine, list_mics, mic_choice, parakeet_available,
+    parakeet_server_up, request_stop, run_blocking, run_parakeet_server, set_engine,
+    set_mic_choice, set_vk_language, voice_level,
 };
+
+#[cfg(not(feature = "speech"))]
+pub fn run_parakeet_server() -> Result<(), String> {
+    Err("speech support not built into this binary".into())
+}
+
+#[cfg(not(feature = "speech"))]
+pub fn parakeet_server_up() -> bool {
+    false
+}
 
 #[cfg(not(feature = "speech"))]
 pub fn available() -> bool {
@@ -207,12 +296,30 @@ pub fn set_mic_choice(_name: &str) {}
 pub fn set_vk_language(_de: bool) {}
 
 #[cfg(not(feature = "speech"))]
+pub fn engine() -> String {
+    "whisper".to_string()
+}
+
+#[cfg(not(feature = "speech"))]
+pub fn set_engine(_name: &str) {}
+
+#[cfg(not(feature = "speech"))]
+pub fn parakeet_available() -> bool {
+    false
+}
+
+#[cfg(not(feature = "speech"))]
 pub fn current_phase() -> Option<String> {
     None
 }
 
 #[cfg(not(feature = "speech"))]
 pub fn request_stop() {}
+
+#[cfg(not(feature = "speech"))]
+pub fn voice_level() -> f32 {
+    0.0
+}
 
 /// `available()` throttled to ~3s. The renderer asks every frame whether the mic
 /// key is live; `available()` stats the filesystem, so cache it. A model dropped
@@ -263,6 +370,9 @@ mod engine {
     /// Safety cap: if the user never stops, transcribe + exit after this long so a
     /// runaway recording can't grow without bound.
     const MAX_RECORD_S: f32 = 180.0;
+    /// Auto-finish: after speech, this much quiet ends the recording and transcribes
+    /// (so the user need not press stop). Generous enough to ride out mid-sentence pauses.
+    const AUTO_STOP_S: f32 = 2.5;
 
     fn server_path() -> PathBuf {
         Path::new(SPEECH_DIR).join(SERVER_EXE)
@@ -292,9 +402,53 @@ mod engine {
             .find(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("bin")))
     }
 
-    /// True only if both the whisper sidecar and a model are installed.
+    /// True if a usable engine is installed: the whisper sidecar+model, or the
+    /// optional Parakeet model. Either gates the Mic key on.
     pub fn available() -> bool {
+        whisper_available() || parakeet::available()
+    }
+
+    fn whisper_available() -> bool {
         server_path().is_file() && model_path().is_some()
+    }
+
+    /// True if the optional Parakeet engine is fully installed (model + DLL), so
+    /// the tray can offer it. Always false unless built with `--features parakeet`.
+    pub fn parakeet_available() -> bool {
+        parakeet::available()
+    }
+
+    /// True if the resident parakeet server is loaded + listening. Used by the SYSTEM
+    /// worker to decide whether it still needs to spawn one.
+    pub fn parakeet_server_up() -> bool {
+        parakeet::server_up()
+    }
+
+    fn engine_path() -> PathBuf {
+        Path::new(SPEECH_DIR).join("engine.txt")
+    }
+
+    /// The engine the user picked ("parakeet" or "whisper"). Stored in the shared
+    /// speech dir like `mic.txt` so the SYSTEM tray writes it and this user-session
+    /// helper reads it. Defaults to whisper.
+    pub fn engine() -> String {
+        std::fs::read_to_string(engine_path())
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| s == "parakeet")
+            .unwrap_or_else(|| "whisper".to_string())
+    }
+
+    /// Persist the engine choice (anything but "parakeet" => whisper).
+    pub fn set_engine(name: &str) {
+        let v = if name == "parakeet" { "parakeet" } else { "whisper" };
+        let _ = std::fs::write(engine_path(), v);
+    }
+
+    /// Resolve the engine for this run: honor the user's pick when it's installed,
+    /// else fall back to whatever IS installed (e.g. parakeet-only box).
+    fn use_parakeet() -> bool {
+        parakeet::available() && (engine() == "parakeet" || !whisper_available())
     }
 
     fn mic_choice_path() -> PathBuf {
@@ -404,6 +558,24 @@ mod engine {
 
     fn clear_stop() {
         let _ = std::fs::remove_file(stop_path());
+    }
+
+    fn level_path() -> PathBuf {
+        Path::new(SPEECH_DIR).join("rt").join("level")
+    }
+
+    /// Helper-side: publish the live mic level (0..1) for the reactive overlay.
+    fn set_level(v: f32) {
+        let _ = std::fs::write(level_path(), format!("{v:.3}"));
+    }
+
+    /// Worker-side: the live mic level (0..1) for the reactive voice glow; 0 if absent.
+    pub fn voice_level() -> f32 {
+        std::fs::read_to_string(level_path())
+            .ok()
+            .and_then(|s| s.trim().parse::<f32>().ok())
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0)
     }
 
     fn addr() -> SocketAddr {
@@ -540,6 +712,24 @@ mod engine {
         Ok(v["text"].as_str().unwrap_or("").trim().to_string())
     }
 
+    /// Strip whisper's non-speech annotations (`[BLANK_AUDIO]`, `[CLAPPING]`,
+    /// `(claps)`, `[Music]`, …) it emits for noise/silence — otherwise they'd get
+    /// typed verbatim. Bracket/paren content is removed and whitespace collapsed;
+    /// an all-annotation result becomes empty so nothing is injected.
+    fn clean_transcript(t: &str) -> String {
+        let mut out = String::with_capacity(t.len());
+        let mut depth = 0i32;
+        for c in t.chars() {
+            match c {
+                '[' | '(' => depth += 1,
+                ']' | ')' => depth = (depth - 1).max(0),
+                _ if depth == 0 => out.push(c),
+                _ => {}
+            }
+        }
+        out.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
     /// Average interleaved frames of any sample type down to mono f32.
     fn push_mono<T>(data: &[T], channels: usize, buf: &std::sync::Mutex<Vec<f32>>)
     where
@@ -617,6 +807,179 @@ mod engine {
         }
     }
 
+    /// Optional Parakeet (NVIDIA) engine — native, in-process via parakeet-rs/ort.
+    /// Unlike whisper there is no resident server: the model loads in THIS helper.
+    /// `Session` is opaque so `run_blocking` compiles with or without the feature.
+    #[cfg(feature = "parakeet")]
+    mod parakeet {
+        use std::io::{Read, Write};
+        use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+        use std::path::Path;
+        use std::time::{Duration, Instant};
+
+        // `transcribe_samples` lives on the `Transcriber` trait — must be in scope.
+        use parakeet_rs::Transcriber;
+        // ParakeetTDT (encoder/decoder_joint + vocab.txt), NOT Parakeet (the CTC
+        // model, which wants model.onnx + tokenizer.json). We ship the TDT model.
+        pub use parakeet_rs::ParakeetTDT as Session;
+
+        const DIR: &str = r"C:\ProgramData\WarmupVk\speech\parakeet";
+        /// Loopback port for the resident parakeet-server (uncommon, distinct from
+        /// whisper-server's 17181, to avoid clashes).
+        const PORT: u16 = 17182;
+
+        /// Installed only when the TDT model files + the load-dynamic onnxruntime
+        /// DLL are all present (the optional installer downloads them together).
+        /// File set per parakeet-rs's TDT loader: an `encoder*.onnx` (int8 or fp32),
+        /// a `decoder_joint*.onnx`, and `vocab.txt`.
+        pub fn available() -> bool {
+            let d = Path::new(DIR);
+            let encoder = d.join("encoder-model.int8.onnx").is_file()
+                || d.join("encoder-model.onnx").is_file();
+            encoder && d.join("vocab.txt").is_file() && d.join("onnxruntime.dll").is_file()
+        }
+
+        /// Load the model. Called during the "starting" phase so the load overlaps
+        /// the user's first words — matching whisper-server's first-load UX.
+        // ponytail: reloads every mic-on (helper is short-lived, no resident cache
+        // like whisper-server). Upgrade path: make the helper resident if the
+        // per-toggle ~load cost on CPU proves annoying.
+        pub fn load() -> Result<Session, String> {
+            // Point ort's load-dynamic backend at the DLL beside the model.
+            std::env::set_var("ORT_DYLIB_PATH", Path::new(DIR).join("onnxruntime.dll"));
+            Session::from_pretrained(DIR, None).map_err(|e| format!("parakeet load: {e}"))
+        }
+
+        /// Transcribe 16 kHz mono f32 samples (exactly what `resample_16k` produces).
+        pub fn transcribe(model: &mut Session, samples: &[f32]) -> Result<String, String> {
+            model
+                .transcribe_samples(samples.to_vec(), 16_000, 1, None)
+                .map(|r| r.text)
+                .map_err(|e| format!("parakeet: {e}"))
+        }
+
+        fn addr() -> SocketAddr {
+            SocketAddr::new(super::HOST.parse().expect("valid loopback ip"), PORT)
+        }
+
+        /// True once the resident server has loaded the model AND bound the port (it
+        /// binds only after loading, so a successful connect == model ready).
+        pub fn server_up() -> bool {
+            TcpStream::connect_timeout(&addr(), Duration::from_millis(300)).is_ok()
+        }
+
+        /// Helper side: wait for the resident server (spawned by the SYSTEM worker) to
+        /// finish loading + bind. Cold ONNX load of the 650MB encoder can take a while
+        /// on the first press after login; later presses find it already up.
+        pub fn wait_ready() -> Result<(), String> {
+            let deadline = Instant::now() + Duration::from_secs(90);
+            while Instant::now() < deadline {
+                if server_up() {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            Err("parakeet-server not ready (model load timed out)".into())
+        }
+
+        /// Client side: send 16 kHz mono f32 samples to the resident server and read
+        /// back the transcript. Wire format: `[u32 LE nsamples][nsamples * f32 LE]`,
+        /// reply is the UTF-8 transcript until EOF.
+        pub fn transcribe_via_server(samples: &[f32]) -> Result<String, String> {
+            let mut s = TcpStream::connect_timeout(&addr(), Duration::from_secs(2))
+                .map_err(|e| format!("connect: {e}"))?;
+            let _ = s.set_read_timeout(Some(Duration::from_secs(120)));
+            let _ = s.set_write_timeout(Some(Duration::from_secs(30)));
+            let mut buf = Vec::with_capacity(4 + samples.len() * 4);
+            buf.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+            for v in samples {
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            s.write_all(&buf).map_err(|e| format!("send: {e}"))?;
+            let _ = s.shutdown(Shutdown::Write);
+            let mut resp = Vec::new();
+            s.read_to_end(&mut resp).map_err(|e| format!("recv: {e}"))?;
+            Ok(String::from_utf8_lossy(&resp).trim().to_string())
+        }
+
+        /// Server side (`--parakeet-server`): load the model once, then bind and serve
+        /// transcription requests over loopback until killed (logoff / tray quit).
+        /// Single-threaded — dictation is serial, so one request at a time is fine.
+        // ponytail: single-threaded, no idle shutdown. Add an idle-timeout exit if the
+        // resident RAM proves annoying when the mic is unused for long stretches.
+        pub fn serve() -> Result<(), String> {
+            super::log("parakeet-server: loading model");
+            let mut model = load()?; // slow, once; binds only after this returns
+            let listener = TcpListener::bind(addr())
+                .map_err(|e| format!("parakeet-server bind {PORT}: {e}"))?;
+            super::log(&format!("parakeet-server: ready on {}", addr()));
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(mut s) => {
+                        if let Err(e) = handle_conn(&mut s, &mut model) {
+                            super::log(&format!("parakeet-server: conn error: {e}"));
+                        }
+                    }
+                    Err(e) => super::log(&format!("parakeet-server: accept: {e}")),
+                }
+            }
+            Ok(())
+        }
+
+        fn handle_conn(s: &mut TcpStream, model: &mut Session) -> Result<(), String> {
+            let mut lenb = [0u8; 4];
+            // A bare connect with no payload (the readiness probe) hits EOF here — treat
+            // that as a no-op rather than an error.
+            if s.read_exact(&mut lenb).is_err() {
+                return Ok(());
+            }
+            let n = u32::from_le_bytes(lenb) as usize;
+            if n == 0 {
+                return Ok(());
+            }
+            // Loopback only, but cap the alloc anyway (16M samples ~= 1000s of audio).
+            if n > 16_000_000 {
+                return Err(format!("sample count too large: {n}"));
+            }
+            let mut bytes = vec![0u8; n * 4];
+            s.read_exact(&mut bytes)
+                .map_err(|e| format!("read samples: {e}"))?;
+            let samples: Vec<f32> = bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            let text = transcribe(model, &samples)?;
+            s.write_all(text.as_bytes())
+                .map_err(|e| format!("write: {e}"))?;
+            Ok(())
+        }
+    }
+
+    #[cfg(not(feature = "parakeet"))]
+    mod parakeet {
+        pub fn available() -> bool {
+            false
+        }
+        pub fn server_up() -> bool {
+            false
+        }
+        pub fn wait_ready() -> Result<(), String> {
+            Err("parakeet engine not built into this binary".into())
+        }
+        pub fn transcribe_via_server(_samples: &[f32]) -> Result<String, String> {
+            Err("parakeet engine not built into this binary".into())
+        }
+        pub fn serve() -> Result<(), String> {
+            Err("parakeet engine not built into this binary".into())
+        }
+    }
+
+    /// Entry point for `<exe> --parakeet-server`: the resident model host. Loads the
+    /// parakeet model once and serves transcription over loopback until killed.
+    pub fn run_parakeet_server() -> Result<(), String> {
+        parakeet::serve()
+    }
+
     /// Capture the mic, segment utterances by silence, transcribe each via the
     /// resident server, and inject the text. Blocks until idle auto-stop; the
     /// worker kills this process for a manual toggle-off.
@@ -665,35 +1028,91 @@ mod engine {
         // finishes their thought, then gets the text (no mid-sentence injection).
         // Audio also buffers here while the model loads the first time.
         clear_stop();
-        set_phase("starting");
-        ensure_server()?;
         set_phase("listening");
-        log("speech: recording (whisper-server ready)");
+        // Capture + the reactive glow must run DURING engine warm-up, not after it.
+        // Parakeet is a ~650MB in-process model load that can outlast the entire
+        // utterance — the user speaks and stops while it loads, leaving the orb frozen
+        // (whisper's resident server returns near-instantly, which is why it animated).
+        // The model isn't needed until transcription (after stop), so load it on a
+        // background thread and start capturing/animating immediately; join before use.
+        let pk_ready = if use_parakeet() {
+            log("speech: waiting for parakeet server (background)");
+            Some(std::thread::spawn(parakeet::wait_ready))
+        } else {
+            ensure_server()?;
+            None
+        };
+        log(if pk_ready.is_some() {
+            "speech: recording (parakeet server warming)"
+        } else {
+            "speech: recording (whisper-server ready)"
+        });
 
-        let tick = Duration::from_millis(100);
+        let tick = Duration::from_millis(50);
+        let dt = tick.as_secs_f32();
         let mut all: Vec<f32> = Vec::new();
-        let mut peak = 0.0f32;
+        // Audio captured while the engine warmed up: keep it in the recording, but
+        // DON'T feed it through the floor/level math below. It's one multi-second
+        // chunk whose rms would seed a bogus noise floor and gate the glow off for the
+        // whole utterance. Parakeet loads its model in-process here (seconds), so this
+        // pre-roll is large; whisper's resident server makes it ~empty — which is why
+        // the visualizer strength only died on parakeet.
+        if let Ok(mut b) = buf.lock() {
+            all.append(&mut b);
+        }
+        let mut level = 0.0f32;
         let mut since_log = 0.0f32;
+        // Adaptive noise floor for auto-stop + a voice-relative glow level. The
+        // DualSense floor is high (~0.1), so gate speech RELATIVE to a learned floor
+        // rather than an absolute threshold. Warm up briefly to learn it.
+        let mut noise = 0.0f32;
+        let mut warmup = 16u32;
+        let mut had_speech = false;
+        let mut silence_s = 0.0f32;
         loop {
             std::thread::sleep(tick);
             let new: Vec<f32> = {
                 let mut b = buf.lock().map_err(|_| "mic buffer poisoned")?;
                 std::mem::take(&mut *b)
             };
-            if !new.is_empty() {
-                let rms = (new.iter().map(|x| x * x).sum::<f32>() / new.len() as f32).sqrt();
-                peak = peak.max(rms);
-            }
-            all.extend_from_slice(&new);
+            let rms = if new.is_empty() {
+                0.0
+            } else {
+                (new.iter().map(|x| x * x).sum::<f32>() / new.len() as f32).sqrt()
+            };
+            all.extend_from_slice(&new); // record the whole monologue regardless
             let secs = all.len() as f32 / in_rate as f32;
-            since_log += tick.as_secs_f32();
-            if since_log >= 1.5 {
-                log(&format!("speech: recording {secs:.0}s peak_rms={peak:.3}"));
-                peak = 0.0;
+
+            if warmup > 0 {
+                noise = if noise == 0.0 { rms } else { noise * 0.6 + rms * 0.4 };
+                warmup -= 1;
+            }
+            let gate = (noise * 1.6).max(0.012);
+            let voiced = rms > gate;
+            if voiced {
+                had_speech = true;
+                silence_s = 0.0;
+            } else {
+                silence_s += dt;
+                noise = noise * 0.97 + rms * 0.03; // track the floor only during quiet
+            }
+            // Glow level = voice energy ABOVE the floor, normalized + smoothed, so the
+            // glow reacts to speech and stays dark on the noise floor.
+            let target = ((rms - gate).max(0.0) / 0.12).clamp(0.0, 1.0);
+            level = level * 0.5 + target * 0.5;
+            set_level(level);
+
+            since_log += dt;
+            if since_log >= 2.0 {
+                log(&format!("speech: recording {secs:.0}s rms={rms:.3} floor={noise:.3}"));
                 since_log = 0.0;
             }
-            // Stop only when the user toggles voice off (or the safety cap).
-            if stop_requested() || secs >= MAX_RECORD_S {
+            // Finish on: manual stop, auto-stop after a post-speech pause, or the cap.
+            let auto_stop = had_speech && silence_s >= AUTO_STOP_S;
+            if stop_requested() || auto_stop || secs >= MAX_RECORD_S {
+                if auto_stop {
+                    log(&format!("speech: auto-stop after {AUTO_STOP_S}s silence"));
+                }
                 break;
             }
         }
@@ -701,13 +1120,33 @@ mod engine {
         set_phase("transcribing");
         let secs = all.len() as f32 / in_rate as f32;
         if !all.is_empty() {
-            let wav = wav_16k_mono(&resample_16k(&all, in_rate));
-            match transcribe(&wav) {
-                Ok(t) if !t.is_empty() => {
-                    log(&format!("speech: heard ({secs:.1}s) \"{t}\""));
-                    crate::vk_nav::send_text_direct(&format!("{t} "));
+            let samples = resample_16k(&all, in_rate);
+            // Parakeet transcribes via its resident server (model stays loaded there);
+            // whisper goes via WAV + HTTP. For parakeet, join the background "ensure
+            // server" first — it blocks only if the model is still loading (e.g. the
+            // very first press after login); after that the server is already up.
+            let result = if let Some(h) = pk_ready {
+                match h.join() {
+                    Ok(Ok(())) => parakeet::transcribe_via_server(&samples),
+                    Ok(Err(e)) => Err(format!("parakeet server: {e}")),
+                    Err(_) => Err("parakeet ensure-server thread panicked".to_string()),
                 }
-                Ok(_) => log(&format!("speech: heard ({secs:.1}s) but transcript empty")),
+            } else {
+                transcribe(&wav_16k_mono(&samples))
+            };
+            match result {
+                Ok(t) => {
+                    let clean = clean_transcript(&t);
+                    if clean.is_empty() {
+                        log(&format!(
+                            "speech: heard ({secs:.1}s) non-speech, skipped (\"{}\")",
+                            t.trim()
+                        ));
+                    } else {
+                        log(&format!("speech: heard ({secs:.1}s) \"{clean}\""));
+                        crate::vk_nav::send_text_direct(&format!("{clean} "));
+                    }
+                }
                 Err(e) => log(&format!("speech transcribe failed: {e}")),
             }
         }

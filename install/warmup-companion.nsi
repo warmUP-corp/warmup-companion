@@ -43,6 +43,7 @@ Var RbTiny
 Var RbBase
 Var RbSmall
 Var RbMedium
+Var RbParakeet
 
 Name "${APPNAME}"
 OutFile "${SRCROOT}\target\warmup-companion-setup.exe"
@@ -86,6 +87,7 @@ Section "!Warmup Companion service (required)" SEC_MAIN
   SetOutPath "$INSTDIR"
   File "${BIN}"
   File "${SRCROOT}\install\Get-WarmupSpeech.ps1"
+  File "${SRCROOT}\install\Get-WarmupParakeet.ps1"
   File "${SRCROOT}\README.md"
   File "${SRCROOT}\PRIVACY.md"
   File "${SRCROOT}\SECURITY.md"
@@ -121,23 +123,33 @@ Section "!Warmup Companion service (required)" SEC_MAIN
   WriteRegDWORD HKLM "${UNINSTKEY}" "NoRepair" 1
 SectionEnd
 
-Section /o "Offline voice typing (whisper)" SEC_SPEECH
-  ; Opt-in, unchecked by default. Downloads the whisper.cpp runner + a model into
-  ; ${DATADIR}\speech; the Mic key on the on-screen keyboard appears only once
-  ; those exist (src\win\speech_input.rs::available). Recognition is fully local.
-  ${If} $ModelChoice == ""
-    StrCpy $ModelChoice "medium"
-  ${EndIf}
-  DetailPrint "Downloading offline voice typing (whisper '$ModelChoice' model)..."
-  nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\Get-WarmupSpeech.ps1" -Model $ModelChoice'
-  Pop $0
-  ${If} $0 != 0
-    MessageBox MB_ICONEXCLAMATION "Voice typing could not be downloaded (exit $0). The app works fine without it. Add it later by running $INSTDIR\Get-WarmupSpeech.ps1, or drop whisper-server.exe + a ggml-*.bin into ${DATADIR}\speech."
+Section /o "Offline voice typing" SEC_SPEECH
+  ; Opt-in, unchecked by default. Downloads the chosen engine into ${DATADIR}\speech;
+  ; the Mic key on the on-screen keyboard appears only once it's present
+  ; (src\win\speech_input.rs::available). Recognition is fully local, no cloud.
+  ; The model page sets $ModelChoice to a whisper size or "parakeet".
+  ${If} $ModelChoice == "parakeet"
+    DetailPrint "Downloading offline voice typing (Parakeet, ~670 MB)..."
+    nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\Get-WarmupParakeet.ps1"'
+    Pop $0
+    ${If} $0 != 0
+      MessageBox MB_ICONEXCLAMATION "Parakeet voice typing could not be downloaded (exit $0). The app works fine without it. Add it later by running $INSTDIR\Get-WarmupParakeet.ps1."
+    ${EndIf}
+  ${Else}
+    ${If} $ModelChoice == ""
+      StrCpy $ModelChoice "medium"
+    ${EndIf}
+    DetailPrint "Downloading offline voice typing (whisper '$ModelChoice' model)..."
+    nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\Get-WarmupSpeech.ps1" -Model $ModelChoice'
+    Pop $0
+    ${If} $0 != 0
+      MessageBox MB_ICONEXCLAMATION "Voice typing could not be downloaded (exit $0). The app works fine without it. Add it later by running $INSTDIR\Get-WarmupSpeech.ps1, or drop whisper-server.exe + a ggml-*.bin into ${DATADIR}\speech."
+    ${EndIf}
   ${EndIf}
 SectionEnd
 
 LangString DESC_MAIN   ${LANG_ENGLISH} "The Warmup Companion service (sign-in / lock / UAC gamepad keyboard). Required."
-LangString DESC_SPEECH ${LANG_ENGLISH} "Optional, fully offline voice typing. Downloads the whisper.cpp engine + a speech model (~150 MB) to ${DATADIR}\speech. The on-screen Mic key stays hidden unless this is installed. No cloud; recognition runs locally."
+LangString DESC_SPEECH ${LANG_ENGLISH} "Optional, fully offline voice typing. Downloads your chosen engine (whisper.cpp model, or NVIDIA Parakeet ~670 MB) to ${DATADIR}\speech. The on-screen Mic key stays hidden unless this is installed. No cloud; recognition runs locally."
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_MAIN}   $(DESC_MAIN)
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_SPEECH} $(DESC_SPEECH)
@@ -151,23 +163,25 @@ Function ModelPageShow
     Abort                          ; voice typing not chosen — skip this page
   ${EndIf}
 
-  !insertmacro MUI_HEADER_TEXT "Voice model" "Choose the offline speech model to download."
+  !insertmacro MUI_HEADER_TEXT "Voice engine" "Choose the offline speech engine to download."
   nsDialogs::Create 1018
   Pop $0
   ${If} $0 == error
     Abort
   ${EndIf}
 
-  ${NSD_CreateLabel} 0 0 100% 22u "Bigger models are more accurate but slower and larger to download. All run fully offline."
+  ${NSD_CreateLabel} 0 0 100% 22u "Whisper sizes: bigger = more accurate but slower/larger. Parakeet (NVIDIA) is a faster, multilingual alternative. All run fully offline; you can switch later from the tray."
   Pop $1
-  ${NSD_CreateRadioButton} 8u 28u 95% 12u "Tiny  -  ~75 MB, fastest"
+  ${NSD_CreateRadioButton} 8u 28u 95% 12u "Whisper Tiny  -  ~75 MB, fastest"
   Pop $RbTiny
-  ${NSD_CreateRadioButton} 8u 42u 95% 12u "Base  -  ~142 MB"
+  ${NSD_CreateRadioButton} 8u 42u 95% 12u "Whisper Base  -  ~142 MB"
   Pop $RbBase
-  ${NSD_CreateRadioButton} 8u 56u 95% 12u "Small  -  ~466 MB, better accuracy"
+  ${NSD_CreateRadioButton} 8u 56u 95% 12u "Whisper Small  -  ~466 MB, better accuracy"
   Pop $RbSmall
-  ${NSD_CreateRadioButton} 8u 70u 95% 12u "Medium  -  ~1.5 GB, best accuracy (recommended)"
+  ${NSD_CreateRadioButton} 8u 70u 95% 12u "Whisper Medium  -  ~1.5 GB, best accuracy (recommended)"
   Pop $RbMedium
+  ${NSD_CreateRadioButton} 8u 88u 95% 12u "Parakeet (NVIDIA)  -  ~670 MB, fast multilingual"
+  Pop $RbParakeet
 
   ${If} $ModelChoice == "tiny"
     ${NSD_Check} $RbTiny
@@ -175,6 +189,8 @@ Function ModelPageShow
     ${NSD_Check} $RbBase
   ${ElseIf} $ModelChoice == "small"
     ${NSD_Check} $RbSmall
+  ${ElseIf} $ModelChoice == "parakeet"
+    ${NSD_Check} $RbParakeet
   ${Else}
     ${NSD_Check} $RbMedium
   ${EndIf}
@@ -197,6 +213,11 @@ Function ModelPageLeave
     StrCpy $ModelChoice "medium"
     Return
   ${EndIf}
+  ${NSD_GetState} $RbParakeet $0
+  ${If} $0 == ${BST_CHECKED}
+    StrCpy $ModelChoice "parakeet"
+    Return
+  ${EndIf}
   StrCpy $ModelChoice "base"
 FunctionEnd
 
@@ -208,6 +229,7 @@ Section "Uninstall"
 
   Delete "$INSTDIR\warmup-companion.exe"
   Delete "$INSTDIR\Get-WarmupSpeech.ps1"
+  Delete "$INSTDIR\Get-WarmupParakeet.ps1"
   Delete "$INSTDIR\README.md"
   Delete "$INSTDIR\PRIVACY.md"
   Delete "$INSTDIR\SECURITY.md"

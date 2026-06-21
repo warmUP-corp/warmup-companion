@@ -841,7 +841,7 @@ mod server {
         // Block until a client connects. ERROR_PIPE_CONNECTED (client beat us to it) is fine.
         let _ = unsafe { ConnectNamedPipe(pipe, None) };
         if !client_process_allowed(pipe) {
-            crate::install::log_line("pipe client rejected");
+            // client_process_allowed logs the rejected process name.
             unsafe {
                 let _ = DisconnectNamedPipe(pipe);
             }
@@ -891,7 +891,13 @@ mod server {
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or_default();
-        name.eq_ignore_ascii_case("warmUP.exe")
+        let allowed = name.eq_ignore_ascii_case("warmUP.exe");
+        if !allowed {
+            crate::install::log_line(&format!(
+                "pipe client rejected: process '{name}' (expected warmUP.exe)"
+            ));
+        }
+        allowed
     }
 
     /// Read the client `hello`, reject on version mismatch, reply with our `hello`.
@@ -911,7 +917,13 @@ mod server {
                     apply_companion_settings(&settings);
                 }
             }
-            _ => return Err(io_err("hello rejected (missing or version mismatch)")),
+            Ok(DownFrame::Hello(h)) => {
+                return Err(io_err(&format!(
+                    "hello rejected: client protocol_version={}, companion expects {PROTOCOL_VERSION}",
+                    h.protocol_version
+                )));
+            }
+            _ => return Err(io_err("hello rejected: missing or invalid hello frame")),
         }
         let reply = UpFrame::Hello(Hello {
             protocol_version: PROTOCOL_VERSION,

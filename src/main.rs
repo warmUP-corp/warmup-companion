@@ -803,6 +803,18 @@ fn dispatch_install_or_service(args: &[String]) {
         };
         std::process::exit(code);
     }
+    // Resident parakeet model host: loaded once, kept warm across mic toggles. Spawned
+    // detached by the speech helper (already in the user session) on first parakeet use.
+    if args.iter().any(|a| a == "--parakeet-server") {
+        let code = match crate::win::speech_input::run_parakeet_server() {
+            Ok(()) => 0,
+            Err(e) => {
+                install::log_line(&format!("parakeet-server failed: {e}"));
+                1
+            }
+        };
+        std::process::exit(code);
+    }
     match args.get(1).map(String::as_str) {
         Some("install") => {
             let debug_ui = args.iter().any(|a| a == "--debug-ui" || a == "--debug");

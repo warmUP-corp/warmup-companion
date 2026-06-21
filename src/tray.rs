@@ -20,8 +20,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetTimer,
     TrackPopupMenu, TranslateMessage, HICON, IDI_APPLICATION, IMAGE_ICON, LR_LOADFROMFILE,
     MB_ICONINFORMATION, MB_OK, MF_CHECKED, MF_DISABLED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG,
-    SW_SHOWNORMAL, TPM_BOTTOMALIGN, TPM_LEFTALIGN, WM_APP, WM_COMMAND, WM_DESTROY, WM_RBUTTONUP,
-    WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
+    SW_SHOWNORMAL, TPM_BOTTOMALIGN, TPM_LEFTALIGN, WM_APP, WM_COMMAND, WM_DESTROY, WM_HOTKEY,
+    WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
 };
 
 const CLASS_NAME: windows::core::PCWSTR = w!("WarmupCompanionTray");
@@ -43,8 +46,12 @@ const MENU_AUTOSTOP_ON_GAME: usize = 1010;
 const MENU_VK_FLOATING: usize = 1011;
 const MENU_EDIT_SETTINGS: usize = 1012;
 const MENU_MIC_DEFAULT: usize = 1013;
+const MENU_ENGINE_WHISPER: usize = 1014;
+const MENU_ENGINE_PARAKEET: usize = 1015;
 /// Mic device i is `MENU_MIC_BASE + i` (capped at 32 devices in the menu).
 const MENU_MIC_BASE: usize = 1100;
+/// Global hotkey id for "toggle voice dictation" (Ctrl+Alt+V).
+const HOTKEY_VOICE: i32 = 0xB001;
 
 const SERVICE_LOG_PATH: &str = r"C:\ProgramData\WarmupVk\service.log";
 
@@ -93,6 +100,9 @@ fn tray_thread() {
             RegisterWindowMessageW(w!("TaskbarCreated")),
             Ordering::SeqCst,
         );
+        // Ctrl+Alt+V toggles voice dictation (mirrors R3), even with the keyboard
+        // closed. MOD_NOREPEAT so holding the combo doesn't thrash the toggle.
+        let _ = RegisterHotKey(hwnd, HOTKEY_VOICE, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 0x56);
         try_add_icon(hwnd);
         if !ICON_ADDED.load(Ordering::SeqCst) {
             let _ = SetTimer(hwnd, ADD_RETRY_TIMER_ID, ADD_RETRY_TIMER_MS, None);
@@ -102,6 +112,7 @@ fn tray_thread() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        let _ = UnregisterHotKey(hwnd, HOTKEY_VOICE);
         delete_icon(hwnd);
         let _ = DestroyWindow(hwnd);
     }
@@ -220,6 +231,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             show_menu(hwnd);
             LRESULT(0)
         }
+        WM_HOTKEY if wparam.0 as i32 == HOTKEY_VOICE => {
+            crate::vk_nav::start_voice_input();
+            LRESULT(0)
+        }
         msg if msg == TASKBAR_CREATED.load(Ordering::SeqCst) => {
             ICON_ADDED.store(false, Ordering::SeqCst);
             try_add_icon(hwnd);
@@ -241,6 +256,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 MENU_VK_FLOATING => toggle_vk_mode(),
                 MENU_EDIT_SETTINGS => edit_settings(),
+                MENU_ENGINE_WHISPER => crate::win::speech_input::set_engine("whisper"),
+                MENU_ENGINE_PARAKEET => crate::win::speech_input::set_engine("parakeet"),
                 MENU_MIC_DEFAULT => crate::win::speech_input::set_mic_choice(""),
                 id if (MENU_MIC_BASE..MENU_MIC_BASE + 32).contains(&id) => {
                     let mics = crate::win::speech_input::list_mics();
@@ -322,6 +339,17 @@ unsafe fn show_menu(hwnd: HWND) {
     // mic-name buffers must outlive TrackPopupMenu, so they live in this scope.
     let mut mic_labels: Vec<Vec<u16>> = Vec::new();
     if crate::win::speech_input::available_cached() {
+        // Engine picker — only when Parakeet is installed (else whisper is the only
+        // choice and a one-item menu is noise).
+        if crate::win::speech_input::parakeet_available() {
+            let eng = CreatePopupMenu().unwrap_or_default();
+            if !eng.0.is_null() {
+                let parakeet = crate::win::speech_input::engine() == "parakeet";
+                let _ = AppendMenuW(eng, chk(!parakeet), MENU_ENGINE_WHISPER, w!("Whisper"));
+                let _ = AppendMenuW(eng, chk(parakeet), MENU_ENGINE_PARAKEET, w!("Parakeet (NVIDIA)"));
+                let _ = AppendMenuW(menu, MF_POPUP, eng.0 as usize, w!("Voice engine"));
+            }
+        }
         let sub = CreatePopupMenu().unwrap_or_default();
         if !sub.0.is_null() {
             let cur = crate::win::speech_input::mic_choice();

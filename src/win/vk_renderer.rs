@@ -9,14 +9,15 @@ use windows::Foundation::Numerics::Matrix3x2;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_POINT_2F, D2D_RECT_F,
+    D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
     ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
     D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
     D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+    D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
     D2D1_INTERPOLATION_MODE_LINEAR, D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
 };
 use windows::Win32::Graphics::Direct3D::{
@@ -84,6 +85,46 @@ fn colorref_mix(fg: u32, bg: u32, amount: f32) -> u32 {
 
 pub fn mix_color(fg: u32, bg: u32, amount: f32) -> u32 {
     colorref_mix(fg, bg, amount)
+}
+
+/// Rotate the hue of a COLORREF (0x00BBGGRR) by `deg`, keeping saturation and
+/// lightness. Lets the voice orb fan a single theme accent into a few related
+/// tints so it flows like the old multicolor blob but stays on-theme.
+fn shift_hue(c: u32, deg: f32) -> u32 {
+    let r = (c & 0xff) as f32 / 255.0;
+    let g = ((c >> 8) & 0xff) as f32 / 255.0;
+    let b = ((c >> 16) & 0xff) as f32 / 255.0;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) * 0.5;
+    let d = max - min;
+    let (mut h, s) = if d < 1e-6 {
+        (0.0, 0.0)
+    } else {
+        let s = d / (1.0 - (2.0 * l - 1.0).abs());
+        let h = if max == r {
+            ((g - b) / d).rem_euclid(6.0)
+        } else if max == g {
+            (b - r) / d + 2.0
+        } else {
+            (r - g) / d + 4.0
+        };
+        (h * 60.0, s)
+    };
+    h = (h + deg).rem_euclid(360.0);
+    let chroma = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = chroma * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = l - chroma * 0.5;
+    let (r1, g1, b1) = match (h / 60.0) as u32 {
+        0 => (chroma, x, 0.0),
+        1 => (x, chroma, 0.0),
+        2 => (0.0, chroma, x),
+        3 => (0.0, x, chroma),
+        4 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let to = |v: f32| ((v + m).clamp(0.0, 1.0) * 255.0).round() as u32;
+    to(r1) | (to(g1) << 8) | (to(b1) << 16)
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -1944,6 +1985,127 @@ impl VkRenderer {
             M32: 0.0,
         };
         self.d2d_context.SetTransform(&identity);
+        self.d2d_context
+            .EndDraw(None, None)
+            .map_err(|e| format!("EndDraw: {e}"))?;
+        self.swapchain
+            .Present(1, DXGI_PRESENT(0))
+            .ok()
+            .map_err(|e| format!("Present: {e}"))?;
+        Ok(())
+    }
+
+    /// Subtle, audio-reactive voice glow for the right-edge overlay: soft concentric
+    /// rings + a core dot that grow/brighten with `level` (live mic energy, 0..1).
+    /// `transcribing` swaps the live level for a gentle auto-pulse while it works.
+    pub unsafe fn draw_voice(
+        &mut self,
+        accent: u32,
+        level: f32,
+        transcribing: bool,
+    ) -> Result<(), String> {
+        let cw = self.width as f32;
+        let ch = self.height as f32;
+        self.d2d_context.BeginDraw();
+        self.d2d_context.Clear(Some(&D2D1_COLOR_F {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        }));
+
+        let t = self.prompt_started.elapsed().as_secs_f32();
+        let amp = if transcribing {
+            (t * std::f32::consts::TAU * 1.1).sin() * 0.5 + 0.5
+        } else {
+            level.clamp(0.0, 1.0)
+        };
+        // A faint breath so it's alive (not dead) even in silence, but stays subtle.
+        let idle = (t * std::f32::consts::TAU * 0.25).sin() * 0.5 + 0.5;
+        let energy = amp.max(idle * 0.10).clamp(0.0, 1.0);
+
+        let cx = cw * 0.5;
+        let cy = ch * 0.5;
+        let unit = cw.min(ch) * 0.5;
+        // Blob centers stay within this radius (their edge too, via the clamp below),
+        // so nothing clips the window even at peak energy.
+        let max_r = unit * 0.92;
+
+        // Siri-ish: a few translucent blobs that orbit + pulse on their own phase and
+        // blend into a flowing glow; brighter/larger with voice energy. All four are
+        // hue-rotations of the theme accent so the orb matches the keyboard theme.
+        // COLORREF is 0x00BBGGRR.
+        let blobs: [(u32, f32, f32); 4] = [
+            (shift_hue(accent, -34.0), 0.0, 0.85),
+            (shift_hue(accent, -10.0), 2.1, 1.10),
+            (shift_hue(accent, 16.0), 4.2, 0.70),
+            (shift_hue(accent, 38.0), 1.0, 1.30),
+        ];
+        // Keep blobs clustered near center so they read as ONE coherent orb that
+        // gently rotates/morphs, not separate wandering dots: small orbit, large
+        // radius (always overlapping), slow circular motion.
+        let drift = unit * (0.05 + 0.08 * energy);
+        let base_r = unit * (0.42 + 0.24 * energy);
+        // Smooth per-layer wobble: each feather layer drifts on its own phase so the
+        // stack looks like an irregular organic blob, not clean concentric rings. This
+        // is what lets us use FEW layers — the jitter, not sheer count, hides the
+        // alpha banding. Two summed sines stay ~[-1,1] and vary smoothly over time;
+        // louder voice both widens the wobble and speeds it up so the orb churns with
+        // energy and nearly stills in silence.
+        let wob = 0.5 + 1.5 * energy;
+        let jitter = |seed: f32| {
+            let sp = 0.6 + 1.8 * energy;
+            ((seed * 2.3999632 + t * sp).sin() + (seed * 5.197 - t * sp * 0.62).sin()) * 0.5 * wob
+        };
+        // Feathered falloff per blob: largest+faintest disc first, smaller+brighter
+        // stacked on top → soft glow with a blurry edge, all cheap solid fills (no GPU
+        // blur). One brush per blob, SetOpacity per layer, so there's no per-fill alloc.
+        const LAYERS: usize = 11;
+        for (bi, (color, phase, freq)) in blobs.into_iter().enumerate() {
+            let ang = t * freq * 0.45 + phase;
+            let bx = cx + ang.cos() * drift;
+            let by = cy + ang.sin() * drift;
+            let dist = ((bx - cx).powi(2) + (by - cy).powi(2)).sqrt();
+            let r = (base_r * (0.90 + 0.12 * (ang * 1.3).sin()))
+                .min(max_r - dist)
+                .max(unit * 0.12);
+            let brush = solid_brush(&self.d2d_context, colorref(color))?;
+            let seed0 = bi as f32 * 9.71;
+            for k in 0..LAYERS {
+                let kf = k as f32 / (LAYERS - 1) as f32; // 0 outer .. 1 inner
+                let s = seed0 + k as f32;
+                // Wobble each layer's radius + center so the few layers don't stack
+                // into visible rings. ponytail: visual-tuning knobs — bump jitter
+                // amounts if banding shows, drop them if it looks too noisy.
+                let rr = r * (1.0 - 0.80 * kf) * (1.0 + 0.20 * jitter(s));
+                let jx = bx + unit * 0.06 * jitter(s + 1.3);
+                let jy = by + unit * 0.06 * jitter(s + 7.7);
+                // Quadratic ramp → soft edge; alpha rescaled for the lower layer count.
+                brush.SetOpacity((0.13 + 0.08 * energy) * (0.22 + 0.78 * kf * kf));
+                let e = D2D1_ELLIPSE {
+                    point: D2D_POINT_2F { x: jx, y: jy },
+                    radiusX: rr,
+                    radiusY: rr,
+                };
+                self.d2d_context.FillEllipse(&e, &brush);
+            }
+        }
+        // Soft bright focal core that swells with energy (also feathered).
+        let core_brush = solid_brush(&self.d2d_context, colorref(0x00FFFFFF))?;
+        for k in 0..LAYERS {
+            let kf = k as f32 / (LAYERS - 1) as f32;
+            let rr = unit * (0.04 + (0.10 + 0.08 * energy) * (1.0 - kf));
+            // Base alpha rescaled for the lower layer count so silence stays a faint
+            // highlight, not a hard white dot; blooms with energy.
+            core_brush.SetOpacity((0.022 + 0.09 * energy) * kf * kf);
+            let core = D2D1_ELLIPSE {
+                point: D2D_POINT_2F { x: cx, y: cy },
+                radiusX: rr,
+                radiusY: rr,
+            };
+            self.d2d_context.FillEllipse(&core, &core_brush);
+        }
+
         self.d2d_context
             .EndDraw(None, None)
             .map_err(|e| format!("EndDraw: {e}"))?;

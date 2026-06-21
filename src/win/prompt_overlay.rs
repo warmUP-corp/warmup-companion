@@ -36,8 +36,13 @@ const CONNECTED_PANEL_W: i32 = 300;
 const CONNECTED_PANEL_H: i32 = 210;
 /// Gap between the pill's bottom edge and the bottom of the primary monitor.
 const MARGIN_BOTTOM: i32 = 72;
+/// Voice glow overlay: small + subtle, hugging the right edge, vertically centered.
+const VOICE_W: i32 = 150;
+const VOICE_H: i32 = 150;
+const MARGIN_RIGHT: i32 = 40;
 const REPAINT_TIMER_ID: usize = 12;
-const REPAINT_TIMER_MS: u32 = 50;
+/// ~60 fps so the reactive voice glow animates smoothly.
+const REPAINT_TIMER_MS: u32 = 16;
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
 const CONNECTED_VISUAL_DURATION: Duration = Duration::from_millis(2400);
 
@@ -75,6 +80,10 @@ enum PromptVisual {
     Ready,
     NoPad,
     Connected,
+    /// Voice dictation is recording (mic on, VK closed).
+    Listening,
+    /// Voice dictation stopped; transcribing the recording.
+    Transcribing,
 }
 
 impl PromptVisual {
@@ -83,6 +92,8 @@ impl PromptVisual {
             PromptVisual::Ready => 1,
             PromptVisual::NoPad => 2,
             PromptVisual::Connected => 3,
+            PromptVisual::Listening => 4,
+            PromptVisual::Transcribing => 5,
         })
     }
 
@@ -90,6 +101,8 @@ impl PromptVisual {
         match lparam.0 {
             2 => PromptVisual::NoPad,
             3 => PromptVisual::Connected,
+            4 => PromptVisual::Listening,
+            5 => PromptVisual::Transcribing,
             _ => PromptVisual::Ready,
         }
     }
@@ -104,6 +117,16 @@ impl DesktopApp for PromptApp {
     const BG_COLOR: u32 = DEFAULT_BG;
     const WNDPROC: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT = prompt_wndproc;
 
+    fn on_ready(&mut self, _thread_id: u32) {
+        // Attach to the input desktop ONCE while the thread is clean (no windows),
+        // so SetThreadDesktop can't later fail with ERROR_BUSY (0x800700AA). In a
+        // userland session that's the user's Default desktop — where the voice pill
+        // lives — so voice shows then need no (failing) per-show re-attach.
+        if let Err(e) = desktop::attach_input() {
+            service_log(&format!("prompt ui: initial desktop attach failed: {e}"));
+        }
+    }
+
     fn on_show(&mut self, lparam: LPARAM) {
         ui_show(PromptVisual::from_lparam(lparam));
     }
@@ -117,6 +140,19 @@ thread_local! {
     static HWND_STATE: std::cell::Cell<Option<HWND>> = const { std::cell::Cell::new(None) };
     static RENDERER: RefCell<Option<VkRenderer>> = const { RefCell::new(None) };
     static VISUAL_STATE: std::cell::Cell<PromptVisual> = const { std::cell::Cell::new(PromptVisual::Ready) };
+    /// Render-side smoothed mic level — lerps toward the helper's published value
+    /// each (60 fps) repaint so the glow glides instead of stepping at the helper rate.
+    static VOICE_LEVEL: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+}
+
+fn smoothed_voice_level() -> f32 {
+    let target = crate::win::speech_input::voice_level();
+    VOICE_LEVEL.with(|c| {
+        let v = c.get();
+        let n = v + (target - v) * 0.35;
+        c.set(n);
+        n
+    })
 }
 
 static CONTROLLER: OnceLock<Mutex<PromptOverlayController>> = OnceLock::new();
@@ -149,7 +185,19 @@ pub fn tick(vk_open: bool) {
     let connected_intro_active = c
         .connected_visual_until
         .is_some_and(|until| Instant::now() < until);
-    let visual = if userland_debug {
+    // Voice dictation takes priority on ANY desktop: R3 can start it with the VK
+    // closed, so this pill is the "currently listening" indicator. While the VK is
+    // open its own mic-key halo shows the phase, so the pill yields then.
+    let voice = crate::win::speech_input::voice_ui_phase();
+    let visual = if let Some(p) = voice.as_deref() {
+        if vk_open {
+            None
+        } else if p == "transcribing" {
+            Some(PromptVisual::Transcribing)
+        } else {
+            Some(PromptVisual::Listening)
+        }
+    } else if userland_debug {
         Some(PromptVisual::Connected)
     } else if on_winlogon {
         if vk_open {
@@ -196,6 +244,8 @@ pub fn tick(vk_open: bool) {
                 }
                 (PromptVisual::Ready, _) => "prompt ui: shown (Winlogon, VK closed, pad connected)",
                 (PromptVisual::NoPad, _) => "prompt ui: shown (Winlogon, no pad connected)",
+                (PromptVisual::Listening, _) => "prompt ui: shown (voice listening)",
+                (PromptVisual::Transcribing, _) => "prompt ui: shown (voice transcribing)",
             });
         } else {
             let _ = thread.hide();
@@ -208,8 +258,14 @@ pub fn tick(vk_open: bool) {
 fn ui_show(visual: PromptVisual) {
     ui_hide();
     VISUAL_STATE.with(|state| state.set(visual));
-    if let Err(e) = desktop::attach_input() {
-        service_log(&format!("prompt ui: desktop attach failed: {e}"));
+    // Voice pill is userland-only and the thread is already on the user desktop
+    // (attached once in on_ready); re-attaching there fails with ERROR_BUSY and
+    // mis-places the window. Only the Winlogon prompts re-attach per show.
+    let userland_only = matches!(visual, PromptVisual::Listening | PromptVisual::Transcribing);
+    if !userland_only {
+        if let Err(e) = desktop::attach_input() {
+            service_log(&format!("prompt ui: desktop attach failed: {e}"));
+        }
     }
     match unsafe { create_prompt_window() } {
         Ok(hwnd) => {
@@ -259,15 +315,20 @@ fn ui_hide() {
 unsafe fn bottom_center() -> (i32, i32) {
     let cx = GetSystemMetrics(SM_CXSCREEN);
     let cy = GetSystemMetrics(SM_CYSCREEN);
-    let (w, h) = VISUAL_STATE.with(|state| panel_size_for_visual(state.get()));
-    let x = ((cx - w) / 2).max(0);
-    let y = (cy - h - MARGIN_BOTTOM).max(0);
-    (x, y)
+    let visual = VISUAL_STATE.with(|state| state.get());
+    let (w, h) = panel_size_for_visual(visual);
+    if matches!(visual, PromptVisual::Listening | PromptVisual::Transcribing) {
+        // Voice glow: hug the right edge, vertically centered — subtle, out of the way.
+        ((cx - w - MARGIN_RIGHT).max(0), ((cy - h) / 2).max(0))
+    } else {
+        (((cx - w) / 2).max(0), (cy - h - MARGIN_BOTTOM).max(0))
+    }
 }
 
 fn panel_size_for_visual(visual: PromptVisual) -> (i32, i32) {
     match visual {
         PromptVisual::Connected => (CONNECTED_PANEL_W, CONNECTED_PANEL_H),
+        PromptVisual::Listening | PromptVisual::Transcribing => (VOICE_W, VOICE_H),
         PromptVisual::Ready | PromptVisual::NoPad => (PANEL_W, PANEL_H),
     }
 }
@@ -402,6 +463,14 @@ fn render_prompt(hwnd: HWND) {
                                 false,
                                 "",
                             )
+                        }
+                        PromptVisual::Listening => {
+                            let accent = theme.accent.or(theme.border).unwrap_or(DEFAULT_BORDER);
+                            r.draw_voice(accent, smoothed_voice_level(), false)
+                        }
+                        PromptVisual::Transcribing => {
+                            let accent = theme.accent.or(theme.border).unwrap_or(DEFAULT_BORDER);
+                            r.draw_voice(accent, smoothed_voice_level(), true)
                         }
                     };
                     if let Err(e) = result {

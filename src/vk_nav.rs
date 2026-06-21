@@ -642,8 +642,95 @@ pub fn activate_key(key: &KeyCell) {
 }
 
 pub fn send_text_direct(text: &str) {
+    // Log the real inject target up front, to the user-writable log, so we can see
+    // exactly where a transcript went — including when the guard below skips it.
+    let (hwnd, exe, class) = foreground_info();
+    let skip_warmup = exe.eq_ignore_ascii_case("warmup.exe");
+    diag_inject_log(&format!(
+        "send_text_direct: chars={} fg=0x{hwnd:x} exe='{exe}' class='{class}' skip_warmup={skip_warmup}",
+        text.chars().count()
+    ));
+    // Never dump a dictated transcript into the warmUP app's own UI.
+    if skip_warmup {
+        crate::install::log_line("voice inject skipped: warmUP is foreground");
+        return;
+    }
     let units: Vec<u16> = text.encode_utf16().collect();
     send_unicode(&units);
+}
+
+/// `(hwnd_as_usize, exe_basename, window_class)` of the current foreground
+/// window. Used both to keep dictation out of warmUP and to log the real inject
+/// target — the speech helper injects from its own process, so this is the only
+/// way to see where a transcript actually went.
+fn foreground_info() -> (usize, String, String) {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId,
+    };
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.0.is_null() {
+            return (0, String::new(), String::new());
+        }
+        let hwnd = fg.0 as usize;
+        let mut cbuf = [0u16; 128];
+        let n = GetClassNameW(fg, &mut cbuf);
+        let class = String::from_utf16_lossy(&cbuf[..n.max(0) as usize]);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(fg, Some(&mut pid));
+        let mut exe = String::new();
+        if pid != 0 {
+            if let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+                let mut buf = [0u16; 1024];
+                let mut len = buf.len() as u32;
+                let ok = QueryFullProcessImageNameW(
+                    process,
+                    PROCESS_NAME_FORMAT(0),
+                    windows::core::PWSTR(buf.as_mut_ptr()),
+                    &mut len,
+                )
+                .is_ok();
+                let _ = CloseHandle(process);
+                if ok && len > 0 {
+                    exe = std::path::Path::new(&String::from_utf16_lossy(&buf[..len as usize]))
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or_default()
+                        .to_string();
+                }
+            }
+        }
+        (hwnd, exe, class)
+    }
+}
+
+/// True if the OS foreground window belongs to the warmUP desktop app.
+fn foreground_is_warmup() -> bool {
+    foreground_info().1.eq_ignore_ascii_case("warmup.exe")
+}
+
+/// Append a line to a user-session-writable inject log. `service.log` is
+/// ACL-locked to SYSTEM, so an inject done from the user-session speech helper
+/// leaves no trail there — this mirror makes it visible.
+fn diag_inject_log(msg: &str) {
+    let Some(base) = std::env::var_os("LOCALAPPDATA") else {
+        return;
+    };
+    let dir = std::path::Path::new(&base).join("WarmupVk");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("inject.log");
+    if std::fs::metadata(&path).map(|m| m.len() > 512_000).unwrap_or(false) {
+        let _ = std::fs::remove_file(&path);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        use std::io::Write;
+        let _ = writeln!(f, "{msg}");
+    }
 }
 
 /// Real Text-commit adapter (CONTEXT.md "Text commit"): one batched `SendInput`
@@ -715,12 +802,20 @@ pub fn start_voice_input() {
         return;
     }
 
-    // Toggle off: ask the helper to FINISH — it transcribes the whole monologue
-    // and injects it, then exits. Not a kill (that would drop the recording).
-    if voice_input_active() {
+    // Toggle off only if a helper is actually running — it transcribes the whole
+    // monologue and injects it, then exits. After an auto-stop the helper has already
+    // exited, so a stale "active" flag falls through to a fresh start.
+    if voice_input_active() && crate::win::speech_input::helper_alive() {
         crate::install::log_line("vk voice input: OFF (finishing — transcribe on stop)");
         crate::win::speech_input::request_stop();
         set_voice_input_active(false);
+        return;
+    }
+
+    // Don't start dictation when warmUP itself is focused — the transcript would
+    // land in its UI. (Toggle-off above is unguarded, so it can still be stopped.)
+    if foreground_is_warmup() {
+        crate::install::log_line("vk voice input ignored: warmUP is foreground");
         return;
     }
 
@@ -814,15 +909,35 @@ fn inject_vk(vk: VIRTUAL_KEY) {
     suppress_native_keyboard_after_winlogon_inject(collapse);
 }
 
+/// Chunk size + gap for paced injection. Console hosts (conhost / Windows
+/// Terminal) silently drop a single large burst of synthetic KEYEVENTF_UNICODE
+/// events — they drain the input queue slower than GUI apps, so a whole dictated
+/// sentence sent at once never lands in a terminal (a single VK keypress does:
+/// it's one event, paced by the human). Calibration knob: if a terminal still
+/// drops dictated text, shrink INJECT_CHUNK or raise INJECT_GAP.
+const INJECT_CHUNK: usize = 8;
+const INJECT_GAP: Duration = Duration::from_millis(6);
+
 fn send_unicode(units: &[u16]) {
     let collapse = focus_for_inject();
-    let mut batch: Vec<INPUT> = Vec::with_capacity(units.len() * 2 + 2);
-    push_collapse(&mut batch, collapse);
-    for &unit in units {
-        batch.push(unicode_event(unit, false));
-        batch.push(unicode_event(unit, true));
+    // One char (a VK keypress) is a single chunk → one SendInput, no added
+    // latency. Long injects (voice dictation) pace out so terminals keep up.
+    let groups: Vec<&[u16]> = units.chunks(INJECT_CHUNK.max(1)).collect();
+    let mut sent = 0i32;
+    for (i, group) in groups.iter().enumerate() {
+        let mut batch: Vec<INPUT> = Vec::with_capacity(group.len() * 2 + 2);
+        if i == 0 {
+            push_collapse(&mut batch, collapse);
+        }
+        for &unit in *group {
+            batch.push(unicode_event(unit, false));
+            batch.push(unicode_event(unit, true));
+        }
+        sent += unsafe { SendInput(&batch, std::mem::size_of::<INPUT>() as i32) } as i32;
+        if i + 1 < groups.len() {
+            std::thread::sleep(INJECT_GAP);
+        }
     }
-    let sent = unsafe { SendInput(&batch, std::mem::size_of::<INPUT>() as i32) };
     suppress_native_keyboard_after_winlogon_inject(collapse);
     // Userland-typing diagnostic: when off Winlogon, SendInput should land in the
     // foreground app. Log the event count actually inserted + the loop thread's
@@ -830,13 +945,16 @@ fn send_unicode(units: &[u16]) {
     // not-foreground / blocked) is visible in the log.
     #[cfg(feature = "gamepad")]
     if !crate::win::logon_focus::is_active() {
-        let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+        let (hwnd, exe, class) = foreground_info();
         let desk = crate::win::current_desktop_name().unwrap_or_default();
-        crate::install::log_line(&format!(
-            "vk inject(userland): units={} SendInput->{sent} desktop={desk} fg=0x{:x}",
-            units.len(),
-            fg.0 as usize
-        ));
+        let line = format!(
+            "vk inject(userland): units={} SendInput->{sent} desktop={desk} fg=0x{hwnd:x} exe='{exe}' class='{class}'",
+            units.len()
+        );
+        // service.log (gamepad helper can write it) + a user-writable mirror (the
+        // speech helper can't write service.log, so its injects only show here).
+        crate::install::log_line(&line);
+        diag_inject_log(&line);
     }
 }
 

@@ -190,6 +190,11 @@ fn install_inner(debug_ui: bool) -> Result<(), String> {
     fs::create_dir_all(INSTALL_DIR).map_err(|e| e.to_string())?;
     fs::create_dir_all(DATA_DIR).map_err(|e| e.to_string())?;
     restrict_data_dir_acl()?;
+    // Re-open the bin subdir to Users (read+execute) so the non-elevated warmUP
+    // desktop app can detect the install (else its settings show "Missing"). Done
+    // after the lockdown so it adds to, not replaces, the SYSTEM+Admins grant. The
+    // exe is copied below and inherits this read access.
+    allow_bin_read_acl()?;
     set_debug_ui_flag(debug_ui)?;
 
     // Stop + delete BEFORE copying — old exe is locked by the running service.
@@ -209,6 +214,13 @@ fn install_inner(debug_ui: bool) -> Result<(), String> {
         ));
     }
     copy_gamecontroller_db()?;
+    // Version marker the warmUP desktop app reads (its `warmup-companion.version`
+    // convention) to show the installed version and judge updates. Best-effort —
+    // a marker failure must not fail the service install. Inherits Users:RX from bin.
+    let _ = fs::write(
+        Path::new(INSTALL_DIR).join("warmup-companion.version"),
+        env!("CARGO_PKG_VERSION"),
+    );
     // sc.exe: `binPath=` and path are separate argv tokens; no quotes (path has no spaces).
     // SCM starts the exe directly; main() dispatches to service_dispatcher when argc == 1.
     let exe = dest.display().to_string();
@@ -390,6 +402,26 @@ fn restrict_data_dir_acl() -> Result<(), String> {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stdout = String::from_utf8_lossy(&out.stdout);
         Err(format!("lock down {DATA_DIR} ACL failed: {stdout}{stderr}"))
+    }
+}
+
+fn allow_bin_read_acl() -> Result<(), String> {
+    // Grant BUILTIN\Users (S-1-5-32-545) read+execute on the bin dir only. The data
+    // dir stays locked to SYSTEM+Admins (logs / VK context), but the binaries are
+    // public release artifacts and the non-elevated desktop app must read the exe to
+    // see the companion as installed. Read can't tamper with the SYSTEM-run service.
+    // (OI)(CI) so the copied exe + version marker inherit it. Bypass-traverse-checking
+    // (default for all users) lets the app reach bin through the locked data dir.
+    let out = Command::new("icacls.exe")
+        .args([INSTALL_DIR, "/grant:r", "*S-1-5-32-545:(OI)(CI)RX"])
+        .output()
+        .map_err(|e| format!("icacls.exe: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        Err(format!("grant {INSTALL_DIR} read ACL failed: {stdout}{stderr}"))
     }
 }
 
