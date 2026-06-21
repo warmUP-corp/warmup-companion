@@ -39,15 +39,6 @@ pub enum VkLayoutMode {
     Floating,
 }
 
-impl VkLayoutMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            VkLayoutMode::Docked => "docked",
-            VkLayoutMode::Floating => "floating",
-        }
-    }
-}
-
 #[cfg(feature = "gamepad")]
 pub fn parse_vk_layout_mode(raw: Option<&str>) -> VkLayoutMode {
     match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
@@ -67,6 +58,29 @@ pub fn vk_layout_mode() -> VkLayoutMode {
             })
         });
     parse_vk_layout_mode(raw.as_deref())
+}
+
+/// Compact docked bar (default). 1.0 = the full reference bar; the default keeps
+/// the keyboard out of the way at ~80% height. Tray "Compact size" toggles it.
+#[cfg(feature = "gamepad")]
+pub const COMPACT_BAR_SCALE: f32 = 0.8;
+
+/// Docked-keyboard height multiplier. Defaults to [`COMPACT_BAR_SCALE`]; a value
+/// of `1.0` is the full reference bar. Clamped to a usable range; only the docked
+/// layout uses it (floating already sizes to its content).
+#[cfg(feature = "gamepad")]
+pub fn vk_bar_scale() -> f32 {
+    settings_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|text| {
+            text.lines().find_map(|line| {
+                let (k, v) = line.split_once('=')?;
+                (k.trim() == "vk_bar_scale").then(|| v.trim().to_string())
+            })
+        })
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| (0.6..=1.2).contains(v))
+        .unwrap_or(COMPACT_BAR_SCALE)
 }
 
 #[cfg(feature = "gamepad")]
@@ -413,6 +427,66 @@ pub fn settings_path() -> Option<std::path::PathBuf> {
     })
 }
 
+/// Commented `settings.ini` template. Each value line is commented and free of
+/// inline comments, so uncommenting one stays parseable. Keep keys in sync with
+/// `validate_gamepad_setting`.
+#[cfg(feature = "gamepad")]
+const SETTINGS_TEMPLATE: &str = r#"# Warmup Companion settings. One `key = value` per line; `#` lines are ignored.
+# Uncomment a line, change the value, save, then re-open the keyboard.
+# Cursor/scroll/theme are normally set in the warmUP desktop app and pushed over
+# IPC; values set here apply until the next push.
+
+# Gamepad poll mode: full | sleep
+# userland_poll = full
+
+# Sleep / stop the gamepad poll when a fullscreen game is foreground (true|false)
+# sleep_on_game = true
+# auto_stop_on_game = false
+
+# Cursor: deadzone & smoothing are 0.0-0.95; speed & accel are > 0.0
+# cursor_deadzone = 0.15
+# cursor_speed = 15.0
+# cursor_accel = 2.0
+# cursor_smoothing = 0.0
+
+# Scroll: deadzone 0.0-0.95; speed & accel > 0.0; natural_scroll true|false
+# scroll_deadzone = 0.15
+# scroll_speed = 5.0
+# scroll_accel = 1.0
+# natural_scroll = false
+
+# On-screen keyboard layout: docked | floating
+# vk_mode = docked
+# Keyboard size: 0.6 - 1.2 (0.8 = compact)
+# vk_bar_scale = 1.0
+
+# Keyboard theme colors, #RRGGBB
+# keyboard_bg = #101010
+# keyboard_key = #202020
+# keyboard_accent = #4C7B99
+# keyboard_text = #FFFFFF
+# keyboard_sel_text = #FFFFFF
+# keyboard_border = #333333
+
+# Voice typing (offline whisper) is an opt-in install (-Speech). Recognition
+# language defaults to your Windows locale; override with the WARMUP_WHISPER_LANG
+# environment variable. Mic = your Windows default input device.
+"#;
+
+/// Path to `settings.ini`, creating it with the documented template if missing
+/// so the tray "Edit settings" item always opens a populated, self-describing file.
+#[cfg(feature = "gamepad")]
+pub fn ensure_settings_file() -> Option<std::path::PathBuf> {
+    let path = settings_path()?;
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, SETTINGS_TEMPLATE);
+    }
+    Some(path)
+}
+
 #[cfg(feature = "gamepad")]
 pub fn set_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
     validate_gamepad_setting(key, value)?;
@@ -503,6 +577,12 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
             "docked" | "floating" => Ok(()),
             _ => Err("vk_mode must be docked or floating".to_string()),
         },
+        "vk_bar_scale" => value
+            .parse::<f32>()
+            .ok()
+            .filter(|v| (0.6..=1.2).contains(v))
+            .map(|_| ())
+            .ok_or_else(|| "vk_bar_scale must be between 0.6 and 1.2".to_string()),
         _ => Err(format!("unknown setting: {key}")),
     }
 }
@@ -539,6 +619,17 @@ mod tests {
         assert_eq!(theme.accent, Some(0x00090807));
         assert_eq!(theme.text, Some(0x000c0b0a));
         assert_eq!(theme.sel_text, Some(0x000f0e0d));
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn vk_bar_scale_validates_range() {
+        // The tray Compact toggle writes this; out-of-range must be rejected so a
+        // bad value can't shrink the bar to nothing or balloon it past the screen.
+        assert!(validate_gamepad_setting("vk_bar_scale", "0.8").is_ok());
+        assert!(validate_gamepad_setting("vk_bar_scale", "1.0").is_ok());
+        assert!(validate_gamepad_setting("vk_bar_scale", "2.0").is_err());
+        assert!(validate_gamepad_setting("vk_bar_scale", "abc").is_err());
     }
 
     #[cfg(feature = "gamepad")]

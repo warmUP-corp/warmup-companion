@@ -543,9 +543,9 @@ mod repl_scroll {
     use super::{io, App, Write};
 
     thread_local! {
-        static ENABLED: Cell<bool> = Cell::new(false);
-        static AFTER_STATE: Cell<u32> = Cell::new(0);
-        static LAST_STATE_LINES: RefCell<Option<Vec<String>>> = RefCell::new(None);
+        static ENABLED: Cell<bool> = const { Cell::new(false) };
+        static AFTER_STATE: Cell<u32> = const { Cell::new(0) };
+        static LAST_STATE_LINES: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
     }
 
     pub fn enable(y: bool) {
@@ -612,7 +612,7 @@ mod repl_scroll {
                     print!("{s}");
                 }
                 if i + 1 < max {
-                    print!("\n");
+                    println!();
                 }
             }
         }
@@ -803,6 +803,18 @@ fn dispatch_install_or_service(args: &[String]) {
         };
         std::process::exit(code);
     }
+    // Resident parakeet model host: loaded once, kept warm across mic toggles. Spawned
+    // detached by the speech helper (already in the user session) on first parakeet use.
+    if args.iter().any(|a| a == "--parakeet-server") {
+        let code = match crate::win::speech_input::run_parakeet_server() {
+            Ok(()) => 0,
+            Err(e) => {
+                install::log_line(&format!("parakeet-server failed: {e}"));
+                1
+            }
+        };
+        std::process::exit(code);
+    }
     match args.get(1).map(String::as_str) {
         Some("install") => {
             let debug_ui = args.iter().any(|a| a == "--debug-ui" || a == "--debug");
@@ -811,6 +823,10 @@ fn dispatch_install_or_service(args: &[String]) {
         }
         Some("uninstall") => {
             install::run_uninstall();
+            std::process::exit(0);
+        }
+        Some("verify") => {
+            install::run_verify();
             std::process::exit(0);
         }
         Some("stop") => {
@@ -1235,13 +1251,13 @@ fn spawn_warmup_as_active_user(exe: &std::path::Path) -> std::io::Result<()> {
         let session_id = WTSGetActiveConsoleSessionId();
         let mut token = Default::default();
         WTSQueryUserToken(session_id, &mut token)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         let exe_w = wide_os(exe.as_os_str());
         let mut cmd_w = wide(&format!("\"{}\"", exe.display()));
         let cwd_w = exe.parent().map(|parent| wide_os(parent.as_os_str()));
         let mut desktop = wide("winsta0\\default");
-        let mut startup = STARTUPINFOW {
+        let startup = STARTUPINFOW {
             cb: std::mem::size_of::<STARTUPINFOW>() as u32,
             lpDesktop: PWSTR(desktop.as_mut_ptr()),
             ..Default::default()
@@ -1274,14 +1290,14 @@ fn spawn_warmup_as_active_user(exe: &std::path::Path) -> std::io::Result<()> {
             flags,
             env_arg,
             cwd_arg,
-            &mut startup,
+            &startup,
             &mut info,
         );
         if env_created {
             let _ = DestroyEnvironmentBlock(env);
         }
         let _ = CloseHandle(token);
-        created.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        created.map_err(|e| std::io::Error::other(e.to_string()))?;
         let _ = CloseHandle(info.hThread);
         let _ = CloseHandle(info.hProcess);
     }
@@ -1306,7 +1322,7 @@ fn help_screen_rows(help: &str) -> u32 {
     let mut rows = 0u32;
     for line in help.split('\n') {
         let w = line.chars().count() as u32;
-        rows = rows.saturating_add(if w == 0 { 1 } else { (w + cols - 1) / cols });
+        rows = rows.saturating_add(if w == 0 { 1 } else { w.div_ceil(cols) });
     }
     // println! adds one '\n' after HELP → cursor sits on following row
     rows.saturating_add(1)

@@ -17,12 +17,20 @@ use crate::xinput_backend::XInputBackend;
 const VK_BUTTON: Button = Button::L3;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(8);
+/// Idle poll cadence: once no pad is connected and the VK is closed for
+/// `IDLE_AFTER`, drop from 125Hz to ~8Hz to cut idle CPU / handheld battery.
+/// Restored to `POLL_INTERVAL` immediately on connect / VK-open. (P2)
+const POLL_INTERVAL_IDLE: Duration = Duration::from_millis(125);
+const IDLE_AFTER: Duration = Duration::from_secs(2);
 const WARMUP_LAUNCH_DEBOUNCE: Duration = Duration::from_secs(2);
 /// Ignore spurious X/dpad from misaligned HID for a moment after VK opens.
 const VK_NAV_INPUT_GRACE: Duration = Duration::from_millis(450);
 const DESKTOP_SYNC_LOG_INTERVAL: Duration = Duration::from_secs(120);
 const HAPTIC_CONFIRM_MS: u32 = 14;
 const HAPTIC_ALERT_MS: u32 = 45;
+/// Featherweight pulse for the high-frequency typing loop (key press, cursor
+/// move, chip cycle) — short and faint so fast typing reads as texture, not buzz.
+const HAPTIC_TICK_MS: u32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VkLoopAction {
@@ -164,6 +172,10 @@ impl Backend {
         self.rumble(0.0, 0.07, HAPTIC_CONFIRM_MS);
     }
 
+    fn haptic_tick(&mut self) {
+        self.rumble(0.0, 0.045, HAPTIC_TICK_MS);
+    }
+
     fn haptic_alert(&mut self) {
         self.rumble(0.24, 0.12, HAPTIC_ALERT_MS);
     }
@@ -196,6 +208,7 @@ pub struct GamepadPoll {
     vk_down: bool,
     a_cursor_down: bool,
     touchpad_cursor_down: bool,
+    b_cursor_down: bool,
     last_vk_open: bool,
     /// The L3 press that opened the VK is still physically down; close only on the
     /// *next* press. Release-gated, not time-gated — close is instant once L3 lifts.
@@ -349,6 +362,7 @@ impl GamepadPoll {
             vk_down: false,
             a_cursor_down: false,
             touchpad_cursor_down: false,
+            b_cursor_down: false,
             last_vk_open: false,
             vk_toggle_need_release: false,
             vk_nav_grace_until: None,
@@ -371,6 +385,7 @@ impl GamepadPoll {
         self.vk_down = false;
         self.a_cursor_down = false;
         self.touchpad_cursor_down = false;
+        self.b_cursor_down = false;
         self.vk_toggle_need_release = false;
         self.vk_nav_grace_until = None;
         self.stick_nav = None;
@@ -404,6 +419,10 @@ impl GamepadPoll {
         self.backend.controller_label()
     }
 
+    pub fn is_connected(&self) -> bool {
+        self.backend.is_connected()
+    }
+
     pub fn poll_frame(
         &mut self,
         cursor: &mut PcCursor,
@@ -413,6 +432,7 @@ impl GamepadPoll {
         if crate::gamepad_backend::userland_poll_paused() {
             self.backend.apply_device_commands();
             cursor.set_left_button(false);
+            cursor.set_right_button(false);
             return Ok(Vec::new());
         }
 
@@ -421,7 +441,9 @@ impl GamepadPoll {
             self.backend.haptic_confirm();
             self.a_cursor_down = false;
             self.touchpad_cursor_down = false;
+            self.b_cursor_down = false;
             cursor.set_left_button(false);
+            cursor.set_right_button(false);
         }
         self.last_vk_open = vk_open;
 
@@ -474,6 +496,8 @@ impl GamepadPoll {
             {
                 self.sync_stick_nav(lx, ly);
                 if crate::win::vk_ui::tick_dpad_hold(Instant::now()) {
+                    // Held d-pad move or held-key auto-repeat fired — ratchet tick.
+                    self.backend.haptic_tick();
                     crate::win::vk_ui::request_repaint();
                 }
             }
@@ -502,6 +526,14 @@ impl GamepadPoll {
             // Forward every edge to the warmUP desktop over the pipe so the launcher grid
             // is gamepad-navigable (#348). The companion still drives its own VK/cursor below.
             crate::pipe_server::publish_button(change.button.as_str(), change.pressed);
+            // R3 starts dictation even with the VK closed, so voice typing into the
+            // focused app is a single click — no need to open the keyboard first.
+            #[cfg(windows)]
+            if change.button == Button::R3 && change.pressed {
+                crate::vk_nav::start_voice_input();
+                self.backend.haptic_alert();
+                continue;
+            }
             if change.button == Button::A || change.button == Button::Touchpad {
                 // Hold: button down -> mouse-left down, up -> up, so
                 // the PIN keypad sees a real press duration (not an instant click).
@@ -514,6 +546,30 @@ impl GamepadPoll {
                 }
                 let any_click_down = self.a_cursor_down || self.touchpad_cursor_down;
                 cursor.set_left_button(any_click_down && crate::pipe_server::clicks_enabled());
+            }
+            // B → right-click HOLD on the OS cursor (A=left, B=right, console convention).
+            // Gated by clicks_enabled so it stays quiet while the launcher/game owns input;
+            // B still forwards to the launcher above for back-nav.
+            if change.button == Button::B {
+                self.b_cursor_down = change.pressed;
+                cursor.set_right_button(self.b_cursor_down && crate::pipe_server::clicks_enabled());
+            }
+            // Share (SELECT) → Enter into the focused app even with the VK closed, so
+            // submit/confirm is one tap. NOT gated by clicks_enabled (that's OS-cursor
+            // mode); only suppressed when warmUP owns text input or a game is active.
+            // ponytail: also fires on the SELECT edge of the SELECT+LB+X launch combo —
+            // one stray Enter during that 3-finger hold; split to release-edge if it bites.
+            if change.button == Button::Select && change.pressed {
+                let suppressed = crate::pipe_server::native_vk_suppressed();
+                crate::install::log_line(&format!(
+                    "SELECT press, vk closed: suppressed={suppressed} clicks_enabled={} -> {}",
+                    crate::pipe_server::clicks_enabled(),
+                    if suppressed { "skip" } else { "Enter" }
+                ));
+                if !suppressed {
+                    cursor.tap_enter();
+                    self.backend.haptic_confirm();
+                }
             }
             if crate::pipe_server::native_vk_suppressed() {
                 continue;
@@ -645,7 +701,9 @@ impl GamepadPoll {
                 None
             }
             (Button::Up | Button::Down | Button::Left | Button::Right, true) => {
-                vk_nav::dpad_pressed(change.button);
+                if vk_nav::dpad_pressed(change.button) {
+                    self.backend.haptic_tick();
+                }
                 vk_ui::request_repaint();
                 None
             }
@@ -656,9 +714,13 @@ impl GamepadPoll {
             (Button::A | Button::Touchpad, true) => {
                 // Fire on press (not release) so holding the button auto-repeats.
                 let mut sink = vk_nav::SendInputSink;
-                if crate::vk_predict::commit_if_engaged(&mut sink).is_none() {
+                if crate::vk_predict::commit_if_engaged(&mut sink).is_some() {
+                    // A landed suggestion commit — a firmer confirm than a key tap.
+                    self.backend.haptic_confirm();
+                } else {
                     vk_nav::activate_selection();
                     vk_nav::repeat_pressed(vk_nav::RepeatKey::Activate);
+                    self.backend.haptic_tick();
                 }
                 vk_ui::request_repaint();
                 None
@@ -670,6 +732,7 @@ impl GamepadPoll {
             (Button::B, true) => {
                 vk_nav::backspace();
                 vk_nav::repeat_pressed(vk_nav::RepeatKey::Backspace);
+                self.backend.haptic_tick();
                 vk_ui::request_repaint();
                 None
             }
@@ -687,6 +750,7 @@ impl GamepadPoll {
             (Button::Y, true) => {
                 vk_nav::space();
                 vk_nav::repeat_pressed(vk_nav::RepeatKey::Space);
+                self.backend.haptic_tick();
                 vk_ui::request_repaint();
                 None
             }
@@ -697,6 +761,7 @@ impl GamepadPoll {
             (Button::Select, true) => {
                 // Web SELECT: jump into the suggestion strip when populated.
                 if crate::vk_predict::cycle_next() {
+                    self.backend.haptic_tick();
                     vk_ui::request_repaint();
                 }
                 None
@@ -704,22 +769,26 @@ impl GamepadPoll {
             (Button::Lb, true) => {
                 // Shoulders own the autocomplete chips (strip draws LB/RB pills).
                 if crate::vk_predict::cycle_prev() {
+                    self.backend.haptic_tick();
                     vk_ui::request_repaint();
                 }
                 None
             }
             (Button::Rb, true) => {
                 if crate::vk_predict::cycle_next() {
+                    self.backend.haptic_tick();
                     vk_ui::request_repaint();
                 }
                 None
             }
             (Button::Lt, true) => {
                 vk_nav::toggle_symbols();
+                self.backend.haptic_confirm();
                 None
             }
             (Button::Rt, true) => {
                 vk_nav::toggle_shift();
+                self.backend.haptic_confirm();
                 None
             }
             (Button::R3, true) => {
@@ -766,13 +835,17 @@ impl GamepadPoll {
         match (self.stick_nav, dir) {
             (None, None) => {}
             (None, Some(d)) => {
-                vk_nav::dpad_pressed(d);
+                if vk_nav::dpad_pressed(d) {
+                    self.backend.haptic_tick();
+                }
                 vk_ui::request_repaint();
             }
             (Some(old), None) => vk_nav::dpad_released(old),
             (Some(old), Some(d)) if old != d => {
                 vk_nav::dpad_released(old);
-                vk_nav::dpad_pressed(d);
+                if vk_nav::dpad_pressed(d) {
+                    self.backend.haptic_tick();
+                }
                 vk_ui::request_repaint();
             }
             _ => {}
@@ -892,10 +965,7 @@ where
             return GamepadPoll::open_service();
         }
     } else {
-        match GamepadPoll::open_desktop() {
-            Ok(p) => p,
-            Err(e) => return Err(e),
-        }
+        GamepadPoll::open_desktop()?
     };
 
     #[cfg(windows)]
@@ -940,6 +1010,7 @@ where
         ));
     }
     let mut last_tick = Instant::now();
+    let mut last_active = Instant::now();
     while RUNNING.load(Ordering::SeqCst) {
         let now = Instant::now();
         let dt = now.duration_since(last_tick).as_secs_f32();
@@ -1018,9 +1089,20 @@ where
             }
         }
 
+        // Idle backoff (P2): slow the poll once nothing has needed input for a
+        // while, to cut idle CPU / handheld battery. Snap back to full rate the
+        // moment a pad is connected or the VK is open.
+        if poll.is_connected() || vk_open() {
+            last_active = now;
+        }
+        let interval = if last_active.elapsed() >= IDLE_AFTER {
+            POLL_INTERVAL_IDLE
+        } else {
+            POLL_INTERVAL
+        };
         let elapsed = now.elapsed();
-        if elapsed < POLL_INTERVAL {
-            interruptible_sleep(POLL_INTERVAL - elapsed);
+        if elapsed < interval {
+            interruptible_sleep(interval - elapsed);
         }
     }
     #[cfg(windows)]

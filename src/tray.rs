@@ -19,9 +19,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetCursorPos, GetMessageW, KillTimer, LoadIconW, LoadImageW, MessageBoxW,
     PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetTimer,
     TrackPopupMenu, TranslateMessage, HICON, IDI_APPLICATION, IMAGE_ICON, LR_LOADFROMFILE,
-    MB_ICONINFORMATION, MB_OK, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, SW_SHOWNORMAL,
-    TPM_BOTTOMALIGN, TPM_LEFTALIGN, WM_APP, WM_COMMAND, WM_DESTROY, WM_RBUTTONUP, WM_TIMER,
-    WNDCLASSW, WS_OVERLAPPED,
+    MB_ICONINFORMATION, MB_OK, MF_CHECKED, MF_DISABLED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG,
+    SW_SHOWNORMAL, TPM_BOTTOMALIGN, TPM_LEFTALIGN, WM_APP, WM_COMMAND, WM_DESTROY, WM_HOTKEY,
+    WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
 };
 
 const CLASS_NAME: windows::core::PCWSTR = w!("WarmupCompanionTray");
@@ -37,6 +40,18 @@ const MENU_PRIVACY: usize = 1004;
 const MENU_RESTORE_NATIVE_KBD: usize = 1005;
 const MENU_UNINSTALL: usize = 1006;
 const MENU_EXIT: usize = 1007;
+const MENU_COMPACT: usize = 1008;
+const MENU_SLEEP_ON_GAME: usize = 1009;
+const MENU_AUTOSTOP_ON_GAME: usize = 1010;
+const MENU_VK_FLOATING: usize = 1011;
+const MENU_EDIT_SETTINGS: usize = 1012;
+const MENU_MIC_DEFAULT: usize = 1013;
+const MENU_ENGINE_WHISPER: usize = 1014;
+const MENU_ENGINE_PARAKEET: usize = 1015;
+/// Mic device i is `MENU_MIC_BASE + i` (capped at 32 devices in the menu).
+const MENU_MIC_BASE: usize = 1100;
+/// Global hotkey id for "toggle voice dictation" (Ctrl+Alt+V).
+const HOTKEY_VOICE: i32 = 0xB001;
 
 const SERVICE_LOG_PATH: &str = r"C:\ProgramData\WarmupVk\service.log";
 
@@ -85,6 +100,9 @@ fn tray_thread() {
             RegisterWindowMessageW(w!("TaskbarCreated")),
             Ordering::SeqCst,
         );
+        // Ctrl+Alt+V toggles voice dictation (mirrors R3), even with the keyboard
+        // closed. MOD_NOREPEAT so holding the combo doesn't thrash the toggle.
+        let _ = RegisterHotKey(hwnd, HOTKEY_VOICE, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 0x56);
         try_add_icon(hwnd);
         if !ICON_ADDED.load(Ordering::SeqCst) {
             let _ = SetTimer(hwnd, ADD_RETRY_TIMER_ID, ADD_RETRY_TIMER_MS, None);
@@ -94,6 +112,7 @@ fn tray_thread() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        let _ = UnregisterHotKey(hwnd, HOTKEY_VOICE);
         delete_icon(hwnd);
         let _ = DestroyWindow(hwnd);
     }
@@ -108,7 +127,47 @@ unsafe fn try_add_icon(hwnd: HWND) {
     if Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
         ICON_ADDED.store(true, Ordering::SeqCst);
         let _ = KillTimer(hwnd, ADD_RETRY_TIMER_ID);
+        // We only reach here in an interactive session (the session-0 worker's
+        // NIM_ADD fails — no shell), so a welcome dialog is actually visible.
+        show_welcome_if_first_run(hwnd);
     }
+}
+
+/// One-time post-install welcome so a new user knows what to do, instead of
+/// guessing at the lock screen. Per-user marker in %LOCALAPPDATA% (writable by
+/// the userland helper, and correctly shows once for each user of the machine).
+unsafe fn show_welcome_if_first_run(hwnd: HWND) {
+    let Some(marker) = first_run_marker() else {
+        return;
+    };
+    if marker.exists() {
+        return;
+    }
+    let title = wide("Warmup Companion is ready");
+    let body = wide(
+        "Your controller keyboard is installed and running.\r\n\r\n\
+         1. Connect or pair your controller.\r\n\
+         2. Press Y on the controller to open the keyboard — or lock Windows (Win+L) to use it at sign-in.\r\n\
+         3. D-pad to move, A to type, LB/RB to pick word suggestions.\r\n\r\n\
+         Right-click the tray icon for status and privacy. Run \"warmup-companion.exe verify\" to self-check the install.",
+    );
+    let _ = MessageBoxW(
+        hwnd,
+        PCWSTR(body.as_ptr()),
+        PCWSTR(title.as_ptr()),
+        MB_OK | MB_ICONINFORMATION,
+    );
+    // Best-effort: create the dir + marker so this shows once. If it fails, the
+    // worst case is the welcome shows again next launch — harmless.
+    if let Some(dir) = marker.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&marker, b"1");
+}
+
+fn first_run_marker() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    Some(Path::new(&base).join("WarmupVk").join(".welcome_shown"))
 }
 
 unsafe fn load_tray_icon() -> HICON {
@@ -172,6 +231,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             show_menu(hwnd);
             LRESULT(0)
         }
+        WM_HOTKEY if wparam.0 as i32 == HOTKEY_VOICE => {
+            crate::vk_nav::start_voice_input();
+            LRESULT(0)
+        }
         msg if msg == TASKBAR_CREATED.load(Ordering::SeqCst) => {
             ICON_ADDED.store(false, Ordering::SeqCst);
             try_add_icon(hwnd);
@@ -183,6 +246,24 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     let paused = !crate::gamepad_backend::userland_poll_paused();
                     crate::gamepad_backend::set_userland_poll_paused(paused);
                     let _ = crate::config::write_userland_poll_paused(paused);
+                }
+                MENU_COMPACT => toggle_compact(),
+                MENU_SLEEP_ON_GAME => {
+                    toggle_setting_bool("sleep_on_game", crate::config::gamepad_settings().sleep_on_game)
+                }
+                MENU_AUTOSTOP_ON_GAME => {
+                    toggle_setting_bool("auto_stop_on_game", crate::config::gamepad_settings().auto_stop_on_game)
+                }
+                MENU_VK_FLOATING => toggle_vk_mode(),
+                MENU_EDIT_SETTINGS => edit_settings(),
+                MENU_ENGINE_WHISPER => crate::win::speech_input::set_engine("whisper"),
+                MENU_ENGINE_PARAKEET => crate::win::speech_input::set_engine("parakeet"),
+                MENU_MIC_DEFAULT => crate::win::speech_input::set_mic_choice(""),
+                id if (MENU_MIC_BASE..MENU_MIC_BASE + 32).contains(&id) => {
+                    let mics = crate::win::speech_input::list_mics();
+                    if let Some(name) = mics.get(id - MENU_MIC_BASE) {
+                        crate::win::speech_input::set_mic_choice(name);
+                    }
                 }
                 MENU_OPEN_LOG => open_log(),
                 MENU_DIAGNOSTICS => open_diagnostics(),
@@ -211,23 +292,89 @@ unsafe fn show_menu(hwnd: HWND) {
     if menu.0.is_null() {
         return;
     }
-    let paused = crate::gamepad_backend::userland_poll_paused();
-    let flags = MF_STRING
-        | if paused {
-            MF_CHECKED
-        } else {
-            Default::default()
-        };
-    let toggle_label = if paused {
-        w!("Start gamepad poll")
-    } else {
-        w!("Stop gamepad poll")
-    };
-    let _ = AppendMenuW(menu, flags, MENU_TOGGLE_POLL, toggle_label);
+    let gs = crate::config::gamepad_settings();
+    let chk = |on: bool| MF_STRING | if on { MF_CHECKED } else { Default::default() };
+
+    // Non-clickable header so the menu reads as one app's, not a loose pile of items.
+    let _ = AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, w!("Warmup Companion"));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-    let _ = AppendMenuW(menu, MF_STRING, MENU_OPEN_LOG, w!("Open service log"));
-    let _ = AppendMenuW(menu, MF_STRING, MENU_DIAGNOSTICS, w!("Run diagnostics"));
-    let _ = AppendMenuW(menu, MF_STRING, MENU_PRIVACY, w!("Privacy / trust model"));
+
+    // Primary control stays top-level (a stable label + check, not a verb that swaps).
+    let paused = crate::gamepad_backend::userland_poll_paused();
+    let _ = AppendMenuW(menu, chk(paused), MENU_TOGGLE_POLL, w!("Pause gamepad input"));
+
+    // Keyboard.
+    let kb = CreatePopupMenu().unwrap_or_default();
+    if !kb.0.is_null() {
+        let _ = AppendMenuW(
+            kb,
+            chk(crate::config::vk_bar_scale() < 1.0),
+            MENU_COMPACT,
+            w!("Compact size"),
+        );
+        let floating = crate::config::vk_layout_mode() == crate::config::VkLayoutMode::Floating;
+        let _ = AppendMenuW(kb, chk(floating), MENU_VK_FLOATING, w!("Floating layout"));
+        let _ = AppendMenuW(menu, MF_POPUP, kb.0 as usize, w!("Keyboard"));
+    }
+
+    // Game detection.
+    let game = CreatePopupMenu().unwrap_or_default();
+    if !game.0.is_null() {
+        let _ = AppendMenuW(
+            game,
+            chk(gs.sleep_on_game),
+            MENU_SLEEP_ON_GAME,
+            w!("Pause input while a game is running"),
+        );
+        let _ = AppendMenuW(
+            game,
+            chk(gs.auto_stop_on_game),
+            MENU_AUTOSTOP_ON_GAME,
+            w!("Stop input while a game is running"),
+        );
+        let _ = AppendMenuW(menu, MF_POPUP, game.0 as usize, w!("Game detection"));
+    }
+
+    // Voice typing — only when the optional speech sidecar is installed. The wide
+    // mic-name buffers must outlive TrackPopupMenu, so they live in this scope.
+    let mut mic_labels: Vec<Vec<u16>> = Vec::new();
+    if crate::win::speech_input::available_cached() {
+        // Engine picker — only when Parakeet is installed (else whisper is the only
+        // choice and a one-item menu is noise).
+        if crate::win::speech_input::parakeet_available() {
+            let eng = CreatePopupMenu().unwrap_or_default();
+            if !eng.0.is_null() {
+                let parakeet = crate::win::speech_input::engine() == "parakeet";
+                let _ = AppendMenuW(eng, chk(!parakeet), MENU_ENGINE_WHISPER, w!("Whisper"));
+                let _ = AppendMenuW(eng, chk(parakeet), MENU_ENGINE_PARAKEET, w!("Parakeet (NVIDIA)"));
+                let _ = AppendMenuW(menu, MF_POPUP, eng.0 as usize, w!("Voice engine"));
+            }
+        }
+        let sub = CreatePopupMenu().unwrap_or_default();
+        if !sub.0.is_null() {
+            let cur = crate::win::speech_input::mic_choice();
+            let _ = AppendMenuW(sub, chk(cur.is_none()), MENU_MIC_DEFAULT, w!("Default (system)"));
+            for (i, name) in crate::win::speech_input::list_mics().iter().enumerate().take(32) {
+                let on = cur.as_deref().map(|c| name.contains(c)).unwrap_or(false);
+                mic_labels.push(wide(name));
+                let label = mic_labels.last().unwrap();
+                let _ = AppendMenuW(sub, chk(on), MENU_MIC_BASE + i, PCWSTR(label.as_ptr()));
+            }
+            let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("Microphone"));
+        }
+    }
+
+    // Diagnostics.
+    let diag = CreatePopupMenu().unwrap_or_default();
+    if !diag.0.is_null() {
+        let _ = AppendMenuW(diag, MF_STRING, MENU_OPEN_LOG, w!("Open service log"));
+        let _ = AppendMenuW(diag, MF_STRING, MENU_DIAGNOSTICS, w!("Run diagnostics"));
+        let _ = AppendMenuW(diag, MF_STRING, MENU_EDIT_SETTINGS, w!("Edit settings file…"));
+        let _ = AppendMenuW(diag, MF_STRING, MENU_PRIVACY, w!("Privacy & trust model"));
+        let _ = AppendMenuW(menu, MF_POPUP, diag.0 as usize, w!("Diagnostics"));
+    }
+
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     let _ = AppendMenuW(
         menu,
         MF_STRING,
@@ -238,10 +385,11 @@ unsafe fn show_menu(hwnd: HWND) {
         menu,
         MF_STRING,
         MENU_UNINSTALL,
-        w!("Uninstall Warmup Companion"),
+        w!("Uninstall Warmup Companion…"),
     );
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     let _ = AppendMenuW(menu, MF_STRING, MENU_EXIT, w!("Exit"));
+
     let mut pt = POINT::default();
     let _ = GetCursorPos(&mut pt);
     let _ = SetForegroundWindow(hwnd);
@@ -254,6 +402,7 @@ unsafe fn show_menu(hwnd: HWND) {
         hwnd,
         Some(null_mut()),
     );
+    // Destroying the root frees the attached submenus too.
     let _ = DestroyMenu(menu);
 }
 
@@ -282,11 +431,48 @@ unsafe fn open_log() {
     shell_execute("open", "notepad.exe", Some(SERVICE_LOG_PATH));
 }
 
+unsafe fn edit_settings() {
+    if let Some(path) = crate::config::ensure_settings_file() {
+        shell_execute("open", "notepad.exe", Some(&path.display().to_string()));
+    }
+}
+
 unsafe fn open_diagnostics() {
     let cmd = format!(
         "-NoProfile -NoExit -Command \"Write-Host 'WarmupVk service'; sc.exe qc WarmupVkSvc; sc.exe query WarmupVkSvc; Write-Host ''; Write-Host 'Recent service log'; if (Test-Path '{SERVICE_LOG_PATH}') {{ Get-Content '{SERVICE_LOG_PATH}' -Tail 240 }} else {{ Write-Host 'Missing {SERVICE_LOG_PATH}' }}\""
     );
     shell_execute("open", "powershell.exe", Some(&cmd));
+}
+
+/// Flip the docked keyboard between full and compact height. Written to
+/// settings.ini; the running keyboard reads `vk_bar_scale` live on next show.
+/// Compact is the default, so unchecking writes the explicit full-size 1.0.
+fn toggle_compact() {
+    let new = if crate::config::vk_bar_scale() < 1.0 {
+        "1.0".to_string()
+    } else {
+        crate::config::COMPACT_BAR_SCALE.to_string()
+    };
+    if let Err(e) = crate::config::set_gamepad_setting("vk_bar_scale", &new) {
+        crate::install::log_line(&format!("tray: set vk_bar_scale failed: {e}"));
+    }
+}
+
+/// Flip a settings.ini boolean (read live by `gamepad_settings`).
+fn toggle_setting_bool(key: &str, current: bool) {
+    let next = if current { "false" } else { "true" };
+    if let Err(e) = crate::config::set_gamepad_setting(key, next) {
+        crate::install::log_line(&format!("tray: set {key} failed: {e}"));
+    }
+}
+
+/// Flip the VK layout between docked and floating.
+fn toggle_vk_mode() {
+    let floating = crate::config::vk_layout_mode() == crate::config::VkLayoutMode::Floating;
+    let next = if floating { "docked" } else { "floating" };
+    if let Err(e) = crate::config::set_gamepad_setting("vk_mode", next) {
+        crate::install::log_line(&format!("tray: set vk_mode failed: {e}"));
+    }
 }
 
 unsafe fn show_privacy(hwnd: HWND) {

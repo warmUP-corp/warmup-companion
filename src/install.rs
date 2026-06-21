@@ -41,6 +41,7 @@ pub fn run_install(debug_ui: bool) {
     println!("Binary (SCM uses this): {}", bin.display());
     println!("NOT C:\\Program Files\\WarmupVk\\ — that path is legacy only.");
     println!("Reboot or Win+L, then tap Y on the controller at the password screen.");
+    println!("Check it worked anytime: warmup-companion.exe verify");
     println!("Log: {DATA_DIR}\\{LOG_NAME}");
     println!(
         "Debug UI: {}",
@@ -54,6 +55,96 @@ pub fn run_uninstall() {
         std::process::exit(1);
     }
     println!("Uninstalled {SERVICE_NAME}.");
+}
+
+/// `warmup-companion.exe verify` — read-only self-check so a new user can confirm
+/// the install worked and see whether their controller is detected, instead of
+/// testing blind at the lock screen. Controller status is read from the service's
+/// own log (the service is what actually reads the pad), not by re-initialising
+/// hardware in this throwaway process. Exits non-zero if anything is broken.
+pub fn run_verify() {
+    let mut healthy = true;
+    let bin = Path::new(INSTALL_DIR).join(EXE_NAME);
+    if bin.is_file() {
+        println!("[ ok ] binary present: {}", bin.display());
+    } else {
+        healthy = false;
+        println!("[FAIL] binary missing: {} — run: warmup-companion.exe install", bin.display());
+    }
+
+    match service_state() {
+        Some(state) if state == "RUNNING" => println!("[ ok ] service {SERVICE_NAME}: RUNNING"),
+        Some(state) => {
+            healthy = false;
+            println!("[FAIL] service {SERVICE_NAME}: {state} (expected RUNNING) — try: sc start {SERVICE_NAME}");
+        }
+        None => {
+            healthy = false;
+            println!("[FAIL] service {SERVICE_NAME} not installed — run: warmup-companion.exe install");
+        }
+    }
+
+    let log = Path::new(DATA_DIR).join(LOG_NAME);
+    match log_age_secs(&log) {
+        Some(secs) if secs <= 120 => println!("[ ok ] service log active ({secs}s ago)"),
+        Some(secs) => println!("[warn] service log last written {secs}s ago (service may be idle)"),
+        None => println!("[warn] no service log yet: {}", log.display()),
+    }
+
+    match last_controller_line(&log) {
+        Some(line) if !line.to_lowercase().contains("none") => {
+            println!("[ ok ] controller seen by service: {line}");
+        }
+        _ => println!("[ !  ] no controller detected yet — connect a pad, press any button, re-run verify"),
+    }
+
+    println!();
+    if healthy {
+        println!("Installation looks healthy.");
+    } else {
+        println!("Problems found above. Log: {}", log.display());
+        std::process::exit(1);
+    }
+}
+
+/// Current SCM state word (e.g. "RUNNING", "STOPPED") for the service, or `None`
+/// if it isn't installed.
+fn service_state() -> Option<String> {
+    let out = Command::new("sc.exe")
+        .args(["query", SERVICE_NAME])
+        .output()
+        .ok()?;
+    parse_service_state(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Extract the SCM state word (e.g. "RUNNING") from `sc query` stdout, or `None`
+/// if there's no STATE line (service not installed).
+fn parse_service_state(sc_query_stdout: &str) -> Option<String> {
+    sc_query_stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("STATE"))
+        .and_then(|l| l.split_whitespace().last())
+        .map(str::to_string)
+}
+
+/// Seconds since the service log was last written, or `None` if it's missing.
+fn log_age_secs(path: &Path) -> Option<u64> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    Some(modified.elapsed().map(|d| d.as_secs()).unwrap_or(0))
+}
+
+/// The most recent log line that names the gamepad backend / controller, so
+/// verify can echo what the service currently sees.
+fn last_controller_line(path: &Path) -> Option<String> {
+    find_controller_line(&fs::read_to_string(path).ok()?)
+}
+
+/// Most recent log line naming the gamepad backend / controller.
+fn find_controller_line(log: &str) -> Option<String> {
+    log.lines()
+        .rev()
+        .find(|l| l.contains("gamepad backend") || l.contains("gamepad loop running"))
+        .map(|l| l.trim().to_string())
 }
 
 /// Stop the service without deleting it. Use before manual `cargo run -- install`
@@ -99,6 +190,11 @@ fn install_inner(debug_ui: bool) -> Result<(), String> {
     fs::create_dir_all(INSTALL_DIR).map_err(|e| e.to_string())?;
     fs::create_dir_all(DATA_DIR).map_err(|e| e.to_string())?;
     restrict_data_dir_acl()?;
+    // Re-open the bin subdir to Users (read+execute) so the non-elevated warmUP
+    // desktop app can detect the install (else its settings show "Missing"). Done
+    // after the lockdown so it adds to, not replaces, the SYSTEM+Admins grant. The
+    // exe is copied below and inherits this read access.
+    allow_bin_read_acl()?;
     set_debug_ui_flag(debug_ui)?;
 
     // Stop + delete BEFORE copying — old exe is locked by the running service.
@@ -118,6 +214,13 @@ fn install_inner(debug_ui: bool) -> Result<(), String> {
         ));
     }
     copy_gamecontroller_db()?;
+    // Version marker the warmUP desktop app reads (its `warmup-companion.version`
+    // convention) to show the installed version and judge updates. Best-effort —
+    // a marker failure must not fail the service install. Inherits Users:RX from bin.
+    let _ = fs::write(
+        Path::new(INSTALL_DIR).join("warmup-companion.version"),
+        env!("CARGO_PKG_VERSION"),
+    );
     // sc.exe: `binPath=` and path are separate argv tokens; no quotes (path has no spaces).
     // SCM starts the exe directly; main() dispatches to service_dispatcher when argc == 1.
     let exe = dest.display().to_string();
@@ -126,6 +229,21 @@ fn install_inner(debug_ui: bool) -> Result<(), String> {
     sc(&["config", SERVICE_NAME, "start=", "auto"])?;
     sc(&["config", SERVICE_NAME, "DisplayName=", DISPLAY_NAME])?;
     sc(&["description", SERVICE_NAME, "Description=", DESCRIPTION])?;
+    // Auto-restart on crash. Without this, a single panic/abort leaves the service
+    // — and therefore all controller input — dead until manual restart or reboot.
+    // restart 60s after the 1st and 2nd failure; the last action repeats for any
+    // further failure, so every crash self-heals. reset= (1 day) just bounds the
+    // failure counter. Non-fatal if it fails on older SCMs — log and continue.
+    if let Err(e) = sc(&[
+        "failure",
+        SERVICE_NAME,
+        "reset=",
+        "86400",
+        "actions=",
+        "restart/60000/restart/60000",
+    ]) {
+        log_line(&format!("sc failure (auto-restart) config failed: {e}"));
+    }
     // LocalSystem (default) — required for winlogon / sign-in desktop.
     sc(&["start", SERVICE_NAME])?;
     verify_service_running()?;
@@ -246,10 +364,7 @@ fn remove_legacy_install_artifacts() {
 fn remove_test_services() {
     for name in TEST_SERVICE_NAMES {
         let _ = sc(&["stop", name]);
-        match sc(&["delete", name]) {
-            Ok(()) => log_line(&format!("removed test service {name}")),
-            Err(_) => {}
-        }
+        if let Ok(()) = sc(&["delete", name]) { log_line(&format!("removed test service {name}")) }
     }
 }
 
@@ -268,13 +383,16 @@ fn copy_gamecontroller_db() -> Result<(), String> {
 }
 
 fn restrict_data_dir_acl() -> Result<(), String> {
+    // Grant by well-known SID, not name: "Administrators"/"SYSTEM" don't resolve
+    // on non-English Windows (e.g. German "Administratoren"). *S-1-5-18 = SYSTEM,
+    // *S-1-5-32-544 = BUILTIN\Administrators.
     let out = Command::new("icacls.exe")
         .args([
             DATA_DIR,
             "/inheritance:r",
             "/grant:r",
-            "SYSTEM:(OI)(CI)F",
-            "Administrators:(OI)(CI)F",
+            "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:(OI)(CI)F",
         ])
         .output()
         .map_err(|e| format!("icacls.exe: {e}"))?;
@@ -284,6 +402,26 @@ fn restrict_data_dir_acl() -> Result<(), String> {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stdout = String::from_utf8_lossy(&out.stdout);
         Err(format!("lock down {DATA_DIR} ACL failed: {stdout}{stderr}"))
+    }
+}
+
+fn allow_bin_read_acl() -> Result<(), String> {
+    // Grant BUILTIN\Users (S-1-5-32-545) read+execute on the bin dir only. The data
+    // dir stays locked to SYSTEM+Admins (logs / VK context), but the binaries are
+    // public release artifacts and the non-elevated desktop app must read the exe to
+    // see the companion as installed. Read can't tamper with the SYSTEM-run service.
+    // (OI)(CI) so the copied exe + version marker inherit it. Bypass-traverse-checking
+    // (default for all users) lets the app reach bin through the locked data dir.
+    let out = Command::new("icacls.exe")
+        .args([INSTALL_DIR, "/grant:r", "*S-1-5-32-545:(OI)(CI)RX"])
+        .output()
+        .map_err(|e| format!("icacls.exe: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        Err(format!("grant {INSTALL_DIR} read ACL failed: {stdout}{stderr}"))
     }
 }
 
@@ -373,4 +511,32 @@ fn chrono_lite_timestamp() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("{secs}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{find_controller_line, parse_service_state};
+
+    #[test]
+    fn parse_service_state_reads_state_word() {
+        let out = "SERVICE_NAME: WarmupVkSvc\n\
+                   TYPE               : 10  WIN32_OWN_PROCESS\n\
+                   STATE              : 4  RUNNING\n";
+        assert_eq!(parse_service_state(out).as_deref(), Some("RUNNING"));
+        assert_eq!(parse_service_state("no state here"), None);
+    }
+
+    #[test]
+    fn find_controller_line_picks_last_match() {
+        let log = "boot\n\
+                   gamepad backend: SDL3 (userland) - none\n\
+                   tick\n\
+                   gamepad backend: XInput - Xbox Controller\n\
+                   tick\n";
+        assert_eq!(
+            find_controller_line(log).as_deref(),
+            Some("gamepad backend: XInput - Xbox Controller")
+        );
+        assert_eq!(find_controller_line("nothing relevant"), None);
+    }
 }

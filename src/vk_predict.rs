@@ -50,7 +50,7 @@ fn lexicon() -> &'static [&'static str] {
     predict_ngram::lexicon()
 }
 
-fn words_with_prefix<'a>(prefix: &'a str) -> impl Iterator<Item = &'a str> {
+fn words_with_prefix(prefix: &str) -> impl Iterator<Item = &str> {
     let lex = lexicon();
     let start = lex.partition_point(|w| *w < prefix);
     lex[start..]
@@ -104,7 +104,7 @@ fn flush_personal(from: &HashSet<String>) {
 pub fn predictions_enabled() -> bool {
     #[cfg(test)]
     {
-        return true;
+        true
     }
     #[cfg(not(test))]
     {
@@ -339,6 +339,12 @@ pub fn commit_if_engaged(
         (s.ranked[idx].clone(), s.partial.chars().count())
     };
     let res = crate::vk_commit::commit(&word, del, sink);
+    if res.injected {
+        // After accepting a chip, append a space so the next word starts cleanly
+        // (as if the user typed the word then pressed space). Only the field text
+        // gets the space — the learned word / VK context buffer below stays clean.
+        let _ = sink.replace(0, " ");
+    }
     if let Ok(mut s) = STATE.lock() {
         if res.injected {
             record_completed(&mut s, &word);
@@ -424,8 +430,8 @@ mod tests {
         let res = commit_if_engaged(&mut sink).expect("engaged commit");
         assert!(res.injected);
         assert_eq!(res.deleted, 4);
-        assert_eq!(sink.buf, highlighted);
-        // landed commit records the word into the VK-only context buffer
+        assert_eq!(sink.buf, format!("{highlighted} ")); // word + trailing space on accept
+        // landed commit records the word (no trailing space) into the VK-only context buffer
         assert_eq!(STATE.lock().unwrap().words.last().unwrap(), &highlighted);
     }
 

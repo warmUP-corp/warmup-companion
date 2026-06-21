@@ -7,7 +7,7 @@
 //! (`screenW/1920`, `screenH/1080`), so the feel
 //! is resolution-independent.
 
-use enigo::{Axis, Coordinate, Direction, Enigo, Mouse, Settings};
+use enigo::{Axis, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 
 const BASE_SPEED: f32 = 100.0;
 const BASE_SCROLL_SPEED: f32 = 20.0;
@@ -59,6 +59,8 @@ pub struct PcCursor {
     scale_y: f32,
     /// Left mouse button currently held, edge-tracked.
     left_held: bool,
+    /// Right mouse button currently held, edge-tracked.
+    right_held: bool,
     /// EMA-smoothed cursor delta carried between frames (cursor_smoothing).
     smooth_dx: f32,
     smooth_dy: f32,
@@ -88,6 +90,7 @@ impl PcCursor {
             scale_x,
             scale_y,
             left_held: false,
+            right_held: false,
             smooth_dx: 0.0,
             smooth_dy: 0.0,
         }
@@ -106,6 +109,7 @@ impl PcCursor {
             scale_x,
             scale_y,
             left_held: false,
+            right_held: false,
             smooth_dx: 0.0,
             smooth_dy: 0.0,
         }
@@ -225,6 +229,22 @@ impl PcCursor {
         self.dispatch(if down { Cmd::ButtonDown } else { Cmd::ButtonUp });
     }
 
+    /// Right mouse button as a real HOLD, edge-tracked (same shape as
+    /// [`set_left_button`]). Idempotent.
+    pub fn set_right_button(&mut self, down: bool) {
+        if down == self.right_held {
+            return;
+        }
+        self.right_held = down;
+        self.dispatch(if down { Cmd::RButtonDown } else { Cmd::RButtonUp });
+    }
+
+    /// Tap Enter into the focused app, routed through the same desktop-correct
+    /// dispatch the cursor uses (so it lands on the user's desktop post-login).
+    pub fn tap_enter(&mut self) {
+        self.dispatch(Cmd::EnterTap);
+    }
+
     /// Route a command. On Winlogon: inline on the calling (winlogon-attached) loop
     /// thread so `SendInput` reaches the secure desktop. Otherwise: the Default-
     /// desktop injector thread (service post-login), else inline Enigo.
@@ -264,6 +284,15 @@ fn apply_cmd(enigo: &mut Enigo, cmd: Cmd) {
         Cmd::ButtonUp => {
             let _ = enigo.button(enigo::Button::Left, Direction::Release);
         }
+        Cmd::RButtonDown => {
+            let _ = enigo.button(enigo::Button::Right, Direction::Press);
+        }
+        Cmd::RButtonUp => {
+            let _ = enigo.button(enigo::Button::Right, Direction::Release);
+        }
+        Cmd::EnterTap => {
+            let _ = enigo.key(Key::Return, Direction::Click);
+        }
     }
 }
 
@@ -274,6 +303,9 @@ enum Cmd {
     ScrollH(i32),
     ButtonDown,
     ButtonUp,
+    RButtonDown,
+    RButtonUp,
+    EnterTap,
 }
 
 /// Dedicated cursor-injection thread. Owns its own Enigo and runs on whatever

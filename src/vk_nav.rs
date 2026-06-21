@@ -153,7 +153,7 @@ pub enum RepeatKey {
     Space,
 }
 
-const HOLD_INITIAL: Duration = Duration::from_millis(350);
+const HOLD_INITIAL: Duration = Duration::from_millis(250);
 const HOLD_REPEAT: Duration = Duration::from_millis(70);
 /// Second shift/symbol tap inside this window promotes one-shot to sticky
 /// (web `DOUBLE_TAP_SHIFT_MS`).
@@ -229,17 +229,23 @@ fn build_web_layout(layer: Layer, lang_de: bool) -> Vec<KeyRow> {
     let mut space = KeyCell::vk("Space", VK_SPACE, SPAN_SPACE);
     // Language badge on the space bar (web shows ENG/DE next to the L3 hint).
     space.sublabel = Some(if lang_de { "DE" } else { "ENG" }.to_string());
-    let row_utility = vec![
+    let mut row_utility = vec![
         KeyCell::named("&123", KeyAction::Symbols, SPAN_ACTION),
         KeyCell::ch(QUICK_INSERTS[0]),
         KeyCell::ch(QUICK_INSERTS[1]),
         KeyCell::ch(QUICK_INSERTS[2]),
         space,
-        KeyCell::named("Mic", KeyAction::VoiceInput, SPAN_ACTION),
+    ];
+    // Mic key only when offline dictation is installed (whisper sidecar + model);
+    // otherwise it's hidden, so an install that skipped speech shows no dead key.
+    if crate::win::speech_input::available() {
+        row_utility.push(KeyCell::named("Mic", KeyAction::VoiceInput, SPAN_ACTION));
+    }
+    row_utility.extend([
         KeyCell::ch(QUICK_INSERTS[3]),
         KeyCell::named("<", KeyAction::PredictPrev, SPAN_ACTION),
         KeyCell::named(">", KeyAction::PredictNext, SPAN_ACTION),
-    ];
+    ]);
 
     vec![
         KeyRow { keys: row_top },
@@ -373,40 +379,28 @@ pub fn move_selection(dir: Button) -> bool {
     // Web `moveVirtualKeyboardSelection`: LEFT/RIGHT stop at row edges (no
     // wrap, no cross-row snake); UP/DOWN pick the nearest key by span center.
     let changed = match dir {
-        Button::Left => {
-            if pos.col > 0 {
+        Button::Left
+            if pos.col > 0 => {
                 pos.col -= 1;
                 true
-            } else {
-                false
             }
-        }
-        Button::Right => {
-            if pos.col + 1 < nav.rows[pos.row].keys.len() {
+        Button::Right
+            if pos.col + 1 < nav.rows[pos.row].keys.len() => {
                 pos.col += 1;
                 true
-            } else {
-                false
             }
-        }
-        Button::Up => {
-            if pos.row > 0 {
+        Button::Up
+            if pos.row > 0 => {
                 pos.col = nearest_col(&nav.rows, pos, pos.row - 1);
                 pos.row -= 1;
                 true
-            } else {
-                false
             }
-        }
-        Button::Down => {
-            if pos.row + 1 < nav.rows.len() {
+        Button::Down
+            if pos.row + 1 < nav.rows.len() => {
                 pos.col = nearest_col(&nav.rows, pos, pos.row + 1);
                 pos.row += 1;
                 true
-            } else {
-                false
             }
-        }
         _ => false,
     };
     if changed {
@@ -438,18 +432,21 @@ pub fn tick_dpad_hold(now: Instant) -> bool {
     moved
 }
 
+/// Returns whether the press actually moved the selection (false at a grid
+/// edge), so the caller can fire a haptic tick only on a real move.
 #[cfg(feature = "gamepad")]
-pub fn dpad_pressed(dir: Button) {
+pub fn dpad_pressed(dir: Button) -> bool {
     let mut nav = match NAV.lock() {
         Ok(n) => n,
-        Err(_) => return,
+        Err(_) => return false,
     };
     nav.hold_button = Some(dir);
     nav.hold_count = 0;
     nav.hold_deadline = Some(Instant::now() + HOLD_INITIAL);
     drop(nav);
-    let _ = move_selection(dir);
+    let moved = move_selection(dir);
     refocus_after_nav_move();
+    moved
 }
 
 /// Only character and virtual-key keys auto-repeat; toggles (Shift, &123,
@@ -584,10 +581,14 @@ pub fn toggle_symbols() {
 
 /// Web L3: flip between QWERTY (en-US) and QWERTZ (de-DE) letter rows.
 pub fn toggle_language() {
+    let mut de = false;
     if let Ok(mut nav) = NAV.lock() {
         nav.lang_de = !nav.lang_de;
+        de = nav.lang_de;
         rebuild(&mut nav);
     }
+    // Drive whisper recognition with the VK language (live; helper reads it per utterance).
+    crate::win::speech_input::set_vk_language(de);
     request_ui_repaint();
 }
 
@@ -641,8 +642,95 @@ pub fn activate_key(key: &KeyCell) {
 }
 
 pub fn send_text_direct(text: &str) {
+    // Log the real inject target up front, to the user-writable log, so we can see
+    // exactly where a transcript went — including when the guard below skips it.
+    let (hwnd, exe, class) = foreground_info();
+    let skip_warmup = exe.eq_ignore_ascii_case("warmup.exe");
+    diag_inject_log(&format!(
+        "send_text_direct: chars={} fg=0x{hwnd:x} exe='{exe}' class='{class}' skip_warmup={skip_warmup}",
+        text.chars().count()
+    ));
+    // Never dump a dictated transcript into the warmUP app's own UI.
+    if skip_warmup {
+        crate::install::log_line("voice inject skipped: warmUP is foreground");
+        return;
+    }
     let units: Vec<u16> = text.encode_utf16().collect();
     send_unicode(&units);
+}
+
+/// `(hwnd_as_usize, exe_basename, window_class)` of the current foreground
+/// window. Used both to keep dictation out of warmUP and to log the real inject
+/// target — the speech helper injects from its own process, so this is the only
+/// way to see where a transcript actually went.
+fn foreground_info() -> (usize, String, String) {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId,
+    };
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.0.is_null() {
+            return (0, String::new(), String::new());
+        }
+        let hwnd = fg.0 as usize;
+        let mut cbuf = [0u16; 128];
+        let n = GetClassNameW(fg, &mut cbuf);
+        let class = String::from_utf16_lossy(&cbuf[..n.max(0) as usize]);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(fg, Some(&mut pid));
+        let mut exe = String::new();
+        if pid != 0 {
+            if let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+                let mut buf = [0u16; 1024];
+                let mut len = buf.len() as u32;
+                let ok = QueryFullProcessImageNameW(
+                    process,
+                    PROCESS_NAME_FORMAT(0),
+                    windows::core::PWSTR(buf.as_mut_ptr()),
+                    &mut len,
+                )
+                .is_ok();
+                let _ = CloseHandle(process);
+                if ok && len > 0 {
+                    exe = std::path::Path::new(&String::from_utf16_lossy(&buf[..len as usize]))
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or_default()
+                        .to_string();
+                }
+            }
+        }
+        (hwnd, exe, class)
+    }
+}
+
+/// True if the OS foreground window belongs to the warmUP desktop app.
+fn foreground_is_warmup() -> bool {
+    foreground_info().1.eq_ignore_ascii_case("warmup.exe")
+}
+
+/// Append a line to a user-session-writable inject log. `service.log` is
+/// ACL-locked to SYSTEM, so an inject done from the user-session speech helper
+/// leaves no trail there — this mirror makes it visible.
+fn diag_inject_log(msg: &str) {
+    let Some(base) = std::env::var_os("LOCALAPPDATA") else {
+        return;
+    };
+    let dir = std::path::Path::new(&base).join("WarmupVk");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("inject.log");
+    if std::fs::metadata(&path).map(|m| m.len() > 512_000).unwrap_or(false) {
+        let _ = std::fs::remove_file(&path);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        use std::io::Write;
+        let _ = writeln!(f, "{msg}");
+    }
 }
 
 /// Real Text-commit adapter (CONTEXT.md "Text commit"): one batched `SendInput`
@@ -669,8 +757,7 @@ impl crate::vk_commit::TextSink for SendInputSink {
         if sent as usize == batch.len() {
             Ok(())
         } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(std::io::Error::other(
                 format!("SendInput inserted {sent}/{} events", batch.len()),
             ))
         }
@@ -678,14 +765,13 @@ impl crate::vk_commit::TextSink for SendInputSink {
 }
 
 fn notify_vk_key(vk: VIRTUAL_KEY) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_RETURN, VK_SPACE};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_SPACE};
     if vk == VK_BACK {
         crate::vk_predict::on_backspace();
     } else if vk == VK_SPACE {
         crate::vk_predict::on_space();
-    } else if vk == VK_RETURN {
-        crate::vk_predict::on_boundary();
     } else {
+        // Return and every other committed key act as a word boundary.
         crate::vk_predict::on_boundary();
     }
 }
@@ -716,16 +802,30 @@ pub fn start_voice_input() {
         return;
     }
 
-    // Toggle off the user's mic helper if the indicator says it is on.
-    if voice_input_active() {
-        crate::win::speech_input::stop_helper();
+    // Toggle off only if a helper is actually running — it transcribes the whole
+    // monologue and injects it, then exits. After an auto-stop the helper has already
+    // exited, so a stale "active" flag falls through to a fresh start.
+    if voice_input_active() && crate::win::speech_input::helper_alive() {
+        crate::install::log_line("vk voice input: OFF (finishing — transcribe on stop)");
+        crate::win::speech_input::request_stop();
         set_voice_input_active(false);
+        return;
+    }
+
+    // Don't start dictation when warmUP itself is focused — the transcript would
+    // land in its UI. (Toggle-off above is unguarded, so it can still be stopped.)
+    if foreground_is_warmup() {
+        crate::install::log_line("vk voice input ignored: warmUP is foreground");
         return;
     }
 
     // Turn on: the worker runs as SYSTEM with no mic consent, so recognition runs
     // in a helper process launched as the real logged-in user (see speech_input).
+    crate::install::log_line("vk voice input: ON (spawning helper)");
     set_voice_input_active(true);
+    // Pin the current VK language for the helper before it starts.
+    let de = NAV.lock().map(|n| n.lang_de).unwrap_or(false);
+    crate::win::speech_input::set_vk_language(de);
     if let Err(e) = crate::win::speech_input::start_helper() {
         set_voice_input_active(false);
         crate::install::log_line(&format!("speech helper start failed: {e}"));
@@ -809,15 +909,35 @@ fn inject_vk(vk: VIRTUAL_KEY) {
     suppress_native_keyboard_after_winlogon_inject(collapse);
 }
 
+/// Chunk size + gap for paced injection. Console hosts (conhost / Windows
+/// Terminal) silently drop a single large burst of synthetic KEYEVENTF_UNICODE
+/// events — they drain the input queue slower than GUI apps, so a whole dictated
+/// sentence sent at once never lands in a terminal (a single VK keypress does:
+/// it's one event, paced by the human). Calibration knob: if a terminal still
+/// drops dictated text, shrink INJECT_CHUNK or raise INJECT_GAP.
+const INJECT_CHUNK: usize = 8;
+const INJECT_GAP: Duration = Duration::from_millis(6);
+
 fn send_unicode(units: &[u16]) {
     let collapse = focus_for_inject();
-    let mut batch: Vec<INPUT> = Vec::with_capacity(units.len() * 2 + 2);
-    push_collapse(&mut batch, collapse);
-    for &unit in units {
-        batch.push(unicode_event(unit, false));
-        batch.push(unicode_event(unit, true));
+    // One char (a VK keypress) is a single chunk → one SendInput, no added
+    // latency. Long injects (voice dictation) pace out so terminals keep up.
+    let groups: Vec<&[u16]> = units.chunks(INJECT_CHUNK.max(1)).collect();
+    let mut sent = 0i32;
+    for (i, group) in groups.iter().enumerate() {
+        let mut batch: Vec<INPUT> = Vec::with_capacity(group.len() * 2 + 2);
+        if i == 0 {
+            push_collapse(&mut batch, collapse);
+        }
+        for &unit in *group {
+            batch.push(unicode_event(unit, false));
+            batch.push(unicode_event(unit, true));
+        }
+        sent += unsafe { SendInput(&batch, std::mem::size_of::<INPUT>() as i32) } as i32;
+        if i + 1 < groups.len() {
+            std::thread::sleep(INJECT_GAP);
+        }
     }
-    let sent = unsafe { SendInput(&batch, std::mem::size_of::<INPUT>() as i32) };
     suppress_native_keyboard_after_winlogon_inject(collapse);
     // Userland-typing diagnostic: when off Winlogon, SendInput should land in the
     // foreground app. Log the event count actually inserted + the loop thread's
@@ -825,13 +945,16 @@ fn send_unicode(units: &[u16]) {
     // not-foreground / blocked) is visible in the log.
     #[cfg(feature = "gamepad")]
     if !crate::win::logon_focus::is_active() {
-        let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+        let (hwnd, exe, class) = foreground_info();
         let desk = crate::win::current_desktop_name().unwrap_or_default();
-        crate::install::log_line(&format!(
-            "vk inject(userland): units={} SendInput->{sent} desktop={desk} fg=0x{:x}",
-            units.len(),
-            fg.0 as usize
-        ));
+        let line = format!(
+            "vk inject(userland): units={} SendInput->{sent} desktop={desk} fg=0x{hwnd:x} exe='{exe}' class='{class}'",
+            units.len()
+        );
+        // service.log (gamepad helper can write it) + a user-writable mirror (the
+        // speech helper can't write service.log, so its injects only show here).
+        crate::install::log_line(&line);
+        diag_inject_log(&line);
     }
 }
 
@@ -845,4 +968,34 @@ fn suppress_native_keyboard_after_winlogon_inject(on_winlogon: bool) {
 fn active_langid() -> u32 {
     let hkl = unsafe { GetKeyboardLayout(0) };
     (hkl.0 as usize as u32) & 0xffff
+}
+
+#[cfg(all(test, feature = "gamepad"))]
+mod tests {
+    use super::*;
+    use crate::gamepad_backend::Button;
+
+    #[test]
+    fn move_reports_real_moves_not_edges() {
+        // The typing-loop haptic ticks only when the cursor actually moves. A
+        // press into a row edge must report `false` so it stays silent — a
+        // phantom buzz at every wall would be worse than no haptics.
+        //
+        // Seed NAV directly (not via reset_selection) so this test never touches
+        // the shared vk_predict global that the predict tests run against.
+        {
+            let mut nav = NAV.lock().unwrap();
+            nav.layer = Layer::Upper;
+            nav.pos = KeyPos { row: 1, col: 1 }; // 'a' in the middle row
+            rebuild(&mut nav);
+        }
+        assert!(
+            move_selection(Button::Left),
+            "interior move should report moved"
+        );
+        assert!(
+            !move_selection(Button::Left),
+            "at the left edge there is no move"
+        );
+    }
 }

@@ -53,6 +53,9 @@ const VK_RENDER_TIMER_ID: usize = 2;
 const VK_RENDER_TIMER_MS: u32 = 16;
 const VK_SHOW_ANIMATION_MS: u64 = 180;
 const VK_HIDE_ANIMATION_MS: u64 = 130;
+/// Foreground-app reflow easing when the keyboard docks / undocks (was an instant
+/// snap). ponytail: fixed duration; tune if it feels slow on open.
+const APP_REFLOW_MS: u64 = 150;
 
 static VK_VISIBLE: AtomicBool = AtomicBool::new(false);
 static UI_THREAD_ID: AtomicU32 = AtomicU32::new(0);
@@ -76,7 +79,10 @@ fn vk_palette(dark: bool) -> VkPalette {
         VkPalette {
             bg: rgb(0x1f1f1f),
             key: rgb(0x2b2b2b),
-            accent: rgb(0x4c7b99),
+            // Was 0x4c7b99 — a desaturated grey-blue that read as "off". A
+            // saturated azure makes the selected key obvious at a glance and
+            // still clears white-label contrast (~3.6:1 > the old ~3.4:1).
+            accent: rgb(0x1e88e5),
             text: rgb(0xffffff),
             sel_text: rgb(0xffffff),
             border: rgb(0x34384a),
@@ -466,33 +472,45 @@ unsafe fn reserve_app_space(
         return None;
     }
     let new_h = (dock_top - r.top).max(120);
-    let _ = SetWindowPos(
-        app,
-        HWND::default(),
-        r.left,
-        r.top,
-        r.right - r.left,
-        new_h,
-        SWP_NOACTIVATE | SWP_NOZORDER,
-    );
+    // Ease the shrink instead of snapping, so the app doesn't jump when the bar docks.
+    animate_app_height(app, r.left, r.top, r.right - r.left, r.bottom - r.top, new_h);
     vk_log::log(&format!(
         "reserved space: shrank '{name}' to bottom={dock_top}"
     ));
     Some((app, r))
 }
 
-/// Restore a window shrunk by [`reserve_app_space`].
+/// Restore a window shrunk by [`reserve_app_space`], easing back from its current
+/// (shrunk) height to the original so it grows smoothly when the bar undocks.
 unsafe fn restore_app_space(saved: Option<(HWND, windows::Win32::Foundation::RECT)>) {
     if let Some((app, r)) = saved {
-        let _ = SetWindowPos(
-            app,
-            HWND::default(),
-            r.left,
-            r.top,
-            r.right - r.left,
-            r.bottom - r.top,
-            SWP_NOACTIVATE | SWP_NOZORDER,
-        );
+        let mut cur = windows::Win32::Foundation::RECT::default();
+        let from_h = if GetWindowRect(app, &mut cur).is_ok() {
+            cur.bottom - cur.top
+        } else {
+            r.bottom - r.top
+        };
+        animate_app_height(app, r.left, r.top, r.right - r.left, from_h, r.bottom - r.top);
+    }
+}
+
+/// Ease a foreground app window's height from `from_h` to `to_h` over
+/// [`APP_REFLOW_MS`]. Steps at the render cadence; a no-op delta just sets the rect.
+unsafe fn animate_app_height(app: HWND, x: i32, y: i32, w: i32, from_h: i32, to_h: i32) {
+    if from_h == to_h {
+        let _ = SetWindowPos(app, HWND::default(), x, y, w, to_h, SWP_NOACTIVATE | SWP_NOZORDER);
+        return;
+    }
+    let started = Instant::now();
+    let dur = Duration::from_millis(APP_REFLOW_MS.max(1));
+    loop {
+        let t = (started.elapsed().as_secs_f32() / dur.as_secs_f32()).min(1.0);
+        let h = (from_h as f32 + (to_h - from_h) as f32 * ease_out_cubic(t)).round() as i32;
+        let _ = SetWindowPos(app, HWND::default(), x, y, w, h, SWP_NOACTIVATE | SWP_NOZORDER);
+        if t >= 1.0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(VK_RENDER_TIMER_MS as u64));
     }
 }
 
@@ -644,38 +662,45 @@ unsafe fn target_monitor_rect() -> windows::Win32::Foundation::RECT {
     }
 }
 
-/// Keyboard geometry. Returns `(x, y, width, height)`.
+/// Keyboard geometry `(x, y, width, height)`. The suggestion band
+/// ([`vk_renderer::STRIP_BAND_H`]) is reserved above the keys (keys lay out below
+/// it via `top_inset`), so the layout is fixed and the keys never shift.
 ///
-/// - **Docked**: full monitor width along the bottom edge, height
-///   = `monitorHeight * 384/1080`.
-/// - **Floating**: a compact, horizontally-centred panel raised off the bottom edge —
-///   emulates the warmUP webview keyboard card. Pushed via the desktop `config.vkMode`.
+/// - **Docked**: full monitor width along the bottom edge.
+/// - **Floating**: a compact, horizontally-centred card; the band is the card's top chrome.
 unsafe fn vk_dock_rect() -> (i32, i32, i32, i32) {
     let m = target_monitor_rect();
     let full_w = (m.right - m.left).max(1);
     let full_h = (m.bottom - m.top).max(1);
-    let h = ((full_h as f32) * VK_KB_REF_H / VK_REF_MONITOR_H).round() as i32;
-    let h = h.clamp(160, full_h);
+    // `vk_bar_scale` lets the user pick a more compact docked bar (tray toggle).
+    let bar_scale = crate::config::vk_bar_scale();
+    let h = (((full_h as f32) * VK_KB_REF_H / VK_REF_MONITOR_H * bar_scale).round() as i32)
+        .clamp(160, full_h);
     match crate::config::vk_layout_mode() {
-        crate::config::VkLayoutMode::Floating => {
-            // Size the card to wrap chips + keys at the *docked* key scale (scale_w = monitor
-            // width), so floating keys keep the same spacing as the docked bar. The card height
-            // is the chip chrome + the key block + one pad of slack — no full-bar letterbox.
-            let rows = vk_nav::rows_snapshot();
-            let scale_w = full_w as f32;
-            let (grid_w, block_h) = vk_renderer::grid_size(scale_w, &rows);
-            let pad = vk_renderer::FLOATING_PAD;
-            let chrome = vk_renderer::top_chrome_inset();
-            let w = ((grid_w + pad * 2.0).round() as i32).min(full_w);
-            let card_h = ((chrome + block_h + pad).round() as i32).clamp(160, full_h);
-            // Sit close to the bottom edge — just a small breathing gap.
-            let margin = (((full_h as f32) * 0.015).round() as i32).clamp(10, 48);
-            let x = m.left + (full_w - w) / 2;
-            let y = m.bottom - card_h - margin;
-            (x, y, w, card_h)
-        }
+        crate::config::VkLayoutMode::Floating => floating_card_rect(vk_renderer::STRIP_BAND_H),
         crate::config::VkLayoutMode::Docked => (m.left, m.bottom - h, full_w, h),
     }
+}
+
+/// Floating-card rect `(x, y, w, h)` for a given top-chrome inset. The card wraps
+/// the keys at docked scale; its height = `chrome + key block + pad`, so a smaller
+/// `chrome` (collapsed strip) makes a genuinely shorter card. Bottom edge stays put
+/// (y moves down as it shrinks) so the keys don't jump.
+unsafe fn floating_card_rect(chrome: f32) -> (i32, i32, i32, i32) {
+    let m = target_monitor_rect();
+    let full_w = (m.right - m.left).max(1);
+    let full_h = (m.bottom - m.top).max(1);
+    let rows = vk_nav::rows_snapshot();
+    let scale_w = full_w as f32;
+    let (grid_w, block_h) = vk_renderer::grid_size(scale_w, &rows);
+    let pad = vk_renderer::FLOATING_PAD;
+    let w = ((grid_w + pad * 2.0).round() as i32).min(full_w);
+    // Floor only needs to fit the keys + pad; the chrome is what collapses.
+    let card_h = ((chrome + block_h + pad).round() as i32).clamp(100, full_h);
+    let margin = (((full_h as f32) * 0.015).round() as i32).clamp(10, 48);
+    let x = m.left + (full_w - w) / 2;
+    let y = m.bottom - card_h - margin;
+    (x, y, w, card_h)
 }
 
 /// Width used to scale key size (92px @ 1920 reference). Always the monitor
@@ -762,7 +787,10 @@ unsafe fn show_and_place(hwnd: HWND) {
 }
 
 unsafe fn animate_hide(hwnd: HWND) {
-    let (x, y, outer_w, outer_h) = vk_dock_rect();
+    // Slide out whatever size the window currently is (it may have the band shown).
+    let mut r = windows::Win32::Foundation::RECT::default();
+    let _ = GetWindowRect(hwnd, &mut r);
+    let (x, y, outer_w, outer_h) = (r.left, r.top, r.right - r.left, r.bottom - r.top);
     animate_window_y(
         hwnd,
         x,
@@ -838,6 +866,18 @@ fn render_frame() {
         let Some(hwnd) = state.hwnd else {
             return;
         };
+
+        let floating = matches!(
+            crate::config::vk_layout_mode(),
+            crate::config::VkLayoutMode::Floating
+        );
+        let candidates = crate::vk_predict::strip();
+        // The suggestion band is reserved above the keys at a fixed height, so the
+        // keys never shift and the pill draws above them. (Hiding the band when idle
+        // would need the window to grow on each toggle — that lost topmost on the
+        // live window: taskbar showed, the app re-covered the VK. Fixed window only.)
+        let top_inset = vk_renderer::STRIP_BAND_H;
+
         let Some(renderer) = state.renderer.as_mut() else {
             return;
         };
@@ -849,16 +889,11 @@ fn render_frame() {
             let rows = vk_nav::rows_snapshot();
             let sel = vk_nav::selection();
             let (shift, caps) = vk_nav::modifier_state();
-            let candidates = crate::vk_predict::strip();
-            let top_inset = vk_renderer::top_chrome_inset();
             let scale_w = vk_scale_w();
             let controller_snapshot = crate::debug_state::snapshot();
-            let floating = matches!(
-                crate::config::vk_layout_mode(),
-                crate::config::VkLayoutMode::Floating
-            );
             // One logical snapshot: rows, selection and modifiers captured
             // together so the glyph icons can't tear from the layout.
+            let phase_str = crate::win::speech_input::voice_ui_phase();
             let frame = vk_renderer::VkFrame {
                 pal: &pal,
                 rows: &rows,
@@ -871,6 +906,19 @@ fn render_frame() {
                 floating,
                 modifiers: vk_renderer::VkModifiers { shift, caps },
                 controller_label: controller_snapshot.name.trim(),
+                // Voice needs both a non-secure desktop (LocalSystem has no mic
+                // consent on Winlogon) and the optional whisper sidecar+model
+                // installed. Otherwise the mic key shows honestly disabled.
+                voice_available: !crate::win::logon_focus::is_active()
+                    && crate::win::speech_input::available_cached(),
+                // Busy = the helper is alive (recording, or transcribing after stop,
+                // including auto-stop). The halo phase comes from the helper.
+                voice_active: phase_str.is_some(),
+                voice_phase: match phase_str.as_deref() {
+                    Some("transcribing") => vk_renderer::VoicePhase::Transcribing,
+                    Some("starting") => vk_renderer::VoicePhase::Starting,
+                    _ => vk_renderer::VoicePhase::Listening,
+                },
             };
             if let Err(e) = renderer.draw(&frame) {
                 vk_log::log(&format!("renderer draw: {e}"));
@@ -912,8 +960,8 @@ fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<KeyCell> {
     }
     let rows = vk_nav::rows_snapshot();
     let (xf, yf) = (x as f32, y as f32);
-    // Same layout the renderer draws with, so clicks always match the visible keys.
-    let top_inset = vk_renderer::top_chrome_inset();
+    // Fixed band above the keys (same inset the renderer uses), so clicks match.
+    let top_inset = vk_renderer::STRIP_BAND_H;
     let scale_w = unsafe { vk_scale_w() };
     for kr in vk_renderer::key_rects(
         client.right as f32,
@@ -931,3 +979,4 @@ fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<KeyCell> {
     }
     None
 }
+

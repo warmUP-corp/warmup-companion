@@ -438,7 +438,7 @@ unsafe fn create_worker_process(token: HANDLE) -> Result<WorkerProcess, String> 
     let mut cmd_w = wide(&command_line(&exe, WORKER_ARGS));
     // Default desktop in session; app attaches via OpenInputDesktop (lock/logon/UAC).
     let mut desktop = wide("winsta0\\default");
-    let mut startup = STARTUPINFOW {
+    let startup = STARTUPINFOW {
         cb: std::mem::size_of::<STARTUPINFOW>() as u32,
         lpDesktop: PWSTR(desktop.as_mut_ptr()),
         ..Default::default()
@@ -468,7 +468,7 @@ unsafe fn create_worker_process(token: HANDLE) -> Result<WorkerProcess, String> 
         flags,
         if env_created { Some(env.cast()) } else { None },
         PCWSTR::null(),
-        &mut startup,
+        &startup,
         &mut info,
     );
     if env_created {

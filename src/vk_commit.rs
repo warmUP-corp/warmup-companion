@@ -61,7 +61,7 @@ impl BufSink {
 impl TextSink for BufSink {
     fn replace(&mut self, del: usize, ins: &str) -> io::Result<()> {
         if self.fail {
-            return Err(io::Error::new(io::ErrorKind::Other, "sink failed"));
+            return Err(io::Error::other("sink failed"));
         }
         for _ in 0..del {
             self.buf.pop();

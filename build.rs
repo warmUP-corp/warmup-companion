@@ -227,7 +227,7 @@ fn tokenize_sentences_file(path: &Path, lexicon: &[String], cap: usize) -> Vec<u
 
 /// Leipzig `*-sentences.txt`: `<id>\\t<sentence>`
 fn leipzig_sentence_text(line: &str) -> &str {
-    line.splitn(2, '\t').nth(1).unwrap_or(line)
+    line.split_once('\t').map(|x| x.1).unwrap_or(line)
 }
 
 fn tokenize_corpus_text(text: &str, lexicon: &[String]) -> Vec<u16> {

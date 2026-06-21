@@ -16,13 +16,20 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use windows::core::{w, PCSTR};
-use windows::Win32::Foundation::{HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{
+    BOOL, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, WAIT_TIMEOUT, WPARAM,
+};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryA};
+
+// WM_POWERBROADCAST wParam values (Win32_System_Power feature not enabled; these
+// are stable platform constants). Resume-from-suspend / resume-automatic.
+const PBT_APMRESUMESUSPEND: usize = 0x0007;
+const PBT_APMRESUMEAUTOMATIC: usize = 0x0012;
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
 };
 use windows::Win32::UI::Input::XboxController::{
-    XINPUT_CAPABILITIES, XINPUT_GAMEPAD, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B,
+    XINPUT_GAMEPAD, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B,
     XINPUT_GAMEPAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT,
     XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_RIGHT_SHOULDER,
     XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y, XINPUT_STATE,
@@ -33,11 +40,12 @@ use windows::Win32::UI::Input::{
     RIDEV_PAGEONLY, RIDI_DEVICEINFO, RID_DEVICE_INFO, RID_INPUT, RIM_TYPEHID,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClassNameW,
-    GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, KillTimer, PostThreadMessageW,
-    RegisterClassW, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, TranslateMessage,
-    HMENU, LWA_ALPHA, MSG, WM_DESTROY, WM_INPUT, WM_NULL, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
+    GetWindowThreadProcessId, KillTimer, MsgWaitForMultipleObjects,
+    PeekMessageW, PostThreadMessageW, RegisterClassW, SetForegroundWindow,
+    SetLayeredWindowAttributes, SetTimer, TranslateMessage, HMENU, LWA_ALPHA, MSG, PM_REMOVE,
+    QS_ALLINPUT, WM_DESTROY, WM_INPUT, WM_NULL, WM_POWERBROADCAST, WM_QUIT, WM_TIMER, WNDCLASSW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::gamepad_backend::mapping_db_path;
@@ -57,122 +65,6 @@ const ERROR_EMPTY: u32 = 4306;
 
 type XInputGetStateFn = unsafe extern "system" fn(u32, *mut XINPUT_STATE) -> u32;
 type XInputGetKeystrokeFn = unsafe extern "system" fn(u32, u32, *mut XInputKeystroke) -> u32;
-type XInputGetCapabilitiesFn = unsafe extern "system" fn(u32, u32, *mut XINPUT_CAPABILITIES) -> u32;
-
-/// One independently-loaded XInput DLL, used only by the winlogon diagnostic
-/// probe (step C). We load `xinput1_4.dll` and `xinput1_3.dll` side-by-side and
-/// poll ordinal 100 (`XInputGetStateEx`) from each on the same frame so the
-/// service.log shows definitively which DLL — if either — returns real
-/// `wButtons` on the secure desktop, and whether 1.4 background-zeroing is the
-/// gate. Delete once the winning path is baked into the loader (step B).
-struct ProbeDll {
-    label: &'static str,
-    get_state: XInputGetStateFn,
-    get_caps: Option<XInputGetCapabilitiesFn>,
-}
-
-struct XInputProbe {
-    dlls: Vec<ProbeDll>,
-    /// OR of every DLL's slot-0 buttons last frame, for press/release edges.
-    last_combined: u16,
-    logged_caps: bool,
-    last_heartbeat: Instant,
-}
-
-impl XInputProbe {
-    fn load() -> Self {
-        let mut dlls = Vec::new();
-        for (label, raw) in [
-            ("1_4", b"xinput1_4.dll\0".as_slice()),
-            ("1_3", b"xinput1_3.dll\0".as_slice()),
-        ] {
-            unsafe {
-                let Ok(module) = LoadLibraryA(PCSTR(raw.as_ptr())) else {
-                    continue;
-                };
-                let Some(proc) = GetProcAddress(module, PCSTR(100usize as *const u8)) else {
-                    continue;
-                };
-                let get_state: XInputGetStateFn = std::mem::transmute(proc);
-                let get_caps = GetProcAddress(module, PCSTR(b"XInputGetCapabilities\0".as_ptr()))
-                    .map(|p| std::mem::transmute::<_, XInputGetCapabilitiesFn>(p));
-                dlls.push(ProbeDll {
-                    label,
-                    get_state,
-                    get_caps,
-                });
-            }
-        }
-        Self {
-            dlls,
-            last_combined: 0,
-            logged_caps: false,
-            last_heartbeat: crate::time_util::stale(Duration::from_secs(60)),
-        }
-    }
-
-    /// Poll every loaded DLL for `slot` and emit an `XPROBE` line whenever the
-    /// combined button mask changes (press/release edge) or every 2s heartbeat.
-    fn tick(&mut self, slot: u32, tx: &mpsc::Sender<SecureMsg>) {
-        let mut combined = 0u16;
-        let mut per_dll = Vec::with_capacity(self.dlls.len());
-        for dll in &self.dlls {
-            let mut s = XINPUT_STATE::default();
-            let err = unsafe { (dll.get_state)(slot, &mut s) };
-            let (btn, pkt) = if err == ERROR_SUCCESS {
-                combined |= s.Gamepad.wButtons.0;
-                (s.Gamepad.wButtons.0, s.dwPacketNumber)
-            } else {
-                (0, 0)
-            };
-            per_dll.push(format!(
-                "{}:err={} btn=0x{:04x} pkt={} lt={} rt={} lx={} ly={}",
-                dll.label,
-                err,
-                btn,
-                pkt,
-                s.Gamepad.bLeftTrigger,
-                s.Gamepad.bRightTrigger,
-                s.Gamepad.sThumbLX,
-                s.Gamepad.sThumbLY,
-            ));
-        }
-
-        let edge = combined != self.last_combined;
-        let heartbeat = self.last_heartbeat.elapsed() >= Duration::from_secs(2);
-        if !edge && !heartbeat {
-            return;
-        }
-        self.last_combined = combined;
-        if heartbeat {
-            self.last_heartbeat = Instant::now();
-        }
-
-        let mut line = format!(
-            "XPROBE slot{slot} [{}] {}",
-            per_dll.join(" | "),
-            probe_foreground()
-        );
-
-        // Capabilities once (subtype/flags identify the real device behind slot 0).
-        if !self.logged_caps {
-            if let Some(dll) = self.dlls.first() {
-                if let Some(get_caps) = dll.get_caps {
-                    let mut caps = XINPUT_CAPABILITIES::default();
-                    let err = unsafe { get_caps(slot, 0, &mut caps) };
-                    if err == ERROR_SUCCESS {
-                        self.logged_caps = true;
-                        line.push_str(&format!(
-                            " caps[{}]:type={} subtype={} flags=0x{:04x}",
-                            dll.label, caps.Type.0, caps.SubType.0, caps.Flags.0
-                        ));
-                    }
-                }
-            }
-        }
-        let _ = tx.send(SecureMsg::Error(line));
-    }
-}
 
 /// One-shot identity of THIS worker process: session, token user SID, integrity
 /// level RID, thread desktop, PLUS the fields that actually distinguish
@@ -333,28 +225,6 @@ fn probe_self_identity() -> String {
 /// Foreground window identity on the current (winlogon) desktop. Tells us
 /// whether we own foreground (XInput 1.4 background-zeroing gate) or LogonUI
 /// does. `ours=true` means GetForegroundWindow belongs to this process.
-fn probe_foreground() -> String {
-    unsafe {
-        let hwnd = GetForegroundWindow();
-        if hwnd.0.is_null() {
-            return "fg=none".into();
-        }
-        let mut pid = 0u32;
-        let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        let ours = pid == GetCurrentProcessId();
-        let mut buf = [0u16; 128];
-        let n = GetClassNameW(hwnd, &mut buf);
-        let class = if n > 0 {
-            String::from_utf16_lossy(&buf[..n as usize])
-        } else {
-            "?".into()
-        };
-        format!(
-            "fg=0x{:x} pid={pid} ours={ours} class={class}",
-            hwnd.0 as usize
-        )
-    }
-}
 
 const XINPUT_KEYSTROKE_KEYDOWN: u16 = 0x0001;
 const XINPUT_KEYSTROKE_KEYUP: u16 = 0x0002;
@@ -407,6 +277,9 @@ pub struct XInputBackend {
     last_no_pad_log: Instant,
     last_raw_log: Instant,
     last_secure_check: Instant,
+    /// Throttle for the non-fatal `XInputGetState error` log so a persistently
+    /// failing slot can't spam the service log every poll (~125 lines/s).
+    last_slot_err_log: Instant,
     /// Consecutive input-desktop probes that were not Winlogon while helper runs.
     secure_leave_winlogon_streak: u8,
 }
@@ -450,7 +323,7 @@ const INJECT_HOLD_WINDOW: u32 = 6;
 /// the PIN field.
 pub fn logon_credential_window() -> Option<HWND> {
     let h = LOGON_FG_HWND.load(Ordering::Relaxed);
-    (h != 0).then(|| HWND(h as *mut _))
+    (h != 0).then_some(HWND(h as *mut _))
 }
 
 /// Suppress the anchor's foreground reclaim for one inject burst so the loop
@@ -522,10 +395,10 @@ struct PollState {
     /// pad plugged in later (or present only after the secure desktop appears) must
     /// be picked up, else we have 0 devices and fall back to the foreground-gated DLL.
     last_xusb_scan: Instant,
+    /// Throttle for the non-fatal `XInputGetState error` log on the secure thread.
+    last_slot_err_log: Instant,
     prev_trigger_left: bool,
     prev_trigger_right: bool,
-    /// Step-C diagnostic: side-by-side xinput1_3 vs xinput1_4 GetStateEx.
-    probe: XInputProbe,
 }
 
 thread_local! {
@@ -563,6 +436,7 @@ impl XInputBackend {
             last_no_pad_log: crate::time_util::stale(Duration::from_secs(60)),
             last_raw_log: crate::time_util::stale(Duration::from_secs(60)),
             last_secure_check: crate::time_util::stale(Duration::from_secs(60)),
+            last_slot_err_log: crate::time_util::stale(Duration::from_secs(60)),
             secure_leave_winlogon_streak: 0,
         }
     }
@@ -645,7 +519,7 @@ impl XInputBackend {
         }
         let names: Vec<&str> = BUTTON_MASKS
             .iter()
-            .filter_map(|(b, mask)| (cur & *mask != 0).then(|| b.as_str()))
+            .filter(|&(_b, mask)| cur & *mask != 0).map(|(b, _mask)| b.as_str())
             .collect();
         service_log(&format!(
             "XInput buttons slot {slot}: 0x{prev:04x} -> 0x{cur:04x} [{}]",
@@ -716,8 +590,18 @@ impl XInputBackend {
         };
 
         let mut messages = Vec::new();
-        while let Ok(msg) = secure.rx.try_recv() {
-            messages.push(msg);
+        let mut thread_dead = false;
+        loop {
+            match secure.rx.try_recv() {
+                Ok(msg) => messages.push(msg),
+                Err(mpsc::TryRecvError::Empty) => break,
+                // Sender dropped => the secure thread exited (panic, or pump end).
+                // It is never restarted otherwise, so flag it for respawn below.
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    thread_dead = true;
+                    break;
+                }
+            }
         }
         let got_msg = !messages.is_empty();
         for msg in messages {
@@ -768,6 +652,13 @@ impl XInputBackend {
                 }
                 SecureMsg::Error(e) => service_log(&format!("XInput secure helper: {e}")),
             }
+        }
+        if thread_dead {
+            // Drop the dead handle; the (true, false) arm above respawns it on the
+            // next tick (<=250ms) if we're still on the input desktop.
+            service_log("XInput secure helper: thread exited; clearing for respawn");
+            self.secure = None;
+            self.clear_secure_state();
         }
         got_msg || self.secure.is_some()
     }
@@ -839,7 +730,10 @@ impl GamepadBackend for XInputBackend {
             if err == ERROR_SUCCESS {
                 connected[slot as usize] = true;
                 states[slot as usize] = Some(state.Gamepad);
-            } else if err != ERROR_DEVICE_NOT_CONNECTED {
+            } else if err != ERROR_DEVICE_NOT_CONNECTED
+                && self.last_slot_err_log.elapsed() >= Duration::from_secs(1)
+            {
+                self.last_slot_err_log = Instant::now();
                 service_log(&format!("XInputGetState({slot}) error {err}"));
             }
         }
@@ -1081,9 +975,9 @@ fn secure_poll_main(
             last_xusb: None,
             hid_active_prev: false,
             last_xusb_scan: crate::time_util::stale(Duration::from_secs(60)),
+            last_slot_err_log: crate::time_util::stale(Duration::from_secs(60)),
             prev_trigger_left: false,
             prev_trigger_right: false,
-            probe: XInputProbe::load(),
         });
     });
 
@@ -1125,21 +1019,41 @@ fn secure_poll_main(
     let _ = tid_tx.send(unsafe { GetCurrentThreadId() });
 
     // 5. Pump messages. WM_TIMER fires xinput poll inside anchor_wndproc.
+    //    We wait with a 250ms timeout instead of blocking forever in GetMessageW:
+    //    a wedged/dead message queue (lost input desktop, killed timer) can no
+    //    longer hang the pump while ignoring `stop`. The poll timer fires every
+    //    ~8ms, so a full 250ms of silence is abnormal; after ~750ms we exit and
+    //    let sync_secure_helper respawn a fresh thread on the current desktop.
     let mut msg = MSG::default();
-    loop {
+    let mut idle_streak: u8 = 0;
+    'pump: loop {
         if stop.load(Ordering::SeqCst) {
             break;
         }
-        let ok = unsafe { GetMessageW(&mut msg, None, 0, 0) };
-        if !ok.as_bool() {
-            break;
-        }
+        let wait = unsafe { MsgWaitForMultipleObjects(None, BOOL(0), 250, QS_ALLINPUT) };
         if stop.load(Ordering::SeqCst) {
             break;
         }
-        unsafe {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+        if wait == WAIT_TIMEOUT {
+            idle_streak = idle_streak.saturating_add(1);
+            if idle_streak >= 3 {
+                let _ = tx.send(SecureMsg::Error(
+                    "secure pump silent >750ms (wedged); exiting for respawn".into(),
+                ));
+                break;
+            }
+            continue;
+        }
+        idle_streak = 0;
+        // Drain everything pending without blocking; WM_QUIT ends the pump.
+        while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+            if msg.message == WM_QUIT {
+                break 'pump;
+            }
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
         }
     }
 
@@ -1148,6 +1062,31 @@ fn secure_poll_main(
         let _ = DestroyWindow(hwnd);
     }
     POLL_STATE.with(|s| *s.borrow_mut() = None);
+}
+
+thread_local! {
+    /// Throttle for the recovered-panic log so a tick that panics every frame
+    /// can't itself spam the service log (it would reintroduce the disk-fill).
+    static LAST_POLL_PANIC_LOG: std::cell::Cell<Option<Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Record that a poll tick panicked and was caught at the FFI boundary. Logs at
+/// most once per second; the pump continues either way.
+fn note_poll_panic(kind: &str) {
+    let now = Instant::now();
+    let should_log = LAST_POLL_PANIC_LOG.with(|c| match c.get() {
+        Some(t) if now.duration_since(t) < Duration::from_secs(1) => false,
+        _ => {
+            c.set(Some(now));
+            true
+        }
+    });
+    if should_log {
+        service_log(&format!(
+            "secure poll tick panicked in {kind}; recovered, pump alive"
+        ));
+    }
 }
 
 #[allow(dead_code)]
@@ -1169,7 +1108,16 @@ unsafe extern "system" fn anchor_wndproc(
         }
         POLL_STATE.with(|s| {
             if let Some(state) = s.borrow_mut().as_mut() {
-                poll_xinput_tick(state);
+                // A panic must NOT unwind out of this `extern "system"` callback —
+                // that aborts the whole process (Rust >= 1.81). Catch it here so a
+                // bad poll tick is recovered and the message pump stays alive.
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    poll_xinput_tick(state)
+                }))
+                .is_err()
+                {
+                    note_poll_panic("xinput_tick");
+                }
             }
         });
         return LRESULT(0);
@@ -1177,10 +1125,38 @@ unsafe extern "system" fn anchor_wndproc(
     if msg == WM_INPUT {
         POLL_STATE.with(|s| {
             if let Some(state) = s.borrow_mut().as_mut() {
-                poll_raw_hid_input(state, HRAWINPUT(lparam.0 as _));
+                let raw = HRAWINPUT(lparam.0 as _);
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    poll_raw_hid_input(state, raw)
+                }))
+                .is_err()
+                {
+                    note_poll_panic("raw_hid_input");
+                }
             }
         });
         return LRESULT(0);
+    }
+    if msg == WM_POWERBROADCAST {
+        // On resume, XUSB handles / HID overlapped reads / the XInput DLL's internal
+        // slot state can all be stale. Flush the device handles and force immediate
+        // re-enumeration on the next poll tick so input recovers without a replug.
+        if wparam.0 == PBT_APMRESUMEAUTOMATIC as usize
+            || wparam.0 == PBT_APMRESUMESUSPEND as usize
+        {
+            POLL_STATE.with(|s| {
+                if let Some(state) = s.borrow_mut().as_mut() {
+                    state.xusb.clear();
+                    state.hid_readers.clear();
+                    state.last_xusb_scan = crate::time_util::stale(Duration::from_secs(60));
+                    state.last_hid_scan = crate::time_util::stale(Duration::from_secs(60));
+                    let _ = state.tx.send(SecureMsg::Error(
+                        "resume: flushing pad handles for re-enum".into(),
+                    ));
+                }
+            });
+        }
+        return LRESULT(1);
     }
     if msg == WM_DESTROY {
         return LRESULT(0);
@@ -1297,7 +1273,7 @@ fn poll_raw_hid_input(state: &mut PollState, raw_handle: HRAWINPUT) {
         return;
     }
 
-    let words = (size as usize + size_of::<usize>() - 1) / size_of::<usize>();
+    let words = (size as usize).div_ceil(size_of::<usize>());
     let mut storage = vec![0usize; words];
     let capacity = words * size_of::<usize>();
     let read = unsafe {
@@ -1383,10 +1359,6 @@ fn report_hex(report: &[u8]) -> String {
 
 #[allow(dead_code)]
 fn poll_xinput_tick(state: &mut PollState) {
-    // Step-C diagnostic: compare 1_3 vs 1_4 GetStateEx on the live winlogon
-    // thread. Disjoint field borrows (probe is &mut, tx is &) are allowed.
-    state.probe.tick(0, &state.tx);
-
     // Re-enumerate XUSB pads while we have none — a controller connected after the
     // worker started (common at the lock screen) was missed by the one-shot
     // `open_all`, leaving only the foreground-gated DLL (always zeroed here).
@@ -1406,7 +1378,10 @@ fn poll_xinput_tick(state: &mut PollState) {
     // connected after spawn — common at the lock screen — was missed by the
     // one-shot open in secure_poll_main).
     state.hid_readers.retain(|r| !r.is_dead());
-    if state.hid_readers.is_empty() && state.last_hid_scan.elapsed() >= Duration::from_secs(1) {
+    // Re-enumerate quickly while we have no readers so a replugged pad recovers in
+    // ~150ms, not ~1s. Gated on is_empty(), so this only runs when there's nothing
+    // to read — never during normal streaming.
+    if state.hid_readers.is_empty() && state.last_hid_scan.elapsed() >= Duration::from_millis(150) {
         state.last_hid_scan = Instant::now();
         let (readers, log) = crate::hid_reader::HidReader::open_all();
         if !readers.is_empty() {
@@ -1449,7 +1424,10 @@ fn poll_xinput_tick(state: &mut PollState) {
             connected[slot as usize] = true;
             states[slot as usize] = Some(s.Gamepad);
             packets[slot as usize] = s.dwPacketNumber;
-        } else if err != ERROR_DEVICE_NOT_CONNECTED {
+        } else if err != ERROR_DEVICE_NOT_CONNECTED
+            && state.last_slot_err_log.elapsed() >= Duration::from_secs(1)
+        {
+            state.last_slot_err_log = Instant::now();
             let _ = state.tx.send(SecureMsg::Error(format!(
                 "XInputGetState({slot}) error {err}"
             )));

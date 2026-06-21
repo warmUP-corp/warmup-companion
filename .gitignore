@@ -1,6 +1,7 @@
 /target
 /.agents
 /.claude
+/.lavish
 # Added by code-review-graph
 .code-review-graph/
 /crates/warmup-gamepad/target

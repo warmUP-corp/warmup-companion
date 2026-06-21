@@ -71,7 +71,6 @@ const XUSB_FAIL_LIMIT: u32 = 30;
 /// the raw IOCTL bytes for offset verification.
 #[derive(Clone, Default)]
 pub struct XusbReport {
-    pub packet: u32,
     pub buttons: u16,
     pub left_trigger: u8,
     pub right_trigger: u8,
@@ -308,7 +307,6 @@ fn parse_report(raw: &[u8]) -> XusbReport {
     let i16le = |off: usize| -> i16 { r(off, 2).map_or(0, |b| i16::from_le_bytes([b[0], b[1]])) };
 
     XusbReport {
-        packet: raw.get(5).copied().unwrap_or(0) as u32,
         buttons: u16le(11),
         left_trigger: raw.get(13).copied().unwrap_or(0),
         right_trigger: raw.get(14).copied().unwrap_or(0),

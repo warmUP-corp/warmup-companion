@@ -35,6 +35,15 @@ Unicode true
 
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
+!include "nsDialogs.nsh"
+!include "Sections.nsh"
+
+Var ModelChoice
+Var RbTiny
+Var RbBase
+Var RbSmall
+Var RbMedium
+Var RbParakeet
 
 Name "${APPNAME}"
 OutFile "${SRCROOT}\target\warmup-companion-setup.exe"
@@ -59,6 +68,8 @@ VIAddVersionKey "LegalCopyright"  "${COMPANY}"
 !define MUI_ABORTWARNING
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "${SRCROOT}\LICENSE"
+!insertmacro MUI_PAGE_COMPONENTS
+Page custom ModelPageShow ModelPageLeave
 !insertmacro MUI_PAGE_INSTFILES
 !define MUI_FINISHPAGE_LINK "warmUP Game Launcher - ${WEBSITE}"
 !define MUI_FINISHPAGE_LINK_LOCATION "${WEBSITE}"
@@ -69,11 +80,14 @@ VIAddVersionKey "LegalCopyright"  "${COMPANY}"
 
 !insertmacro MUI_LANGUAGE "English"
 
-Section "Install"
+Section "!Warmup Companion service (required)" SEC_MAIN
+  SectionIn RO                    ; always installed; user can't uncheck the service
   SetRegView 64                   ; write the uninstall key to the native 64-bit hive
   ; Keep a copy of the binary + trust docs in the app dir.
   SetOutPath "$INSTDIR"
   File "${BIN}"
+  File "${SRCROOT}\install\Get-WarmupSpeech.ps1"
+  File "${SRCROOT}\install\Get-WarmupParakeet.ps1"
   File "${SRCROOT}\README.md"
   File "${SRCROOT}\PRIVACY.md"
   File "${SRCROOT}\SECURITY.md"
@@ -109,6 +123,104 @@ Section "Install"
   WriteRegDWORD HKLM "${UNINSTKEY}" "NoRepair" 1
 SectionEnd
 
+Section /o "Offline voice typing" SEC_SPEECH
+  ; Opt-in, unchecked by default. Downloads the chosen engine into ${DATADIR}\speech;
+  ; the Mic key on the on-screen keyboard appears only once it's present
+  ; (src\win\speech_input.rs::available). Recognition is fully local, no cloud.
+  ; The model page sets $ModelChoice to a whisper size or "parakeet".
+  ${If} $ModelChoice == "parakeet"
+    DetailPrint "Downloading offline voice typing (Parakeet, ~670 MB)..."
+    nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\Get-WarmupParakeet.ps1"'
+    Pop $0
+    ${If} $0 != 0
+      MessageBox MB_ICONEXCLAMATION "Parakeet voice typing could not be downloaded (exit $0). The app works fine without it. Add it later by running $INSTDIR\Get-WarmupParakeet.ps1."
+    ${EndIf}
+  ${Else}
+    ${If} $ModelChoice == ""
+      StrCpy $ModelChoice "medium"
+    ${EndIf}
+    DetailPrint "Downloading offline voice typing (whisper '$ModelChoice' model)..."
+    nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\Get-WarmupSpeech.ps1" -Model $ModelChoice'
+    Pop $0
+    ${If} $0 != 0
+      MessageBox MB_ICONEXCLAMATION "Voice typing could not be downloaded (exit $0). The app works fine without it. Add it later by running $INSTDIR\Get-WarmupSpeech.ps1, or drop whisper-server.exe + a ggml-*.bin into ${DATADIR}\speech."
+    ${EndIf}
+  ${EndIf}
+SectionEnd
+
+LangString DESC_MAIN   ${LANG_ENGLISH} "The Warmup Companion service (sign-in / lock / UAC gamepad keyboard). Required."
+LangString DESC_SPEECH ${LANG_ENGLISH} "Optional, fully offline voice typing. Downloads your chosen engine (whisper.cpp model, or NVIDIA Parakeet ~670 MB) to ${DATADIR}\speech. The on-screen Mic key stays hidden unless this is installed. No cloud; recognition runs locally."
+!insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_MAIN}   $(DESC_MAIN)
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_SPEECH} $(DESC_SPEECH)
+!insertmacro MUI_FUNCTION_DESCRIPTION_END
+
+; Custom page: pick the whisper model — shown only if voice typing is selected.
+Function ModelPageShow
+  SectionGetFlags ${SEC_SPEECH} $0
+  IntOp $0 $0 & ${SF_SELECTED}
+  ${If} $0 == 0
+    Abort                          ; voice typing not chosen — skip this page
+  ${EndIf}
+
+  !insertmacro MUI_HEADER_TEXT "Voice engine" "Choose the offline speech engine to download."
+  nsDialogs::Create 1018
+  Pop $0
+  ${If} $0 == error
+    Abort
+  ${EndIf}
+
+  ${NSD_CreateLabel} 0 0 100% 22u "Whisper sizes: bigger = more accurate but slower/larger. Parakeet (NVIDIA) is a faster, multilingual alternative. All run fully offline; you can switch later from the tray."
+  Pop $1
+  ${NSD_CreateRadioButton} 8u 28u 95% 12u "Whisper Tiny  -  ~75 MB, fastest"
+  Pop $RbTiny
+  ${NSD_CreateRadioButton} 8u 42u 95% 12u "Whisper Base  -  ~142 MB"
+  Pop $RbBase
+  ${NSD_CreateRadioButton} 8u 56u 95% 12u "Whisper Small  -  ~466 MB, better accuracy"
+  Pop $RbSmall
+  ${NSD_CreateRadioButton} 8u 70u 95% 12u "Whisper Medium  -  ~1.5 GB, best accuracy (recommended)"
+  Pop $RbMedium
+  ${NSD_CreateRadioButton} 8u 88u 95% 12u "Parakeet (NVIDIA)  -  ~670 MB, fast multilingual"
+  Pop $RbParakeet
+
+  ${If} $ModelChoice == "tiny"
+    ${NSD_Check} $RbTiny
+  ${ElseIf} $ModelChoice == "base"
+    ${NSD_Check} $RbBase
+  ${ElseIf} $ModelChoice == "small"
+    ${NSD_Check} $RbSmall
+  ${ElseIf} $ModelChoice == "parakeet"
+    ${NSD_Check} $RbParakeet
+  ${Else}
+    ${NSD_Check} $RbMedium
+  ${EndIf}
+  nsDialogs::Show
+FunctionEnd
+
+Function ModelPageLeave
+  ${NSD_GetState} $RbTiny $0
+  ${If} $0 == ${BST_CHECKED}
+    StrCpy $ModelChoice "tiny"
+    Return
+  ${EndIf}
+  ${NSD_GetState} $RbSmall $0
+  ${If} $0 == ${BST_CHECKED}
+    StrCpy $ModelChoice "small"
+    Return
+  ${EndIf}
+  ${NSD_GetState} $RbMedium $0
+  ${If} $0 == ${BST_CHECKED}
+    StrCpy $ModelChoice "medium"
+    Return
+  ${EndIf}
+  ${NSD_GetState} $RbParakeet $0
+  ${If} $0 == ${BST_CHECKED}
+    StrCpy $ModelChoice "parakeet"
+    Return
+  ${EndIf}
+  StrCpy $ModelChoice "base"
+FunctionEnd
+
 Section "Uninstall"
   SetRegView 64                   ; match the install section's hive
   ; Stop + delete the service and remove the ProgramData service binary.
@@ -116,6 +228,8 @@ Section "Uninstall"
   Pop $0
 
   Delete "$INSTDIR\warmup-companion.exe"
+  Delete "$INSTDIR\Get-WarmupSpeech.ps1"
+  Delete "$INSTDIR\Get-WarmupParakeet.ps1"
   Delete "$INSTDIR\README.md"
   Delete "$INSTDIR\PRIVACY.md"
   Delete "$INSTDIR\SECURITY.md"
@@ -124,6 +238,8 @@ Section "Uninstall"
   RMDir  "$INSTDIR"
 
   DeleteRegKey HKLM "${UNINSTKEY}"
+  ; Downloaded voice-typing engine + model are not user data — remove them.
+  RMDir /r "${DATADIR}\speech"
   ; Logs and the local dictionary under ${DATADIR} are intentionally left in
   ; place, matching `warmup-companion.exe uninstall`.
 SectionEnd

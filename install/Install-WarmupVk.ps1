@@ -24,7 +24,13 @@
 #>
 param(
     [Alias("Debug")]
-    [switch]$DebugUi
+    [switch]$DebugUi,
+    # Optional offline voice typing: download a speech engine so the on-screen Mic
+    # key appears. Omitted = no download, Mic key stays hidden. "parakeet" picks the
+    # NVIDIA Parakeet engine instead of whisper (and builds with --features parakeet).
+    [switch]$Speech,
+    [ValidateSet("tiny", "base", "small", "medium", "parakeet")]
+    [string]$SpeechModel = "medium"
 )
 
 $ErrorActionPreference = "Stop"
@@ -88,6 +94,10 @@ if (-not (Test-Admin)) {
     if ($DebugUi) {
         $args += "-DebugUi"
     }
+    if ($Speech) {
+        $args += "-Speech"
+        $args += @("-SpeechModel", $SpeechModel)
+    }
     Write-Host "Administrator rights are required; opening an elevated installer..."
     try {
         Start-Process -FilePath "powershell.exe" -ArgumentList $args -Verb RunAs -WindowStyle Hidden -Wait
@@ -140,10 +150,15 @@ Write-Host "Telemetry:     disabled unless WARMUP_SENTRY_DSN is set"
 Write-Host "Privacy:       no host-control text reads for prediction; VK-only local context"
 Write-Host "Game sleep:    enabled by default; fullscreen game detection sleeps poll to Guide-only"
 Write-Host "Recovery:      tray menu and CLI command 'restore-keyboard' restore Windows keyboard services"
+Write-Host "Voice typing:  $(if ($Speech) { "downloading '$SpeechModel' (offline, opt-in)" } else { 'skipped — Mic key hidden (pass -Speech to enable)' })"
 Write-Host ""
 
-Write-Host "Building release (default service + gamepad features)..."
-cargo build --release
+# Parakeet's ASR code is behind a cargo feature (keeps non-parakeet builds lean);
+# pull it in only when that engine was chosen.
+$FeatureArgs = @()
+if ($Speech -and $SpeechModel -eq "parakeet") { $FeatureArgs = @("--features", "parakeet") }
+Write-Host "Building release (service + gamepad$(if ($FeatureArgs) { ' + parakeet' }))..."
+cargo build --release @FeatureArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $Exe = Join-Path $Root "target\release\warmup-companion.exe"
@@ -173,6 +188,23 @@ if ($DebugUi) {
 }
 & $Exe @InstallArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Optional offline voice typing. Non-fatal: a download failure must not undo the
+# service install — the companion runs fine without it (Mic key just stays hidden).
+if ($Speech) {
+    Write-Host "Installing offline voice typing ('$SpeechModel')..."
+    try {
+        if ($SpeechModel -eq "parakeet") {
+            & (Join-Path $PSScriptRoot "Get-WarmupParakeet.ps1")
+        } else {
+            & (Join-Path $PSScriptRoot "Get-WarmupSpeech.ps1") -Model $SpeechModel
+        }
+    } catch {
+        Write-Host "WARNING: voice-typing download failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "         The companion works without it; re-run with -Speech later, or drop" -ForegroundColor Yellow
+        Write-Host "         whisper-server.exe + a ggml-*.bin into C:\ProgramData\WarmupVk\speech." -ForegroundColor Yellow
+    }
+}
 
 if (Test-Path $IconSrc) {
     Copy-Item -LiteralPath $IconSrc -Destination $IconDest -Force
