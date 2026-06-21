@@ -116,7 +116,47 @@ unsafe fn try_add_icon(hwnd: HWND) {
     if Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
         ICON_ADDED.store(true, Ordering::SeqCst);
         let _ = KillTimer(hwnd, ADD_RETRY_TIMER_ID);
+        // We only reach here in an interactive session (the session-0 worker's
+        // NIM_ADD fails — no shell), so a welcome dialog is actually visible.
+        show_welcome_if_first_run(hwnd);
     }
+}
+
+/// One-time post-install welcome so a new user knows what to do, instead of
+/// guessing at the lock screen. Per-user marker in %LOCALAPPDATA% (writable by
+/// the userland helper, and correctly shows once for each user of the machine).
+unsafe fn show_welcome_if_first_run(hwnd: HWND) {
+    let Some(marker) = first_run_marker() else {
+        return;
+    };
+    if marker.exists() {
+        return;
+    }
+    let title = wide("Warmup Companion is ready");
+    let body = wide(
+        "Your controller keyboard is installed and running.\r\n\r\n\
+         1. Connect or pair your controller.\r\n\
+         2. Press Y on the controller to open the keyboard — or lock Windows (Win+L) to use it at sign-in.\r\n\
+         3. D-pad to move, A to type, LB/RB to pick word suggestions.\r\n\r\n\
+         Right-click the tray icon for status and privacy. Run \"warmup-companion.exe verify\" to self-check the install.",
+    );
+    let _ = MessageBoxW(
+        hwnd,
+        PCWSTR(body.as_ptr()),
+        PCWSTR(title.as_ptr()),
+        MB_OK | MB_ICONINFORMATION,
+    );
+    // Best-effort: create the dir + marker so this shows once. If it fails, the
+    // worst case is the welcome shows again next launch — harmless.
+    if let Some(dir) = marker.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&marker, b"1");
+}
+
+fn first_run_marker() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    Some(Path::new(&base).join("WarmupVk").join(".welcome_shown"))
 }
 
 unsafe fn load_tray_icon() -> HICON {

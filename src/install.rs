@@ -41,6 +41,7 @@ pub fn run_install(debug_ui: bool) {
     println!("Binary (SCM uses this): {}", bin.display());
     println!("NOT C:\\Program Files\\WarmupVk\\ — that path is legacy only.");
     println!("Reboot or Win+L, then tap Y on the controller at the password screen.");
+    println!("Check it worked anytime: warmup-companion.exe verify");
     println!("Log: {DATA_DIR}\\{LOG_NAME}");
     println!(
         "Debug UI: {}",
@@ -54,6 +55,96 @@ pub fn run_uninstall() {
         std::process::exit(1);
     }
     println!("Uninstalled {SERVICE_NAME}.");
+}
+
+/// `warmup-companion.exe verify` — read-only self-check so a new user can confirm
+/// the install worked and see whether their controller is detected, instead of
+/// testing blind at the lock screen. Controller status is read from the service's
+/// own log (the service is what actually reads the pad), not by re-initialising
+/// hardware in this throwaway process. Exits non-zero if anything is broken.
+pub fn run_verify() {
+    let mut healthy = true;
+    let bin = Path::new(INSTALL_DIR).join(EXE_NAME);
+    if bin.is_file() {
+        println!("[ ok ] binary present: {}", bin.display());
+    } else {
+        healthy = false;
+        println!("[FAIL] binary missing: {} — run: warmup-companion.exe install", bin.display());
+    }
+
+    match service_state() {
+        Some(state) if state == "RUNNING" => println!("[ ok ] service {SERVICE_NAME}: RUNNING"),
+        Some(state) => {
+            healthy = false;
+            println!("[FAIL] service {SERVICE_NAME}: {state} (expected RUNNING) — try: sc start {SERVICE_NAME}");
+        }
+        None => {
+            healthy = false;
+            println!("[FAIL] service {SERVICE_NAME} not installed — run: warmup-companion.exe install");
+        }
+    }
+
+    let log = Path::new(DATA_DIR).join(LOG_NAME);
+    match log_age_secs(&log) {
+        Some(secs) if secs <= 120 => println!("[ ok ] service log active ({secs}s ago)"),
+        Some(secs) => println!("[warn] service log last written {secs}s ago (service may be idle)"),
+        None => println!("[warn] no service log yet: {}", log.display()),
+    }
+
+    match last_controller_line(&log) {
+        Some(line) if !line.to_lowercase().contains("none") => {
+            println!("[ ok ] controller seen by service: {line}");
+        }
+        _ => println!("[ !  ] no controller detected yet — connect a pad, press any button, re-run verify"),
+    }
+
+    println!();
+    if healthy {
+        println!("Installation looks healthy.");
+    } else {
+        println!("Problems found above. Log: {}", log.display());
+        std::process::exit(1);
+    }
+}
+
+/// Current SCM state word (e.g. "RUNNING", "STOPPED") for the service, or `None`
+/// if it isn't installed.
+fn service_state() -> Option<String> {
+    let out = Command::new("sc.exe")
+        .args(["query", SERVICE_NAME])
+        .output()
+        .ok()?;
+    parse_service_state(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Extract the SCM state word (e.g. "RUNNING") from `sc query` stdout, or `None`
+/// if there's no STATE line (service not installed).
+fn parse_service_state(sc_query_stdout: &str) -> Option<String> {
+    sc_query_stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("STATE"))
+        .and_then(|l| l.split_whitespace().last())
+        .map(str::to_string)
+}
+
+/// Seconds since the service log was last written, or `None` if it's missing.
+fn log_age_secs(path: &Path) -> Option<u64> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    Some(modified.elapsed().map(|d| d.as_secs()).unwrap_or(0))
+}
+
+/// The most recent log line that names the gamepad backend / controller, so
+/// verify can echo what the service currently sees.
+fn last_controller_line(path: &Path) -> Option<String> {
+    find_controller_line(&fs::read_to_string(path).ok()?)
+}
+
+/// Most recent log line naming the gamepad backend / controller.
+fn find_controller_line(log: &str) -> Option<String> {
+    log.lines()
+        .rev()
+        .find(|l| l.contains("gamepad backend") || l.contains("gamepad loop running"))
+        .map(|l| l.trim().to_string())
 }
 
 /// Stop the service without deleting it. Use before manual `cargo run -- install`
@@ -388,4 +479,32 @@ fn chrono_lite_timestamp() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("{secs}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{find_controller_line, parse_service_state};
+
+    #[test]
+    fn parse_service_state_reads_state_word() {
+        let out = "SERVICE_NAME: WarmupVkSvc\n\
+                   TYPE               : 10  WIN32_OWN_PROCESS\n\
+                   STATE              : 4  RUNNING\n";
+        assert_eq!(parse_service_state(out).as_deref(), Some("RUNNING"));
+        assert_eq!(parse_service_state("no state here"), None);
+    }
+
+    #[test]
+    fn find_controller_line_picks_last_match() {
+        let log = "boot\n\
+                   gamepad backend: SDL3 (userland) - none\n\
+                   tick\n\
+                   gamepad backend: XInput - Xbox Controller\n\
+                   tick\n";
+        assert_eq!(
+            find_controller_line(log).as_deref(),
+            Some("gamepad backend: XInput - Xbox Controller")
+        );
+        assert_eq!(find_controller_line("nothing relevant"), None);
+    }
 }

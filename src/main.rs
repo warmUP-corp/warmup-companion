@@ -813,6 +813,10 @@ fn dispatch_install_or_service(args: &[String]) {
             install::run_uninstall();
             std::process::exit(0);
         }
+        Some("verify") => {
+            install::run_verify();
+            std::process::exit(0);
+        }
         Some("stop") => {
             install::run_stop();
             std::process::exit(0);

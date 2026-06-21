@@ -29,7 +29,7 @@ use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
 };
 use windows::Win32::UI::Input::XboxController::{
-    XINPUT_CAPABILITIES, XINPUT_GAMEPAD, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B,
+    XINPUT_GAMEPAD, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B,
     XINPUT_GAMEPAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT,
     XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_RIGHT_SHOULDER,
     XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y, XINPUT_STATE,
@@ -40,8 +40,8 @@ use windows::Win32::UI::Input::{
     RIDEV_PAGEONLY, RIDI_DEVICEINFO, RID_DEVICE_INFO, RID_INPUT, RIM_TYPEHID,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClassNameW,
-    GetForegroundWindow, GetWindowThreadProcessId, KillTimer, MsgWaitForMultipleObjects,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
+    GetWindowThreadProcessId, KillTimer, MsgWaitForMultipleObjects,
     PeekMessageW, PostThreadMessageW, RegisterClassW, SetForegroundWindow,
     SetLayeredWindowAttributes, SetTimer, TranslateMessage, HMENU, LWA_ALPHA, MSG, PM_REMOVE,
     QS_ALLINPUT, WM_DESTROY, WM_INPUT, WM_NULL, WM_POWERBROADCAST, WM_QUIT, WM_TIMER, WNDCLASSW,
@@ -65,122 +65,6 @@ const ERROR_EMPTY: u32 = 4306;
 
 type XInputGetStateFn = unsafe extern "system" fn(u32, *mut XINPUT_STATE) -> u32;
 type XInputGetKeystrokeFn = unsafe extern "system" fn(u32, u32, *mut XInputKeystroke) -> u32;
-type XInputGetCapabilitiesFn = unsafe extern "system" fn(u32, u32, *mut XINPUT_CAPABILITIES) -> u32;
-
-/// One independently-loaded XInput DLL, used only by the winlogon diagnostic
-/// probe (step C). We load `xinput1_4.dll` and `xinput1_3.dll` side-by-side and
-/// poll ordinal 100 (`XInputGetStateEx`) from each on the same frame so the
-/// service.log shows definitively which DLL — if either — returns real
-/// `wButtons` on the secure desktop, and whether 1.4 background-zeroing is the
-/// gate. Delete once the winning path is baked into the loader (step B).
-struct ProbeDll {
-    label: &'static str,
-    get_state: XInputGetStateFn,
-    get_caps: Option<XInputGetCapabilitiesFn>,
-}
-
-struct XInputProbe {
-    dlls: Vec<ProbeDll>,
-    /// OR of every DLL's slot-0 buttons last frame, for press/release edges.
-    last_combined: u16,
-    logged_caps: bool,
-    last_heartbeat: Instant,
-}
-
-impl XInputProbe {
-    fn load() -> Self {
-        let mut dlls = Vec::new();
-        for (label, raw) in [
-            ("1_4", b"xinput1_4.dll\0".as_slice()),
-            ("1_3", b"xinput1_3.dll\0".as_slice()),
-        ] {
-            unsafe {
-                let Ok(module) = LoadLibraryA(PCSTR(raw.as_ptr())) else {
-                    continue;
-                };
-                let Some(proc) = GetProcAddress(module, PCSTR(100usize as *const u8)) else {
-                    continue;
-                };
-                let get_state: XInputGetStateFn = std::mem::transmute(proc);
-                let get_caps = GetProcAddress(module, PCSTR(b"XInputGetCapabilities\0".as_ptr()))
-                    .map(|p| std::mem::transmute::<_, XInputGetCapabilitiesFn>(p));
-                dlls.push(ProbeDll {
-                    label,
-                    get_state,
-                    get_caps,
-                });
-            }
-        }
-        Self {
-            dlls,
-            last_combined: 0,
-            logged_caps: false,
-            last_heartbeat: crate::time_util::stale(Duration::from_secs(60)),
-        }
-    }
-
-    /// Poll every loaded DLL for `slot` and emit an `XPROBE` line whenever the
-    /// combined button mask changes (press/release edge) or every 2s heartbeat.
-    fn tick(&mut self, slot: u32, tx: &mpsc::Sender<SecureMsg>) {
-        let mut combined = 0u16;
-        let mut per_dll = Vec::with_capacity(self.dlls.len());
-        for dll in &self.dlls {
-            let mut s = XINPUT_STATE::default();
-            let err = unsafe { (dll.get_state)(slot, &mut s) };
-            let (btn, pkt) = if err == ERROR_SUCCESS {
-                combined |= s.Gamepad.wButtons.0;
-                (s.Gamepad.wButtons.0, s.dwPacketNumber)
-            } else {
-                (0, 0)
-            };
-            per_dll.push(format!(
-                "{}:err={} btn=0x{:04x} pkt={} lt={} rt={} lx={} ly={}",
-                dll.label,
-                err,
-                btn,
-                pkt,
-                s.Gamepad.bLeftTrigger,
-                s.Gamepad.bRightTrigger,
-                s.Gamepad.sThumbLX,
-                s.Gamepad.sThumbLY,
-            ));
-        }
-
-        let edge = combined != self.last_combined;
-        let heartbeat = self.last_heartbeat.elapsed() >= Duration::from_secs(2);
-        if !edge && !heartbeat {
-            return;
-        }
-        self.last_combined = combined;
-        if heartbeat {
-            self.last_heartbeat = Instant::now();
-        }
-
-        let mut line = format!(
-            "XPROBE slot{slot} [{}] {}",
-            per_dll.join(" | "),
-            probe_foreground()
-        );
-
-        // Capabilities once (subtype/flags identify the real device behind slot 0).
-        if !self.logged_caps {
-            if let Some(dll) = self.dlls.first() {
-                if let Some(get_caps) = dll.get_caps {
-                    let mut caps = XINPUT_CAPABILITIES::default();
-                    let err = unsafe { get_caps(slot, 0, &mut caps) };
-                    if err == ERROR_SUCCESS {
-                        self.logged_caps = true;
-                        line.push_str(&format!(
-                            " caps[{}]:type={} subtype={} flags=0x{:04x}",
-                            dll.label, caps.Type.0, caps.SubType.0, caps.Flags.0
-                        ));
-                    }
-                }
-            }
-        }
-        let _ = tx.send(SecureMsg::Error(line));
-    }
-}
 
 /// One-shot identity of THIS worker process: session, token user SID, integrity
 /// level RID, thread desktop, PLUS the fields that actually distinguish
@@ -341,28 +225,6 @@ fn probe_self_identity() -> String {
 /// Foreground window identity on the current (winlogon) desktop. Tells us
 /// whether we own foreground (XInput 1.4 background-zeroing gate) or LogonUI
 /// does. `ours=true` means GetForegroundWindow belongs to this process.
-fn probe_foreground() -> String {
-    unsafe {
-        let hwnd = GetForegroundWindow();
-        if hwnd.0.is_null() {
-            return "fg=none".into();
-        }
-        let mut pid = 0u32;
-        let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        let ours = pid == GetCurrentProcessId();
-        let mut buf = [0u16; 128];
-        let n = GetClassNameW(hwnd, &mut buf);
-        let class = if n > 0 {
-            String::from_utf16_lossy(&buf[..n as usize])
-        } else {
-            "?".into()
-        };
-        format!(
-            "fg=0x{:x} pid={pid} ours={ours} class={class}",
-            hwnd.0 as usize
-        )
-    }
-}
 
 const XINPUT_KEYSTROKE_KEYDOWN: u16 = 0x0001;
 const XINPUT_KEYSTROKE_KEYUP: u16 = 0x0002;
@@ -537,8 +399,6 @@ struct PollState {
     last_slot_err_log: Instant,
     prev_trigger_left: bool,
     prev_trigger_right: bool,
-    /// Step-C diagnostic: side-by-side xinput1_3 vs xinput1_4 GetStateEx.
-    probe: XInputProbe,
 }
 
 thread_local! {
@@ -1118,7 +978,6 @@ fn secure_poll_main(
             last_slot_err_log: crate::time_util::stale(Duration::from_secs(60)),
             prev_trigger_left: false,
             prev_trigger_right: false,
-            probe: XInputProbe::load(),
         });
     });
 
@@ -1500,10 +1359,6 @@ fn report_hex(report: &[u8]) -> String {
 
 #[allow(dead_code)]
 fn poll_xinput_tick(state: &mut PollState) {
-    // Step-C diagnostic: compare 1_3 vs 1_4 GetStateEx on the live winlogon
-    // thread. Disjoint field borrows (probe is &mut, tx is &) are allowed.
-    state.probe.tick(0, &state.tx);
-
     // Re-enumerate XUSB pads while we have none — a controller connected after the
     // worker started (common at the lock screen) was missed by the one-shot
     // `open_all`, leaving only the foreground-gated DLL (always zeroed here).

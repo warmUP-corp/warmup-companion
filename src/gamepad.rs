@@ -17,6 +17,11 @@ use crate::xinput_backend::XInputBackend;
 const VK_BUTTON: Button = Button::L3;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(8);
+/// Idle poll cadence: once no pad is connected and the VK is closed for
+/// `IDLE_AFTER`, drop from 125Hz to ~8Hz to cut idle CPU / handheld battery.
+/// Restored to `POLL_INTERVAL` immediately on connect / VK-open. (P2)
+const POLL_INTERVAL_IDLE: Duration = Duration::from_millis(125);
+const IDLE_AFTER: Duration = Duration::from_secs(2);
 const WARMUP_LAUNCH_DEBOUNCE: Duration = Duration::from_secs(2);
 /// Ignore spurious X/dpad from misaligned HID for a moment after VK opens.
 const VK_NAV_INPUT_GRACE: Duration = Duration::from_millis(450);
@@ -411,6 +416,10 @@ impl GamepadPoll {
         self.backend.controller_label()
     }
 
+    pub fn is_connected(&self) -> bool {
+        self.backend.is_connected()
+    }
+
     pub fn poll_frame(
         &mut self,
         cursor: &mut PcCursor,
@@ -511,6 +520,14 @@ impl GamepadPoll {
             // Forward every edge to the warmUP desktop over the pipe so the launcher grid
             // is gamepad-navigable (#348). The companion still drives its own VK/cursor below.
             crate::pipe_server::publish_button(change.button.as_str(), change.pressed);
+            // R3 starts dictation even with the VK closed, so voice typing into the
+            // focused app is a single click — no need to open the keyboard first.
+            #[cfg(windows)]
+            if change.button == Button::R3 && change.pressed {
+                crate::vk_nav::start_voice_input();
+                self.backend.haptic_alert();
+                continue;
+            }
             if change.button == Button::A || change.button == Button::Touchpad {
                 // Hold: button down -> mouse-left down, up -> up, so
                 // the PIN keypad sees a real press duration (not an instant click).
@@ -963,6 +980,7 @@ where
         ));
     }
     let mut last_tick = Instant::now();
+    let mut last_active = Instant::now();
     while RUNNING.load(Ordering::SeqCst) {
         let now = Instant::now();
         let dt = now.duration_since(last_tick).as_secs_f32();
@@ -1041,9 +1059,20 @@ where
             }
         }
 
+        // Idle backoff (P2): slow the poll once nothing has needed input for a
+        // while, to cut idle CPU / handheld battery. Snap back to full rate the
+        // moment a pad is connected or the VK is open.
+        if poll.is_connected() || vk_open() {
+            last_active = now;
+        }
+        let interval = if last_active.elapsed() >= IDLE_AFTER {
+            POLL_INTERVAL_IDLE
+        } else {
+            POLL_INTERVAL
+        };
         let elapsed = now.elapsed();
-        if elapsed < POLL_INTERVAL {
-            interruptible_sleep(POLL_INTERVAL - elapsed);
+        if elapsed < interval {
+            interruptible_sleep(interval - elapsed);
         }
     }
     #[cfg(windows)]

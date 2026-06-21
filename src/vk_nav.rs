@@ -153,7 +153,7 @@ pub enum RepeatKey {
     Space,
 }
 
-const HOLD_INITIAL: Duration = Duration::from_millis(350);
+const HOLD_INITIAL: Duration = Duration::from_millis(250);
 const HOLD_REPEAT: Duration = Duration::from_millis(70);
 /// Second shift/symbol tap inside this window promotes one-shot to sticky
 /// (web `DOUBLE_TAP_SHIFT_MS`).
