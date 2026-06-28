@@ -131,6 +131,15 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
+fn lerp_rect(a: D2D_RECT_F, b: D2D_RECT_F, t: f32) -> D2D_RECT_F {
+    D2D_RECT_F {
+        left: lerp(a.left, b.left, t),
+        top: lerp(a.top, b.top, t),
+        right: lerp(a.right, b.right, t),
+        bottom: lerp(a.bottom, b.bottom, t),
+    }
+}
+
 fn configure_d2d_quality(ctx: &ID2D1DeviceContext) {
     // Default D2D text path can look aliased on our DXGI composition target.
     unsafe { ctx.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE) };
@@ -1109,6 +1118,16 @@ impl VkRenderer {
         rect: D2D_RECT_F,
         color: u32,
     ) -> Result<(), String> {
+        self.draw_svg_icon_alpha(icon, rect, color, 1.0)
+    }
+
+    unsafe fn draw_svg_icon_alpha(
+        &mut self,
+        icon: VkIcon,
+        rect: D2D_RECT_F,
+        color: u32,
+        opacity: f32,
+    ) -> Result<(), String> {
         let h = rect.bottom - rect.top;
         let draw_px = match icon {
             icon if icon.is_controller_tip() => (h * 0.98).round().clamp(24.0, 64.0),
@@ -1181,7 +1200,7 @@ impl VkRenderer {
         self.d2d_context.DrawBitmap(
             bitmap,
             Some(&dest),
-            1.0,
+            opacity.clamp(0.0, 1.0),
             D2D1_INTERPOLATION_MODE_LINEAR,
             None,
             None,
@@ -1193,6 +1212,15 @@ impl VkRenderer {
         &mut self,
         art: ControllerArt,
         rect: D2D_RECT_F,
+    ) -> Result<(), String> {
+        self.draw_controller_art_alpha(art, rect, 1.0)
+    }
+
+    unsafe fn draw_controller_art_alpha(
+        &mut self,
+        art: ControllerArt,
+        rect: D2D_RECT_F,
+        opacity: f32,
     ) -> Result<(), String> {
         let key = ControllerArtCacheKey { art };
         if !self.controller_art_cache.contains_key(&key) {
@@ -1286,7 +1314,7 @@ impl VkRenderer {
         self.d2d_context.DrawBitmap(
             bitmap,
             Some(&dest),
-            1.0,
+            opacity.clamp(0.0, 1.0),
             D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
             None,
             None,
@@ -1693,6 +1721,225 @@ impl VkRenderer {
             return 0.0;
         }
         m.widthIncludingTrailingWhitespace
+    }
+
+    /// One-surface morph between the small "open keyboard" pill and the
+    /// controller connection card. `card_t`: 0 = prompt, 1 = card.
+    pub unsafe fn draw_prompt_card_morph(
+        &mut self,
+        bg: u32,
+        border: u32,
+        text_color: u32,
+        prefix: &str,
+        suffix: &str,
+        show_l3: bool,
+        title: &str,
+        controller_label: &str,
+        card_t: f32,
+    ) -> Result<(), String> {
+        let cw = self.width as f32;
+        let ch = self.height as f32;
+        let card_t = card_t.clamp(0.0, 1.0);
+        let prompt_alpha = 1.0 - card_t;
+        let card_alpha = card_t;
+        let identity = Matrix3x2 {
+            M11: 1.0,
+            M12: 0.0,
+            M21: 0.0,
+            M22: 1.0,
+            M31: 0.0,
+            M32: 0.0,
+        };
+        self.d2d_context.SetTransform(&identity);
+
+        self.d2d_context.BeginDraw();
+        self.d2d_context.Clear(Some(&D2D1_COLOR_F {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        }));
+
+        let elapsed = self.prompt_started.elapsed().as_secs_f32();
+        let pulse = (elapsed * 0.54).fract();
+        let pulse_alpha = (1.0 - pulse).powi(2);
+        let prompt_panel = D2D_RECT_F {
+            left: 4.0,
+            top: 4.0,
+            right: cw - 4.0,
+            bottom: ch - 4.0,
+        };
+        let card_top = 44.0_f32.min(ch - 14.0).max(4.0);
+        let card_w = 196.0_f32.min(cw - 10.0).max(20.0);
+        let card_left = (cw - card_w) * 0.5;
+        let card_panel = D2D_RECT_F {
+            left: card_left,
+            top: card_top,
+            right: cw - card_left,
+            bottom: ch - 5.0,
+        };
+        let panel = lerp_rect(prompt_panel, card_panel, card_t);
+        let rounded = D2D1_ROUNDED_RECT {
+            rect: panel,
+            radiusX: lerp((ch * 0.5 - 2.0).max(8.0), 28.0, card_t),
+            radiusY: lerp((ch * 0.5 - 2.0).max(8.0), 28.0, card_t),
+        };
+        let glow = colorref_mix(0x00FFFFFF, border, lerp(0.38, 0.45, card_t));
+        let bg_brush = solid_brush(
+            &self.d2d_context,
+            colorref_alpha(bg, lerp(1.0, 0.94, card_t)),
+        )?;
+        let glow_brush = solid_brush(
+            &self.d2d_context,
+            colorref_alpha(glow, lerp(0.30, 0.22, card_t) * pulse_alpha),
+        )?;
+        let border_brush = solid_brush(
+            &self.d2d_context,
+            colorref_alpha(glow, lerp(1.0, 0.84, card_t)),
+        )?;
+        self.d2d_context.FillRoundedRectangle(&rounded, &bg_brush);
+        self.d2d_context
+            .DrawRoundedRectangle(&rounded, &glow_brush, 2.0 + 10.0 * pulse, None);
+        self.d2d_context.DrawRoundedRectangle(
+            &rounded,
+            &border_brush,
+            lerp(1.5, 1.2, card_t),
+            None,
+        );
+
+        if prompt_alpha > 0.01 {
+            let _ = self
+                .text_format
+                .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            let _ = self
+                .text_format
+                .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            let chip = (ch * 0.70).clamp(26.0, 48.0);
+            let gap = 8.0;
+            let w_prefix = self.measure_text(prefix);
+            let w_suffix = self.measure_text(suffix);
+            let total = if show_l3 {
+                w_prefix + gap + chip + gap + w_suffix
+            } else {
+                w_prefix
+            };
+            let mut x = ((cw - total) * 0.5).max(0.0);
+            let text_brush =
+                solid_brush(&self.d2d_context, colorref_alpha(text_color, prompt_alpha))?;
+            let pre: Vec<u16> = prefix.encode_utf16().collect();
+            self.d2d_context.DrawText(
+                &pre,
+                &self.text_format,
+                &D2D_RECT_F {
+                    left: x,
+                    top: 0.0,
+                    right: x + w_prefix,
+                    bottom: ch,
+                },
+                &text_brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+            if show_l3 {
+                x += w_prefix + gap;
+                let chip_rect = D2D_RECT_F {
+                    left: x,
+                    top: (ch - chip) * 0.5,
+                    right: x + chip,
+                    bottom: (ch + chip) * 0.5,
+                };
+                let icon = ControllerIconFamily::from_label(controller_label).l3_icon();
+                self.draw_svg_icon_alpha(icon, chip_rect, text_color, prompt_alpha)?;
+                x += chip + gap;
+            }
+            if !suffix.is_empty() {
+                let suf: Vec<u16> = suffix.encode_utf16().collect();
+                self.d2d_context.DrawText(
+                    &suf,
+                    &self.text_format,
+                    &D2D_RECT_F {
+                        left: x,
+                        top: 0.0,
+                        right: x + w_suffix,
+                        bottom: ch,
+                    },
+                    &text_brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
+            }
+        }
+
+        if card_alpha > 0.01 {
+            let _ = self
+                .text_format
+                .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            let _ = self
+                .text_format
+                .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            let _ = self
+                .text_format
+                .SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            let title_w: Vec<u16> = title.encode_utf16().collect();
+            let text_brush =
+                solid_brush(&self.d2d_context, colorref_alpha(text_color, card_alpha))?;
+            let name_bottom = (card_top - 6.0).max(12.0);
+            self.d2d_context.DrawText(
+                &title_w,
+                &self.text_format,
+                &D2D_RECT_F {
+                    left: 0.0,
+                    top: 8.0,
+                    right: cw,
+                    bottom: name_bottom,
+                },
+                &text_brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+            let _ = self.text_format.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+
+            let image_cx = cw * 0.5;
+            let image_cy = (panel.top + panel.bottom) * 0.5 - 6.0 * (1.0 - card_t);
+            let image_scale = 0.88 + 0.12 * card_t;
+            let ring_brush = solid_brush(
+                &self.d2d_context,
+                colorref_alpha(glow, 0.20 * card_alpha * pulse_alpha),
+            )?;
+            let ring = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: image_cx - 74.0 * image_scale - 10.0 * pulse,
+                    top: image_cy - 60.0 * image_scale - 10.0 * pulse,
+                    right: image_cx + 74.0 * image_scale + 10.0 * pulse,
+                    bottom: image_cy + 60.0 * image_scale + 10.0 * pulse,
+                },
+                radiusX: 52.0 * image_scale + 10.0 * pulse,
+                radiusY: 52.0 * image_scale + 10.0 * pulse,
+            };
+            self.d2d_context
+                .DrawRoundedRectangle(&ring, &ring_brush, 2.0, None);
+            let image_rect = D2D_RECT_F {
+                left: image_cx - 62.0 * image_scale,
+                top: image_cy - 54.0 * image_scale,
+                right: image_cx + 62.0 * image_scale,
+                bottom: image_cy + 54.0 * image_scale,
+            };
+            if let Some(art) = ControllerArt::from_label(controller_label) {
+                self.draw_controller_art_alpha(art, image_rect, card_alpha)?;
+            } else {
+                self.draw_svg_icon_alpha(VkIcon::Gamepad, image_rect, text_color, card_alpha)?;
+            }
+        }
+
+        self.d2d_context.SetTransform(&identity);
+        self.d2d_context
+            .EndDraw(None, None)
+            .map_err(|e| format!("EndDraw: {e}"))?;
+        self.swapchain
+            .Present(1, DXGI_PRESENT(0))
+            .ok()
+            .map_err(|e| format!("Present: {e}"))?;
+        Ok(())
     }
 
     /// Draw an AirPods-style connection card with a controller image.

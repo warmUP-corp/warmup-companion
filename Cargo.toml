@@ -1,21 +1,20 @@
 [package]
 name = "warmup-companion"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 build = "build.rs"
 
 [features]
-default = ["service"]
+default = ["service", "parakeet"]
 gamepad = ["dep:warmup-gamepad", "dep:enigo", "dep:ctrlc"]
 service = ["gamepad", "speech", "dep:windows-service"]
 # Offline mic dictation: cpal capture in-process, whisper.cpp (whisper-cli.exe)
 # as an optional downloaded sidecar. The Mic key is hidden unless the runner AND
 # a model are present on disk, so speech is a true opt-in install.
 speech = ["dep:cpal"]
-# Optional Parakeet (NVIDIA) engine: native in-process ASR via parakeet-rs/ort.
+# Parakeet (NVIDIA) engine: native in-process ASR via parakeet-rs/ort.
 # load-dynamic => onnxruntime.dll is found at RUNTIME (dropped beside the model by
-# the optional installer), so the base binary links no native ONNX. Engine code is
-# compiled in only with this feature; ship release builds with --features parakeet.
+# the installer), so the binary links no native ONNX.
 parakeet = ["speech", "dep:parakeet-rs"]
 
 [dependencies]

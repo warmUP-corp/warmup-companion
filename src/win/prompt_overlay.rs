@@ -45,6 +45,7 @@ const REPAINT_TIMER_ID: usize = 12;
 const REPAINT_TIMER_MS: u32 = 16;
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
 const CONNECTED_VISUAL_DURATION: Duration = Duration::from_millis(2400);
+const MORPH_DURATION: Duration = Duration::from_millis(420);
 
 const PROMPT_PREFIX: &str = "Press ";
 const PROMPT_SUFFIX: &str = " for keyboard";
@@ -57,21 +58,65 @@ const DEFAULT_TEXT: u32 = 0x00FFFFFF;
 
 struct PromptOverlayController {
     thread: Option<DesktopWindowThread>,
+    thread_kind: Option<PromptThreadKind>,
     last_tick: Instant,
     last_visual: Option<PromptVisual>,
     last_connected: bool,
     connected_visual_until: Option<Instant>,
+    connected_card_shown: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PromptThreadKind {
+    Prompt,
+    Voice,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PromptRect {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WindowMorph {
+    from: PromptRect,
+    to: PromptRect,
+    start: Instant,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct VisualMorph {
+    from: PromptVisual,
+    to: PromptVisual,
+    start: Instant,
 }
 
 impl Default for PromptOverlayController {
     fn default() -> Self {
         Self {
             thread: None,
+            thread_kind: None,
             last_tick: crate::time_util::stale(TICK_INTERVAL),
             last_visual: None,
             last_connected: false,
             connected_visual_until: None,
+            connected_card_shown: false,
         }
+    }
+}
+
+impl PromptOverlayController {
+    fn update_connected_visual(&mut self, connected: bool, now: Instant) {
+        if connected && !self.last_connected && !self.connected_card_shown {
+            self.connected_visual_until = Some(now + CONNECTED_VISUAL_DURATION);
+            self.connected_card_shown = true;
+        } else if !connected {
+            self.connected_visual_until = None;
+        }
+        self.last_connected = connected;
     }
 }
 
@@ -140,6 +185,9 @@ thread_local! {
     static HWND_STATE: std::cell::Cell<Option<HWND>> = const { std::cell::Cell::new(None) };
     static RENDERER: RefCell<Option<VkRenderer>> = const { RefCell::new(None) };
     static VISUAL_STATE: std::cell::Cell<PromptVisual> = const { std::cell::Cell::new(PromptVisual::Ready) };
+    static WINDOW_RECT_STATE: std::cell::Cell<Option<PromptRect>> = const { std::cell::Cell::new(None) };
+    static WINDOW_MORPH: std::cell::Cell<Option<WindowMorph>> = const { std::cell::Cell::new(None) };
+    static VISUAL_MORPH: std::cell::Cell<Option<VisualMorph>> = const { std::cell::Cell::new(None) };
     /// Render-side smoothed mic level — lerps toward the helper's published value
     /// each (60 fps) repaint so the glow glides instead of stepping at the helper rate.
     static VOICE_LEVEL: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
@@ -153,6 +201,98 @@ fn smoothed_voice_level() -> f32 {
         c.set(n);
         n
     })
+}
+
+fn visual_is_voice(visual: PromptVisual) -> bool {
+    matches!(visual, PromptVisual::Listening | PromptVisual::Transcribing)
+}
+
+fn thread_kind_for_visual(visual: PromptVisual) -> PromptThreadKind {
+    if visual_is_voice(visual) {
+        PromptThreadKind::Voice
+    } else {
+        PromptThreadKind::Prompt
+    }
+}
+
+fn can_morph_between(from: PromptVisual, to: PromptVisual) -> bool {
+    from != to
+        && !visual_is_voice(from)
+        && !visual_is_voice(to)
+        && (matches!(from, PromptVisual::Connected) || matches!(to, PromptVisual::Connected))
+}
+
+fn raw_morph_progress(start: Instant, now: Instant) -> f32 {
+    (now.saturating_duration_since(start).as_secs_f32() / MORPH_DURATION.as_secs_f32())
+        .clamp(0.0, 1.0)
+}
+
+fn eased_morph_progress(start: Instant, now: Instant) -> f32 {
+    let t = raw_morph_progress(start, now);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn lerp_i32(a: i32, b: i32, t: f32) -> i32 {
+    (a as f32 + (b - a) as f32 * t).round() as i32
+}
+
+fn lerp_rect(a: PromptRect, b: PromptRect, t: f32) -> PromptRect {
+    PromptRect {
+        x: lerp_i32(a.x, b.x, t),
+        y: lerp_i32(a.y, b.y, t),
+        w: lerp_i32(a.w, b.w, t).max(1),
+        h: lerp_i32(a.h, b.h, t).max(1),
+    }
+}
+
+fn active_visual_morph(now: Instant) -> Option<(PromptVisual, PromptVisual, f32)> {
+    VISUAL_MORPH.with(|state| {
+        let morph = state.get()?;
+        let raw = raw_morph_progress(morph.start, now);
+        if raw >= 1.0 {
+            state.set(None);
+            None
+        } else {
+            Some((morph.from, morph.to, eased_morph_progress(morph.start, now)))
+        }
+    })
+}
+
+unsafe fn target_rect_for_visual(visual: PromptVisual) -> PromptRect {
+    let cx = GetSystemMetrics(SM_CXSCREEN);
+    let cy = GetSystemMetrics(SM_CYSCREEN);
+    let (w, h) = panel_size_for_visual(visual);
+    let (x, y) = if visual_is_voice(visual) {
+        ((cx - w - MARGIN_RIGHT).max(0), ((cy - h) / 2).max(0))
+    } else {
+        (((cx - w) / 2).max(0), (cy - h - MARGIN_BOTTOM).max(0))
+    };
+    PromptRect { x, y, w, h }
+}
+
+unsafe fn tick_window_morph(hwnd: HWND, now: Instant) {
+    WINDOW_MORPH.with(|state| {
+        let Some(morph) = state.get() else {
+            return;
+        };
+        let raw = raw_morph_progress(morph.start, now);
+        let rect = if raw >= 1.0 {
+            state.set(None);
+            morph.to
+        } else {
+            lerp_rect(morph.from, morph.to, eased_morph_progress(morph.start, now))
+        };
+        WINDOW_RECT_STATE.with(|s| s.set(Some(rect)));
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            SWP_SHOWWINDOW | SWP_NOACTIVATE,
+        );
+    });
 }
 
 static CONTROLLER: OnceLock<Mutex<PromptOverlayController>> = OnceLock::new();
@@ -171,20 +311,14 @@ pub fn tick(vk_open: bool) {
     if c.last_tick.elapsed() < TICK_INTERVAL {
         return;
     }
-    c.last_tick = Instant::now();
+    let now = Instant::now();
+    c.last_tick = now;
 
     let userland_debug = crate::config::prompt_userland_debug();
     let on_winlogon = super::surface::input().is_some_and(|s| s.is_winlogon());
     let connected = crate::debug_state::snapshot().connected;
-    if connected && !c.last_connected {
-        c.connected_visual_until = Some(Instant::now() + CONNECTED_VISUAL_DURATION);
-    } else if !connected {
-        c.connected_visual_until = None;
-    }
-    c.last_connected = connected;
-    let connected_intro_active = c
-        .connected_visual_until
-        .is_some_and(|until| Instant::now() < until);
+    c.update_connected_visual(connected, now);
+    let connected_intro_active = c.connected_visual_until.is_some_and(|until| now < until);
     // Voice dictation takes priority on ANY desktop: R3 can start it with the VK
     // closed, so this pill is the "currently listening" indicator. While the VK is
     // open its own mic-key halo shows the phase, so the pill yields then.
@@ -213,17 +347,27 @@ pub fn tick(vk_open: bool) {
         None
     };
 
-    // Keep the thread alive across desktops; toggle visibility only (tearing the
-    // thread down per transition raced the next CreateWindow — see debug overlay).
-    let just_spawned = if c.thread.is_none() {
+    let desired_thread_kind = visual.map(thread_kind_for_visual);
+    if c.thread.is_some() && desired_thread_kind.is_some() && c.thread_kind != desired_thread_kind {
+        if let Some(thread) = c.thread.take() {
+            let _ = thread.hide();
+        }
+        c.thread_kind = None;
+    }
+
+    // Keep the thread alive while it belongs to the same desktop class; voice
+    // lives on Default, while the prompt/card lives on the current input desktop.
+    let just_spawned = if c.thread.is_none() && desired_thread_kind.is_some() {
         match desktop_window::spawn(PromptApp) {
             Ok(thread) => {
                 c.thread = Some(thread);
+                c.thread_kind = desired_thread_kind;
                 true
             }
             Err(e) => {
                 service_log(&format!("prompt ui: spawn failed: {e}"));
                 c.last_visual = visual;
+                c.thread_kind = None;
                 return;
             }
         }
@@ -256,8 +400,49 @@ pub fn tick(vk_open: bool) {
 }
 
 fn ui_show(visual: PromptVisual) {
-    ui_hide();
+    let previous = VISUAL_STATE.with(|state| state.get());
+    let existing = HWND_STATE.with(|state| state.get());
+    if existing.is_some() && !can_morph_between(previous, visual) && previous != visual {
+        ui_hide();
+    }
+
     VISUAL_STATE.with(|state| state.set(visual));
+    let target = unsafe { target_rect_for_visual(visual) };
+    let now = Instant::now();
+    if let Some(hwnd) = HWND_STATE.with(|state| state.get()) {
+        let from = WINDOW_RECT_STATE
+            .with(|state| state.get())
+            .unwrap_or_else(|| unsafe { target_rect_for_visual(previous) });
+        if previous != visual {
+            WINDOW_MORPH.with(|state| {
+                state.set(Some(WindowMorph {
+                    from,
+                    to: target,
+                    start: now,
+                }))
+            });
+            VISUAL_MORPH.with(|state| {
+                state.set(if can_morph_between(previous, visual) {
+                    Some(VisualMorph {
+                        from: previous,
+                        to: visual,
+                        start: now,
+                    })
+                } else {
+                    None
+                })
+            });
+        }
+        unsafe {
+            tick_window_morph(hwnd, now);
+            render_prompt(hwnd);
+        }
+        return;
+    }
+
+    WINDOW_RECT_STATE.with(|state| state.set(Some(target)));
+    WINDOW_MORPH.with(|state| state.set(None));
+    VISUAL_MORPH.with(|state| state.set(None));
     // Voice pill is userland-only and the thread is already on the user desktop
     // (attached once in on_ready); re-attaching there fails with ERROR_BUSY and
     // mis-places the window. Only the Winlogon prompts re-attach per show.
@@ -304,6 +489,9 @@ fn ui_hide() {
         // Drop the renderer (releases the DComp target bound to this HWND) BEFORE
         // DestroyWindow, or releasing it against a dead HWND crashes.
         RENDERER.with(|c| *c.borrow_mut() = None);
+        WINDOW_RECT_STATE.with(|state| state.set(None));
+        WINDOW_MORPH.with(|state| state.set(None));
+        VISUAL_MORPH.with(|state| state.set(None));
         unsafe {
             let _ = KillTimer(hwnd, REPAINT_TIMER_ID);
             let _ = DestroyWindow(hwnd);
@@ -313,16 +501,9 @@ fn ui_hide() {
 
 /// Bottom-center of the primary monitor.
 unsafe fn bottom_center() -> (i32, i32) {
-    let cx = GetSystemMetrics(SM_CXSCREEN);
-    let cy = GetSystemMetrics(SM_CYSCREEN);
     let visual = VISUAL_STATE.with(|state| state.get());
-    let (w, h) = panel_size_for_visual(visual);
-    if matches!(visual, PromptVisual::Listening | PromptVisual::Transcribing) {
-        // Voice glow: hug the right edge, vertically centered — subtle, out of the way.
-        ((cx - w - MARGIN_RIGHT).max(0), ((cy - h) / 2).max(0))
-    } else {
-        (((cx - w) / 2).max(0), (cy - h - MARGIN_BOTTOM).max(0))
-    }
+    let rect = target_rect_for_visual(visual);
+    (rect.x, rect.y)
 }
 
 fn panel_size_for_visual(visual: PromptVisual) -> (i32, i32) {
@@ -335,16 +516,16 @@ fn panel_size_for_visual(visual: PromptVisual) -> (i32, i32) {
 
 unsafe fn create_prompt_window() -> Result<HWND, String> {
     let instance = GetModuleHandleW(None).map_err(|e| format!("GetModuleHandleW: {e}"))?;
-    let (x, y) = bottom_center();
+    let rect = target_rect_for_visual(VISUAL_STATE.with(|state| state.get()));
     CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
         WINDOW_CLASS,
         w!("Warmup Prompt Overlay"),
         WS_POPUP,
-        x,
-        y,
-        PANEL_W,
-        PANEL_H,
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
         None,
         HMENU::default(),
         windows::Win32::Foundation::HINSTANCE(instance.0),
@@ -413,11 +594,16 @@ fn connected_card_title(label: &str) -> String {
 /// Render the pill through the shared D3D11/D2D/DComp renderer. Colors follow the
 /// keyboard theme so the prompt matches the VK card; the L3 chip keeps its own.
 fn render_prompt(hwnd: HWND) {
+    let now = Instant::now();
+    unsafe {
+        tick_window_morph(hwnd, now);
+    }
     let theme = crate::config::keyboard_theme();
     let bg = theme.bg.unwrap_or(DEFAULT_BG);
     let border = theme.border.or(theme.accent).unwrap_or(DEFAULT_BORDER);
     let text = theme.text.unwrap_or(DEFAULT_TEXT);
     let visual = VISUAL_STATE.with(|state| state.get());
+    let visual_morph = active_visual_morph(now);
     let snapshot = crate::debug_state::snapshot();
     RENDERER.with(|c| {
         if let Ok(mut slot) = c.try_borrow_mut() {
@@ -426,51 +612,86 @@ fn render_prompt(hwnd: HWND) {
                     if let Err(e) = r.resize(hwnd) {
                         service_log(&format!("prompt ui: renderer resize: {e}"));
                     }
-                    let result = match visual {
-                        PromptVisual::Connected => {
-                            // The live device name (e.g. "DualSense Wireless Controller")
-                            // drives both the card title and the controller artwork. Fall
-                            // back to a generic pad name only when the backend hasn't
-                            // published one yet (no service-mode publish, mid-connect, …).
-                            let name = snapshot.name.trim();
-                            let controller_label =
-                                if name.is_empty() || name.eq_ignore_ascii_case("none") {
-                                    "Xbox Wireless Controller"
-                                } else {
-                                    name
-                                };
-                            let title = connected_card_title(controller_label);
-                            r.draw_connected_prompt(bg, border, text, &title, controller_label)
-                        }
-                        PromptVisual::Ready => r.draw_prompt(
-                            bg,
-                            border,
-                            text,
-                            PROMPT_PREFIX,
-                            PROMPT_SUFFIX,
-                            true,
-                            snapshot.name.trim(),
-                        ),
-                        PromptVisual::NoPad => {
-                            let muted_text = crate::win::vk_renderer::mix_color(text, bg, 0.58);
-                            let muted_border = crate::win::vk_renderer::mix_color(border, bg, 0.45);
+                    // The live device name (e.g. "DualSense Wireless Controller")
+                    // drives both the card title and the controller artwork. Fall
+                    // back to a generic pad name only when the backend hasn't
+                    // published one yet (no service-mode publish, mid-connect, ...).
+                    let name = snapshot.name.trim();
+                    let controller_label = if name.is_empty() || name.eq_ignore_ascii_case("none") {
+                        "Xbox Wireless Controller"
+                    } else {
+                        name
+                    };
+                    let title = connected_card_title(controller_label);
+                    let result = if let Some((from, to, t)) = visual_morph {
+                        if matches!(from, PromptVisual::Connected)
+                            || matches!(to, PromptVisual::Connected)
+                        {
+                            let card_t = if matches!(to, PromptVisual::Connected) {
+                                t
+                            } else {
+                                1.0 - t
+                            };
+                            r.draw_prompt_card_morph(
+                                bg,
+                                border,
+                                text,
+                                PROMPT_PREFIX,
+                                PROMPT_SUFFIX,
+                                true,
+                                &title,
+                                controller_label,
+                                card_t,
+                            )
+                        } else {
                             r.draw_prompt(
                                 bg,
-                                muted_border,
-                                muted_text,
-                                NO_PAD_PROMPT,
-                                "",
-                                false,
-                                "",
+                                border,
+                                text,
+                                PROMPT_PREFIX,
+                                PROMPT_SUFFIX,
+                                true,
+                                snapshot.name.trim(),
                             )
                         }
-                        PromptVisual::Listening => {
-                            let accent = theme.accent.or(theme.border).unwrap_or(DEFAULT_BORDER);
-                            r.draw_voice(accent, smoothed_voice_level(), false)
-                        }
-                        PromptVisual::Transcribing => {
-                            let accent = theme.accent.or(theme.border).unwrap_or(DEFAULT_BORDER);
-                            r.draw_voice(accent, smoothed_voice_level(), true)
+                    } else {
+                        match visual {
+                            PromptVisual::Connected => {
+                                r.draw_connected_prompt(bg, border, text, &title, controller_label)
+                            }
+                            PromptVisual::Ready => r.draw_prompt(
+                                bg,
+                                border,
+                                text,
+                                PROMPT_PREFIX,
+                                PROMPT_SUFFIX,
+                                true,
+                                snapshot.name.trim(),
+                            ),
+                            PromptVisual::NoPad => {
+                                let muted_text = crate::win::vk_renderer::mix_color(text, bg, 0.58);
+                                let muted_border =
+                                    crate::win::vk_renderer::mix_color(border, bg, 0.45);
+                                r.draw_prompt(
+                                    bg,
+                                    muted_border,
+                                    muted_text,
+                                    NO_PAD_PROMPT,
+                                    "",
+                                    false,
+                                    "",
+                                )
+                            }
+                            PromptVisual::Listening => {
+                                let accent =
+                                    theme.accent.or(theme.border).unwrap_or(DEFAULT_BORDER);
+                                r.draw_voice(accent, smoothed_voice_level(), false)
+                            }
+                            PromptVisual::Transcribing => {
+                                let accent =
+                                    theme.accent.or(theme.border).unwrap_or(DEFAULT_BORDER);
+                                r.draw_voice(accent, smoothed_voice_level(), true)
+                            }
                         }
                     };
                     if let Err(e) = result {
@@ -485,5 +706,52 @@ fn render_prompt(hwnd: HWND) {
 fn service_log(msg: &str) {
     if crate::config::service_mode() {
         crate::install::log_line(msg);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connected_card_is_one_shot() {
+        let mut controller = PromptOverlayController::default();
+        let now = Instant::now();
+
+        controller.update_connected_visual(true, now);
+        assert!(controller.connected_visual_until.is_some());
+
+        controller.update_connected_visual(false, now + CONNECTED_VISUAL_DURATION);
+        assert!(controller.connected_visual_until.is_none());
+
+        controller.update_connected_visual(true, now + CONNECTED_VISUAL_DURATION * 2);
+        assert!(controller.connected_visual_until.is_none());
+    }
+
+    #[test]
+    fn morph_progress_eases_without_overshoot() {
+        let start = Instant::now();
+
+        assert_eq!(eased_morph_progress(start, start), 0.0);
+        assert!(
+            (eased_morph_progress(start, start + Duration::from_millis(210)) - 0.5).abs() < 0.01
+        );
+        assert_eq!(eased_morph_progress(start, start + MORPH_DURATION * 2), 1.0);
+    }
+
+    #[test]
+    fn voice_uses_separate_overlay_thread_kind() {
+        assert_eq!(
+            thread_kind_for_visual(PromptVisual::Listening),
+            PromptThreadKind::Voice
+        );
+        assert_eq!(
+            thread_kind_for_visual(PromptVisual::Connected),
+            PromptThreadKind::Prompt
+        );
+        assert_eq!(
+            thread_kind_for_visual(PromptVisual::Ready),
+            PromptThreadKind::Prompt
+        );
     }
 }

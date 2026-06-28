@@ -24,7 +24,7 @@ impl VkSession {
         }
         let ui = VkUiThread::spawn(attach)?;
         ui.show(attach)?;
-        if !vk_ui::wait_until_visible(Duration::from_millis(750)) {
+        if !vk_ui::wait_until_visible(Duration::from_secs(5)) {
             let _ = ui.hide();
             return Err("VK window did not become visible (desktop attach or Session 0 UI)".into());
         }

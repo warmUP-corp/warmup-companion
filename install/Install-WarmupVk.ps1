@@ -3,7 +3,7 @@
   Build and install Warmup Companion (sign-in / UAC gamepad keyboard).
 
 .DESCRIPTION
-  Same gamepad-enabled binary as:
+  Same gamepad + Parakeet-enabled binary as:
     cargo build --release
   Desktop test (after install or from target\release):
     warmup-companion.exe --gamepad --real
@@ -26,11 +26,11 @@ param(
     [Alias("Debug")]
     [switch]$DebugUi,
     # Optional offline voice typing: download a speech engine so the on-screen Mic
-    # key appears. Omitted = no download, Mic key stays hidden. "parakeet" picks the
-    # NVIDIA Parakeet engine instead of whisper (and builds with --features parakeet).
+    # key appears. Omitted = no download, Mic key stays hidden. Release builds
+    # always include the Parakeet engine code; this only chooses what to download.
     [switch]$Speech,
     [ValidateSet("tiny", "base", "small", "medium", "parakeet")]
-    [string]$SpeechModel = "medium"
+    [string]$SpeechModel = "parakeet"
 )
 
 $ErrorActionPreference = "Stop"
@@ -153,12 +153,8 @@ Write-Host "Recovery:      tray menu and CLI command 'restore-keyboard' restore 
 Write-Host "Voice typing:  $(if ($Speech) { "downloading '$SpeechModel' (offline, opt-in)" } else { 'skipped — Mic key hidden (pass -Speech to enable)' })"
 Write-Host ""
 
-# Parakeet's ASR code is behind a cargo feature (keeps non-parakeet builds lean);
-# pull it in only when that engine was chosen.
-$FeatureArgs = @()
-if ($Speech -and $SpeechModel -eq "parakeet") { $FeatureArgs = @("--features", "parakeet") }
-Write-Host "Building release (service + gamepad$(if ($FeatureArgs) { ' + parakeet' }))..."
-cargo build --release @FeatureArgs
+Write-Host "Building release (service + gamepad + parakeet)..."
+cargo build --release
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $Exe = Join-Path $Root "target\release\warmup-companion.exe"
@@ -180,6 +176,14 @@ if (-not ((Test-BinaryString $Exe "hid:btn=0x") -and (Test-BinaryString $Exe "GU
     throw "Built exe is missing PlayStation Winlogon HID diagnostics/Guide support. Re-run this script."
 }
 Write-Host "OK: PlayStation Winlogon diagnostics + Guide support present in $Exe"
+
+if (-not (Test-BinaryString $Exe "parakeet-server: loading model")) {
+    throw "Built exe is missing Parakeet support. Re-run this script."
+}
+if (Test-BinaryString $Exe "parakeet engine not built into this binary") {
+    throw "Built exe contains the non-Parakeet fallback. Re-run this script."
+}
+Write-Host "OK: Parakeet engine support present in $Exe"
 
 Write-Host "Installing service..."
 $InstallArgs = @("install")
