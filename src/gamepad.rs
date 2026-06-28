@@ -554,15 +554,17 @@ impl GamepadPoll {
                 self.b_cursor_down = change.pressed;
                 cursor.set_right_button(self.b_cursor_down && crate::pipe_server::clicks_enabled());
             }
-            // Share (SELECT) → Enter into the focused app even with the VK closed, so
-            // submit/confirm is one tap. NOT gated by clicks_enabled (that's OS-cursor
-            // mode); only suppressed when warmUP owns text input or a game is active.
+            // Share (SELECT) / Start → Enter into the focused app even with the VK
+            // closed, so submit/confirm is one tap. NOT gated by clicks_enabled
+            // (that's OS-cursor mode); only suppressed when warmUP owns text input
+            // or a game is active.
             // ponytail: also fires on the SELECT edge of the SELECT+LB+X launch combo —
             // one stray Enter during that 3-finger hold; split to release-edge if it bites.
-            if change.button == Button::Select && change.pressed {
+            if matches!(change.button, Button::Select | Button::Start) && change.pressed {
                 let suppressed = crate::pipe_server::native_vk_suppressed();
                 crate::install::log_line(&format!(
-                    "SELECT press, vk closed: suppressed={suppressed} clicks_enabled={} -> {}",
+                    "{} press, vk closed: suppressed={suppressed} clicks_enabled={} -> {}",
+                    change.button.as_str(),
                     crate::pipe_server::clicks_enabled(),
                     if suppressed { "skip" } else { "Enter" }
                 ));

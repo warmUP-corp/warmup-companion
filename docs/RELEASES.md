@@ -24,15 +24,22 @@ Use this before publishing an OSS release or binary.
 
 ## Installer
 
-- Build the installer from the release binary:
+- Build release assets and checksum sidecars:
 
 ```powershell
-cargo build --release
-makensis install\warmup-companion.nsi
+.\tools\New-ReleaseArtifacts.ps1
 ```
 
-- Output: `target\warmup-companion-setup.exe` (NSIS; UAC-elevated; supports
-  silent `/S`).
+- Output: `target\release-assets\warmup-companion.exe`,
+  `target\release-assets\warmup-companion.exe.sha256`,
+  `target\release-assets\warmup-companion-setup.exe`, and
+  `target\release-assets\warmup-companion-setup.exe.sha256`.
+- The bare exe checksum sidecar must be attached to GitHub releases as exactly
+  `warmup-companion.exe.sha256`; the desktop app refuses in-app companion
+  installs when this asset is missing or mismatched.
+- The installer is NSIS, UAC-elevated, and supports silent `/S`.
+- Default release builds include the Parakeet engine code. The installer still
+  downloads the large offline speech model only when voice typing is selected.
 - Attach both `warmup-companion-setup.exe` and the bare `warmup-companion.exe`
   to the release, each with a SHA-256 checksum.
 - Sign both before publishing (see Binary Signing).

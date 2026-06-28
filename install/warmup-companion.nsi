@@ -102,6 +102,12 @@ Section "!Warmup Companion service (required)" SEC_MAIN
 
   ; Register + start the service. This self-copies the exe to
   ; C:\ProgramData\WarmupVk\bin and creates WarmupVkSvc (LocalSystem, auto-start).
+  DetailPrint "Stopping stale ${APPNAME} processes..."
+  nsExec::ExecToLog 'taskkill /F /IM warmup-companion.exe'
+  Pop $0
+  nsExec::ExecToLog 'taskkill /F /IM warmup-vk-prototype.exe'
+  Pop $0
+
   DetailPrint "Installing the ${SERVICE} service..."
   nsExec::ExecToLog '"$INSTDIR\warmup-companion.exe" install'
   Pop $0
@@ -128,6 +134,7 @@ Section /o "Offline voice typing" SEC_SPEECH
   ; the Mic key on the on-screen keyboard appears only once it's present
   ; (src\win\speech_input.rs::available). Recognition is fully local, no cloud.
   ; The model page sets $ModelChoice to a whisper size or "parakeet".
+  ; The app binary always includes Parakeet support; this only downloads data.
   ${If} $ModelChoice == "parakeet"
     DetailPrint "Downloading offline voice typing (Parakeet, ~670 MB)..."
     nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\Get-WarmupParakeet.ps1"'
@@ -178,9 +185,9 @@ Function ModelPageShow
   Pop $RbBase
   ${NSD_CreateRadioButton} 8u 56u 95% 12u "Whisper Small  -  ~466 MB, better accuracy"
   Pop $RbSmall
-  ${NSD_CreateRadioButton} 8u 70u 95% 12u "Whisper Medium  -  ~1.5 GB, best accuracy (recommended)"
+  ${NSD_CreateRadioButton} 8u 70u 95% 12u "Whisper Medium  -  ~1.5 GB, best accuracy"
   Pop $RbMedium
-  ${NSD_CreateRadioButton} 8u 88u 95% 12u "Parakeet (NVIDIA)  -  ~670 MB, fast multilingual"
+  ${NSD_CreateRadioButton} 8u 88u 95% 12u "Parakeet (NVIDIA)  -  ~670 MB, fast multilingual (recommended)"
   Pop $RbParakeet
 
   ${If} $ModelChoice == "tiny"
@@ -192,7 +199,7 @@ Function ModelPageShow
   ${ElseIf} $ModelChoice == "parakeet"
     ${NSD_Check} $RbParakeet
   ${Else}
-    ${NSD_Check} $RbMedium
+    ${NSD_Check} $RbParakeet
   ${EndIf}
   nsDialogs::Show
 FunctionEnd
