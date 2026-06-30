@@ -23,9 +23,10 @@ Unicode true
 ; install.rs hardcodes this path (no spaces; sc.exe binPath breaks on quotes).
 !define DATADIR     "C:\ProgramData\WarmupVk"
 
-; Source paths. NSIS resolves File/OutFile relative to makensis's working
-; directory, so the default assumes makensis is run from the repo root.
-; Override with an absolute path via /DSRCROOT=... to run from anywhere.
+; Source paths. NSIS resolves File/LicenseData relative to *this script's own
+; directory* (install\), not makensis's working directory, so the "." default
+; only works if you run makensis from inside install\. New-ReleaseArtifacts.ps1
+; always passes an absolute /DSRCROOT=... override so it works from any cwd.
 !ifndef SRCROOT
   !define SRCROOT "."
 !endif

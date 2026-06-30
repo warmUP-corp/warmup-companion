@@ -16,7 +16,10 @@ if (-not (Test-Path $Exe)) {
 
 $Setup = Join-Path $Root 'target\warmup-companion-setup.exe'
 if (Get-Command makensis -ErrorAction SilentlyContinue) {
-    makensis (Join-Path $Root 'install\warmup-companion.nsi')
+    # NSIS resolves File/LicenseData paths relative to the .nsi's own directory, not
+    # makensis's working directory -- pass SRCROOT as an absolute path so this works
+    # no matter where the caller's shell cwd is.
+    makensis "/DSRCROOT=$Root" (Join-Path $Root 'install\warmup-companion.nsi')
 } elseif (-not (Test-Path $Setup)) {
     throw "makensis not found and installer does not exist: $Setup"
 }
