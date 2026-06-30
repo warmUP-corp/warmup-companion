@@ -112,7 +112,9 @@ Section "!Warmup Companion service (required)" SEC_MAIN
   nsExec::ExecToLog '"$INSTDIR\warmup-companion.exe" install'
   Pop $0
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP "Service install failed (exit $0). See ${DATADIR}\service.log."
+    ; /SD IDOK: a MessageBox with no /SD still shows under /S (silent install) and would
+    ; block forever with no one to click it -- the desktop app waits on this process handle.
+    MessageBox MB_ICONSTOP|MB_OK "Service install failed (exit $0). See ${DATADIR}\service.log." /SD IDOK
     Abort "Service install failed."
   ${EndIf}
 
