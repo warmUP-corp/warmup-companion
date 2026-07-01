@@ -525,7 +525,13 @@ impl GamepadPoll {
         for change in changes {
             // Forward every edge to the warmUP desktop over the pipe so the launcher grid
             // is gamepad-navigable (#348). The companion still drives its own VK/cursor below.
-            crate::pipe_server::publish_button(change.button.as_str(), change.pressed);
+            // Browser is a special warmUP-owned desktop surface: L3/R3 belong to the companion
+            // there (native VK / voice) and must not leak to the main launcher dock/topbar.
+            let browser_owns_stick_click = matches!(change.button, Button::L3 | Button::R3)
+                && crate::vk_nav::foreground_is_warmup_browser();
+            if !browser_owns_stick_click {
+                crate::pipe_server::publish_button(change.button.as_str(), change.pressed);
+            }
             // R3 starts dictation even with the VK closed, so voice typing into the
             // focused app is a single click — no need to open the keyboard first.
             #[cfg(windows)]

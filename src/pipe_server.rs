@@ -30,6 +30,9 @@ static GAME_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// user has brought the launcher forward (Guide-wake over a running game), this stays the full
 /// poll mode instead of sleeping, so the controller can navigate the launcher.
 static LAUNCHER_FOREGROUND_NAV: AtomicBool = AtomicBool::new(false);
+/// The standalone warmUP browser/overlay owns the foreground experience. Browser mode keeps
+/// companion L3/R3 actions local (native VK / voice) instead of forwarding them to the launcher.
+static BROWSER_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// True while a warmUP desktop client has completed the pipe handshake.
 static DESKTOP_CONNECTED: AtomicBool = AtomicBool::new(false);
 
@@ -65,6 +68,10 @@ pub fn game_active() -> bool {
 /// companion stays in the full poll mode even though [`game_active`] is set.
 pub fn launcher_foreground_nav() -> bool {
     LAUNCHER_FOREGROUND_NAV.load(Ordering::Relaxed)
+}
+
+pub fn browser_active() -> bool {
+    BROWSER_ACTIVE.load(Ordering::Relaxed)
 }
 
 /// Whether warmUP is connected and should be the source of truth for mode state.
@@ -554,6 +561,7 @@ fn apply_mode(p: &ModeSnapshot) {
     LAUNCHER_OWNS_TEXT_INPUT.store(p.launcher_owns_text_input, Ordering::Relaxed);
     GAME_ACTIVE.store(p.game_active, Ordering::Relaxed);
     LAUNCHER_FOREGROUND_NAV.store(p.launcher_foreground_nav, Ordering::Relaxed);
+    BROWSER_ACTIVE.store(p.browser_active, Ordering::Relaxed);
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -561,6 +569,7 @@ fn clear_desktop_mode() {
     LAUNCHER_OWNS_TEXT_INPUT.store(false, Ordering::Relaxed);
     GAME_ACTIVE.store(false, Ordering::Relaxed);
     LAUNCHER_FOREGROUND_NAV.store(false, Ordering::Relaxed);
+    BROWSER_ACTIVE.store(false, Ordering::Relaxed);
 }
 
 /// Apply companion-local settings pushed by warmUP (protocol v4 `companion_settings` frame).
@@ -644,7 +653,11 @@ fn controller_type_for(label: &str) -> String {
     let l = label.to_ascii_lowercase();
     if l.contains("xbox") {
         "xbox".into()
-    } else if l.contains("dualsense") || l.contains("ps5") || l.contains("dualshock") || l.contains("ps4") {
+    } else if l.contains("dualsense")
+        || l.contains("ps5")
+        || l.contains("dualshock")
+        || l.contains("ps4")
+    {
         "playstation".into()
     } else if l.contains("nintendo") || l.contains("switch") || l.contains("pro controller") {
         "switch".into()
@@ -723,34 +736,33 @@ pub fn spawn() {}
 #[cfg(windows)]
 mod server {
     use super::{
-        apply_companion_settings, apply_config, apply_led, apply_mode, apply_rumble,
-        clear_desktop_mode, current, current_axis, current_battery, drain_buttons,
+        DESKTOP_CONNECTED, apply_companion_settings, apply_config, apply_led, apply_mode,
+        apply_rumble, clear_desktop_mode, current, current_axis, current_battery, drain_buttons,
         reset_button_stream, set_native_vk_request, take_cursor_moved, take_touchpad,
-        DESKTOP_CONNECTED,
     };
     use crate::protocol::{
-        AxisPayload, BatteryPayload, ConnectionPayload, DownFrame, Hello, UpFrame, PROTOCOL_VERSION,
+        AxisPayload, BatteryPayload, ConnectionPayload, DownFrame, Hello, PROTOCOL_VERSION, UpFrame,
     };
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
-    use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
-        CloseHandle, GetLastError, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
+        CloseHandle, GetLastError, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree,
     };
     use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
     use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows::Win32::Storage::FileSystem::{
-        ReadFile, WriteFile, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_FIRST_PIPE_INSTANCE,
-        PIPE_ACCESS_DUPLEX,
+        FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAGS_AND_ATTRIBUTES, PIPE_ACCESS_DUPLEX, ReadFile,
+        WriteFile,
     };
     use windows::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
-        PeekNamedPipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+        PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, PeekNamedPipe,
     };
     use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
-        PROCESS_QUERY_LIMITED_INFORMATION,
+        OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
     };
+    use windows::core::PCWSTR;
 
     const PIPE_NAME: &str = r"\\.\pipe\warmup-input";
     /// SYSTEM full control; the interactive user (the desktop's account) gets read+write.
@@ -1192,6 +1204,7 @@ mod tests {
             launcher_foreground_nav: false,
             clicks_enabled: false,
             launcher_owns_text_input: true,
+            browser_active: false,
         });
         assert!(!clicks_enabled());
         assert!(launcher_owns_text_input());
@@ -1201,6 +1214,7 @@ mod tests {
             launcher_foreground_nav: false,
             clicks_enabled: true,
             launcher_owns_text_input: false,
+            browser_active: false,
         });
         assert!(clicks_enabled());
         assert!(!launcher_owns_text_input());
@@ -1212,6 +1226,7 @@ mod tests {
             launcher_foreground_nav: false,
             clicks_enabled: false,
             launcher_owns_text_input: false,
+            browser_active: false,
         });
         assert!(
             game_active() && !launcher_foreground_nav(),
@@ -1224,6 +1239,7 @@ mod tests {
             launcher_foreground_nav: true,
             clicks_enabled: true,
             launcher_owns_text_input: true,
+            browser_active: false,
         });
         assert!(
             game_active() && launcher_foreground_nav(),
@@ -1342,9 +1358,10 @@ mod tests {
         });
 
         let cmds = drain_device_commands();
-        assert!(cmds
-            .iter()
-            .any(|cmd| matches!(cmd, PadCommand::Led { r: 0, g: 0, b: 0 })));
+        assert!(
+            cmds.iter()
+                .any(|cmd| matches!(cmd, PadCommand::Led { r: 0, g: 0, b: 0 }))
+        );
         let st = *led_state().lock().unwrap();
         assert_eq!(st.effect, LedEffect::Off);
         assert_eq!(led_color_at(&st, 0.0), (0, 0, 0));

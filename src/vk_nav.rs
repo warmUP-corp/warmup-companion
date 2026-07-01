@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use crate::gamepad_backend::Button;
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyboardLayout, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_END, VK_RETURN, VK_SPACE, VK_TAB,
+    GetKeyboardLayout, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+    KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY, VK_BACK, VK_END, VK_RETURN, VK_SPACE, VK_TAB,
 };
 
 #[derive(Clone)]
@@ -196,30 +196,16 @@ fn build_web_layout(layer: Layer, lang_de: bool) -> Vec<KeyRow> {
     };
 
     let mut row_top = vec![KeyCell::named("Esc", KeyAction::CloseVk, SPAN_ACTION)];
-    row_top.extend(
-        top.iter()
-            .zip(TOP_SYMBOLS)
-            .map(|(&l, s)| t(l, s)),
-    );
+    row_top.extend(top.iter().zip(TOP_SYMBOLS).map(|(&l, s)| t(l, s)));
     row_top.push(KeyCell::vk("Backspace", VK_BACK, SPAN_ACTION));
 
     let mut row_mid = vec![KeyCell::vk("Tab", VK_TAB, SPAN_ACTION)];
-    row_mid.extend(
-        MID_LETTERS
-            .iter()
-            .zip(MID_SYMBOLS)
-            .map(|(&l, s)| t(l, s)),
-    );
+    row_mid.extend(MID_LETTERS.iter().zip(MID_SYMBOLS).map(|(&l, s)| t(l, s)));
     row_mid.push(KeyCell::tri('\'', '"', '/', layer));
     row_mid.push(KeyCell::vk("Enter", VK_RETURN, SPAN_ACTION));
 
     let mut row_bottom = vec![KeyCell::named("Shift", KeyAction::Shift, SPAN_ACTION)];
-    row_bottom.extend(
-        bottom
-            .iter()
-            .zip(BOTTOM_SYMBOLS)
-            .map(|(&l, s)| t(l, s)),
-    );
+    row_bottom.extend(bottom.iter().zip(BOTTOM_SYMBOLS).map(|(&l, s)| t(l, s)));
     row_bottom.push(KeyCell::tri(';', ':', '[', layer));
     row_bottom.push(KeyCell::tri('.', '!', ']', layer));
     // No dedicated close key: L3 toggles the keyboard open/closed, and the Esc
@@ -379,28 +365,24 @@ pub fn move_selection(dir: Button) -> bool {
     // Web `moveVirtualKeyboardSelection`: LEFT/RIGHT stop at row edges (no
     // wrap, no cross-row snake); UP/DOWN pick the nearest key by span center.
     let changed = match dir {
-        Button::Left
-            if pos.col > 0 => {
-                pos.col -= 1;
-                true
-            }
-        Button::Right
-            if pos.col + 1 < nav.rows[pos.row].keys.len() => {
-                pos.col += 1;
-                true
-            }
-        Button::Up
-            if pos.row > 0 => {
-                pos.col = nearest_col(&nav.rows, pos, pos.row - 1);
-                pos.row -= 1;
-                true
-            }
-        Button::Down
-            if pos.row + 1 < nav.rows.len() => {
-                pos.col = nearest_col(&nav.rows, pos, pos.row + 1);
-                pos.row += 1;
-                true
-            }
+        Button::Left if pos.col > 0 => {
+            pos.col -= 1;
+            true
+        }
+        Button::Right if pos.col + 1 < nav.rows[pos.row].keys.len() => {
+            pos.col += 1;
+            true
+        }
+        Button::Up if pos.row > 0 => {
+            pos.col = nearest_col(&nav.rows, pos, pos.row - 1);
+            pos.row -= 1;
+            true
+        }
+        Button::Down if pos.row + 1 < nav.rows.len() => {
+            pos.col = nearest_col(&nav.rows, pos, pos.row + 1);
+            pos.row += 1;
+            true
+        }
         _ => false,
     };
     if changed {
@@ -644,43 +626,55 @@ pub fn activate_key(key: &KeyCell) {
 pub fn send_text_direct(text: &str) {
     // Log the real inject target up front, to the user-writable log, so we can see
     // exactly where a transcript went — including when the guard below skips it.
-    let (hwnd, exe, class) = foreground_info();
-    let skip_warmup = exe.eq_ignore_ascii_case("warmup.exe");
+    let (hwnd, exe, class, title) = foreground_info();
+    let warmup_browser_foreground = foreground_is_warmup_browser_info(&exe, &title);
+    let skip_warmup = exe.eq_ignore_ascii_case("warmup.exe") && !warmup_browser_foreground;
     diag_inject_log(&format!(
-        "send_text_direct: chars={} fg=0x{hwnd:x} exe='{exe}' class='{class}' skip_warmup={skip_warmup}",
-        text.chars().count()
+        "send_text_direct: chars={} fg=0x{hwnd:x} exe='{exe}' class='{class}' title='{title}' browser_active={} browser_fg={warmup_browser_foreground} skip_warmup={skip_warmup}",
+        text.chars().count(),
+        crate::pipe_server::browser_active()
     ));
-    // Never dump a dictated transcript into the warmUP app's own UI.
+    // Never dump a dictated transcript into the warmUP launcher's own UI. Browser windows
+    // are allowed because they are intentionally acting as desktop/browser text targets.
     if skip_warmup {
-        crate::install::log_line("voice inject skipped: warmUP is foreground");
+        crate::install::log_line("voice inject skipped: warmUP launcher is foreground");
         return;
     }
     let units: Vec<u16> = text.encode_utf16().collect();
     send_unicode(&units);
 }
 
-/// `(hwnd_as_usize, exe_basename, window_class)` of the current foreground
+/// `(hwnd_as_usize, exe_basename, window_class, window_title)` of the current foreground
 /// window. Used both to keep dictation out of warmUP and to log the real inject
 /// target — the speech helper injects from its own process, so this is the only
 /// way to see where a transcript actually went.
-fn foreground_info() -> (usize, String, String) {
+fn foreground_info() -> (usize, String, String, String) {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
-        PROCESS_QUERY_LIMITED_INFORMATION,
+        OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId,
+        GetClassNameW, GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
+        GetWindowThreadProcessId,
     };
     unsafe {
         let fg = GetForegroundWindow();
         if fg.0.is_null() {
-            return (0, String::new(), String::new());
+            return (0, String::new(), String::new(), String::new());
         }
         let hwnd = fg.0 as usize;
         let mut cbuf = [0u16; 128];
         let n = GetClassNameW(fg, &mut cbuf);
         let class = String::from_utf16_lossy(&cbuf[..n.max(0) as usize]);
+        let title_len = GetWindowTextLengthW(fg);
+        let title = if title_len > 0 {
+            let mut tbuf = vec![0u16; title_len as usize + 1];
+            let n = GetWindowTextW(fg, &mut tbuf);
+            String::from_utf16_lossy(&tbuf[..n.max(0) as usize])
+        } else {
+            String::new()
+        };
         let mut pid = 0u32;
         GetWindowThreadProcessId(fg, Some(&mut pid));
         let mut exe = String::new();
@@ -705,13 +699,21 @@ fn foreground_info() -> (usize, String, String) {
                 }
             }
         }
-        (hwnd, exe, class)
+        (hwnd, exe, class, title)
     }
 }
 
 /// True if the OS foreground window belongs to the warmUP desktop app.
-fn foreground_is_warmup() -> bool {
-    foreground_info().1.eq_ignore_ascii_case("warmup.exe")
+fn foreground_is_warmup_browser_info(exe: &str, title: &str) -> bool {
+    crate::pipe_server::browser_active()
+        && exe.eq_ignore_ascii_case("warmup.exe")
+        && (title.eq_ignore_ascii_case("warmUP Browser")
+            || title.eq_ignore_ascii_case("warmUP Browser Overlay"))
+}
+
+pub(crate) fn foreground_is_warmup_browser() -> bool {
+    let (_, exe, _, title) = foreground_info();
+    foreground_is_warmup_browser_info(&exe, &title)
 }
 
 /// Append a line to a user-session-writable inject log. `service.log` is
@@ -724,10 +726,17 @@ fn diag_inject_log(msg: &str) {
     let dir = std::path::Path::new(&base).join("WarmupVk");
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("inject.log");
-    if std::fs::metadata(&path).map(|m| m.len() > 512_000).unwrap_or(false) {
+    if std::fs::metadata(&path)
+        .map(|m| m.len() > 512_000)
+        .unwrap_or(false)
+    {
         let _ = std::fs::remove_file(&path);
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         use std::io::Write;
         let _ = writeln!(f, "{msg}");
     }
@@ -757,9 +766,10 @@ impl crate::vk_commit::TextSink for SendInputSink {
         if sent as usize == batch.len() {
             Ok(())
         } else {
-            Err(std::io::Error::other(
-                format!("SendInput inserted {sent}/{} events", batch.len()),
-            ))
+            Err(std::io::Error::other(format!(
+                "SendInput inserted {sent}/{} events",
+                batch.len()
+            )))
         }
     }
 }
@@ -812,10 +822,13 @@ pub fn start_voice_input() {
         return;
     }
 
-    // Don't start dictation when warmUP itself is focused — the transcript would
-    // land in its UI. (Toggle-off above is unguarded, so it can still be stopped.)
-    if foreground_is_warmup() {
-        crate::install::log_line("vk voice input ignored: warmUP is foreground");
+    // Don't start dictation when warmUP's launcher is focused — the transcript would
+    // land in its UI. Browser windows are different: they are warmUP-owned OS windows
+    // but behave like normal desktop/browser text entry, so allow R3 there only when
+    // the explicit browser mode is set AND the foreground warmUP window is the browser.
+    let (_, exe, _, title) = foreground_info();
+    if exe.eq_ignore_ascii_case("warmup.exe") && !foreground_is_warmup_browser_info(&exe, &title) {
+        crate::install::log_line("vk voice input ignored: warmUP launcher is foreground");
         return;
     }
 
@@ -945,10 +958,10 @@ fn send_unicode(units: &[u16]) {
     // not-foreground / blocked) is visible in the log.
     #[cfg(feature = "gamepad")]
     if !crate::win::logon_focus::is_active() {
-        let (hwnd, exe, class) = foreground_info();
+        let (hwnd, exe, class, title) = foreground_info();
         let desk = crate::win::current_desktop_name().unwrap_or_default();
         let line = format!(
-            "vk inject(userland): units={} SendInput->{sent} desktop={desk} fg=0x{hwnd:x} exe='{exe}' class='{class}'",
+            "vk inject(userland): units={} SendInput->{sent} desktop={desk} fg=0x{hwnd:x} exe='{exe}' class='{class}' title='{title}'",
             units.len()
         );
         // service.log (gamepad helper can write it) + a user-writable mirror (the

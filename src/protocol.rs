@@ -33,6 +33,11 @@ pub struct ModeSnapshot {
     pub clicks_enabled: bool,
     #[serde(default)]
     pub launcher_owns_text_input: bool,
+    /// True while warmUP's standalone browser/overlay owns the foreground experience.
+    /// Browser mode keeps companion stick-click actions local (native VK / voice) even
+    /// though the owning executable is warmUP.
+    #[serde(default)]
+    pub browser_active: bool,
 }
 
 /// `hello` handshake payload. The client (desktop) includes its config/mode
@@ -301,8 +306,9 @@ impl DownFrame {
     pub fn parse_line(line: &str) -> Result<Self, serde_json::Error> {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
-            "hello" | "config" | "mode" | "rumble" | "led" | "companion_settings"
-            | "native_vk" => serde_json::from_str(line),
+            "hello" | "config" | "mode" | "rumble" | "led" | "companion_settings" | "native_vk" => {
+                serde_json::from_str(line)
+            }
             _ => Ok(Self::Unknown),
         }
     }
@@ -407,11 +413,13 @@ mod tests {
             launcher_foreground_nav: true,
             clicks_enabled: false,
             launcher_owns_text_input: true,
+            browser_active: false,
         });
         let line = frame.to_ndjson_line();
         let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(json["type"], "mode");
         assert_eq!(json["payload"]["launcherOwnsTextInput"], true);
+        assert_eq!(json["payload"]["browserActive"], false);
         assert_eq!(DownFrame::parse_line(line.trim_end()).unwrap(), frame);
     }
 
@@ -517,6 +525,7 @@ mod tests {
                 launcher_foreground_nav: false,
                 clicks_enabled: true,
                 launcher_owns_text_input: false,
+                browser_active: false,
             }),
             companion_settings: Some(CompanionSettingsPayload {
                 sleep_on_game: Some(true),

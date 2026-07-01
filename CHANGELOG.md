@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.3
+
+- Browser mode: accept warmUP desktop's `browserActive` mode bit so L3/R3 stay
+  companion-local while the standalone browser is foreground.
+- Fix: R3 voice dictation is allowed for the warmUP browser/overlay but remains
+  blocked for the main launcher to prevent accidental transcript injection.
+
 ## v0.2.2
 
 - Fix: the installer's service-install-failure dialog had no `/SD` flag, so it
