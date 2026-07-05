@@ -441,7 +441,11 @@ mod engine {
 
     /// Persist the engine choice (anything but "parakeet" => whisper).
     pub fn set_engine(name: &str) {
-        let v = if name == "parakeet" { "parakeet" } else { "whisper" };
+        let v = if name == "parakeet" {
+            "parakeet"
+        } else {
+            "whisper"
+        };
         let _ = std::fs::write(engine_path(), v);
     }
 
@@ -690,8 +694,8 @@ mod engine {
             body.len()
         );
 
-        let mut stream =
-            TcpStream::connect_timeout(&addr(), Duration::from_secs(2)).map_err(|e| format!("connect: {e}"))?;
+        let mut stream = TcpStream::connect_timeout(&addr(), Duration::from_secs(2))
+            .map_err(|e| format!("connect: {e}"))?;
         let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
         stream
@@ -700,15 +704,21 @@ mod engine {
             .map_err(|e| format!("send: {e}"))?;
 
         let mut resp = Vec::new();
-        stream.read_to_end(&mut resp).map_err(|e| format!("recv: {e}"))?;
+        stream
+            .read_to_end(&mut resp)
+            .map_err(|e| format!("recv: {e}"))?;
         let text = String::from_utf8_lossy(&resp);
         // Robust against chunked framing: pull the JSON object out by braces.
         let json = match (text.find('{'), text.rfind('}')) {
             (Some(a), Some(b)) if b > a => &text[a..=b],
-            _ => return Err(format!("no JSON in response: {}", text.lines().next().unwrap_or(""))),
+            _ => {
+                return Err(format!(
+                    "no JSON in response: {}",
+                    text.lines().next().unwrap_or("")
+                ))
+            }
         };
-        let v: serde_json::Value =
-            serde_json::from_str(json).map_err(|e| format!("parse: {e}"))?;
+        let v: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("parse: {e}"))?;
         Ok(v["text"].as_str().unwrap_or("").trim().to_string())
     }
 
@@ -798,10 +808,17 @@ mod engine {
             let dir = Path::new(&base).join("WarmupVk");
             let _ = std::fs::create_dir_all(&dir);
             let path = dir.join("speech-helper.log");
-            if std::fs::metadata(&path).map(|m| m.len() > 512_000).unwrap_or(false) {
+            if std::fs::metadata(&path)
+                .map(|m| m.len() > 512_000)
+                .unwrap_or(false)
+            {
                 let _ = std::fs::remove_file(&path);
             }
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
                 let _ = writeln!(f, "{msg}");
             }
         }
@@ -1084,7 +1101,11 @@ mod engine {
             let secs = all.len() as f32 / in_rate as f32;
 
             if warmup > 0 {
-                noise = if noise == 0.0 { rms } else { noise * 0.6 + rms * 0.4 };
+                noise = if noise == 0.0 {
+                    rms
+                } else {
+                    noise * 0.6 + rms * 0.4
+                };
                 warmup -= 1;
             }
             let gate = (noise * 1.6).max(0.012);
@@ -1104,7 +1125,9 @@ mod engine {
 
             since_log += dt;
             if since_log >= 2.0 {
-                log(&format!("speech: recording {secs:.0}s rms={rms:.3} floor={noise:.3}"));
+                log(&format!(
+                    "speech: recording {secs:.0}s rms={rms:.3} floor={noise:.3}"
+                ));
                 since_log = 0.0;
             }
             // Finish on: manual stop, auto-stop after a post-speech pause, or the cap.

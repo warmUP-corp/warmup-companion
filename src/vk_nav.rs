@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use crate::gamepad_backend::Button;
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyboardLayout, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, SendInput, VIRTUAL_KEY, VK_BACK, VK_END, VK_RETURN, VK_SPACE, VK_TAB,
+    GetKeyboardLayout, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_END, VK_RETURN, VK_SPACE, VK_TAB,
 };
 
 #[derive(Clone)]
@@ -512,6 +512,18 @@ pub fn activate_selection() {
     }
 }
 
+pub fn copy_selection() {
+    inject_ctrl_key(VIRTUAL_KEY(b'C' as u16));
+}
+
+pub fn paste_clipboard() {
+    inject_ctrl_key(VIRTUAL_KEY(b'V' as u16));
+}
+
+pub fn clear_focused_input() {
+    inject_ctrl_key_then_vk(VIRTUAL_KEY(b'A' as u16), VK_BACK);
+}
+
 /// Web `toggleShift`: off -> one-shot upper; double-tap inside 400ms -> sticky
 /// caps; any further tap -> lower.
 pub fn toggle_shift() {
@@ -651,8 +663,8 @@ pub fn send_text_direct(text: &str) {
 fn foreground_info() -> (usize, String, String, String) {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
-        QueryFullProcessImageNameW,
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         GetClassNameW, GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
@@ -920,6 +932,30 @@ fn inject_vk(vk: VIRTUAL_KEY) {
         let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
     }
     suppress_native_keyboard_after_winlogon_inject(collapse);
+}
+
+fn inject_ctrl_key(vk: VIRTUAL_KEY) {
+    let mut batch = Vec::with_capacity(4);
+    batch.push(vk_event(VK_CONTROL, false));
+    batch.push(vk_event(vk, false));
+    batch.push(vk_event(vk, true));
+    batch.push(vk_event(VK_CONTROL, true));
+    unsafe {
+        let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+fn inject_ctrl_key_then_vk(ctrl_vk: VIRTUAL_KEY, vk: VIRTUAL_KEY) {
+    let mut batch = Vec::with_capacity(6);
+    batch.push(vk_event(VK_CONTROL, false));
+    batch.push(vk_event(ctrl_vk, false));
+    batch.push(vk_event(ctrl_vk, true));
+    batch.push(vk_event(VK_CONTROL, true));
+    batch.push(vk_event(vk, false));
+    batch.push(vk_event(vk, true));
+    unsafe {
+        let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
+    }
 }
 
 /// Chunk size + gap for paced injection. Console hosts (conhost / Windows

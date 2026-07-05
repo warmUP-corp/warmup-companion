@@ -69,7 +69,10 @@ pub fn run_verify() {
         println!("[ ok ] binary present: {}", bin.display());
     } else {
         healthy = false;
-        println!("[FAIL] binary missing: {} — run: warmup-companion.exe install", bin.display());
+        println!(
+            "[FAIL] binary missing: {} — run: warmup-companion.exe install",
+            bin.display()
+        );
     }
 
     match service_state() {
@@ -80,7 +83,9 @@ pub fn run_verify() {
         }
         None => {
             healthy = false;
-            println!("[FAIL] service {SERVICE_NAME} not installed — run: warmup-companion.exe install");
+            println!(
+                "[FAIL] service {SERVICE_NAME} not installed — run: warmup-companion.exe install"
+            );
         }
     }
 
@@ -95,7 +100,9 @@ pub fn run_verify() {
         Some(line) if !line.to_lowercase().contains("none") => {
             println!("[ ok ] controller seen by service: {line}");
         }
-        _ => println!("[ !  ] no controller detected yet — connect a pad, press any button, re-run verify"),
+        _ => println!(
+            "[ !  ] no controller detected yet — connect a pad, press any button, re-run verify"
+        ),
     }
 
     println!();
@@ -364,7 +371,9 @@ fn remove_legacy_install_artifacts() {
 fn remove_test_services() {
     for name in TEST_SERVICE_NAMES {
         let _ = sc(&["stop", name]);
-        if let Ok(()) = sc(&["delete", name]) { log_line(&format!("removed test service {name}")) }
+        if let Ok(()) = sc(&["delete", name]) {
+            log_line(&format!("removed test service {name}"))
+        }
     }
 }
 
@@ -421,7 +430,9 @@ fn allow_bin_read_acl() -> Result<(), String> {
     } else {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stdout = String::from_utf8_lossy(&out.stdout);
-        Err(format!("grant {INSTALL_DIR} read ACL failed: {stdout}{stderr}"))
+        Err(format!(
+            "grant {INSTALL_DIR} read ACL failed: {stdout}{stderr}"
+        ))
     }
 }
 

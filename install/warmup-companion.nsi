@@ -17,7 +17,7 @@ Unicode true
 
 !define APPNAME     "Warmup Companion"
 !define COMPANY     "warmUP"
-!define APPVERSION  "0.0.1"
+!define APPVERSION  "0.2.3"
 !define SERVICE     "WarmupVkSvc"
 !define WEBSITE     "https://www.warmup-gamelauncher.com"
 ; install.rs hardcodes this path (no spaces; sc.exe binPath breaks on quotes).
@@ -56,7 +56,7 @@ RequestExecutionLevel admin       ; service install needs admin; elevate the who
 ShowInstDetails show
 ShowUninstDetails show
 
-VIProductVersion "0.0.1.0"
+VIProductVersion "0.2.3.0"
 VIAddVersionKey "ProductName"     "${APPNAME}"
 VIAddVersionKey "CompanyName"     "${COMPANY}"
 VIAddVersionKey "FileDescription" "${APPNAME} Setup"
@@ -67,6 +67,12 @@ VIAddVersionKey "LegalCopyright"  "${COMPANY}"
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\WarmupCompanion"
 
 !define MUI_ABORTWARNING
+!define MUI_ICON "${SRCROOT}\assets\icon.ico"
+!define MUI_UNICON "${SRCROOT}\assets\icon.ico"
+!define MUI_HEADERIMAGE
+!define MUI_HEADERIMAGE_BITMAP "${SRCROOT}\assets\installer\header.bmp"
+!define MUI_WELCOMEFINISHPAGE_BITMAP "${SRCROOT}\assets\installer\welcome.bmp"
+!define MUI_UNWELCOMEFINISHPAGE_BITMAP "${SRCROOT}\assets\installer\welcome.bmp"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "${SRCROOT}\LICENSE"
 !insertmacro MUI_PAGE_COMPONENTS
@@ -93,6 +99,7 @@ Section "!Warmup Companion service (required)" SEC_MAIN
   File "${SRCROOT}\PRIVACY.md"
   File "${SRCROOT}\SECURITY.md"
   File "${SRCROOT}\LICENSE"
+  File "/oname=icon.ico" "${SRCROOT}\assets\icon.ico"
 
   ; Trust docs also live next to the data dir (parity with Install-WarmupVk.ps1).
   SetOutPath "${DATADIR}"
@@ -100,6 +107,10 @@ Section "!Warmup Companion service (required)" SEC_MAIN
   File "${SRCROOT}\PRIVACY.md"
   File "${SRCROOT}\SECURITY.md"
   File "${SRCROOT}\LICENSE"
+  ; The tray process starts during service install and reads this path once.
+  ; Put the icon in place first so it never falls back to the generic app icon.
+  SetOutPath "${DATADIR}\bin"
+  File "/oname=icon.ico" "${SRCROOT}\assets\icon.ico"
 
   ; Register + start the service. This self-copies the exe to
   ; C:\ProgramData\WarmupVk\bin and creates WarmupVkSvc (LocalSystem, auto-start).
@@ -125,6 +136,7 @@ Section "!Warmup Companion service (required)" SEC_MAIN
   WriteRegStr   HKLM "${UNINSTKEY}" "DisplayVersion"       "${APPVERSION}"
   WriteRegStr   HKLM "${UNINSTKEY}" "Publisher"            "${COMPANY}"
   WriteRegStr   HKLM "${UNINSTKEY}" "URLInfoAbout"         "${WEBSITE}"
+  WriteRegStr   HKLM "${UNINSTKEY}" "DisplayIcon"          "$INSTDIR\icon.ico"
   WriteRegStr   HKLM "${UNINSTKEY}" "InstallLocation"      "$INSTDIR"
   WriteRegStr   HKLM "${UNINSTKEY}" "UninstallString"      '"$INSTDIR\uninstall.exe"'
   WriteRegStr   HKLM "${UNINSTKEY}" "QuietUninstallString" '"$INSTDIR\uninstall.exe" /S'
@@ -244,12 +256,14 @@ Section "Uninstall"
   Delete "$INSTDIR\PRIVACY.md"
   Delete "$INSTDIR\SECURITY.md"
   Delete "$INSTDIR\LICENSE"
+  Delete "$INSTDIR\icon.ico"
   Delete "$INSTDIR\uninstall.exe"
   RMDir  "$INSTDIR"
 
   DeleteRegKey HKLM "${UNINSTKEY}"
   ; Downloaded voice-typing engine + model are not user data — remove them.
   RMDir /r "${DATADIR}\speech"
+  Delete "${DATADIR}\bin\icon.ico"
   ; Logs and the local dictionary under ${DATADIR} are intentionally left in
   ; place, matching `warmup-companion.exe uninstall`.
 SectionEnd

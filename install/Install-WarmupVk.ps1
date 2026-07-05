@@ -185,6 +185,14 @@ if (Test-BinaryString $Exe "parakeet engine not built into this binary") {
 }
 Write-Host "OK: Parakeet engine support present in $Exe"
 
+if (Test-Path $IconSrc) {
+    New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+    Copy-Item -LiteralPath $IconSrc -Destination $IconDest -Force
+    Write-Host "OK: tray icon staged at $IconDest"
+} else {
+    Write-Host "WARNING: tray icon source missing: $IconSrc" -ForegroundColor Yellow
+}
+
 Write-Host "Installing service..."
 $InstallArgs = @("install")
 if ($DebugUi) {
@@ -208,13 +216,6 @@ if ($Speech) {
         Write-Host "         The companion works without it; re-run with -Speech later, or drop" -ForegroundColor Yellow
         Write-Host "         whisper-server.exe + a ggml-*.bin into C:\ProgramData\WarmupVk\speech." -ForegroundColor Yellow
     }
-}
-
-if (Test-Path $IconSrc) {
-    Copy-Item -LiteralPath $IconSrc -Destination $IconDest -Force
-    Write-Host "OK: tray icon installed at $IconDest"
-} else {
-    Write-Host "WARNING: tray icon source missing: $IconSrc" -ForegroundColor Yellow
 }
 
 foreach ($Doc in @("README.md", "PRIVACY.md", "SECURITY.md", "LICENSE")) {
