@@ -515,6 +515,34 @@ mod tests {
     }
 
     #[test]
+    fn parental_blocked_up_frame_round_trips() {
+        let frame = UpFrame::ParentalBlocked(ParentalBlockedPayload {
+            exe_stem: "game".into(),
+            pid: 1234,
+        });
+        let line = frame.to_ndjson_line();
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["type"], "parental_blocked");
+        assert_eq!(json["payload"]["exeStem"], "game");
+        assert_eq!(UpFrame::parse_line(line.trim_end()).unwrap(), frame);
+    }
+
+    #[test]
+    fn parental_guard_down_frame_round_trips() {
+        let frame = DownFrame::ParentalGuard(ParentalGuardPayload {
+            enabled: true,
+            blocked_exe_stems: vec!["game".into()],
+            blocked_install_dir_prefixes: vec![r"c:\games\blocked".into()],
+        });
+        let line = frame.to_ndjson_line();
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["type"], "parental_guard");
+        assert_eq!(json["payload"]["enabled"], true);
+        assert_eq!(json["payload"]["blockedExeStems"][0], "game");
+        assert_eq!(DownFrame::parse_line(line.trim_end()).unwrap(), frame);
+    }
+
+    #[test]
     fn rumble_down_frame_round_trips_both_kinds() {
         let full = DownFrame::Rumble(RumblePayload::Full {
             strong: 0.8,

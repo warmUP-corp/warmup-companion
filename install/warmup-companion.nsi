@@ -17,7 +17,7 @@ Unicode true
 
 !define APPNAME     "Warmup Companion"
 !define COMPANY     "warmUP"
-!define APPVERSION  "0.0.1"
+!define APPVERSION  "0.2.4"
 !define SERVICE     "WarmupVkSvc"
 !define WEBSITE     "https://www.warmup-gamelauncher.com"
 ; install.rs hardcodes this path (no spaces; sc.exe binPath breaks on quotes).
@@ -56,7 +56,7 @@ RequestExecutionLevel admin       ; service install needs admin; elevate the who
 ShowInstDetails show
 ShowUninstDetails show
 
-VIProductVersion "0.0.1.0"
+VIProductVersion "0.2.4.0"
 VIAddVersionKey "ProductName"     "${APPNAME}"
 VIAddVersionKey "CompanyName"     "${COMPANY}"
 VIAddVersionKey "FileDescription" "${APPNAME} Setup"
