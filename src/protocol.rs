@@ -21,7 +21,10 @@ use serde::{Deserialize, Serialize};
 /// (`sleepOnGame`, `autoStopOnGame`, `userlandPollPaused`, `promptUserlandDebug`).
 ///
 /// v4 also tolerates additive `axis` up-frames for controller calibration/test UI.
-pub const PROTOCOL_VERSION: u32 = 4;
+///
+/// v5: additive `parental_guard` down-frame and `parental_blocked` up-frame for Kid Mode
+/// system-wide game blocking.
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Desktop mode snapshot carried in `hello` and the `mode` down-frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +56,27 @@ pub struct Hello {
     pub mode: Option<ModeSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub companion_settings: Option<CompanionSettingsPayload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parental_guard: Option<ParentalGuardPayload>,
+}
+
+/// Kid Mode system-wide blocking rules for the companion guardian loop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentalGuardPayload {
+    pub enabled: bool,
+    #[serde(default)]
+    pub blocked_exe_stems: Vec<String>,
+    #[serde(default)]
+    pub blocked_install_dir_prefixes: Vec<String>,
+}
+
+/// Companion terminated a non-allowlisted game process started outside warmUP.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentalBlockedPayload {
+    pub exe_stem: String,
+    pub pid: u32,
 }
 
 /// `connection` frame payload — authoritative controller connection snapshot.
@@ -248,6 +272,7 @@ pub enum UpFrame {
     Axis(AxisPayload),
     Battery(BatteryPayload),
     Touchpad(TouchpadPayload),
+    ParentalBlocked(ParentalBlockedPayload),
     /// A frame whose `type` this slice does not know (added by a later slice).
     /// Never serialized; produced only by [`UpFrame::parse_line`].
     #[serde(skip)]
@@ -265,6 +290,7 @@ pub enum DownFrame {
     Led(LedPayload),
     CompanionSettings(CompanionSettingsPayload),
     NativeVk(NativeVkPayload),
+    ParentalGuard(ParentalGuardPayload),
     #[serde(skip)]
     Unknown,
 }
@@ -293,7 +319,7 @@ impl UpFrame {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
             "hello" | "connection" | "button" | "cursor_moved" | "axis" | "battery"
-            | "touchpad" => serde_json::from_str(line),
+            | "touchpad" | "parental_blocked" => serde_json::from_str(line),
             _ => Ok(Self::Unknown),
         }
     }
@@ -306,9 +332,8 @@ impl DownFrame {
     pub fn parse_line(line: &str) -> Result<Self, serde_json::Error> {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
-            "hello" | "config" | "mode" | "rumble" | "led" | "companion_settings" | "native_vk" => {
-                serde_json::from_str(line)
-            }
+            "hello" | "config" | "mode" | "rumble" | "led" | "companion_settings" | "native_vk"
+            | "parental_guard" => serde_json::from_str(line),
             _ => Ok(Self::Unknown),
         }
     }
@@ -533,11 +558,12 @@ mod tests {
                 userland_poll_paused: Some(false),
                 prompt_userland_debug: None,
             }),
+            parental_guard: None,
         });
         let line = hello.to_ndjson_line();
         let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(json["type"], "hello");
-        assert_eq!(json["payload"]["protocolVersion"], 4);
+        assert_eq!(json["payload"]["protocolVersion"], 5);
         assert_eq!(json["payload"]["mode"]["gameActive"], false);
         assert_eq!(json["payload"]["companionSettings"]["sleepOnGame"], true);
     }

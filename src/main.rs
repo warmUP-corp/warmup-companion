@@ -38,6 +38,8 @@ mod win;
 #[path = "win_stub.rs"]
 mod win;
 
+#[cfg(all(windows, feature = "gamepad"))]
+mod parental_guard;
 #[cfg(feature = "gamepad")]
 mod gamepad;
 #[cfg(feature = "gamepad")]
@@ -1072,6 +1074,8 @@ pub(crate) fn run_boot_gamepad_loop(
     // The companion owns the device; host the pipe so the warmUP desktop can read
     // connection state over IPC (#347). No-op on non-Windows.
     crate::pipe_server::spawn();
+    #[cfg(windows)]
+    crate::parental_guard::spawn_guardian_loop();
     let on_action = |action: gamepad::VkLoopAction| match action {
         gamepad::VkLoopAction::Toggle => {
             app.toggle_virtual_keyboard_combo();

@@ -1,6 +1,6 @@
 # Companion IPC protocol
 
-**Status:** v4. Companion (`warmup-keyboard`) ⇄ warmUP desktop.
+**Status:** v5. Companion (`warmup-keyboard`) ⇄ warmUP desktop.
 
 This spec is the **versioned wire contract** between the two processes (ADR `0002`). It is mirrored verbatim in both repos. Changing any frame shape or the pipe framing is a breaking change and **must** bump `protocolVersion`.
 

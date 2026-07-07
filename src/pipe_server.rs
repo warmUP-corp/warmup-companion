@@ -10,7 +10,7 @@
 use crate::gamepad_backend::PadCommand;
 use crate::protocol::{
     AxisPayload, BatteryPayload, ButtonPayload, CompanionSettingsPayload, ConnectionPayload,
-    ModeSnapshot, RumblePayload, TouchpadPayload,
+    ModeSnapshot, ParentalBlockedPayload, ParentalGuardPayload, RumblePayload, TouchpadPayload,
 };
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -602,6 +602,9 @@ static STATE: OnceLock<Mutex<ConnectionPayload>> = OnceLock::new();
 static BUTTONS: OnceLock<Mutex<VecDeque<ButtonPayload>>> = OnceLock::new();
 const BUTTON_QUEUE_CAP: usize = 256;
 
+static PARENTAL_BLOCKED: OnceLock<Mutex<VecDeque<ParentalBlockedPayload>>> = OnceLock::new();
+const PARENTAL_BLOCKED_QUEUE_CAP: usize = 32;
+
 /// Last published `GUIDE` edge state, for consecutive-Guide-edge dedupe (SDL3 can emit
 /// duplicate Guide edges on some firmware) — preserves the desktop's old behaviour.
 static LAST_GUIDE: OnceLock<Mutex<Option<bool>>> = OnceLock::new();
@@ -613,6 +616,24 @@ fn state() -> &'static Mutex<ConnectionPayload> {
 fn buttons() -> &'static Mutex<VecDeque<ButtonPayload>> {
     BUTTONS.get_or_init(|| Mutex::new(VecDeque::new()))
 }
+
+fn parental_blocked_queue() -> &'static Mutex<VecDeque<ParentalBlockedPayload>> {
+    PARENTAL_BLOCKED.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+/// Queue a Kid Mode block notification for the connected warmUP desktop client.
+#[cfg(windows)]
+pub fn publish_parental_blocked(payload: ParentalBlockedPayload) {
+    if let Ok(mut q) = parental_blocked_queue().lock() {
+        while q.len() >= PARENTAL_BLOCKED_QUEUE_CAP {
+            q.pop_front();
+        }
+        q.push_back(payload);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn publish_parental_blocked(_payload: ParentalBlockedPayload) {}
 
 fn last_guide() -> &'static Mutex<Option<bool>> {
     LAST_GUIDE.get_or_init(|| Mutex::new(None))
@@ -708,6 +729,22 @@ fn drain_buttons() -> Vec<ButtonPayload> {
         .unwrap_or_default()
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
+fn drain_parental_blocked() -> Vec<ParentalBlockedPayload> {
+    parental_blocked_queue()
+        .lock()
+        .map(|mut q| q.drain(..).collect())
+        .unwrap_or_default()
+}
+
+#[cfg(all(windows, feature = "gamepad"))]
+fn apply_parental_guard(payload: &ParentalGuardPayload) {
+    crate::parental_guard::apply_guard(payload);
+}
+
+#[cfg(all(windows, not(feature = "gamepad")))]
+fn apply_parental_guard(_payload: &ParentalGuardPayload) {}
+
 /// Drop any edges queued before a client connected (they are stale to the new client),
 /// and reset Guide-dedupe state so the first post-connect Guide edge always sends.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -737,8 +774,9 @@ pub fn spawn() {}
 mod server {
     use super::{
         DESKTOP_CONNECTED, apply_companion_settings, apply_config, apply_led, apply_mode,
-        apply_rumble, clear_desktop_mode, current, current_axis, current_battery, drain_buttons,
-        reset_button_stream, set_native_vk_request, take_cursor_moved, take_touchpad,
+        apply_parental_guard, apply_rumble, clear_desktop_mode, current, current_axis,
+        current_battery, drain_buttons, drain_parental_blocked, reset_button_stream,
+        set_native_vk_request, take_cursor_moved, take_touchpad,
     };
     use crate::protocol::{
         AxisPayload, BatteryPayload, ConnectionPayload, DownFrame, Hello, PROTOCOL_VERSION, UpFrame,
@@ -928,6 +966,9 @@ mod server {
                 if let Some(settings) = h.companion_settings {
                     apply_companion_settings(&settings);
                 }
+                if let Some(guard) = h.parental_guard {
+                    apply_parental_guard(&guard);
+                }
             }
             Ok(DownFrame::Hello(h)) => {
                 return Err(io_err(&format!(
@@ -942,6 +983,7 @@ mod server {
             config: None,
             mode: None,
             companion_settings: None,
+            parental_guard: None,
         });
         write_all(pipe, reply.to_ndjson_line().as_bytes())
     }
@@ -965,6 +1007,18 @@ mod server {
             for edge in drain_buttons() {
                 if write_all(pipe, UpFrame::Button(edge).to_ndjson_line().as_bytes()).is_err() {
                     return; // client gone — return to accept a new one
+                }
+            }
+            for blocked in drain_parental_blocked() {
+                if write_all(
+                    pipe,
+                    UpFrame::ParentalBlocked(blocked)
+                        .to_ndjson_line()
+                        .as_bytes(),
+                )
+                .is_err()
+                {
+                    return;
                 }
             }
             // Battery — send only when it changes (low-rate; no keepalive needed).
@@ -1034,6 +1088,7 @@ mod server {
                 Ok(DownFrame::Led(p)) => apply_led(&p),
                 Ok(DownFrame::CompanionSettings(p)) => apply_companion_settings(&p),
                 Ok(DownFrame::NativeVk(p)) => set_native_vk_request(&p),
+                Ok(DownFrame::ParentalGuard(p)) => apply_parental_guard(&p),
                 // A malformed known-type frame is a contract break (e.g. the rumble
                 // durationMs mismatch) — log it instead of dropping silently.
                 Err(e) => {
