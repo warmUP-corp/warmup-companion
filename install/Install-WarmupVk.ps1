@@ -83,7 +83,9 @@ function Test-Admin {
 
 if (-not (Test-Admin)) {
     $args = @(
+        "-NoLogo",
         "-NoProfile",
+        "-NonInteractive",
         "-WindowStyle",
         "Hidden",
         "-ExecutionPolicy",

@@ -14,10 +14,12 @@
 ; Output: target\warmup-companion-setup.exe
 
 Unicode true
+SetCompressor /SOLID lzma
+SetDatablockOptimize on
 
 !define APPNAME     "Warmup Companion"
 !define COMPANY     "warmUP"
-!define APPVERSION  "0.2.4"
+!define APPVERSION  "0.2.5"
 !define SERVICE     "WarmupVkSvc"
 !define WEBSITE     "https://www.warmup-gamelauncher.com"
 ; install.rs hardcodes this path (no spaces; sc.exe binPath breaks on quotes).
@@ -46,17 +48,18 @@ Var RbSmall
 Var RbMedium
 Var RbParakeet
 
-Name "${APPNAME}"
+Name "${APPNAME} Setup"
+BrandingText "warmUP"
 OutFile "${SRCROOT}\target\warmup-companion-setup.exe"
 ; Must NOT be C:\Program Files\WarmupVk: `warmup-companion.exe install` treats
 ; that exact path as a legacy install and purges it (taskkill /F /IM ...), which
 ; would kill the install process itself. See install.rs remove_legacy_install_artifacts.
 InstallDir "$PROGRAMFILES64\WarmupCompanion"
 RequestExecutionLevel admin       ; service install needs admin; elevate the whole installer
-ShowInstDetails show
-ShowUninstDetails show
+ShowInstDetails hide
+ShowUninstDetails hide
 
-VIProductVersion "0.2.4.0"
+VIProductVersion "0.2.5.0"
 VIAddVersionKey "ProductName"     "${APPNAME}"
 VIAddVersionKey "CompanyName"     "${COMPANY}"
 VIAddVersionKey "FileDescription" "${APPNAME} Setup"
@@ -67,6 +70,15 @@ VIAddVersionKey "LegalCopyright"  "${COMPANY}"
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\WarmupCompanion"
 
 !define MUI_ABORTWARNING
+!define MUI_WELCOMEPAGE_TITLE "Install ${APPNAME}"
+!define MUI_WELCOMEPAGE_TEXT "Warmup Companion adds secure controller input for sign-in, lock, and UAC screens. The service starts with Windows and runs locally.$\r$\n$\r$\nOffline Parakeet voice typing is selected by default and downloads a local speech model. You can clear it on the features page."
+!define MUI_COMPONENTSPAGE_TEXT_TOP "Choose the features to install. The Warmup Companion service is required. Offline Parakeet voice typing is selected by default and downloads a local model."
+!define MUI_COMPONENTSPAGE_TEXT_BOTTOM "You can change voice-typing models later from the installed scripts or tray menu."
+!define MUI_FINISHPAGE_TITLE "Continue with the warmUP Game Launcher"
+!define MUI_FINISHPAGE_TEXT "Warmup Companion is installed and running.$\r$\n$\r$\nBring your PC games together in one controller-friendly home. Browse, launch, and manage your library with Companion ready for sign-in, UAC, and offline voice typing.$\r$\n$\r$\nGet the launcher below and start playing."
+!define MUI_UNCONFIRMPAGE_TEXT_TOP "This removes the service, installer files, and optional offline voice models. Logs and diagnostics are kept under C:\ProgramData\WarmupVk so they remain available for troubleshooting."
+!define MUI_UNFINISHPAGE_TITLE "${APPNAME} was removed"
+!define MUI_UNFINISHPAGE_TEXT "The service and installed files were removed. Existing logs and diagnostics remain under C:\ProgramData\WarmupVk."
 !define MUI_ICON "${SRCROOT}\assets\icon.ico"
 !define MUI_UNICON "${SRCROOT}\assets\icon.ico"
 !define MUI_HEADERIMAGE
@@ -78,7 +90,7 @@ VIAddVersionKey "LegalCopyright"  "${COMPANY}"
 !insertmacro MUI_PAGE_COMPONENTS
 Page custom ModelPageShow ModelPageLeave
 !insertmacro MUI_PAGE_INSTFILES
-!define MUI_FINISHPAGE_LINK "warmUP Game Launcher - ${WEBSITE}"
+!define MUI_FINISHPAGE_LINK "Get the warmUP Game Launcher"
 !define MUI_FINISHPAGE_LINK_LOCATION "${WEBSITE}"
 !insertmacro MUI_PAGE_FINISH
 
@@ -124,10 +136,10 @@ Section "!Warmup Companion service (required)" SEC_MAIN
   nsExec::ExecToLog '"$INSTDIR\warmup-companion.exe" install'
   Pop $0
   ${If} $0 != 0
-    ; /SD IDOK: a MessageBox with no /SD still shows under /S (silent install) and would
-    ; block forever with no one to click it -- the desktop app waits on this process handle.
+    ; In /S mode, skip the dialog and fail without leaving a blocking popup.
+    IfSilent +2
     MessageBox MB_ICONSTOP|MB_OK "Service install failed (exit $0). See ${DATADIR}\service.log." /SD IDOK
-    Abort "Service install failed."
+    Abort
   ${EndIf}
 
   ; Add/Remove Programs entry + uninstaller.
@@ -144,17 +156,18 @@ Section "!Warmup Companion service (required)" SEC_MAIN
   WriteRegDWORD HKLM "${UNINSTKEY}" "NoRepair" 1
 SectionEnd
 
-Section /o "Offline voice typing" SEC_SPEECH
-  ; Opt-in, unchecked by default. Downloads the chosen engine into ${DATADIR}\speech;
+Section /o "Offline voice typing (recommended)" SEC_SPEECH
+  ; Selected by default. Downloads the chosen engine into ${DATADIR}\speech;
   ; the Mic key on the on-screen keyboard appears only once it's present
   ; (src\win\speech_input.rs::available). Recognition is fully local, no cloud.
   ; The model page sets $ModelChoice to a whisper size or "parakeet".
   ; The app binary always includes Parakeet support; this only downloads data.
   ${If} $ModelChoice == "parakeet"
     DetailPrint "Downloading offline voice typing (Parakeet, ~670 MB)..."
-    nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\Get-WarmupParakeet.ps1"'
+    nsExec::ExecToLog '"powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$INSTDIR\Get-WarmupParakeet.ps1"'
     Pop $0
     ${If} $0 != 0
+      IfSilent +2
       MessageBox MB_ICONEXCLAMATION "Parakeet voice typing could not be downloaded (exit $0). The app works fine without it. Add it later by running $INSTDIR\Get-WarmupParakeet.ps1."
     ${EndIf}
   ${Else}
@@ -162,16 +175,24 @@ Section /o "Offline voice typing" SEC_SPEECH
       StrCpy $ModelChoice "medium"
     ${EndIf}
     DetailPrint "Downloading offline voice typing (whisper '$ModelChoice' model)..."
-    nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\Get-WarmupSpeech.ps1" -Model $ModelChoice'
+    nsExec::ExecToLog '"powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$INSTDIR\Get-WarmupSpeech.ps1" -Model $ModelChoice'
     Pop $0
     ${If} $0 != 0
+      IfSilent +2
       MessageBox MB_ICONEXCLAMATION "Voice typing could not be downloaded (exit $0). The app works fine without it. Add it later by running $INSTDIR\Get-WarmupSpeech.ps1, or drop whisper-server.exe + a ggml-*.bin into ${DATADIR}\speech."
     ${EndIf}
   ${EndIf}
 SectionEnd
 
+Function .onInit
+  ; Keep the default consistent in interactive and silent installs. Silent mode
+  ; skips the component and model pages, so it cannot rely on page selections.
+  StrCpy $ModelChoice "parakeet"
+  SectionSetFlags ${SEC_SPEECH} ${SF_SELECTED}
+FunctionEnd
+
 LangString DESC_MAIN   ${LANG_ENGLISH} "The Warmup Companion service (sign-in / lock / UAC gamepad keyboard). Required."
-LangString DESC_SPEECH ${LANG_ENGLISH} "Optional, fully offline voice typing. Downloads your chosen engine (whisper.cpp model, or NVIDIA Parakeet ~670 MB) to ${DATADIR}\speech. The on-screen Mic key stays hidden unless this is installed. No cloud; recognition runs locally."
+LangString DESC_SPEECH ${LANG_ENGLISH} "Fully offline voice typing, selected by default. Downloads your chosen engine (whisper.cpp model, or NVIDIA Parakeet ~670 MB) to ${DATADIR}\speech. The on-screen Mic key stays hidden unless this is installed. No cloud; recognition runs locally."
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_MAIN}   $(DESC_MAIN)
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_SPEECH} $(DESC_SPEECH)
@@ -248,6 +269,11 @@ Section "Uninstall"
   ; Stop + delete the service and remove the ProgramData service binary.
   nsExec::ExecToLog '"$INSTDIR\warmup-companion.exe" uninstall'
   Pop $0
+  ${If} $0 != 0
+    IfSilent +2
+    MessageBox MB_ICONSTOP|MB_OK "Warmup Companion could not be removed (exit $0). The service may still be running. See ${DATADIR}\service.log and try again." /SD IDOK
+    Abort
+  ${EndIf}
 
   Delete "$INSTDIR\warmup-companion.exe"
   Delete "$INSTDIR\Get-WarmupSpeech.ps1"
@@ -264,6 +290,8 @@ Section "Uninstall"
   ; Downloaded voice-typing engine + model are not user data — remove them.
   RMDir /r "${DATADIR}\speech"
   Delete "${DATADIR}\bin\icon.ico"
+  Delete "${DATADIR}\bin\warmup-companion.version"
+  RMDir  "${DATADIR}\bin"
   ; Logs and the local dictionary under ${DATADIR} are intentionally left in
   ; place, matching `warmup-companion.exe uninstall`.
 SectionEnd

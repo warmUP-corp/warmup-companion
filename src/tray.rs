@@ -278,6 +278,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 MENU_RESTORE_NATIVE_KBD => restore_native_keyboard(hwnd),
                 MENU_UNINSTALL => uninstall(),
                 MENU_EXIT => {
+                    crate::install::request_service_stop();
                     crate::gamepad::request_stop();
                     PostQuitMessage(0);
                 }

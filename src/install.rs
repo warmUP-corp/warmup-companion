@@ -20,6 +20,7 @@ const LEGACY_EXE_NAME: &str = "warmup-vk-prototype.exe";
 const LOG_NAME: &str = "service.log";
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
 const DEBUG_UI_FLAG: &str = r"C:\ProgramData\WarmupVk\debug-ui.enabled";
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Leftover names from manual `sc create` debugging — removed on install/uninstall.
 const TEST_SERVICE_NAMES: &[&str] = &[
@@ -117,7 +118,7 @@ pub fn run_verify() {
 /// Current SCM state word (e.g. "RUNNING", "STOPPED") for the service, or `None`
 /// if it isn't installed.
 fn service_state() -> Option<String> {
-    let out = Command::new("sc.exe")
+    let out = hidden_command("sc.exe")
         .args(["query", SERVICE_NAME])
         .output()
         .ok()?;
@@ -178,15 +179,9 @@ pub fn run_stop() {
 /// reaches the launcher's control handler — which tears the worker down. Spawned
 /// with `CREATE_NO_WINDOW` so no console flashes on the secure desktop.
 pub fn request_service_stop() {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    log_line("debug ui: stop service requested (sc stop)");
-    if let Err(e) = Command::new("sc")
-        .args(["stop", SERVICE_NAME])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-    {
-        log_line(&format!("debug ui: sc stop spawn failed: {e}"));
+    log_line("service stop requested (sc stop)");
+    if let Err(e) = hidden_command("sc").args(["stop", SERVICE_NAME]).spawn() {
+        log_line(&format!("sc stop spawn failed: {e}"));
     }
 }
 
@@ -206,7 +201,7 @@ fn install_inner(debug_ui: bool) -> Result<(), String> {
 
     // Stop + delete BEFORE copying — old exe is locked by the running service.
     remove_test_services();
-    uninstall_service_quiet();
+    uninstall_service_quiet()?;
 
     let dest = Path::new(INSTALL_DIR).join(EXE_NAME);
     let legacy_dest = Path::new(INSTALL_DIR).join(LEGACY_EXE_NAME);
@@ -265,7 +260,7 @@ fn install_inner(debug_ui: bool) -> Result<(), String> {
 fn uninstall_inner() -> Result<(), String> {
     require_admin()?;
     remove_test_services();
-    uninstall_service_quiet();
+    uninstall_service_quiet()?;
     let exe = Path::new(INSTALL_DIR).join(EXE_NAME);
     if exe.exists() {
         fs::remove_file(&exe).ok();
@@ -279,6 +274,14 @@ fn uninstall_inner() -> Result<(), String> {
     if legacy.exists() {
         fs::remove_file(&legacy).ok();
     }
+    let old_legacy = Path::new(r"C:\Program Files\WarmupVk").join(EXE_NAME);
+    if old_legacy.exists() {
+        fs::remove_file(&old_legacy).ok();
+    }
+    let version = Path::new(INSTALL_DIR).join("warmup-companion.version");
+    let icon = Path::new(DATA_DIR).join("bin").join("icon.ico");
+    let _ = fs::remove_file(version);
+    let _ = fs::remove_file(icon);
     let _ = fs::remove_file(DEBUG_UI_FLAG);
     log_line("uninstalled");
     Ok(())
@@ -296,9 +299,13 @@ fn set_debug_ui_flag(enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn uninstall_service_quiet() {
-    let _ = stop_service_blocking();
-    let _ = sc(&["delete", SERVICE_NAME]);
+fn uninstall_service_quiet() -> Result<(), String> {
+    stop_service_blocking()?;
+    match sc(&["delete", SERVICE_NAME]) {
+        Ok(()) => Ok(()),
+        Err(e) if e.contains("1060") => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 enum StopOutcome {
@@ -332,7 +339,7 @@ fn stop_service_blocking() -> Result<StopOutcome, String> {
 /// Returns `Ok(None)` if the service is not installed, or the current state token
 /// (e.g. "RUNNING", "STOPPED", "STOP_PENDING") parsed out of `sc query`.
 fn query_service_state() -> Result<Option<String>, String> {
-    let out = Command::new("sc.exe")
+    let out = hidden_command("sc.exe")
         .args(["query", SERVICE_NAME])
         .output()
         .map_err(|e| format!("sc.exe query: {e}"))?;
@@ -357,7 +364,7 @@ fn remove_legacy_install_artifacts() {
     let legacy_dir = Path::new(r"C:\Program Files\WarmupVk");
     let legacy_exe = legacy_dir.join(EXE_NAME);
     if legacy_exe.is_file() {
-        let _ = Command::new("taskkill")
+        let _ = hidden_command("taskkill")
             .args(["/F", "/IM", EXE_NAME])
             .output();
         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -395,7 +402,7 @@ fn restrict_data_dir_acl() -> Result<(), String> {
     // Grant by well-known SID, not name: "Administrators"/"SYSTEM" don't resolve
     // on non-English Windows (e.g. German "Administratoren"). *S-1-5-18 = SYSTEM,
     // *S-1-5-32-544 = BUILTIN\Administrators.
-    let out = Command::new("icacls.exe")
+    let out = hidden_command("icacls.exe")
         .args([
             DATA_DIR,
             "/inheritance:r",
@@ -421,7 +428,7 @@ fn allow_bin_read_acl() -> Result<(), String> {
     // see the companion as installed. Read can't tamper with the SYSTEM-run service.
     // (OI)(CI) so the copied exe + version marker inherit it. Bypass-traverse-checking
     // (default for all users) lets the app reach bin through the locked data dir.
-    let out = Command::new("icacls.exe")
+    let out = hidden_command("icacls.exe")
         .args([INSTALL_DIR, "/grant:r", "*S-1-5-32-545:(OI)(CI)RX"])
         .output()
         .map_err(|e| format!("icacls.exe: {e}"))?;
@@ -437,7 +444,7 @@ fn allow_bin_read_acl() -> Result<(), String> {
 }
 
 fn sc(args: &[&str]) -> Result<(), String> {
-    let out = Command::new("sc.exe")
+    let out = hidden_command("sc.exe")
         .args(args)
         .output()
         .map_err(|e| format!("sc.exe: {e}"))?;
@@ -454,7 +461,7 @@ fn sc(args: &[&str]) -> Result<(), String> {
 }
 
 fn verify_service_running() -> Result<(), String> {
-    let out = Command::new("sc.exe")
+    let out = hidden_command("sc.exe")
         .args(["query", SERVICE_NAME])
         .output()
         .map_err(|e| format!("sc.exe query: {e}"))?;
@@ -476,7 +483,7 @@ fn verify_service_running() -> Result<(), String> {
 }
 
 fn require_admin() -> Result<(), String> {
-    let ok = Command::new("net.exe")
+    let ok = hidden_command("net.exe")
         .args(["session"])
         .output()
         .map(|o| o.status.success())
@@ -486,6 +493,14 @@ fn require_admin() -> Result<(), String> {
     } else {
         Err("Administrator required. Run PowerShell as Administrator.".into())
     }
+}
+
+fn hidden_command(program: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+
+    let mut command = Command::new(program);
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
 }
 
 pub fn log_line(msg: &str) {
