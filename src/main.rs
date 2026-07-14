@@ -48,6 +48,8 @@ mod hid_gamepad;
 mod hid_reader;
 #[cfg(all(windows, feature = "gamepad"))]
 mod pad_decode;
+#[cfg(all(windows, feature = "gamepad"))]
+mod parental_guard;
 #[cfg(feature = "gamepad")]
 mod pc_cursor;
 #[cfg(all(windows, feature = "gamepad"))]
@@ -1072,6 +1074,8 @@ pub(crate) fn run_boot_gamepad_loop(
     // The companion owns the device; host the pipe so the warmUP desktop can read
     // connection state over IPC (#347). No-op on non-Windows.
     crate::pipe_server::spawn();
+    #[cfg(windows)]
+    crate::parental_guard::spawn_guardian_loop();
     let on_action = |action: gamepad::VkLoopAction| match action {
         gamepad::VkLoopAction::Toggle => {
             app.toggle_virtual_keyboard_combo();

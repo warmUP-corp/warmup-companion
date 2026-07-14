@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.4
+
+- Kid Mode companion IPC v5 support with system-wide game blocking notifications.
+- Installer metadata now reports the release version.
+
 ## v0.2.3
 
 - Browser mode: accept warmUP desktop's `browserActive` mode bit so L3/R3 stay
