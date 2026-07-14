@@ -431,7 +431,7 @@ mod tests {
         assert!(res.injected);
         assert_eq!(res.deleted, 4);
         assert_eq!(sink.buf, format!("{highlighted} ")); // word + trailing space on accept
-        // landed commit records the word (no trailing space) into the VK-only context buffer
+                                                         // landed commit records the word (no trailing space) into the VK-only context buffer
         assert_eq!(STATE.lock().unwrap().words.last().unwrap(), &highlighted);
     }
 

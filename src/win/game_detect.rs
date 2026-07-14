@@ -18,8 +18,8 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
-    GA_ROOT,
+    GetAncestor, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId,
+    IsWindowVisible, GA_ROOT, GWL_STYLE, WS_CAPTION, WS_THICKFRAME,
 };
 
 const FULLSCREEN_PERCENT_BASE: i64 = 100;
@@ -192,6 +192,12 @@ fn foreground_external_game_pid(our_pid: u32, exe_by_pid: &HashMap<u32, String>)
 }
 
 fn is_hwnd_external_fullscreen_candidate(hwnd: HWND) -> bool {
+    // A maximized desktop app can cover most of a monitor while still being a normal
+    // framed window. Standalone companion sleep has no warmUP library/session context,
+    // so keep the geometry heuristic for borderless/exclusive game surfaces only.
+    if is_hwnd_ordinary_framed_window(hwnd) {
+        return false;
+    }
     let Some((win_rect, mon_rect)) = hwnd_window_and_monitor_rect(hwnd) else {
         return false;
     };
@@ -206,6 +212,16 @@ fn is_hwnd_external_fullscreen_candidate(hwnd: HWND) -> bool {
         return false;
     };
     rect_area(ix) * FULLSCREEN_PERCENT_BASE >= mon_area * EXTERNAL_FULLSCREEN_OVERLAP_PERCENT
+}
+
+fn is_hwnd_ordinary_framed_window(hwnd: HWND) -> bool {
+    unsafe { is_ordinary_framed_window_style(GetWindowLongPtrW(hwnd, GWL_STYLE)) }
+}
+
+fn is_ordinary_framed_window_style(style: isize) -> bool {
+    let caption = WS_CAPTION.0 as isize;
+    let thickframe = WS_THICKFRAME.0 as isize;
+    style & caption != 0 && style & thickframe != 0
 }
 
 fn hwnd_window_and_monitor_rect(hwnd: HWND) -> Option<(RECT, RECT)> {
@@ -300,6 +316,14 @@ mod tests {
         ] {
             assert!(EXTERNAL_GAME_EXE_DENYLIST.contains(&exe));
         }
+    }
+
+    #[test]
+    fn ordinary_framed_window_style_is_not_game_surface() {
+        let style = (WS_CAPTION.0 | WS_THICKFRAME.0) as isize;
+        assert!(is_ordinary_framed_window_style(style));
+        assert!(!is_ordinary_framed_window_style(0));
+        assert!(!is_ordinary_framed_window_style(WS_THICKFRAME.0 as isize));
     }
 
     fn is_external_candidate_for_rects(win_rect: RECT, mon_rect: RECT) -> bool {

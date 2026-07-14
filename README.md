@@ -1,8 +1,25 @@
+<p align="center">
+  <img src="assets/promo/warmup-logo-wordmark.png" alt="warmUP" width="360">
+</p>
+
 # Warmup Companion
 
-Windows companion service for warmUP gamepad input and the native gamepad-driven
-virtual keyboard. It lets a controller open and drive a keyboard in normal apps,
-UAC, lock, and sign-in surfaces where the desktop webview cannot inject input.
+Native Windows companion package for
+[warmUP](https://github.com/warmUP-corp). It gives warmUP controller users a
+gamepad-driven virtual keyboard in normal apps, UAC, lock, and sign-in surfaces
+where the desktop webview cannot inject input.
+
+![warmUP library with the native gamepad keyboard open](assets/promo/warmup-keyboard-library.png)
+
+## Why It Exists
+
+warmUP is the main app. This package handles the privileged Windows input path:
+
+- Open and drive a native on-screen keyboard with a controller.
+- Type into desktop apps and secure Windows surfaces.
+- Use local English suggestions without reading text from the focused app.
+- Sleep while a game owns the controller, then resume for desktop input.
+- Keep the input stack auditable before install.
 
 ## Trust Model
 

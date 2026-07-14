@@ -29,10 +29,10 @@ use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
 };
 use windows::Win32::UI::Input::XboxController::{
-    XINPUT_GAMEPAD, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B,
-    XINPUT_GAMEPAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT,
-    XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_RIGHT_SHOULDER,
-    XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y, XINPUT_STATE,
+    XINPUT_GAMEPAD, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_DPAD_DOWN,
+    XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT, XINPUT_GAMEPAD_DPAD_UP,
+    XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_RIGHT_SHOULDER, XINPUT_GAMEPAD_X,
+    XINPUT_GAMEPAD_Y, XINPUT_STATE,
 };
 use windows::Win32::UI::Input::{
     GetRawInputData, GetRawInputDeviceInfoW, GetRawInputDeviceList, RegisterRawInputDevices,
@@ -41,11 +41,11 @@ use windows::Win32::UI::Input::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
-    GetWindowThreadProcessId, KillTimer, MsgWaitForMultipleObjects,
-    PeekMessageW, PostThreadMessageW, RegisterClassW, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetTimer, TranslateMessage, HMENU, LWA_ALPHA, MSG, PM_REMOVE,
-    QS_ALLINPUT, WM_DESTROY, WM_INPUT, WM_NULL, WM_POWERBROADCAST, WM_QUIT, WM_TIMER, WNDCLASSW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    GetWindowThreadProcessId, KillTimer, MsgWaitForMultipleObjects, PeekMessageW,
+    PostThreadMessageW, RegisterClassW, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer,
+    TranslateMessage, HMENU, LWA_ALPHA, MSG, PM_REMOVE, QS_ALLINPUT, WM_DESTROY, WM_INPUT, WM_NULL,
+    WM_POWERBROADCAST, WM_QUIT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::gamepad_backend::mapping_db_path;
@@ -519,7 +519,8 @@ impl XInputBackend {
         }
         let names: Vec<&str> = BUTTON_MASKS
             .iter()
-            .filter(|&(_b, mask)| cur & *mask != 0).map(|(b, _mask)| b.as_str())
+            .filter(|&(_b, mask)| cur & *mask != 0)
+            .map(|(b, _mask)| b.as_str())
             .collect();
         service_log(&format!(
             "XInput buttons slot {slot}: 0x{prev:04x} -> 0x{cur:04x} [{}]",
@@ -1141,8 +1142,7 @@ unsafe extern "system" fn anchor_wndproc(
         // On resume, XUSB handles / HID overlapped reads / the XInput DLL's internal
         // slot state can all be stale. Flush the device handles and force immediate
         // re-enumeration on the next poll tick so input recovers without a replug.
-        if wparam.0 == PBT_APMRESUMEAUTOMATIC as usize
-            || wparam.0 == PBT_APMRESUMESUSPEND as usize
+        if wparam.0 == PBT_APMRESUMEAUTOMATIC as usize || wparam.0 == PBT_APMRESUMESUSPEND as usize
         {
             POLL_STATE.with(|s| {
                 if let Some(state) = s.borrow_mut().as_mut() {

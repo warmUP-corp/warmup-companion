@@ -473,7 +473,14 @@ unsafe fn reserve_app_space(
     }
     let new_h = (dock_top - r.top).max(120);
     // Ease the shrink instead of snapping, so the app doesn't jump when the bar docks.
-    animate_app_height(app, r.left, r.top, r.right - r.left, r.bottom - r.top, new_h);
+    animate_app_height(
+        app,
+        r.left,
+        r.top,
+        r.right - r.left,
+        r.bottom - r.top,
+        new_h,
+    );
     vk_log::log(&format!(
         "reserved space: shrank '{name}' to bottom={dock_top}"
     ));
@@ -490,7 +497,14 @@ unsafe fn restore_app_space(saved: Option<(HWND, windows::Win32::Foundation::REC
         } else {
             r.bottom - r.top
         };
-        animate_app_height(app, r.left, r.top, r.right - r.left, from_h, r.bottom - r.top);
+        animate_app_height(
+            app,
+            r.left,
+            r.top,
+            r.right - r.left,
+            from_h,
+            r.bottom - r.top,
+        );
     }
 }
 
@@ -498,7 +512,15 @@ unsafe fn restore_app_space(saved: Option<(HWND, windows::Win32::Foundation::REC
 /// [`APP_REFLOW_MS`]. Steps at the render cadence; a no-op delta just sets the rect.
 unsafe fn animate_app_height(app: HWND, x: i32, y: i32, w: i32, from_h: i32, to_h: i32) {
     if from_h == to_h {
-        let _ = SetWindowPos(app, HWND::default(), x, y, w, to_h, SWP_NOACTIVATE | SWP_NOZORDER);
+        let _ = SetWindowPos(
+            app,
+            HWND::default(),
+            x,
+            y,
+            w,
+            to_h,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        );
         return;
     }
     let started = Instant::now();
@@ -506,7 +528,15 @@ unsafe fn animate_app_height(app: HWND, x: i32, y: i32, w: i32, from_h: i32, to_
     loop {
         let t = (started.elapsed().as_secs_f32() / dur.as_secs_f32()).min(1.0);
         let h = (from_h as f32 + (to_h - from_h) as f32 * ease_out_cubic(t)).round() as i32;
-        let _ = SetWindowPos(app, HWND::default(), x, y, w, h, SWP_NOACTIVATE | SWP_NOZORDER);
+        let _ = SetWindowPos(
+            app,
+            HWND::default(),
+            x,
+            y,
+            w,
+            h,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        );
         if t >= 1.0 {
             break;
         }
@@ -697,15 +727,14 @@ unsafe fn floating_card_rect(chrome: f32) -> (i32, i32, i32, i32) {
     let w = ((grid_w + pad * 2.0).round() as i32).min(full_w);
     // Floor only needs to fit the keys + pad; the chrome is what collapses.
     let card_h = ((chrome + block_h + pad).round() as i32).clamp(100, full_h);
-    let margin = (((full_h as f32) * 0.015).round() as i32).clamp(10, 48);
+    let margin = (((full_h as f32) * 0.04).round() as i32).clamp(28, 80);
     let x = m.left + (full_w - w) / 2;
     let y = m.bottom - card_h - margin;
     (x, y, w, card_h)
 }
 
 /// Width used to scale key size (92px @ 1920 reference). Always the monitor
-/// width so floating keys render at the same scale as the docked bar, independent of
-/// the narrower floating card width.
+/// width so the keyboard stays readable at TV distance.
 unsafe fn vk_scale_w() -> f32 {
     let m = target_monitor_rect();
     ((m.right - m.left).max(1)) as f32
@@ -919,6 +948,7 @@ fn render_frame() {
                     Some("starting") => vk_renderer::VoicePhase::Starting,
                     _ => vk_renderer::VoicePhase::Listening,
                 },
+                voice_level: crate::win::speech_input::voice_level(),
             };
             if let Err(e) = renderer.draw(&frame) {
                 vk_log::log(&format!("renderer draw: {e}"));
@@ -979,4 +1009,3 @@ fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<KeyCell> {
     }
     None
 }
-

@@ -38,8 +38,6 @@ mod win;
 #[path = "win_stub.rs"]
 mod win;
 
-#[cfg(all(windows, feature = "gamepad"))]
-mod parental_guard;
 #[cfg(feature = "gamepad")]
 mod gamepad;
 #[cfg(feature = "gamepad")]
@@ -50,6 +48,8 @@ mod hid_gamepad;
 mod hid_reader;
 #[cfg(all(windows, feature = "gamepad"))]
 mod pad_decode;
+#[cfg(all(windows, feature = "gamepad"))]
+mod parental_guard;
 #[cfg(feature = "gamepad")]
 mod pc_cursor;
 #[cfg(all(windows, feature = "gamepad"))]

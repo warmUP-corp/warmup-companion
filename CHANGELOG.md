@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.5
+
+- Polished the controller keyboard, tray menu, voice input, game detection, and branded installer experience.
+- Silent installs now include offline Parakeet voice typing by default and run helper processes without terminal windows.
+- Uninstall now fails safely when the service cannot stop, removes stale installed assets, and stays silent.
+- Tray **Exit** now stops `WarmupVkSvc` instead of allowing the service worker to relaunch.
+- The installer finish page now prominently links to the warmUP Game Launcher.
+
 ## v0.2.4
 
 - Kid Mode companion IPC v5 support with system-wide game blocking notifications.

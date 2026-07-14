@@ -20,16 +20,13 @@ pub fn init() -> Option<sentry::ClientInitGuard> {
                 env!("CARGO_PKG_VERSION")
             )))
         });
-    let environment = std::env::var("WARMUP_SENTRY_ENV")
-        .ok()
-        .map(Cow::Owned)
-        .or({
-            Some(Cow::Borrowed(if cfg!(debug_assertions) {
-                "development"
-            } else {
-                "production"
-            }))
-        });
+    let environment = std::env::var("WARMUP_SENTRY_ENV").ok().map(Cow::Owned).or({
+        Some(Cow::Borrowed(if cfg!(debug_assertions) {
+            "development"
+        } else {
+            "production"
+        }))
+    });
 
     let guard = sentry::init((
         dsn,

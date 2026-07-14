@@ -894,6 +894,8 @@ pub struct VkFrame<'a> {
     pub voice_active: bool,
     /// Helper phase, for a phase-coded mic halo (only read when `voice_active`).
     pub voice_phase: VoicePhase,
+    /// Live mic energy, 0..1, used by the mic-key voice glow.
+    pub voice_level: f32,
 }
 
 /// Glyph for the Shift key (the Shift-action key reflects `shift`).
@@ -1322,6 +1324,85 @@ impl VkRenderer {
         Ok(())
     }
 
+    unsafe fn draw_voice_orb(
+        &mut self,
+        accent: u32,
+        level: f32,
+        transcribing: bool,
+        cx: f32,
+        cy: f32,
+        unit: f32,
+        alpha_scale: f32,
+    ) -> Result<(), String> {
+        let t = self.prompt_started.elapsed().as_secs_f32();
+        let amp = if transcribing {
+            (t * std::f32::consts::TAU * 1.1).sin() * 0.5 + 0.5
+        } else {
+            level.clamp(0.0, 1.0)
+        };
+        let idle = (t * std::f32::consts::TAU * 0.25).sin() * 0.5 + 0.5;
+        let energy = amp.max(idle * 0.10).clamp(0.0, 1.0);
+        let max_r = unit * 0.92;
+
+        let blobs: [(u32, f32, f32); 4] = [
+            (shift_hue(accent, -34.0), 0.0, 0.85),
+            (shift_hue(accent, -10.0), 2.1, 1.10),
+            (shift_hue(accent, 16.0), 4.2, 0.70),
+            (shift_hue(accent, 38.0), 1.0, 1.30),
+        ];
+        let drift = unit * (0.05 + 0.08 * energy);
+        let base_r = unit * (0.42 + 0.24 * energy);
+        let wob = 0.5 + 1.5 * energy;
+        let jitter = |seed: f32| {
+            let sp = 0.6 + 1.8 * energy;
+            ((seed * 2.3999632 + t * sp).sin() + (seed * 5.197 - t * sp * 0.62).sin()) * 0.5 * wob
+        };
+        const LAYERS: usize = 11;
+        for (bi, (color, phase, freq)) in blobs.into_iter().enumerate() {
+            let ang = t * freq * 0.45 + phase;
+            let bx = cx + ang.cos() * drift;
+            let by = cy + ang.sin() * drift;
+            let dist = ((bx - cx).powi(2) + (by - cy).powi(2)).sqrt();
+            let r = (base_r * (0.90 + 0.12 * (ang * 1.3).sin()))
+                .min(max_r - dist)
+                .max(unit * 0.12);
+            let brush = solid_brush(&self.d2d_context, colorref(color))?;
+            let seed0 = bi as f32 * 9.71;
+            for k in 0..LAYERS {
+                let kf = k as f32 / (LAYERS - 1) as f32;
+                let s = seed0 + k as f32;
+                let rr = r * (1.0 - 0.80 * kf) * (1.0 + 0.20 * jitter(s));
+                let jx = bx + unit * 0.06 * jitter(s + 1.3);
+                let jy = by + unit * 0.06 * jitter(s + 7.7);
+                brush.SetOpacity(((0.13 + 0.08 * energy) * (0.22 + 0.78 * kf * kf)) * alpha_scale);
+                self.d2d_context.FillEllipse(
+                    &D2D1_ELLIPSE {
+                        point: D2D_POINT_2F { x: jx, y: jy },
+                        radiusX: rr,
+                        radiusY: rr,
+                    },
+                    &brush,
+                );
+            }
+        }
+
+        let core_brush = solid_brush(&self.d2d_context, colorref(0x00FFFFFF))?;
+        for k in 0..LAYERS {
+            let kf = k as f32 / (LAYERS - 1) as f32;
+            let rr = unit * (0.04 + (0.10 + 0.08 * energy) * (1.0 - kf));
+            core_brush.SetOpacity(((0.022 + 0.09 * energy) * kf * kf) * alpha_scale);
+            self.d2d_context.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: D2D_POINT_2F { x: cx, y: cy },
+                    radiusX: rr,
+                    radiusY: rr,
+                },
+                &core_brush,
+            );
+        }
+        Ok(())
+    }
+
     pub unsafe fn draw(&mut self, frame: &VkFrame) -> Result<(), String> {
         let VkFrame {
             pal,
@@ -1338,6 +1419,7 @@ impl VkRenderer {
             voice_available,
             voice_active,
             voice_phase,
+            voice_level,
         } = *frame;
         let controller_icons = ControllerIconFamily::from_label(controller_label);
         let cw = self.width as f32;
@@ -1423,8 +1505,10 @@ impl VkRenderer {
         // Bright accent ring on the selected key — lifts it off the grid so the
         // cursor reads at a glance, not by fill colour alone. (A blurred outer
         // glow would need extra composition layers; deferred — the ring carries it.)
-        let sel_ring_brush =
-            solid_brush(&self.d2d_context, colorref(mix_color(0xFFFFFF, pal.accent, 0.5)))?;
+        let sel_ring_brush = solid_brush(
+            &self.d2d_context,
+            colorref(mix_color(0xFFFFFF, pal.accent, 0.5)),
+        )?;
 
         for kr in &rects {
             let key = &rows[kr.pos.row].keys[kr.pos.col];
@@ -1484,19 +1568,35 @@ impl VkRenderer {
                     let disabled_color = colorref_mix(label_color, pal.key, 0.42);
                     self.draw_svg_icon(VkIcon::MicOff, rect.rect, disabled_color)?;
                 } else if voice_active {
-                    let on_color = if selected { pal.sel_text } else { pal.accent };
-                    self.draw_svg_icon(VkIcon::Mic, rect.rect, on_color)?;
-                    let t = self.prompt_started.elapsed().as_secs_f32();
-                    // Phase-coded halo so it reads as working, not stuck: starting =
-                    // faint slow, listening = steady breathe, transcribing = bright fast.
-                    let (hz, amp) = match voice_phase {
-                        VoicePhase::Starting => (0.5_f32, 0.25_f32),
-                        VoicePhase::Listening => (0.6, 0.5),
-                        VoicePhase::Transcribing => (1.6, 0.9),
+                    let cx = (rect.rect.left + rect.rect.right) * 0.5;
+                    let cy = (rect.rect.top + rect.rect.bottom) * 0.5;
+                    let unit = ((rect.rect.right - rect.rect.left)
+                        .min(rect.rect.bottom - rect.rect.top)
+                        * 0.56)
+                        .max(1.0);
+                    self.d2d_context.PushAxisAlignedClip(
+                        &rect.rect,
+                        windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                    );
+                    self.draw_voice_orb(
+                        pal.accent,
+                        voice_level,
+                        matches!(voice_phase, VoicePhase::Transcribing),
+                        cx,
+                        cy,
+                        unit,
+                        1.25,
+                    )?;
+                    self.d2d_context.PopAxisAlignedClip();
+                    let halo_alpha = match voice_phase {
+                        VoicePhase::Starting => 0.18,
+                        VoicePhase::Listening => 0.28,
+                        VoicePhase::Transcribing => 0.46,
                     };
-                    let pulse = ((t * std::f32::consts::TAU * hz).sin() * 0.5 + 0.5) * amp;
-                    let halo = solid_brush(&self.d2d_context, colorref_alpha(pal.accent, pulse))?;
-                    self.d2d_context.DrawRoundedRectangle(&rect, &halo, 2.5, None);
+                    let halo =
+                        solid_brush(&self.d2d_context, colorref_alpha(pal.accent, halo_alpha))?;
+                    self.d2d_context
+                        .DrawRoundedRectangle(&rect, &halo, 2.0, None);
                 } else {
                     self.draw_svg_icon(VkIcon::Mic, rect.rect, label_color)?;
                 }
@@ -2261,97 +2361,10 @@ impl VkRenderer {
             a: 0.0,
         }));
 
-        let t = self.prompt_started.elapsed().as_secs_f32();
-        let amp = if transcribing {
-            (t * std::f32::consts::TAU * 1.1).sin() * 0.5 + 0.5
-        } else {
-            level.clamp(0.0, 1.0)
-        };
-        // A faint breath so it's alive (not dead) even in silence, but stays subtle.
-        let idle = (t * std::f32::consts::TAU * 0.25).sin() * 0.5 + 0.5;
-        let energy = amp.max(idle * 0.10).clamp(0.0, 1.0);
-
         let cx = cw * 0.5;
         let cy = ch * 0.5;
         let unit = cw.min(ch) * 0.5;
-        // Blob centers stay within this radius (their edge too, via the clamp below),
-        // so nothing clips the window even at peak energy.
-        let max_r = unit * 0.92;
-
-        // Siri-ish: a few translucent blobs that orbit + pulse on their own phase and
-        // blend into a flowing glow; brighter/larger with voice energy. All four are
-        // hue-rotations of the theme accent so the orb matches the keyboard theme.
-        // COLORREF is 0x00BBGGRR.
-        let blobs: [(u32, f32, f32); 4] = [
-            (shift_hue(accent, -34.0), 0.0, 0.85),
-            (shift_hue(accent, -10.0), 2.1, 1.10),
-            (shift_hue(accent, 16.0), 4.2, 0.70),
-            (shift_hue(accent, 38.0), 1.0, 1.30),
-        ];
-        // Keep blobs clustered near center so they read as ONE coherent orb that
-        // gently rotates/morphs, not separate wandering dots: small orbit, large
-        // radius (always overlapping), slow circular motion.
-        let drift = unit * (0.05 + 0.08 * energy);
-        let base_r = unit * (0.42 + 0.24 * energy);
-        // Smooth per-layer wobble: each feather layer drifts on its own phase so the
-        // stack looks like an irregular organic blob, not clean concentric rings. This
-        // is what lets us use FEW layers — the jitter, not sheer count, hides the
-        // alpha banding. Two summed sines stay ~[-1,1] and vary smoothly over time;
-        // louder voice both widens the wobble and speeds it up so the orb churns with
-        // energy and nearly stills in silence.
-        let wob = 0.5 + 1.5 * energy;
-        let jitter = |seed: f32| {
-            let sp = 0.6 + 1.8 * energy;
-            ((seed * 2.3999632 + t * sp).sin() + (seed * 5.197 - t * sp * 0.62).sin()) * 0.5 * wob
-        };
-        // Feathered falloff per blob: largest+faintest disc first, smaller+brighter
-        // stacked on top → soft glow with a blurry edge, all cheap solid fills (no GPU
-        // blur). One brush per blob, SetOpacity per layer, so there's no per-fill alloc.
-        const LAYERS: usize = 11;
-        for (bi, (color, phase, freq)) in blobs.into_iter().enumerate() {
-            let ang = t * freq * 0.45 + phase;
-            let bx = cx + ang.cos() * drift;
-            let by = cy + ang.sin() * drift;
-            let dist = ((bx - cx).powi(2) + (by - cy).powi(2)).sqrt();
-            let r = (base_r * (0.90 + 0.12 * (ang * 1.3).sin()))
-                .min(max_r - dist)
-                .max(unit * 0.12);
-            let brush = solid_brush(&self.d2d_context, colorref(color))?;
-            let seed0 = bi as f32 * 9.71;
-            for k in 0..LAYERS {
-                let kf = k as f32 / (LAYERS - 1) as f32; // 0 outer .. 1 inner
-                let s = seed0 + k as f32;
-                // Wobble each layer's radius + center so the few layers don't stack
-                // into visible rings. ponytail: visual-tuning knobs — bump jitter
-                // amounts if banding shows, drop them if it looks too noisy.
-                let rr = r * (1.0 - 0.80 * kf) * (1.0 + 0.20 * jitter(s));
-                let jx = bx + unit * 0.06 * jitter(s + 1.3);
-                let jy = by + unit * 0.06 * jitter(s + 7.7);
-                // Quadratic ramp → soft edge; alpha rescaled for the lower layer count.
-                brush.SetOpacity((0.13 + 0.08 * energy) * (0.22 + 0.78 * kf * kf));
-                let e = D2D1_ELLIPSE {
-                    point: D2D_POINT_2F { x: jx, y: jy },
-                    radiusX: rr,
-                    radiusY: rr,
-                };
-                self.d2d_context.FillEllipse(&e, &brush);
-            }
-        }
-        // Soft bright focal core that swells with energy (also feathered).
-        let core_brush = solid_brush(&self.d2d_context, colorref(0x00FFFFFF))?;
-        for k in 0..LAYERS {
-            let kf = k as f32 / (LAYERS - 1) as f32;
-            let rr = unit * (0.04 + (0.10 + 0.08 * energy) * (1.0 - kf));
-            // Base alpha rescaled for the lower layer count so silence stays a faint
-            // highlight, not a hard white dot; blooms with energy.
-            core_brush.SetOpacity((0.022 + 0.09 * energy) * kf * kf);
-            let core = D2D1_ELLIPSE {
-                point: D2D_POINT_2F { x: cx, y: cy },
-                radiusX: rr,
-                radiusY: rr,
-            };
-            self.d2d_context.FillEllipse(&core, &core_brush);
-        }
+        self.draw_voice_orb(accent, level, transcribing, cx, cy, unit, 1.0)?;
 
         self.d2d_context
             .EndDraw(None, None)

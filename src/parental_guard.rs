@@ -75,10 +75,7 @@ fn guardian_loop() {
 }
 
 fn tick_guardian() {
-    let guard = state()
-        .lock()
-        .map(|s| s.guard.clone())
-        .unwrap_or_default();
+    let guard = state().lock().map(|s| s.guard.clone()).unwrap_or_default();
     if !guard.enabled {
         return;
     }
@@ -226,12 +223,12 @@ fn snapshot_processes() -> Vec<(u32, String, Option<String>)> {
 }
 
 fn full_process_image_path(pid: u32) -> Option<String> {
+    use windows::core::PWSTR;
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-        QueryFullProcessImageNameW,
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    use windows::core::PWSTR;
 
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
@@ -261,7 +258,7 @@ fn terminate_blocked_process(pid: u32) -> bool {
 fn terminate_pid_with_privilege(pid: u32) -> bool {
     enable_debug_privilege();
     use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+    use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
 
     unsafe {
         if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, pid) {
@@ -277,13 +274,13 @@ fn terminate_pid_with_privilege(pid: u32) -> bool {
 }
 
 fn enable_debug_privilege() {
+    use windows::core::PCWSTR;
     use windows::Win32::Foundation::{CloseHandle, HANDLE, LUID};
     use windows::Win32::Security::{
-        AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
+        AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
         TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
     };
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-    use windows::core::PCWSTR;
 
     unsafe {
         let mut token = HANDLE::default();
