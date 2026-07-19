@@ -406,6 +406,8 @@ pub struct VkRenderer {
     /// Fixed-size labels on prediction chips (not scaled with key height).
     chip_format: IDWriteTextFormat,
     sublabel_format: IDWriteTextFormat,
+    /// Fixed large font for the connect/keyboard prompt pills (10-foot UI).
+    prompt_format: IDWriteTextFormat,
     icon_cache: HashMap<IconCacheKey, ID2D1Bitmap1>,
     controller_art_cache: HashMap<ControllerArtCacheKey, (ID2D1Bitmap1, u32, u32)>,
     prompt_started: Instant,
@@ -1051,6 +1053,20 @@ impl VkRenderer {
                 &locale,
             )
             .map_err(|e| format!("CreateTextFormat (sublabel): {e}"))?;
+        // Fixed large font for the connect/keyboard prompt pills. The pill window
+        // is short, so `label_px` floors at 14; this is ~2x that so the prompt
+        // reads on a TV across the room (10-foot UI).
+        let prompt_format = dwrite
+            .CreateTextFormat(
+                w!("Segoe UI"),
+                &fonts,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                28.0,
+                &locale,
+            )
+            .map_err(|e| format!("CreateTextFormat (prompt): {e}"))?;
 
         // Centre labels in their key rects (DWrite defaults to top-left).
         for f in [&text_format, &glyph_format] {
@@ -1077,6 +1093,7 @@ impl VkRenderer {
             hint_format,
             chip_format,
             sublabel_format,
+            prompt_format,
             icon_cache: HashMap::new(),
             controller_art_cache: HashMap::new(),
             prompt_started: Instant::now(),
@@ -1808,12 +1825,12 @@ impl VkRenderer {
         Ok(())
     }
 
-    /// Measure a text run's width in DIPs at [`Self::text_format`].
-    unsafe fn measure_text(&self, text: &str) -> f32 {
+    /// Measure a text run's width in DIPs at the given format.
+    unsafe fn measure_text(&self, text: &str, format: &IDWriteTextFormat) -> f32 {
         let wide: Vec<u16> = text.encode_utf16().collect();
         let layout: Option<IDWriteTextLayout> = self
             .dwrite
-            .CreateTextLayout(&wide, &self.text_format, f32::MAX, f32::MAX)
+            .CreateTextLayout(&wide, format, f32::MAX, f32::MAX)
             .ok();
         let Some(layout) = layout else { return 0.0 };
         let mut m = DWRITE_TEXT_METRICS::default();
@@ -1869,20 +1886,23 @@ impl VkRenderer {
             right: cw - 4.0,
             bottom: ch - 4.0,
         };
-        let card_top = 44.0_f32.min(ch - 14.0).max(4.0);
-        let card_w = 196.0_f32.min(cw - 10.0).max(20.0);
+        // Card interior was tuned for a 210px card; scale with window height so the
+        // morph lands on the same size as `draw_connected_prompt`.
+        let s = ch / 210.0;
+        let card_top = (44.0 * s).min(ch - 14.0).max(4.0);
+        let card_w = (196.0 * s).min(cw - 10.0).max(20.0);
         let card_left = (cw - card_w) * 0.5;
         let card_panel = D2D_RECT_F {
             left: card_left,
             top: card_top,
             right: cw - card_left,
-            bottom: ch - 5.0,
+            bottom: ch - 5.0 * s,
         };
         let panel = lerp_rect(prompt_panel, card_panel, card_t);
         let rounded = D2D1_ROUNDED_RECT {
             rect: panel,
-            radiusX: lerp((ch * 0.5 - 2.0).max(8.0), 28.0, card_t),
-            radiusY: lerp((ch * 0.5 - 2.0).max(8.0), 28.0, card_t),
+            radiusX: lerp((ch * 0.5 - 2.0).max(8.0), 28.0 * s, card_t),
+            radiusY: lerp((ch * 0.5 - 2.0).max(8.0), 28.0 * s, card_t),
         };
         let glow = colorref_mix(0x00FFFFFF, border, lerp(0.38, 0.45, card_t));
         let bg_brush = solid_brush(
@@ -1909,15 +1929,15 @@ impl VkRenderer {
 
         if prompt_alpha > 0.01 {
             let _ = self
-                .text_format
+                .prompt_format
                 .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             let _ = self
-                .text_format
+                .prompt_format
                 .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            let chip = (ch * 0.70).clamp(26.0, 48.0);
-            let gap = 8.0;
-            let w_prefix = self.measure_text(prefix);
-            let w_suffix = self.measure_text(suffix);
+            let chip = (ch * 0.70).clamp(26.0, 96.0);
+            let gap = 12.0;
+            let w_prefix = self.measure_text(prefix, &self.prompt_format);
+            let w_suffix = self.measure_text(suffix, &self.prompt_format);
             let total = if show_l3 {
                 w_prefix + gap + chip + gap + w_suffix
             } else {
@@ -1929,7 +1949,7 @@ impl VkRenderer {
             let pre: Vec<u16> = prefix.encode_utf16().collect();
             self.d2d_context.DrawText(
                 &pre,
-                &self.text_format,
+                &self.prompt_format,
                 &D2D_RECT_F {
                     left: x,
                     top: 0.0,
@@ -1956,7 +1976,7 @@ impl VkRenderer {
                 let suf: Vec<u16> = suffix.encode_utf16().collect();
                 self.d2d_context.DrawText(
                     &suf,
-                    &self.text_format,
+                    &self.prompt_format,
                     &D2D_RECT_F {
                         left: x,
                         top: 0.0,
@@ -1983,13 +2003,13 @@ impl VkRenderer {
             let title_w: Vec<u16> = title.encode_utf16().collect();
             let text_brush =
                 solid_brush(&self.d2d_context, colorref_alpha(text_color, card_alpha))?;
-            let name_bottom = (card_top - 6.0).max(12.0);
+            let name_bottom = (card_top - 6.0 * s).max(12.0);
             self.d2d_context.DrawText(
                 &title_w,
                 &self.text_format,
                 &D2D_RECT_F {
                     left: 0.0,
-                    top: 8.0,
+                    top: 8.0 * s,
                     right: cw,
                     bottom: name_bottom,
                 },
@@ -2001,7 +2021,7 @@ impl VkRenderer {
 
             let image_cx = cw * 0.5;
             let image_cy = (panel.top + panel.bottom) * 0.5 - 6.0 * (1.0 - card_t);
-            let image_scale = 0.88 + 0.12 * card_t;
+            let image_scale = (0.88 + 0.12 * card_t) * s;
             let ring_brush = solid_brush(
                 &self.d2d_context,
                 colorref_alpha(glow, 0.20 * card_alpha * pulse_alpha),
@@ -2096,19 +2116,22 @@ impl VkRenderer {
         // *outside* (above) the card. The card itself is a narrow pill that only
         // hugs the controller art; it is centred in the (wider) window so the name
         // above has room to render without clipping.
-        let card_top = 44.0;
-        let card_w = 196.0_f32.min(cw - 10.0);
+        // Interior geometry was tuned for a 210px-tall card; scale it with the
+        // actual window height so a bigger card enlarges the art/ring/name too.
+        let s = ch / 210.0;
+        let card_top = 44.0 * s;
+        let card_w = (196.0 * s).min(cw - 10.0);
         let card_left = (cw - card_w) * 0.5;
         let panel = D2D_RECT_F {
             left: card_left,
             top: card_top,
             right: cw - card_left,
-            bottom: ch - 5.0,
+            bottom: ch - 5.0 * s,
         };
         let rounded = D2D1_ROUNDED_RECT {
             rect: panel,
-            radiusX: 28.0,
-            radiusY: 28.0,
+            radiusX: 28.0 * s,
+            radiusY: 28.0 * s,
         };
         let glow = colorref_mix(0x00FFFFFF, border, 0.45);
         let bg_brush = solid_brush(&self.d2d_context, colorref_alpha(bg, 0.94))?;
@@ -2123,27 +2146,27 @@ impl VkRenderer {
         let image_cx = cw * 0.5;
         // The controller name floats *above* the card on the transparent top band;
         // the artwork is the sole content of the card, centred in it.
-        let name_top = 8.0;
-        let name_bottom = card_top - 6.0;
+        let name_top = 8.0 * s;
+        let name_bottom = card_top - 6.0 * s;
         let image_cy = (panel.top + panel.bottom) * 0.5 - 6.0 * (1.0 - eased);
 
         let ring = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F {
-                left: image_cx - 74.0 - 10.0 * pulse,
-                top: image_cy - 60.0 - 10.0 * pulse,
-                right: image_cx + 74.0 + 10.0 * pulse,
-                bottom: image_cy + 60.0 + 10.0 * pulse,
+                left: image_cx - (74.0 + 10.0 * pulse) * s,
+                top: image_cy - (60.0 + 10.0 * pulse) * s,
+                right: image_cx + (74.0 + 10.0 * pulse) * s,
+                bottom: image_cy + (60.0 + 10.0 * pulse) * s,
             },
-            radiusX: 52.0 + 10.0 * pulse,
-            radiusY: 52.0 + 10.0 * pulse,
+            radiusX: (52.0 + 10.0 * pulse) * s,
+            radiusY: (52.0 + 10.0 * pulse) * s,
         };
         self.d2d_context
             .DrawRoundedRectangle(&ring, &halo_brush, 2.0, None);
         let image_rect = D2D_RECT_F {
-            left: image_cx - 62.0,
-            top: image_cy - 54.0,
-            right: image_cx + 62.0,
-            bottom: image_cy + 54.0,
+            left: image_cx - 62.0 * s,
+            top: image_cy - 54.0 * s,
+            right: image_cx + 62.0 * s,
+            bottom: image_cy + 54.0 * s,
         };
         if let Some(art) = ControllerArt::from_label(controller_label) {
             self.draw_controller_art(art, image_rect)?;
@@ -2210,10 +2233,10 @@ impl VkRenderer {
         let ch = self.height as f32;
         // Segments flow left to right, top-aligned to a shared baseline band.
         let _ = self
-            .text_format
+            .prompt_format
             .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         let _ = self
-            .text_format
+            .prompt_format
             .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
         self.d2d_context.BeginDraw();
@@ -2263,10 +2286,10 @@ impl VkRenderer {
             .DrawRoundedRectangle(&rounded, &border_brush, 1.5, None);
 
         // Chip is a square sized to the pill height; text runs sit either side.
-        let chip = (ch * 0.70).clamp(26.0, 48.0);
-        let gap = 8.0;
-        let w_prefix = self.measure_text(prefix);
-        let w_suffix = self.measure_text(suffix);
+        let chip = (ch * 0.70).clamp(26.0, 96.0);
+        let gap = 12.0;
+        let w_prefix = self.measure_text(prefix, &self.prompt_format);
+        let w_suffix = self.measure_text(suffix, &self.prompt_format);
         let total = if show_l3 {
             w_prefix + gap + chip + gap + w_suffix
         } else {
@@ -2279,7 +2302,7 @@ impl VkRenderer {
         let pre: Vec<u16> = prefix.encode_utf16().collect();
         self.d2d_context.DrawText(
             &pre,
-            &self.text_format,
+            &self.prompt_format,
             &D2D_RECT_F {
                 left: x,
                 top: 0.0,
@@ -2310,7 +2333,7 @@ impl VkRenderer {
             let suf: Vec<u16> = suffix.encode_utf16().collect();
             self.d2d_context.DrawText(
                 &suf,
-                &self.text_format,
+                &self.prompt_format,
                 &D2D_RECT_F {
                     left: x,
                     top: 0.0,

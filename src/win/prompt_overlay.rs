@@ -30,10 +30,10 @@ use super::vk_renderer::VkRenderer;
 
 const WINDOW_CLASS: windows::core::PCWSTR = w!("WarmupPromptOverlayWindow");
 
-const PANEL_W: i32 = 390;
-const PANEL_H: i32 = 58;
-const CONNECTED_PANEL_W: i32 = 300;
-const CONNECTED_PANEL_H: i32 = 210;
+const PANEL_W: i32 = 720;
+const PANEL_H: i32 = 116;
+const CONNECTED_PANEL_W: i32 = 600;
+const CONNECTED_PANEL_H: i32 = 420;
 /// Gap between the pill's bottom edge and the bottom of the primary monitor.
 const MARGIN_BOTTOM: i32 = 72;
 /// Voice glow overlay: small + subtle, hugging the right edge, vertically centered.

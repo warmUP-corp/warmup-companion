@@ -25,6 +25,11 @@ use serde::{Deserialize, Serialize};
 /// v5: additive `parental_guard` down-frame and `parental_blocked` up-frame for Kid Mode
 /// system-wide game blocking.
 pub const PROTOCOL_VERSION: u32 = 5;
+pub const DEPRECATED_PROTOCOL_VERSIONS: &[u32] = &[4];
+
+pub fn is_supported_protocol_version(version: u32) -> bool {
+    version == PROTOCOL_VERSION || DEPRECATED_PROTOCOL_VERSIONS.contains(&version)
+}
 
 /// Desktop mode snapshot carried in `hello` and the `mode` down-frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -594,6 +599,13 @@ mod tests {
         assert_eq!(json["payload"]["protocolVersion"], 5);
         assert_eq!(json["payload"]["mode"]["gameActive"], false);
         assert_eq!(json["payload"]["companionSettings"]["sleepOnGame"], true);
+    }
+
+    #[test]
+    fn deprecated_protocol_versions_stay_supported() {
+        assert!(is_supported_protocol_version(PROTOCOL_VERSION));
+        assert!(is_supported_protocol_version(4));
+        assert!(!is_supported_protocol_version(3));
     }
 
     #[test]

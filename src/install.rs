@@ -197,6 +197,7 @@ fn install_inner(debug_ui: bool) -> Result<(), String> {
     // after the lockdown so it adds to, not replaces, the SYSTEM+Admins grant. The
     // exe is copied below and inherits this read access.
     allow_bin_read_acl()?;
+    allow_settings_rw_acl()?;
     set_debug_ui_flag(debug_ui)?;
 
     // Stop + delete BEFORE copying — old exe is locked by the running service.
@@ -440,6 +441,34 @@ fn allow_bin_read_acl() -> Result<(), String> {
         Err(format!(
             "grant {INSTALL_DIR} read ACL failed: {stdout}{stderr}"
         ))
+    }
+}
+
+/// Create `settings.ini` in the (locked) data dir and grant BUILTIN\Users
+/// modify on that ONE file. The dir stays SYSTEM+Admins-only (logs / VK context),
+/// but settings must be readable by the non-elevated tray + desktop app and
+/// writable by the tray, while the SYSTEM service owns the canonical push. The
+/// file is created empty-if-missing so the ACE has something to attach to; the
+/// service/tray populate it via the settings template on first touch.
+fn allow_settings_rw_acl() -> Result<(), String> {
+    let path = Path::new(DATA_DIR).join("settings.ini");
+    if !path.exists() {
+        fs::write(&path, "").map_err(|e| format!("create {}: {e}", path.display()))?;
+    }
+    let out = Command::new("icacls.exe")
+        .args([
+            &path.display().to_string(),
+            "/grant:r",
+            "*S-1-5-32-545:(M)",
+        ])
+        .output()
+        .map_err(|e| format!("icacls.exe: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        Err(format!("grant settings.ini ACL failed: {stdout}{stderr}"))
     }
 }
 

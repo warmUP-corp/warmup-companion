@@ -589,8 +589,20 @@ impl GamepadPoll {
                 continue;
             }
             if self.update_launch_hotkey(change) {
-                self.backend.haptic_alert();
-                edges.push(VkLoopAction::LaunchWarmup);
+                // Only feel like a launch if there's actually something to open.
+                // ponytail: fs probe here is fine — the chord is debounced/rare.
+                if crate::warmup_installed() {
+                    self.backend.haptic_alert();
+                    edges.push(VkLoopAction::LaunchWarmup);
+                } else {
+                    // Distinct, softer feedback: the chord registered, but warmUP
+                    // isn't installed, so we don't fake the launch buzz.
+                    self.backend.haptic_tick();
+                    #[cfg(windows)]
+                    crate::install::log_line(
+                        "launch hotkey ignored: warmUP is not installed",
+                    );
+                }
             }
             if change.button != VK_BUTTON {
                 continue;

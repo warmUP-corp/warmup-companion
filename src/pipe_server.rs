@@ -779,7 +779,8 @@ mod server {
         take_touchpad, DESKTOP_CONNECTED,
     };
     use crate::protocol::{
-        AxisPayload, BatteryPayload, ConnectionPayload, DownFrame, Hello, UpFrame, PROTOCOL_VERSION,
+        is_supported_protocol_version, AxisPayload, BatteryPayload, ConnectionPayload, DownFrame,
+        Hello, UpFrame, PROTOCOL_VERSION,
     };
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
@@ -950,11 +951,13 @@ mod server {
         allowed
     }
 
-    /// Read the client `hello`, reject on version mismatch, reply with our `hello`.
+    /// Read the client `hello`, reject unsupported versions, reply with the negotiated version.
     fn handshake(pipe: HANDLE) -> std::io::Result<()> {
         let line = read_line(pipe)?;
+        let protocol_version;
         match DownFrame::parse_line(line.trim_end()) {
-            Ok(DownFrame::Hello(h)) if h.protocol_version == PROTOCOL_VERSION => {
+            Ok(DownFrame::Hello(h)) if is_supported_protocol_version(h.protocol_version) => {
+                protocol_version = h.protocol_version;
                 if let Some(config) = h.config {
                     if let Ok(p) = serde_json::from_value(config) {
                         apply_config(&p);
@@ -979,7 +982,7 @@ mod server {
             _ => return Err(io_err("hello rejected: missing or invalid hello frame")),
         }
         let reply = UpFrame::Hello(Hello {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version,
             config: None,
             mode: None,
             companion_settings: None,

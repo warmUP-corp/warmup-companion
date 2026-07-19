@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.2.6
+
+- Bigger native prompts: the "Connect controller" / "Press [L3] for keyboard"
+  pills and the controller-connected card are ~2x larger for 10-foot (TV) use.
+- Fix: warmUP theme colors now reach the native prompts. Settings moved to the
+  fixed `C:\ProgramData\WarmupVk\settings.ini` so the SYSTEM service that handles
+  the IPC config push and the one that renders the prompts share the same file
+  (previously split by an unreliable `%LOCALAPPDATA%` under LocalSystem).
+- Fix: the launch hotkey no longer buzzes a fake "launched" confirmation when
+  warmUP isn't installed — it gives a softer tick and logs the skipped launch.
+
 ## v0.2.5
 
 - Polished the controller keyboard, tray menu, voice input, game detection, and branded installer experience.

@@ -1151,6 +1151,14 @@ fn launch_warmup_exe() -> Result<(), String> {
     spawn_warmup(&exe).map_err(|e| format!("{}: {e}", exe.display()))
 }
 
+/// True if a `warmup.exe` can be located (same resolution as launch). Used by the
+/// launch hotkey so it gives honest feedback instead of buzzing "success" when
+/// there's nothing to open.
+#[cfg(feature = "gamepad")]
+pub(crate) fn warmup_installed() -> bool {
+    warmup_exe_path().is_ok()
+}
+
 #[cfg(feature = "gamepad")]
 fn warmup_exe_path() -> Result<std::path::PathBuf, String> {
     if let Some(path) = std::env::var_os("WARMUP_EXE") {
