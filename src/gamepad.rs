@@ -215,6 +215,8 @@ pub struct GamepadPoll {
     vk_toggle_need_release: bool,
     vk_nav_grace_until: Option<Instant>,
     stick_nav: Option<Button>,
+    vk_select_down: bool,
+    vk_select_chord_used: bool,
     launch_select_down: bool,
     launch_lb_down: bool,
     launch_x_down: bool,
@@ -367,6 +369,8 @@ impl GamepadPoll {
             vk_toggle_need_release: false,
             vk_nav_grace_until: None,
             stick_nav: None,
+            vk_select_down: false,
+            vk_select_chord_used: false,
             launch_select_down: false,
             launch_lb_down: false,
             launch_x_down: false,
@@ -389,6 +393,8 @@ impl GamepadPoll {
         self.vk_toggle_need_release = false;
         self.vk_nav_grace_until = None;
         self.stick_nav = None;
+        self.vk_select_down = false;
+        self.vk_select_chord_used = false;
         self.reset_launch_hotkey();
         self.last_vk_open = false;
         #[cfg(windows)]
@@ -583,8 +589,20 @@ impl GamepadPoll {
                 continue;
             }
             if self.update_launch_hotkey(change) {
-                self.backend.haptic_alert();
-                edges.push(VkLoopAction::LaunchWarmup);
+                // Only feel like a launch if there's actually something to open.
+                // ponytail: fs probe here is fine — the chord is debounced/rare.
+                if crate::warmup_installed() {
+                    self.backend.haptic_alert();
+                    edges.push(VkLoopAction::LaunchWarmup);
+                } else {
+                    // Distinct, softer feedback: the chord registered, but warmUP
+                    // isn't installed, so we don't fake the launch buzz.
+                    self.backend.haptic_tick();
+                    #[cfg(windows)]
+                    crate::install::log_line(
+                        "launch hotkey ignored: warmUP is not installed",
+                    );
+                }
             }
             if change.button != VK_BUTTON {
                 continue;
@@ -693,6 +711,7 @@ impl GamepadPoll {
         // X takes the language flip): A/Touchpad=activate, B=backspace, Y=space,
         // Select=engage suggestion strip, LB/RB=cycle chips, Start=Enter,
         // LT=symbols, RT=shift, R3=voice, D-pad/L-stick axis=move focus.
+        // Select chords: Select+X=copy, Select+Y=paste, Select+B=clear focused input.
         match (change.button, change.pressed) {
             (VK_BUTTON, true) => {
                 // Same press that opened the VK is still held — wait for release.
@@ -738,10 +757,16 @@ impl GamepadPoll {
                 None
             }
             (Button::B, true) => {
-                vk_nav::backspace();
-                vk_nav::repeat_pressed(vk_nav::RepeatKey::Backspace);
-                self.backend.haptic_tick();
-                vk_ui::request_repaint();
+                if self.vk_select_down {
+                    self.vk_select_chord_used = true;
+                    vk_nav::clear_focused_input();
+                    self.backend.haptic_confirm();
+                } else {
+                    vk_nav::backspace();
+                    vk_nav::repeat_pressed(vk_nav::RepeatKey::Backspace);
+                    self.backend.haptic_tick();
+                    vk_ui::request_repaint();
+                }
                 None
             }
             (Button::B, false) => {
@@ -749,17 +774,28 @@ impl GamepadPoll {
                 None
             }
             (Button::X, true) => {
-                // L3 keeps its open/close toggle role, so the web's L3 language
-                // flip lives on the otherwise-free X button.
-                vk_nav::toggle_language();
+                if self.vk_select_down {
+                    self.vk_select_chord_used = true;
+                    vk_nav::copy_selection();
+                } else {
+                    // L3 keeps its open/close toggle role, so the web's L3 language
+                    // flip lives on the otherwise-free X button.
+                    vk_nav::toggle_language();
+                }
                 self.backend.haptic_confirm();
                 None
             }
             (Button::Y, true) => {
-                vk_nav::space();
-                vk_nav::repeat_pressed(vk_nav::RepeatKey::Space);
-                self.backend.haptic_tick();
-                vk_ui::request_repaint();
+                if self.vk_select_down {
+                    self.vk_select_chord_used = true;
+                    vk_nav::paste_clipboard();
+                    self.backend.haptic_confirm();
+                } else {
+                    vk_nav::space();
+                    vk_nav::repeat_pressed(vk_nav::RepeatKey::Space);
+                    self.backend.haptic_tick();
+                    vk_ui::request_repaint();
+                }
                 None
             }
             (Button::Y, false) => {
@@ -767,11 +803,20 @@ impl GamepadPoll {
                 None
             }
             (Button::Select, true) => {
-                // Web SELECT: jump into the suggestion strip when populated.
-                if crate::vk_predict::cycle_next() {
-                    self.backend.haptic_tick();
-                    vk_ui::request_repaint();
+                self.vk_select_down = true;
+                self.vk_select_chord_used = false;
+                None
+            }
+            (Button::Select, false) => {
+                self.vk_select_down = false;
+                if !self.vk_select_chord_used {
+                    // Web SELECT: jump into the suggestion strip when populated.
+                    if crate::vk_predict::cycle_next() {
+                        self.backend.haptic_tick();
+                        vk_ui::request_repaint();
+                    }
                 }
+                self.vk_select_chord_used = false;
                 None
             }
             (Button::Lb, true) => {
@@ -1003,6 +1048,7 @@ where
         println!("  X            → language (QWERTY/QWERTZ)");
         println!("  Y            → space");
         println!("  Select       → suggestion strip");
+        println!("  Select+X/Y/B → copy / paste / clear input");
         println!("  Start        → Enter");
         println!("  LB / RB      → cycle autocomplete chips");
         println!("  LT           → &123 symbols");

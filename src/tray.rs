@@ -10,6 +10,9 @@ use std::path::Path;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
+};
 use windows::Win32::UI::Shell::{
     ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
     NOTIFYICONDATAW,
@@ -22,9 +25,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MB_ICONINFORMATION, MB_OK, MF_CHECKED, MF_DISABLED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG,
     SW_SHOWNORMAL, TPM_BOTTOMALIGN, TPM_LEFTALIGN, WM_APP, WM_COMMAND, WM_DESTROY, WM_HOTKEY,
     WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
-};
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
 };
 
 const CLASS_NAME: windows::core::PCWSTR = w!("WarmupCompanionTray");
@@ -102,7 +102,12 @@ fn tray_thread() {
         );
         // Ctrl+Alt+V toggles voice dictation (mirrors R3), even with the keyboard
         // closed. MOD_NOREPEAT so holding the combo doesn't thrash the toggle.
-        let _ = RegisterHotKey(hwnd, HOTKEY_VOICE, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 0x56);
+        let _ = RegisterHotKey(
+            hwnd,
+            HOTKEY_VOICE,
+            MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
+            0x56,
+        );
         try_add_icon(hwnd);
         if !ICON_ADDED.load(Ordering::SeqCst) {
             let _ = SetTimer(hwnd, ADD_RETRY_TIMER_ID, ADD_RETRY_TIMER_MS, None);
@@ -248,12 +253,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     let _ = crate::config::write_userland_poll_paused(paused);
                 }
                 MENU_COMPACT => toggle_compact(),
-                MENU_SLEEP_ON_GAME => {
-                    toggle_setting_bool("sleep_on_game", crate::config::gamepad_settings().sleep_on_game)
-                }
-                MENU_AUTOSTOP_ON_GAME => {
-                    toggle_setting_bool("auto_stop_on_game", crate::config::gamepad_settings().auto_stop_on_game)
-                }
+                MENU_SLEEP_ON_GAME => toggle_setting_bool(
+                    "sleep_on_game",
+                    crate::config::gamepad_settings().sleep_on_game,
+                ),
+                MENU_AUTOSTOP_ON_GAME => toggle_setting_bool(
+                    "auto_stop_on_game",
+                    crate::config::gamepad_settings().auto_stop_on_game,
+                ),
                 MENU_VK_FLOATING => toggle_vk_mode(),
                 MENU_EDIT_SETTINGS => edit_settings(),
                 MENU_ENGINE_WHISPER => crate::win::speech_input::set_engine("whisper"),
@@ -271,6 +278,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 MENU_RESTORE_NATIVE_KBD => restore_native_keyboard(hwnd),
                 MENU_UNINSTALL => uninstall(),
                 MENU_EXIT => {
+                    crate::install::request_service_stop();
                     crate::gamepad::request_stop();
                     PostQuitMessage(0);
                 }
@@ -301,7 +309,12 @@ unsafe fn show_menu(hwnd: HWND) {
 
     // Primary control stays top-level (a stable label + check, not a verb that swaps).
     let paused = crate::gamepad_backend::userland_poll_paused();
-    let _ = AppendMenuW(menu, chk(paused), MENU_TOGGLE_POLL, w!("Pause gamepad input"));
+    let _ = AppendMenuW(
+        menu,
+        chk(paused),
+        MENU_TOGGLE_POLL,
+        w!("Pause gamepad input"),
+    );
 
     // Keyboard.
     let kb = CreatePopupMenu().unwrap_or_default();
@@ -346,15 +359,29 @@ unsafe fn show_menu(hwnd: HWND) {
             if !eng.0.is_null() {
                 let parakeet = crate::win::speech_input::engine() == "parakeet";
                 let _ = AppendMenuW(eng, chk(!parakeet), MENU_ENGINE_WHISPER, w!("Whisper"));
-                let _ = AppendMenuW(eng, chk(parakeet), MENU_ENGINE_PARAKEET, w!("Parakeet (NVIDIA)"));
+                let _ = AppendMenuW(
+                    eng,
+                    chk(parakeet),
+                    MENU_ENGINE_PARAKEET,
+                    w!("Parakeet (NVIDIA)"),
+                );
                 let _ = AppendMenuW(menu, MF_POPUP, eng.0 as usize, w!("Voice engine"));
             }
         }
         let sub = CreatePopupMenu().unwrap_or_default();
         if !sub.0.is_null() {
             let cur = crate::win::speech_input::mic_choice();
-            let _ = AppendMenuW(sub, chk(cur.is_none()), MENU_MIC_DEFAULT, w!("Default (system)"));
-            for (i, name) in crate::win::speech_input::list_mics().iter().enumerate().take(32) {
+            let _ = AppendMenuW(
+                sub,
+                chk(cur.is_none()),
+                MENU_MIC_DEFAULT,
+                w!("Default (system)"),
+            );
+            for (i, name) in crate::win::speech_input::list_mics()
+                .iter()
+                .enumerate()
+                .take(32)
+            {
                 let on = cur.as_deref().map(|c| name.contains(c)).unwrap_or(false);
                 mic_labels.push(wide(name));
                 let label = mic_labels.last().unwrap();
@@ -369,7 +396,12 @@ unsafe fn show_menu(hwnd: HWND) {
     if !diag.0.is_null() {
         let _ = AppendMenuW(diag, MF_STRING, MENU_OPEN_LOG, w!("Open service log"));
         let _ = AppendMenuW(diag, MF_STRING, MENU_DIAGNOSTICS, w!("Run diagnostics"));
-        let _ = AppendMenuW(diag, MF_STRING, MENU_EDIT_SETTINGS, w!("Edit settings file…"));
+        let _ = AppendMenuW(
+            diag,
+            MF_STRING,
+            MENU_EDIT_SETTINGS,
+            w!("Edit settings file…"),
+        );
         let _ = AppendMenuW(diag, MF_STRING, MENU_PRIVACY, w!("Privacy & trust model"));
         let _ = AppendMenuW(menu, MF_POPUP, diag.0 as usize, w!("Diagnostics"));
     }

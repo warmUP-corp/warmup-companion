@@ -38,8 +38,6 @@ mod win;
 #[path = "win_stub.rs"]
 mod win;
 
-#[cfg(all(windows, feature = "gamepad"))]
-mod parental_guard;
 #[cfg(feature = "gamepad")]
 mod gamepad;
 #[cfg(feature = "gamepad")]
@@ -50,6 +48,8 @@ mod hid_gamepad;
 mod hid_reader;
 #[cfg(all(windows, feature = "gamepad"))]
 mod pad_decode;
+#[cfg(all(windows, feature = "gamepad"))]
+mod parental_guard;
 #[cfg(feature = "gamepad")]
 mod pc_cursor;
 #[cfg(all(windows, feature = "gamepad"))]
@@ -1149,6 +1149,14 @@ pub(crate) fn run_boot_gamepad_loop(
 fn launch_warmup_exe() -> Result<(), String> {
     let exe = warmup_exe_path()?;
     spawn_warmup(&exe).map_err(|e| format!("{}: {e}", exe.display()))
+}
+
+/// True if a `warmup.exe` can be located (same resolution as launch). Used by the
+/// launch hotkey so it gives honest feedback instead of buzzing "success" when
+/// there's nothing to open.
+#[cfg(feature = "gamepad")]
+pub(crate) fn warmup_installed() -> bool {
+    warmup_exe_path().is_ok()
 }
 
 #[cfg(feature = "gamepad")]

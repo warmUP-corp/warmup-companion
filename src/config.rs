@@ -420,11 +420,24 @@ pub fn set_userland_gamepad_poll_mode(mode: warmup_gamepad::PollMode) -> Result<
 
 #[cfg(feature = "gamepad")]
 pub fn settings_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("LOCALAPPDATA").map(|base| {
-        std::path::PathBuf::from(base)
-            .join("WarmupVk")
-            .join(SETTINGS_FILE)
-    })
+    // Fixed, machine-wide location so the session-0 SYSTEM service (which handles
+    // the IPC config push AND renders the Winlogon prompts) always resolves the
+    // SAME file. `%LOCALAPPDATA%` is unreliable under LocalSystem — often unset or
+    // pointing at systemprofile — so theme/cursor pushes never met the reader.
+    // The installer grants Users read/write on this one file (the dir stays locked
+    // to SYSTEM+Admins), so the tray and desktop app can still read/edit it.
+    #[cfg(windows)]
+    {
+        Some(std::path::PathBuf::from(r"C:\ProgramData\WarmupVk").join(SETTINGS_FILE))
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("LOCALAPPDATA").map(|base| {
+            std::path::PathBuf::from(base)
+                .join("WarmupVk")
+                .join(SETTINGS_FILE)
+        })
+    }
 }
 
 /// Commented `settings.ini` template. Each value line is commented and free of

@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.2.6
+
+- Bigger native prompts: the "Connect controller" / "Press [L3] for keyboard"
+  pills and the controller-connected card are ~2x larger for 10-foot (TV) use.
+- Fix: warmUP theme colors now reach the native prompts. Settings moved to the
+  fixed `C:\ProgramData\WarmupVk\settings.ini` so the SYSTEM service that handles
+  the IPC config push and the one that renders the prompts share the same file
+  (previously split by an unreliable `%LOCALAPPDATA%` under LocalSystem).
+- Fix: the launch hotkey no longer buzzes a fake "launched" confirmation when
+  warmUP isn't installed — it gives a softer tick and logs the skipped launch.
+
+## v0.2.5
+
+- Polished the controller keyboard, tray menu, voice input, game detection, and branded installer experience.
+- Silent installs now include offline Parakeet voice typing by default and run helper processes without terminal windows.
+- Uninstall now fails safely when the service cannot stop, removes stale installed assets, and stays silent.
+- Tray **Exit** now stops `WarmupVkSvc` instead of allowing the service worker to relaunch.
+- The installer finish page now prominently links to the warmUP Game Launcher.
+
+## v0.2.4
+
+- Kid Mode companion IPC v5 support with system-wide game blocking notifications.
+- Installer metadata now reports the release version.
+
 ## v0.2.3
 
 - Browser mode: accept warmUP desktop's `browserActive` mode bit so L3/R3 stay

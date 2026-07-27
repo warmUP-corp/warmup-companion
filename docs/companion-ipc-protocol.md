@@ -28,11 +28,11 @@ Serde representation: `#[serde(tag = "type", content = "payload", rename_all = "
 
 ## Handshake — `hello`
 
-The client sends `hello` as its **first** frame after connecting. The server replies with its own `hello`. If `protocolVersion` differs, the **server closes the connection** (the client backs off and retries — typically after one side is upgraded).
+The client sends `hello` as its **first** frame after connecting. The server replies with its own `hello`, echoing the accepted `protocolVersion`. If `protocolVersion` is unsupported, the **server closes the connection** (the client backs off and retries — typically after one side is upgraded).
 
 ```json
 {"type":"hello","payload":{
-  "protocolVersion": 4,
+  "protocolVersion": 5,
   "config": { ...GamepadConfig },
   "mode": {
     "gameActive": false,
@@ -47,7 +47,7 @@ The client sends `hello` as its **first** frame after connecting. The server rep
 
 | Field | Who sends | Notes |
 |---|---|---|
-| `protocolVersion` | both | single integer; bumped on any breaking wire change |
+| `protocolVersion` | both | single integer; bumped on any breaking wire change; v4 is deprecated but still accepted |
 | `config` | client | desktop's current `GamepadConfig` snapshot (so the companion starts with the right tuning); server omits |
 | `mode` | client | desktop's current mode snapshot; server omits |
 | `companionSettings` | client | desktop-pushed companion-local settings snapshot; server omits |
@@ -150,13 +150,14 @@ fields keep the native keyboard's current dark/light default for that color slot
 
 ## Versioning policy
 
-- `protocolVersion` is a **single integer**, currently `4`.
+- `protocolVersion` is a **single integer**, currently `5`.
+- Deprecated protocol versions remain accepted while their frames are wire-compatible; currently accepted deprecated versions: `4`.
 - `browserActive` is an additive v4-compatible mode field; old companions ignore it, new companions use it to keep browser L3/R3 local to native VK/voice.
 - `axis` is an additive v4-compatible up-frame; old desktop clients ignore it as unknown, old companions simply omit it.
 - `led` is an additive v4-compatible down-frame for one-shot test writes; old companions ignore it as unknown.
 - Additive fields may stay on the current protocol when both directions are default/unknown-field tolerant.
 - Breaking changes to the pipe name, framing, `hello` shape, or required frame `payload` fields bump it.
-- A version mismatch is resolved by the server closing the connection; the client surfaces a "companion update required" state rather than interpreting unknown frames.
+- An unsupported version is resolved by the server closing the connection; the client surfaces a "companion update required" state rather than interpreting unknown frames.
 
 ## Golden fixtures
 

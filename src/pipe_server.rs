@@ -773,34 +773,35 @@ pub fn spawn() {}
 #[cfg(windows)]
 mod server {
     use super::{
-        DESKTOP_CONNECTED, apply_companion_settings, apply_config, apply_led, apply_mode,
-        apply_parental_guard, apply_rumble, clear_desktop_mode, current, current_axis,
-        current_battery, drain_buttons, drain_parental_blocked, reset_button_stream,
-        set_native_vk_request, take_cursor_moved, take_touchpad,
+        apply_companion_settings, apply_config, apply_led, apply_mode, apply_parental_guard,
+        apply_rumble, clear_desktop_mode, current, current_axis, current_battery, drain_buttons,
+        drain_parental_blocked, reset_button_stream, set_native_vk_request, take_cursor_moved,
+        take_touchpad, DESKTOP_CONNECTED,
     };
     use crate::protocol::{
-        AxisPayload, BatteryPayload, ConnectionPayload, DownFrame, Hello, PROTOCOL_VERSION, UpFrame,
+        is_supported_protocol_version, AxisPayload, BatteryPayload, ConnectionPayload, DownFrame,
+        Hello, UpFrame, PROTOCOL_VERSION,
     };
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
+    use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
-        CloseHandle, GetLastError, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree,
+        CloseHandle, GetLastError, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
     };
     use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
     use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows::Win32::Storage::FileSystem::{
-        FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAGS_AND_ATTRIBUTES, PIPE_ACCESS_DUPLEX, ReadFile,
-        WriteFile,
+        ReadFile, WriteFile, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_ACCESS_DUPLEX,
     };
     use windows::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
-        PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, PeekNamedPipe,
+        PeekNamedPipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
     use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
-        QueryFullProcessImageNameW,
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    use windows::core::PCWSTR;
 
     const PIPE_NAME: &str = r"\\.\pipe\warmup-input";
     /// SYSTEM full control; the interactive user (the desktop's account) gets read+write.
@@ -950,11 +951,13 @@ mod server {
         allowed
     }
 
-    /// Read the client `hello`, reject on version mismatch, reply with our `hello`.
+    /// Read the client `hello`, reject unsupported versions, reply with the negotiated version.
     fn handshake(pipe: HANDLE) -> std::io::Result<()> {
         let line = read_line(pipe)?;
+        let protocol_version;
         match DownFrame::parse_line(line.trim_end()) {
-            Ok(DownFrame::Hello(h)) if h.protocol_version == PROTOCOL_VERSION => {
+            Ok(DownFrame::Hello(h)) if is_supported_protocol_version(h.protocol_version) => {
+                protocol_version = h.protocol_version;
                 if let Some(config) = h.config {
                     if let Ok(p) = serde_json::from_value(config) {
                         apply_config(&p);
@@ -979,7 +982,7 @@ mod server {
             _ => return Err(io_err("hello rejected: missing or invalid hello frame")),
         }
         let reply = UpFrame::Hello(Hello {
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version,
             config: None,
             mode: None,
             companion_settings: None,
@@ -1413,10 +1416,9 @@ mod tests {
         });
 
         let cmds = drain_device_commands();
-        assert!(
-            cmds.iter()
-                .any(|cmd| matches!(cmd, PadCommand::Led { r: 0, g: 0, b: 0 }))
-        );
+        assert!(cmds
+            .iter()
+            .any(|cmd| matches!(cmd, PadCommand::Led { r: 0, g: 0, b: 0 })));
         let st = *led_state().lock().unwrap();
         assert_eq!(st.effect, LedEffect::Off);
         assert_eq!(led_color_at(&st, 0.0), (0, 0, 0));

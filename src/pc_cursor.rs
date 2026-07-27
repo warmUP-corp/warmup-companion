@@ -236,7 +236,11 @@ impl PcCursor {
             return;
         }
         self.right_held = down;
-        self.dispatch(if down { Cmd::RButtonDown } else { Cmd::RButtonUp });
+        self.dispatch(if down {
+            Cmd::RButtonDown
+        } else {
+            Cmd::RButtonUp
+        });
     }
 
     /// Tap Enter into the focused app, routed through the same desktop-correct
