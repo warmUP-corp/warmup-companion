@@ -36,6 +36,75 @@ static BROWSER_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// True while a warmUP desktop client has completed the pipe handshake.
 static DESKTOP_CONNECTED: AtomicBool = AtomicBool::new(false);
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub(crate) struct TrackingOwner {
+    pub user_sid: String,
+    pub session_id: u32,
+}
+
+#[cfg(windows)]
+pub(crate) fn tracking_owner_from_process(
+    process: windows::Win32::Foundation::HANDLE,
+    pid: u32,
+) -> Option<TrackingOwner> {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+    use windows::Win32::System::Threading::OpenProcessToken;
+
+    let mut session_id = 0u32;
+    unsafe { ProcessIdToSessionId(pid, &mut session_id) }.ok()?;
+    if session_id == 0 {
+        return None;
+    }
+
+    let mut token = HANDLE::default();
+    unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.ok()?;
+    let sid = unsafe {
+        let mut len = 0u32;
+        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
+        if len == 0 {
+            None
+        } else {
+            let mut buf = vec![0u8; len as usize];
+            if GetTokenInformation(
+                token,
+                TokenUser,
+                Some(buf.as_mut_ptr().cast()),
+                len,
+                &mut len,
+            )
+            .is_err()
+            {
+                None
+            } else {
+                let token_user = std::ptr::read_unaligned(buf.as_ptr().cast::<TOKEN_USER>());
+                let mut sid_string = PWSTR::null();
+                if ConvertSidToStringSidW(token_user.User.Sid, &mut sid_string).is_err() {
+                    None
+                } else {
+                    let value = sid_string.to_string().ok();
+                    let _ = LocalFree(HLOCAL(sid_string.0.cast()));
+                    value
+                }
+            }
+        }
+    };
+    unsafe {
+        let _ = CloseHandle(token);
+    }
+    let user_sid = sid?;
+    if user_sid.eq_ignore_ascii_case("S-1-5-18") {
+        return None;
+    }
+    Some(TrackingOwner {
+        user_sid,
+        session_id,
+    })
+}
+
 /// Coalesced visual-cursor hint accumulated since the last send: `(dx, dy, dirty)`.
 static CURSOR_ACC: OnceLock<Mutex<(f64, f64, bool)>> = OnceLock::new();
 
@@ -77,6 +146,20 @@ pub fn browser_active() -> bool {
 /// Whether warmUP is connected and should be the source of truth for mode state.
 pub fn desktop_connected() -> bool {
     DESKTOP_CONNECTED.load(Ordering::Relaxed)
+}
+
+#[cfg(windows)]
+fn same_executable_path(actual: &std::path::Path, expected: &std::path::Path) -> bool {
+    let normalize = |path: &std::path::Path| {
+        std::fs::canonicalize(path).ok().map(|canonical| {
+            canonical
+                .to_string_lossy()
+                .trim_start_matches(r"\\?\")
+                .replace('/', "\\")
+                .to_ascii_lowercase()
+        })
+    };
+    matches!((normalize(actual), normalize(expected)), (Some(actual), Some(expected)) if actual == expected)
 }
 
 /// Pending `native_vk` request from the desktop: 0 = none, 1 = open, 2 = close.
@@ -738,12 +821,16 @@ fn drain_parental_blocked() -> Vec<ParentalBlockedPayload> {
 }
 
 #[cfg(all(windows, feature = "gamepad"))]
-fn apply_library_watch(payload: &crate::protocol::LibraryWatchPayload) {
-    crate::library_watch::apply_watch(payload);
+fn apply_library_watch(owner: &TrackingOwner, payload: &crate::protocol::LibraryWatchPayload) {
+    if let Err(error) = crate::library_watch::apply_watch(owner, payload) {
+        crate::install::log_line(&format!(
+            "library watch rejected without changing state: {error:?}"
+        ));
+    }
 }
 
 #[cfg(all(windows, not(feature = "gamepad")))]
-fn apply_library_watch(_payload: &crate::protocol::LibraryWatchPayload) {}
+fn apply_library_watch(_owner: &TrackingOwner, _payload: &crate::protocol::LibraryWatchPayload) {}
 
 #[cfg(all(windows, feature = "gamepad"))]
 fn apply_parental_guard(payload: &ParentalGuardPayload) {
@@ -754,12 +841,22 @@ fn apply_parental_guard(payload: &ParentalGuardPayload) {
 fn apply_parental_guard(_payload: &ParentalGuardPayload) {}
 
 #[cfg(all(windows, feature = "gamepad"))]
-fn apply_play_sessions_ack(payload: &crate::protocol::PlaySessionsAckPayload) {
-    crate::playtime_tracker::apply_play_sessions_ack(payload);
+fn apply_play_sessions_ack(
+    owner: &TrackingOwner,
+    payload: &crate::protocol::PlaySessionsAckPayload,
+    issued: &std::collections::HashSet<String>,
+) -> usize {
+    crate::playtime_tracker::apply_play_sessions_ack(owner, payload, issued)
 }
 
 #[cfg(all(windows, not(feature = "gamepad")))]
-fn apply_play_sessions_ack(_payload: &crate::protocol::PlaySessionsAckPayload) {}
+fn apply_play_sessions_ack(
+    _owner: &TrackingOwner,
+    _payload: &crate::protocol::PlaySessionsAckPayload,
+    _issued: &std::collections::HashSet<String>,
+) -> usize {
+    0
+}
 
 /// Drop any edges queued before a client connected (they are stale to the new client),
 /// and reset Guide-dedupe state so the first post-connect Guide edge always sends.
@@ -790,14 +887,17 @@ pub fn spawn() {}
 mod server {
     use super::{
         apply_companion_settings, apply_config, apply_led, apply_library_watch, apply_mode,
-        apply_parental_guard, apply_play_sessions_ack, apply_rumble, clear_desktop_mode, current, current_axis, current_battery, drain_buttons,
-        drain_parental_blocked, reset_button_stream, set_native_vk_request, take_cursor_moved,
-        take_touchpad, DESKTOP_CONNECTED,
+        apply_parental_guard, apply_play_sessions_ack, apply_rumble, clear_desktop_mode, current,
+        current_axis, current_battery, drain_buttons, drain_parental_blocked, reset_button_stream,
+        same_executable_path, set_native_vk_request, take_cursor_moved, take_touchpad,
+        tracking_owner_from_process, TrackingOwner, DESKTOP_CONNECTED,
     };
     use crate::protocol::{
         is_supported_protocol_version, AxisPayload, BatteryPayload, ConnectionPayload, DownFrame,
         Hello, UpFrame, PROTOCOL_VERSION,
     };
+    use std::collections::HashSet;
+    use std::path::PathBuf;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
     use windows::core::PCWSTR;
@@ -828,6 +928,10 @@ mod server {
     /// Throttle for outbound `cursor_moved` hints (the OS cursor already moved; this just
     /// keeps the webview's visual cursor in sync).
     const CURSOR_HINT_INTERVAL: Duration = Duration::from_millis(100);
+
+    struct ClientIdentity {
+        owner: TrackingOwner,
+    }
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -907,34 +1011,33 @@ mod server {
     fn serve_one(pipe: HANDLE) {
         // Block until a client connects. ERROR_PIPE_CONNECTED (client beat us to it) is fine.
         let _ = unsafe { ConnectNamedPipe(pipe, None) };
-        if !client_process_allowed(pipe) {
-            // client_process_allowed logs the rejected process name.
+        let Some(identity) = client_identity(pipe) else {
             unsafe {
                 let _ = DisconnectNamedPipe(pipe);
             }
             return;
-        }
-        if handshake(pipe).is_ok() {
+        };
+        DESKTOP_CONNECTED.store(true, Ordering::Relaxed);
+        if let Ok(issued_session_ids) = handshake(pipe, &identity) {
             // Drop edges queued before this client connected (stale to it).
             reset_button_stream();
-            DESKTOP_CONNECTED.store(true, Ordering::Relaxed);
-            stream(pipe);
-            DESKTOP_CONNECTED.store(false, Ordering::Relaxed);
-            clear_desktop_mode();
+            stream(pipe, &identity.owner, issued_session_ids);
         }
+        DESKTOP_CONNECTED.store(false, Ordering::Relaxed);
+        clear_desktop_mode();
         unsafe {
             let _ = DisconnectNamedPipe(pipe);
         }
     }
 
-    fn client_process_allowed(pipe: HANDLE) -> bool {
+    fn client_identity(pipe: HANDLE) -> Option<ClientIdentity> {
         let mut pid = 0u32;
         if unsafe { GetNamedPipeClientProcessId(pipe, &mut pid) }.is_err() {
-            return false;
+            return None;
         }
         let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) })
         else {
-            return false;
+            return None;
         };
         let mut buf = [0u16; 32768];
         let mut len = buf.len() as u32;
@@ -947,28 +1050,51 @@ mod server {
             )
         }
         .is_ok();
+        if !ok || len == 0 {
+            unsafe {
+                let _ = CloseHandle(process);
+            }
+            return None;
+        }
+        let image = String::from_utf16_lossy(&buf[..len as usize]);
+        let actual_path = PathBuf::from(&image);
+        let expected_path = match crate::warmup_exe_path() {
+            Ok(path) => path,
+            Err(error) => {
+                crate::install::log_line(&format!(
+                    "pipe client rejected: trusted warmUP path unavailable: {error}"
+                ));
+                unsafe {
+                    let _ = CloseHandle(process);
+                }
+                return None;
+            }
+        };
+        if !same_executable_path(&actual_path, &expected_path) {
+            crate::install::log_line(&format!(
+                "pipe client rejected: process '{}' does not match trusted '{}'",
+                actual_path.display(),
+                expected_path.display()
+            ));
+            unsafe {
+                let _ = CloseHandle(process);
+            }
+            return None;
+        }
+        let owner = tracking_owner_from_process(process, pid);
         unsafe {
             let _ = CloseHandle(process);
         }
-        if !ok || len == 0 {
-            return false;
+        if owner.is_none() {
+            crate::install::log_line(
+                "pipe client rejected: process has no interactive non-System owner",
+            );
         }
-        let image = String::from_utf16_lossy(&buf[..len as usize]);
-        let name = std::path::Path::new(&image)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default();
-        let allowed = name.eq_ignore_ascii_case("warmUP.exe");
-        if !allowed {
-            crate::install::log_line(&format!(
-                "pipe client rejected: process '{name}' (expected warmUP.exe)"
-            ));
-        }
-        allowed
+        owner.map(|owner| ClientIdentity { owner })
     }
 
     /// Read the client `hello`, reject unsupported versions, reply with the negotiated version.
-    fn handshake(pipe: HANDLE) -> std::io::Result<()> {
+    fn handshake(pipe: HANDLE, identity: &ClientIdentity) -> std::io::Result<HashSet<String>> {
         let line = read_line(pipe)?;
         let protocol_version;
         match DownFrame::parse_line(line.trim_end()) {
@@ -989,7 +1115,7 @@ mod server {
                     apply_parental_guard(&guard);
                 }
                 if let Some(watch) = h.library_watch {
-                    apply_library_watch(&watch);
+                    apply_library_watch(&identity.owner, &watch);
                 }
             }
             Ok(DownFrame::Hello(h)) => {
@@ -1011,28 +1137,39 @@ mod server {
         write_all(pipe, reply.to_ndjson_line().as_bytes())?;
         #[cfg(feature = "gamepad")]
         {
-            crate::playtime_tracker::on_desktop_connected();
-            flush_play_sessions(pipe)?;
+            crate::playtime_tracker::on_desktop_connected(&identity.owner);
+            if protocol_version == PROTOCOL_VERSION {
+                return flush_play_sessions(pipe, &identity.owner);
+            }
         }
-        Ok(())
+        Ok(HashSet::new())
     }
 
     /// Push any closed offline sessions to warmUP immediately after handshake.
-    fn flush_play_sessions(pipe: HANDLE) -> std::io::Result<()> {
-        let payload = crate::playtime_tracker::take_closed_sessions_for_flush();
+    fn flush_play_sessions(
+        pipe: HANDLE,
+        owner: &TrackingOwner,
+    ) -> std::io::Result<HashSet<String>> {
+        let payload = crate::playtime_tracker::take_closed_sessions_for_flush(owner);
         if payload.sessions.is_empty() {
-            return Ok(());
+            return Ok(HashSet::new());
         }
+        let issued = payload
+            .sessions
+            .iter()
+            .map(|session| session.external_id.clone())
+            .collect();
         write_all(
             pipe,
             UpFrame::PlaySessions(payload).to_ndjson_line().as_bytes(),
-        )
+        )?;
+        Ok(issued)
     }
 
     /// Full-duplex session: drain inbound `config` (non-blocking), and write button edges
     /// (low latency), `cursor_moved` hints (throttled), and connection snapshots (on change
     /// plus a keepalive so a dropped idle client is noticed via the write error).
-    fn stream(pipe: HANDLE) {
+    fn stream(pipe: HANDLE, owner: &TrackingOwner, mut issued_session_ids: HashSet<String>) {
         let mut last: Option<ConnectionPayload> = None;
         let mut last_battery: Option<BatteryPayload> = None;
         let mut last_axis: Option<AxisPayload> = None;
@@ -1042,7 +1179,7 @@ mod server {
         let mut last_cursor_write = Instant::now();
         loop {
             // Inbound config — never block the writer; only read a line that is fully buffered.
-            if drain_inbound_config(pipe).is_err() {
+            if drain_inbound_config(pipe, owner, &mut issued_session_ids).is_err() {
                 return;
             }
             for edge in drain_buttons() {
@@ -1115,7 +1252,11 @@ mod server {
     }
 
     /// Read and apply any fully-buffered `config` lines without blocking the write side.
-    fn drain_inbound_config(pipe: HANDLE) -> std::io::Result<()> {
+    fn drain_inbound_config(
+        pipe: HANDLE,
+        owner: &TrackingOwner,
+        issued_session_ids: &mut HashSet<String>,
+    ) -> std::io::Result<()> {
         while peek_has_newline(pipe)? {
             let line = read_line(pipe)?;
             let trimmed = line.trim_end();
@@ -1130,8 +1271,14 @@ mod server {
                 Ok(DownFrame::CompanionSettings(p)) => apply_companion_settings(&p),
                 Ok(DownFrame::NativeVk(p)) => set_native_vk_request(&p),
                 Ok(DownFrame::ParentalGuard(p)) => apply_parental_guard(&p),
-                Ok(DownFrame::LibraryWatch(p)) => apply_library_watch(&p),
-                Ok(DownFrame::PlaySessionsAck(p)) => apply_play_sessions_ack(&p),
+                Ok(DownFrame::LibraryWatch(p)) => apply_library_watch(owner, &p),
+                Ok(DownFrame::PlaySessionsAck(p)) => {
+                    let removed = apply_play_sessions_ack(owner, &p, issued_session_ids);
+                    if removed != 0 {
+                        issued_session_ids
+                            .retain(|external_id| !p.external_ids.contains(external_id));
+                    }
+                }
                 // A malformed known-type frame is a contract break (e.g. the rumble
                 // durationMs mismatch) — log it instead of dropping silently.
                 Err(e) => {
@@ -1210,6 +1357,29 @@ mod tests {
     fn none_or_empty_label_is_disconnected() {
         assert!(!label_to_payload("none").connected);
         assert!(!label_to_payload("").connected);
+    }
+
+    #[test]
+    fn executable_auth_rejects_same_basename_from_another_path() {
+        let root = std::env::temp_dir().join(format!(
+            "warmup-pipe-auth-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let trusted = root.join("trusted").join("warmUP.exe");
+        let spoofed = root.join("spoofed").join("warmUP.exe");
+        std::fs::create_dir_all(trusted.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(spoofed.parent().unwrap()).unwrap();
+        std::fs::write(&trusted, b"trusted").unwrap();
+        std::fs::write(&spoofed, b"spoofed").unwrap();
+
+        assert!(same_executable_path(&trusted, &trusted));
+        assert!(!same_executable_path(&spoofed, &trusted));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

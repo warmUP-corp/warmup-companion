@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::pipe_server::TrackingOwner;
 use crate::protocol::{ParentalBlockedPayload, ParentalGuardPayload};
 
 const GUARD_FILE: &str = r"C:\ProgramData\WarmupVk\parental-guard.json";
@@ -187,6 +188,18 @@ fn is_protected_process(exe_name: &str, image_path: Option<&str>) -> bool {
 }
 
 pub(crate) fn snapshot_processes() -> Vec<(u32, String, Option<String>)> {
+    snapshot_processes_filtered(None)
+}
+
+pub(crate) fn snapshot_processes_for_owner(
+    owner: &TrackingOwner,
+) -> Vec<(u32, String, Option<String>)> {
+    snapshot_processes_filtered(Some(owner))
+}
+
+fn snapshot_processes_filtered(
+    owner_filter: Option<&TrackingOwner>,
+) -> Vec<(u32, String, Option<String>)> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
@@ -204,13 +217,32 @@ pub(crate) fn snapshot_processes() -> Vec<(u32, String, Option<String>)> {
         };
         if Process32FirstW(snap, &mut pe).is_ok() {
             loop {
+                if let Some(expected_owner) = owner_filter {
+                    if !process_is_in_session(pe.th32ProcessID, expected_owner.session_id) {
+                        if Process32NextW(snap, &mut pe).is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                }
                 let nul = pe
                     .szExeFile
                     .iter()
                     .position(|&x| x == 0)
                     .unwrap_or(pe.szExeFile.len());
                 let name = String::from_utf16_lossy(&pe.szExeFile[..nul]);
-                let image_path = full_process_image_path(pe.th32ProcessID);
+                let image_path = if let Some(expected_owner) = owner_filter {
+                    let Some(path) = owned_process_image_path(pe.th32ProcessID, expected_owner)
+                    else {
+                        if Process32NextW(snap, &mut pe).is_err() {
+                            break;
+                        }
+                        continue;
+                    };
+                    path
+                } else {
+                    full_process_image_path(pe.th32ProcessID)
+                };
                 out.push((pe.th32ProcessID, name, image_path));
                 if Process32NextW(snap, &mut pe).is_err() {
                     break;
@@ -222,27 +254,82 @@ pub(crate) fn snapshot_processes() -> Vec<(u32, String, Option<String>)> {
     out
 }
 
+fn process_is_in_session(pid: u32, expected_session: u32) -> bool {
+    use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+
+    let mut actual_session = 0u32;
+    unsafe { ProcessIdToSessionId(pid, &mut actual_session) }.is_ok()
+        && actual_session == expected_session
+}
+
 fn full_process_image_path(pid: u32) -> Option<String> {
-    use windows::core::PWSTR;
     use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-        PROCESS_QUERY_LIMITED_INFORMATION,
-    };
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-        let mut buf = vec![0u16; 1024];
-        let mut size = buf.len() as u32;
-        let res = QueryFullProcessImageNameW(
+        let path = process_image_path(handle);
+        let _ = CloseHandle(handle);
+        path
+    }
+}
+
+fn owned_process_image_path(pid: u32, expected_owner: &TrackingOwner) -> Option<Option<String>> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        if crate::pipe_server::tracking_owner_from_process(handle, pid).as_ref()
+            != Some(expected_owner)
+        {
+            let _ = CloseHandle(handle);
+            return None;
+        }
+        let path = process_image_path(handle);
+        let _ = CloseHandle(handle);
+        Some(path)
+    }
+}
+
+fn process_image_path(handle: windows::Win32::Foundation::HANDLE) -> Option<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::System::Threading::{QueryFullProcessImageNameW, PROCESS_NAME_WIN32};
+
+    let mut buf = vec![0u16; 1024];
+    let mut size = buf.len() as u32;
+    unsafe {
+        QueryFullProcessImageNameW(
             handle,
             PROCESS_NAME_WIN32,
             PWSTR(buf.as_mut_ptr()),
             &mut size,
-        );
-        let _ = CloseHandle(handle);
-        res.ok()?;
-        Some(String::from_utf16_lossy(&buf[..size as usize]))
+        )
+    }
+    .ok()?;
+    Some(String::from_utf16_lossy(&buf[..size as usize]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_filter_requires_the_authenticated_sid_and_session() {
+        use windows::Win32::System::Threading::GetCurrentProcess;
+
+        let pid = std::process::id();
+        let owner =
+            crate::pipe_server::tracking_owner_from_process(unsafe { GetCurrentProcess() }, pid)
+                .unwrap();
+
+        assert!(process_is_in_session(pid, owner.session_id));
+        assert!(!process_is_in_session(pid, u32::MAX));
+        assert!(owned_process_image_path(pid, &owner).is_some());
+
+        let mut other_user = owner;
+        other_user.user_sid = "S-1-5-21-other".into();
+        assert!(owned_process_image_path(pid, &other_user).is_none());
     }
 }
 

@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::parental_guard;
-use crate::pipe_server;
+use crate::pipe_server::{self, TrackingOwner};
 use crate::protocol::{
     ExternalPlaySession, LibraryWatchGameEntry, PlaySessionsAckPayload, PlaySessionsPayload,
 };
@@ -32,6 +32,7 @@ struct PendingStore {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct OpenSession {
+    owner: TrackingOwner,
     external_id: String,
     game_id: String,
     pid: u32,
@@ -42,6 +43,7 @@ struct OpenSession {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct ClosedSession {
+    owner: TrackingOwner,
     external_id: String,
     game_id: String,
     started_at: i64,
@@ -60,19 +62,15 @@ pub fn spawn_tracker_loop() {
         .ok();
 }
 
-pub fn on_desktop_connected() {
+pub fn on_desktop_connected(owner: &TrackingOwner) {
     let now = unix_now_secs();
-    let mut closed = Vec::new();
-    if let Ok(mut pending) = store().lock() {
-        let open: Vec<OpenSession> = pending.open.drain(..).collect();
-        for session in open {
-            if let Some(closed_session) = finalize_open(session, now) {
-                pending.closed.push(closed_session.clone());
-                closed.push(closed_session);
-            }
-        }
+    let closed = if let Ok(mut pending) = store().lock() {
+        let closed = finalize_owner_sessions(&mut pending, owner, now);
         persist_pending(&pending);
-    }
+        closed
+    } else {
+        Vec::new()
+    };
     if !closed.is_empty() {
         crate::install::log_line(&format!(
             "playtime tracker: finalized {} open session(s) on warmUP connect",
@@ -81,31 +79,52 @@ pub fn on_desktop_connected() {
     }
 }
 
-pub fn take_closed_sessions_for_flush() -> PlaySessionsPayload {
+pub fn take_closed_sessions_for_flush(owner: &TrackingOwner) -> PlaySessionsPayload {
     PlaySessionsPayload {
-        sessions: closed_sessions_for_wire(),
+        sessions: closed_sessions_for_wire(owner),
     }
 }
 
-pub fn apply_play_sessions_ack(payload: &PlaySessionsAckPayload) {
+pub fn apply_play_sessions_ack(
+    owner: &TrackingOwner,
+    payload: &PlaySessionsAckPayload,
+    issued: &HashSet<String>,
+) -> usize {
     if payload.external_ids.is_empty() {
-        return;
+        return 0;
     }
-    let acked: HashSet<&str> = payload.external_ids.iter().map(String::as_str).collect();
     if let Ok(mut pending) = store().lock() {
-        let before = pending.closed.len();
-        pending
-            .closed
-            .retain(|session| !acked.contains(session.external_id.as_str()));
-        if pending.closed.len() != before {
+        let removed = acknowledge_closed_sessions(&mut pending, owner, payload, issued);
+        if removed != 0 {
             persist_pending(&pending);
         }
+        return removed;
     }
+    0
+}
+
+fn acknowledge_closed_sessions(
+    pending: &mut PendingStore,
+    owner: &TrackingOwner,
+    payload: &PlaySessionsAckPayload,
+    issued: &HashSet<String>,
+) -> usize {
+    let acked: HashSet<&str> = payload
+        .external_ids
+        .iter()
+        .map(String::as_str)
+        .filter(|external_id| issued.contains(*external_id))
+        .collect();
+    let before = pending.closed.len();
+    pending
+        .closed
+        .retain(|session| session.owner != *owner || !acked.contains(session.external_id.as_str()));
+    before - pending.closed.len()
 }
 
 fn tracker_loop() {
     crate::library_watch::load_persisted_watch();
-    load_pending_from_disk_into_memory();
+    let _ = store();
     loop {
         tick_tracker();
         std::thread::sleep(POLL_INTERVAL);
@@ -116,17 +135,17 @@ fn tick_tracker() {
     if pipe_server::desktop_connected() {
         return;
     }
-    let games = crate::library_watch::current_games();
-    if games.is_empty() {
+    let Some((owner, games)) = crate::library_watch::current_games() else {
         return;
-    }
+    };
 
     let now = unix_now_secs();
     let our_pid = std::process::id();
-    let processes: Vec<(u32, String, Option<String>)> = parental_guard::snapshot_processes()
-        .into_iter()
-        .filter(|(pid, _, _)| *pid != 0 && *pid != our_pid)
-        .collect();
+    let processes: Vec<(u32, String, Option<String>)> =
+        parental_guard::snapshot_processes_for_owner(&owner)
+            .into_iter()
+            .filter(|(pid, _, _)| *pid != 0 && *pid != our_pid)
+            .collect();
 
     let mut active_by_game: HashMap<String, u32> = HashMap::new();
     for (pid, exe_name, image_path) in &processes {
@@ -141,12 +160,17 @@ fn tick_tracker() {
     };
 
     let mut changed = false;
-    let open_snapshot: Vec<OpenSession> = pending.open.clone();
+    let open_snapshot: Vec<OpenSession> = pending
+        .open
+        .iter()
+        .filter(|session| session.owner == owner)
+        .cloned()
+        .collect();
     for mut session in open_snapshot {
         let idx = pending
             .open
             .iter()
-            .position(|s| s.external_id == session.external_id);
+            .position(|s| s.owner == owner && s.external_id == session.external_id);
         let Some(idx) = idx else {
             continue;
         };
@@ -176,10 +200,15 @@ fn tick_tracker() {
     }
 
     for (game_id, pid) in active_by_game {
-        if pending.open.iter().any(|s| s.game_id == game_id) {
+        if pending
+            .open
+            .iter()
+            .any(|session| session.owner == owner && session.game_id == game_id)
+        {
             continue;
         }
         pending.open.push(OpenSession {
+            owner: owner.clone(),
             external_id: new_external_id(&game_id, now),
             game_id,
             pid,
@@ -255,6 +284,7 @@ fn finalize_open(session: OpenSession, ended_at: i64) -> Option<ClosedSession> {
     let ended_at = ended_at.max(session.started_at);
     let duration_minutes = ((ended_at - session.started_at + 30) / 60).max(1);
     Some(ClosedSession {
+        owner: session.owner,
         external_id: session.external_id,
         game_id: session.game_id,
         started_at: session.started_at,
@@ -263,13 +293,31 @@ fn finalize_open(session: OpenSession, ended_at: i64) -> Option<ClosedSession> {
     })
 }
 
-fn closed_sessions_for_wire() -> Vec<ExternalPlaySession> {
+fn finalize_owner_sessions(
+    pending: &mut PendingStore,
+    owner: &TrackingOwner,
+    ended_at: i64,
+) -> Vec<ClosedSession> {
+    let (owned, remaining) = std::mem::take(&mut pending.open)
+        .into_iter()
+        .partition(|session| session.owner == *owner);
+    pending.open = remaining;
+    let closed: Vec<_> = owned
+        .into_iter()
+        .filter_map(|session| finalize_open(session, ended_at))
+        .collect();
+    pending.closed.extend(closed.iter().cloned());
+    closed
+}
+
+fn closed_sessions_for_wire(owner: &TrackingOwner) -> Vec<ExternalPlaySession> {
     store()
         .lock()
         .map(|pending| {
             pending
                 .closed
                 .iter()
+                .filter(|session| session.owner == *owner)
                 .map(|session| ExternalPlaySession {
                     external_id: session.external_id.clone(),
                     game_id: session.game_id.clone(),
@@ -286,13 +334,14 @@ fn load_pending_from_disk() -> PendingStore {
     let Ok(raw) = std::fs::read_to_string(PENDING_FILE) else {
         return PendingStore::default();
     };
-    serde_json::from_str(&raw).unwrap_or_default()
-}
-
-fn load_pending_from_disk_into_memory() {
-    let disk = load_pending_from_disk();
-    if let Ok(mut pending) = store().lock() {
-        *pending = disk;
+    match serde_json::from_str(&raw) {
+        Ok(pending) => pending,
+        Err(_) => {
+            crate::install::log_line(
+                "playtime tracker: rejected legacy or malformed pending state without an owner",
+            );
+            PendingStore::default()
+        }
     }
 }
 
@@ -353,6 +402,10 @@ mod tests {
     fn duration_uses_warmup_minimum_one_minute() {
         let closed = finalize_open(
             OpenSession {
+                owner: TrackingOwner {
+                    user_sid: "S-1-5-21-test".into(),
+                    session_id: 1,
+                },
                 external_id: "x".into(),
                 game_id: "g".into(),
                 pid: 1,
@@ -364,17 +417,100 @@ mod tests {
         .expect("closed");
         assert_eq!(closed.duration_minutes, 1);
     }
-}
 
-#[cfg(not(windows))]
-pub fn spawn_tracker_loop() {}
-#[cfg(not(windows))]
-pub fn on_desktop_connected() {}
-#[cfg(not(windows))]
-pub fn take_closed_sessions_for_flush() -> PlaySessionsPayload {
-    PlaySessionsPayload {
-        sessions: Vec::new(),
+    #[test]
+    fn acknowledgements_are_owner_and_connection_scoped() {
+        let alice = TrackingOwner {
+            user_sid: "S-1-5-21-alice".into(),
+            session_id: 1,
+        };
+        let bob = TrackingOwner {
+            user_sid: "S-1-5-21-bob".into(),
+            session_id: 2,
+        };
+        let mut pending = PendingStore {
+            open: Vec::new(),
+            closed: vec![
+                ClosedSession {
+                    owner: alice.clone(),
+                    external_id: "alice-issued".into(),
+                    game_id: "a".into(),
+                    started_at: 1,
+                    ended_at: 2,
+                    duration_minutes: 1,
+                },
+                ClosedSession {
+                    owner: alice.clone(),
+                    external_id: "alice-unissued".into(),
+                    game_id: "a".into(),
+                    started_at: 1,
+                    ended_at: 2,
+                    duration_minutes: 1,
+                },
+                ClosedSession {
+                    owner: bob,
+                    external_id: "bob-issued".into(),
+                    game_id: "b".into(),
+                    started_at: 1,
+                    ended_at: 2,
+                    duration_minutes: 1,
+                },
+            ],
+        };
+        let payload = PlaySessionsAckPayload {
+            external_ids: vec![
+                "alice-issued".into(),
+                "alice-unissued".into(),
+                "bob-issued".into(),
+            ],
+        };
+        let issued = HashSet::from(["alice-issued".to_string(), "bob-issued".to_string()]);
+
+        assert_eq!(
+            acknowledge_closed_sessions(&mut pending, &alice, &payload, &issued),
+            1
+        );
+        assert_eq!(
+            pending
+                .closed
+                .iter()
+                .map(|session| session.external_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alice-unissued", "bob-issued"]
+        );
+    }
+
+    #[test]
+    fn connection_finalizes_only_the_authenticated_owner() {
+        let alice = TrackingOwner {
+            user_sid: "S-1-5-21-alice".into(),
+            session_id: 1,
+        };
+        let bob = TrackingOwner {
+            user_sid: "S-1-5-21-bob".into(),
+            session_id: 2,
+        };
+        let session = |owner: TrackingOwner, id: &str| OpenSession {
+            owner,
+            external_id: id.into(),
+            game_id: "g".into(),
+            pid: 1,
+            started_at: 100,
+            miss_count: 0,
+        };
+        let mut pending = PendingStore {
+            open: vec![session(alice.clone(), "alice"), session(bob.clone(), "bob")],
+            closed: Vec::new(),
+        };
+
+        assert_eq!(finalize_owner_sessions(&mut pending, &alice, 110).len(), 1);
+        assert_eq!(pending.open, vec![session(bob, "bob")]);
+        assert_eq!(pending.closed[0].owner, alice);
+    }
+
+    #[test]
+    fn legacy_pending_sessions_without_owner_are_rejected() {
+        let legacy = r#"{"open":[],"closed":[{"external_id":"x","game_id":"g","started_at":1,"ended_at":2,"duration_minutes":1}]}"#;
+        assert!(serde_json::from_str::<PendingStore>(legacy).is_err());
     }
 }
-#[cfg(not(windows))]
-pub fn apply_play_sessions_ack(_payload: &PlaySessionsAckPayload) {}
