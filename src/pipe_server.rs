@@ -139,6 +139,11 @@ pub fn launcher_foreground_nav() -> bool {
     LAUNCHER_FOREGROUND_NAV.load(Ordering::Relaxed)
 }
 
+/// Whether the standalone desktop launch chord may open warmUP.
+pub fn warmup_launch_allowed() -> bool {
+    !game_active() && !launcher_foreground_nav()
+}
+
 pub fn browser_active() -> bool {
     BROWSER_ACTIVE.load(Ordering::Relaxed)
 }
@@ -1501,6 +1506,8 @@ mod tests {
             "in-game → sleep"
         );
 
+        assert!(!warmup_launch_allowed());
+
         // Launcher woken over the running game: nav flips true so the pad keeps driving the launcher.
         apply_mode(&ModeSnapshot {
             game_active: true,
@@ -1514,10 +1521,22 @@ mod tests {
             "launcher over game → full"
         );
 
+        assert!(!warmup_launch_allowed());
+
         // Disconnect resets every surface flag.
         clear_desktop_mode();
         assert!(!game_active());
         assert!(!launcher_foreground_nav());
+        assert!(warmup_launch_allowed());
+
+        apply_mode(&ModeSnapshot {
+            game_active: false,
+            launcher_foreground_nav: true,
+            clicks_enabled: true,
+            launcher_owns_text_input: false,
+            browser_active: false,
+        });
+        assert!(!warmup_launch_allowed());
     }
 
     fn test_config(
