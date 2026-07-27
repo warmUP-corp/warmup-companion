@@ -23,12 +23,12 @@ use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_R
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics, GetWindowRect,
-    IsWindowVisible, KillTimer, PostThreadMessageW, SetTimer, SetWindowPos, ShowWindow,
+    IsWindowVisible, IsZoomed, KillTimer, PostThreadMessageW, SetTimer, SetWindowPos, ShowWindow,
     EVENT_SYSTEM_DESKTOPSWITCH, EVENT_SYSTEM_FOREGROUND, HMENU, HWND_NOTOPMOST, HWND_TOPMOST,
     MA_NOACTIVATE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, WINDOWPOS, WINEVENT_OUTOFCONTEXT, WM_DESTROY,
-    WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_PAINT, WM_TIMER, WM_WINDOWPOSCHANGING, WS_EX_NOACTIVATE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    SWP_SHOWWINDOW, SW_MAXIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, WINDOWPOS, WINEVENT_OUTOFCONTEXT,
+    WM_DESTROY, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_PAINT, WM_TIMER, WM_WINDOWPOSCHANGING,
+    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use super::desktop;
@@ -188,7 +188,7 @@ struct UiState {
     renderer: Option<VkRenderer>,
     /// Foreground app window we shrank to make room for the keyboard, and its
     /// original rect to restore on hide.
-    reserved: Option<(HWND, windows::Win32::Foundation::RECT)>,
+    reserved: Option<(HWND, windows::Win32::Foundation::RECT, bool)>,
 }
 
 thread_local! {
@@ -448,7 +448,7 @@ fn ui_hide() {
 unsafe fn reserve_app_space(
     app: HWND,
     dock_top: i32,
-) -> Option<(HWND, windows::Win32::Foundation::RECT)> {
+) -> Option<(HWND, windows::Win32::Foundation::RECT, bool)> {
     if app.0.is_null() {
         return None;
     }
@@ -468,10 +468,14 @@ unsafe fn reserve_app_space(
         return None;
     }
     let mut r = windows::Win32::Foundation::RECT::default();
-    if GetWindowRect(app, &mut r).is_err() || r.bottom <= dock_top {
+    if GetWindowRect(app, &mut r).is_err() {
         return None;
     }
-    let new_h = (dock_top - r.top).max(120);
+    let was_maximized = IsZoomed(app).as_bool();
+    let (new_h, restore_maximized) = reservation_plan(&r, dock_top, was_maximized)?;
+    if was_maximized {
+        let _ = ShowWindow(app, SW_RESTORE);
+    }
     // Ease the shrink instead of snapping, so the app doesn't jump when the bar docks.
     animate_app_height(
         app,
@@ -484,13 +488,21 @@ unsafe fn reserve_app_space(
     vk_log::log(&format!(
         "reserved space: shrank '{name}' to bottom={dock_top}"
     ));
-    Some((app, r))
+    Some((app, r, restore_maximized))
+}
+
+fn reservation_plan(
+    rect: &windows::Win32::Foundation::RECT,
+    dock_top: i32,
+    was_maximized: bool,
+) -> Option<(i32, bool)> {
+    (rect.bottom > dock_top).then_some(((dock_top - rect.top).max(120), was_maximized))
 }
 
 /// Restore a window shrunk by [`reserve_app_space`], easing back from its current
 /// (shrunk) height to the original so it grows smoothly when the bar undocks.
-unsafe fn restore_app_space(saved: Option<(HWND, windows::Win32::Foundation::RECT)>) {
-    if let Some((app, r)) = saved {
+unsafe fn restore_app_space(saved: Option<(HWND, windows::Win32::Foundation::RECT, bool)>) {
+    if let Some((app, r, restore_maximized)) = saved {
         let mut cur = windows::Win32::Foundation::RECT::default();
         let from_h = if GetWindowRect(app, &mut cur).is_ok() {
             cur.bottom - cur.top
@@ -505,6 +517,9 @@ unsafe fn restore_app_space(saved: Option<(HWND, windows::Win32::Foundation::REC
             from_h,
             r.bottom - r.top,
         );
+        if restore_maximized {
+            let _ = ShowWindow(app, SW_MAXIMIZE);
+        }
     }
 }
 
@@ -1008,4 +1023,20 @@ fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<KeyCell> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maximized_window_reservation_restores_zoom_after_reflow() {
+        let rect = windows::Win32::Foundation::RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        assert_eq!(reservation_plan(&rect, 700, true), Some((700, true)));
+    }
 }
