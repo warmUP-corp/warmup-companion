@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.7
+
+- IPC protocol v6 adds offline playtime tracking while the warmUP desktop is
+  disconnected.
+- The desktop can push a library watchlist, receive completed offline sessions,
+  and acknowledge persisted sessions after reconnecting.
+- Pending playtime and library-watch state survive companion restarts.
+
 ## v0.2.6
 
 - Bigger native prompts: the "Connect controller" / "Press [L3] for keyboard"
