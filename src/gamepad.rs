@@ -588,7 +588,7 @@ impl GamepadPoll {
             if crate::pipe_server::native_vk_suppressed() {
                 continue;
             }
-            if self.update_launch_hotkey(change) {
+            if crate::pipe_server::warmup_launch_allowed() && self.update_launch_hotkey(change) {
                 // Only feel like a launch if there's actually something to open.
                 // ponytail: fs probe here is fine — the chord is debounced/rare.
                 if crate::warmup_installed() {
