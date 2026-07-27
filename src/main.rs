@@ -1165,8 +1165,8 @@ pub(crate) fn warmup_installed() -> bool {
     warmup_exe_path().is_ok()
 }
 
-#[cfg(feature = "gamepad")]
-fn warmup_exe_path() -> Result<std::path::PathBuf, String> {
+#[cfg(any(feature = "gamepad", windows))]
+pub(crate) fn warmup_exe_path() -> Result<std::path::PathBuf, String> {
     if let Some(path) = std::env::var_os("WARMUP_EXE") {
         let path = std::path::PathBuf::from(path);
         if path.is_file() {
