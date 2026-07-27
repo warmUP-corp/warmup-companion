@@ -49,6 +49,10 @@ mod hid_reader;
 #[cfg(all(windows, feature = "gamepad"))]
 mod pad_decode;
 #[cfg(all(windows, feature = "gamepad"))]
+mod library_watch;
+#[cfg(all(windows, feature = "gamepad"))]
+mod playtime_tracker;
+#[cfg(all(windows, feature = "gamepad"))]
 mod parental_guard;
 #[cfg(feature = "gamepad")]
 mod pc_cursor;
@@ -1076,6 +1080,8 @@ pub(crate) fn run_boot_gamepad_loop(
     crate::pipe_server::spawn();
     #[cfg(windows)]
     crate::parental_guard::spawn_guardian_loop();
+    #[cfg(windows)]
+    crate::playtime_tracker::spawn_tracker_loop();
     let on_action = |action: gamepad::VkLoopAction| match action {
         gamepad::VkLoopAction::Toggle => {
             app.toggle_virtual_keyboard_combo();

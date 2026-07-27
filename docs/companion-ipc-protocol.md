@@ -1,6 +1,6 @@
 # Companion IPC protocol
 
-**Status:** v5. Companion (`warmup-keyboard`) ⇄ warmUP desktop.
+**Status:** v6. Companion (`warmup-keyboard`) ⇄ warmUP desktop.
 
 This spec is the **versioned wire contract** between the two processes (ADR `0002`). It is mirrored verbatim in both repos. Changing any frame shape or the pipe framing is a breaking change and **must** bump `protocolVersion`.
 
@@ -64,6 +64,7 @@ Each maps to an existing webview event; the desktop re-emits the `payload` uncha
 | `cursor_moved` | `gamepad:cursor_moved` | `{ dx: f64, dy: f64 }` |
 | `axis` | `gamepad:axis` | `{ leftX: f32, leftY: f32, rightX: f32, rightY: f32 }` |
 | `touchpad` | `gamepad:touchpad` | `{ fingers: [{ index: u8, down: bool, x: f32, y: f32, pressure: f32 }] }` |
+| `play_sessions` | _(desktop ingest only)_ | `{ sessions: [{ externalId, gameId, startedAt, endedAt, durationMinutes }] }` |
 
 Notes:
 - `connection.controllerType` / `button.controllerType`: `"xbox" | "playstation" | "switch" | "generic"` (existing desktop vocabulary).
@@ -79,6 +80,8 @@ Notes:
 | `rumble` | `{ kind: "full", strong: f32, weak: f32, durationMs: u32 }` **or** `{ kind: "triggers", left: f32, right: f32, durationMs: u32 }` | one-shot force feedback (#352) |
 | `led` | `{ r: u8, g: u8, b: u8 }` | immediate LED/lightbar write for controller test actions; config still owns persisted/effect state |
 | `companion_settings` | `{ sleepOnGame?: bool, autoStopOnGame?: bool, userlandPollPaused?: bool, promptUserlandDebug?: bool }` | companion-local runtime/settings control |
+| `library_watch` | `{ enabled: bool, games: [{ gameId, exeStems: string[], installDirPrefixes: string[] }] }` | offline playtime tracking (v6) |
+| `play_sessions_ack` | `{ externalIds: string[] }` | offline playtime tracking (v6) |
 
 ### `GamepadConfig` payload
 

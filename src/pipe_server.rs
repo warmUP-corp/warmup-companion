@@ -738,12 +738,28 @@ fn drain_parental_blocked() -> Vec<ParentalBlockedPayload> {
 }
 
 #[cfg(all(windows, feature = "gamepad"))]
+fn apply_library_watch(payload: &crate::protocol::LibraryWatchPayload) {
+    crate::library_watch::apply_watch(payload);
+}
+
+#[cfg(all(windows, not(feature = "gamepad")))]
+fn apply_library_watch(_payload: &crate::protocol::LibraryWatchPayload) {}
+
+#[cfg(all(windows, feature = "gamepad"))]
 fn apply_parental_guard(payload: &ParentalGuardPayload) {
     crate::parental_guard::apply_guard(payload);
 }
 
 #[cfg(all(windows, not(feature = "gamepad")))]
 fn apply_parental_guard(_payload: &ParentalGuardPayload) {}
+
+#[cfg(all(windows, feature = "gamepad"))]
+fn apply_play_sessions_ack(payload: &crate::protocol::PlaySessionsAckPayload) {
+    crate::playtime_tracker::apply_play_sessions_ack(payload);
+}
+
+#[cfg(all(windows, not(feature = "gamepad")))]
+fn apply_play_sessions_ack(_payload: &crate::protocol::PlaySessionsAckPayload) {}
 
 /// Drop any edges queued before a client connected (they are stale to the new client),
 /// and reset Guide-dedupe state so the first post-connect Guide edge always sends.
@@ -773,8 +789,8 @@ pub fn spawn() {}
 #[cfg(windows)]
 mod server {
     use super::{
-        apply_companion_settings, apply_config, apply_led, apply_mode, apply_parental_guard,
-        apply_rumble, clear_desktop_mode, current, current_axis, current_battery, drain_buttons,
+        apply_companion_settings, apply_config, apply_led, apply_library_watch, apply_mode,
+        apply_parental_guard, apply_play_sessions_ack, apply_rumble, clear_desktop_mode, current, current_axis, current_battery, drain_buttons,
         drain_parental_blocked, reset_button_stream, set_native_vk_request, take_cursor_moved,
         take_touchpad, DESKTOP_CONNECTED,
     };
@@ -972,6 +988,9 @@ mod server {
                 if let Some(guard) = h.parental_guard {
                     apply_parental_guard(&guard);
                 }
+                if let Some(watch) = h.library_watch {
+                    apply_library_watch(&watch);
+                }
             }
             Ok(DownFrame::Hello(h)) => {
                 return Err(io_err(&format!(
@@ -987,8 +1006,27 @@ mod server {
             mode: None,
             companion_settings: None,
             parental_guard: None,
+            library_watch: None,
         });
-        write_all(pipe, reply.to_ndjson_line().as_bytes())
+        write_all(pipe, reply.to_ndjson_line().as_bytes())?;
+        #[cfg(feature = "gamepad")]
+        {
+            crate::playtime_tracker::on_desktop_connected();
+            flush_play_sessions(pipe)?;
+        }
+        Ok(())
+    }
+
+    /// Push any closed offline sessions to warmUP immediately after handshake.
+    fn flush_play_sessions(pipe: HANDLE) -> std::io::Result<()> {
+        let payload = crate::playtime_tracker::take_closed_sessions_for_flush();
+        if payload.sessions.is_empty() {
+            return Ok(());
+        }
+        write_all(
+            pipe,
+            UpFrame::PlaySessions(payload).to_ndjson_line().as_bytes(),
+        )
     }
 
     /// Full-duplex session: drain inbound `config` (non-blocking), and write button edges
@@ -1092,6 +1130,8 @@ mod server {
                 Ok(DownFrame::CompanionSettings(p)) => apply_companion_settings(&p),
                 Ok(DownFrame::NativeVk(p)) => set_native_vk_request(&p),
                 Ok(DownFrame::ParentalGuard(p)) => apply_parental_guard(&p),
+                Ok(DownFrame::LibraryWatch(p)) => apply_library_watch(&p),
+                Ok(DownFrame::PlaySessionsAck(p)) => apply_play_sessions_ack(&p),
                 // A malformed known-type frame is a contract break (e.g. the rumble
                 // durationMs mismatch) — log it instead of dropping silently.
                 Err(e) => {

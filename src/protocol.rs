@@ -24,8 +24,11 @@ use serde::{Deserialize, Serialize};
 ///
 /// v5: additive `parental_guard` down-frame and `parental_blocked` up-frame for Kid Mode
 /// system-wide game blocking.
-pub const PROTOCOL_VERSION: u32 = 5;
-pub const DEPRECATED_PROTOCOL_VERSIONS: &[u32] = &[4];
+///
+/// v6: additive `library_watch` down-frame, `play_sessions` up-frame, and
+/// `play_sessions_ack` down-frame for offline companion playtime tracking.
+pub const PROTOCOL_VERSION: u32 = 6;
+pub const DEPRECATED_PROTOCOL_VERSIONS: &[u32] = &[5, 4];
 
 pub fn is_supported_protocol_version(version: u32) -> bool {
     version == PROTOCOL_VERSION || DEPRECATED_PROTOCOL_VERSIONS.contains(&version)
@@ -63,6 +66,8 @@ pub struct Hello {
     pub companion_settings: Option<CompanionSettingsPayload>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parental_guard: Option<ParentalGuardPayload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_watch: Option<LibraryWatchPayload>,
 }
 
 /// Kid Mode system-wide blocking rules for the companion guardian loop.
@@ -82,6 +87,49 @@ pub struct ParentalGuardPayload {
 pub struct ParentalBlockedPayload {
     pub exe_stem: String,
     pub pid: u32,
+}
+
+/// One installed library game the companion may match while warmUP is disconnected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryWatchGameEntry {
+    pub game_id: String,
+    #[serde(default)]
+    pub exe_stems: Vec<String>,
+    #[serde(default)]
+    pub install_dir_prefixes: Vec<String>,
+}
+
+/// Library watchlist pushed by warmUP for offline playtime tracking.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryWatchPayload {
+    pub enabled: bool,
+    #[serde(default)]
+    pub games: Vec<LibraryWatchGameEntry>,
+}
+
+/// One closed offline play session flushed companion → warmUP.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalPlaySession {
+    pub external_id: String,
+    pub game_id: String,
+    pub started_at: i64,
+    pub ended_at: i64,
+    pub duration_minutes: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaySessionsPayload {
+    pub sessions: Vec<ExternalPlaySession>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaySessionsAckPayload {
+    pub external_ids: Vec<String>,
 }
 
 /// `connection` frame payload — authoritative controller connection snapshot.
@@ -278,6 +326,7 @@ pub enum UpFrame {
     Battery(BatteryPayload),
     Touchpad(TouchpadPayload),
     ParentalBlocked(ParentalBlockedPayload),
+    PlaySessions(PlaySessionsPayload),
     /// A frame whose `type` this slice does not know (added by a later slice).
     /// Never serialized; produced only by [`UpFrame::parse_line`].
     #[serde(skip)]
@@ -296,6 +345,8 @@ pub enum DownFrame {
     CompanionSettings(CompanionSettingsPayload),
     NativeVk(NativeVkPayload),
     ParentalGuard(ParentalGuardPayload),
+    LibraryWatch(LibraryWatchPayload),
+    PlaySessionsAck(PlaySessionsAckPayload),
     #[serde(skip)]
     Unknown,
 }
@@ -324,7 +375,7 @@ impl UpFrame {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
             "hello" | "connection" | "button" | "cursor_moved" | "axis" | "battery"
-            | "touchpad" | "parental_blocked" => serde_json::from_str(line),
+            | "touchpad" | "parental_blocked" | "play_sessions" => serde_json::from_str(line),
             _ => Ok(Self::Unknown),
         }
     }
@@ -338,7 +389,7 @@ impl DownFrame {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
             "hello" | "config" | "mode" | "rumble" | "led" | "companion_settings" | "native_vk"
-            | "parental_guard" => serde_json::from_str(line),
+            | "parental_guard" | "library_watch" | "play_sessions_ack" => serde_json::from_str(line),
             _ => Ok(Self::Unknown),
         }
     }
@@ -592,11 +643,12 @@ mod tests {
                 prompt_userland_debug: None,
             }),
             parental_guard: None,
+            library_watch: None,
         });
         let line = hello.to_ndjson_line();
         let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(json["type"], "hello");
-        assert_eq!(json["payload"]["protocolVersion"], 5);
+        assert_eq!(json["payload"]["protocolVersion"], 6);
         assert_eq!(json["payload"]["mode"]["gameActive"], false);
         assert_eq!(json["payload"]["companionSettings"]["sleepOnGame"], true);
     }
@@ -604,8 +656,55 @@ mod tests {
     #[test]
     fn deprecated_protocol_versions_stay_supported() {
         assert!(is_supported_protocol_version(PROTOCOL_VERSION));
+        assert!(is_supported_protocol_version(5));
         assert!(is_supported_protocol_version(4));
         assert!(!is_supported_protocol_version(3));
+    }
+
+    #[test]
+    fn play_sessions_up_frame_round_trips() {
+        let frame = UpFrame::PlaySessions(PlaySessionsPayload {
+            sessions: vec![ExternalPlaySession {
+                external_id: "cmp-game-1".into(),
+                game_id: "game-1".into(),
+                started_at: 1_710_000_000,
+                ended_at: 1_710_007_200,
+                duration_minutes: 120,
+            }],
+        });
+        let line = frame.to_ndjson_line();
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["type"], "play_sessions");
+        assert_eq!(json["payload"]["sessions"][0]["gameId"], "game-1");
+        assert_eq!(UpFrame::parse_line(line.trim_end()).unwrap(), frame);
+    }
+
+    #[test]
+    fn library_watch_down_frame_round_trips() {
+        let frame = DownFrame::LibraryWatch(LibraryWatchPayload {
+            enabled: true,
+            games: vec![LibraryWatchGameEntry {
+                game_id: "game-1".into(),
+                exe_stems: vec!["hollowknight".into()],
+                install_dir_prefixes: vec![r"c:\games\hk\".into()],
+            }],
+        });
+        let line = frame.to_ndjson_line();
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["type"], "library_watch");
+        assert_eq!(json["payload"]["games"][0]["exeStems"][0], "hollowknight");
+        assert_eq!(DownFrame::parse_line(line.trim_end()).unwrap(), frame);
+    }
+
+    #[test]
+    fn play_sessions_ack_down_frame_round_trips() {
+        let frame = DownFrame::PlaySessionsAck(PlaySessionsAckPayload {
+            external_ids: vec!["cmp-game-1".into()],
+        });
+        let line = frame.to_ndjson_line();
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["type"], "play_sessions_ack");
+        assert_eq!(DownFrame::parse_line(line.trim_end()).unwrap(), frame);
     }
 
     #[test]
