@@ -186,7 +186,7 @@ fn is_protected_process(exe_name: &str, image_path: Option<&str>) -> bool {
     false
 }
 
-fn snapshot_processes() -> Vec<(u32, String, Option<String>)> {
+pub(crate) fn snapshot_processes() -> Vec<(u32, String, Option<String>)> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
