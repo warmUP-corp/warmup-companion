@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.9
+
+- Restore the desktop-only warmUP launch chord: it is blocked while warmUP is
+  foreground or a game is active.
+
 ## v0.2.8
 
 - Harden offline tracking IPC with canonical executable authentication,
