@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.8
+
+- Harden offline tracking IPC with canonical executable authentication,
+  SID/session ownership, connection-scoped acknowledgements, and bounded watch
+  payloads.
+- Filter playtime process discovery to the authenticated Windows user and
+  session.
+- Maximized foreground windows now reflow above the keyboard and return to
+  maximized state when it closes.
+
 ## v0.2.7
 
 - IPC protocol v6 adds offline playtime tracking while the warmUP desktop is
