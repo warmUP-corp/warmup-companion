@@ -115,16 +115,16 @@ Default: enabled.
 warmup-companion.exe settings sleep-on-game get
 warmup-companion.exe settings sleep-on-game off
 warmup-companion.exe settings sleep-on-game on
-warmup-companion.exe settings auto-stop-on-game get
-warmup-companion.exe settings auto-stop-on-game on
 ```
 
-Equivalent config key in `%LOCALAPPDATA%\WarmupVk\settings.ini`:
+Equivalent config key in `C:\ProgramData\WarmupVk\settings.ini`:
 
 ```ini
 sleep_on_game=true
-auto_stop_on_game=false
 ```
+
+Legacy `auto_stop_on_game=true` is treated as Guide-only sleep. The controller
+loop no longer exits because that would prevent PS/Guide from waking warmUP.
 
 ## Sentry
 

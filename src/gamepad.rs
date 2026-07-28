@@ -538,6 +538,18 @@ impl GamepadPoll {
             if !browser_owns_stick_click {
                 crate::pipe_server::publish_button(change.button.as_str(), change.pressed);
             }
+            #[cfg(windows)]
+            if is_standalone_guide_wake(
+                change,
+                crate::pipe_server::desktop_connected(),
+                crate::gamepad_backend::standalone_game_active_now(),
+            ) {
+                if crate::warmup_installed() {
+                    self.backend.haptic_alert();
+                    edges.push(VkLoopAction::LaunchWarmup);
+                }
+                continue;
+            }
             // R3 starts dictation even with the VK closed, so voice typing into the
             // focused app is a single click — no need to open the keyboard first.
             #[cfg(windows)]
@@ -937,6 +949,14 @@ impl GamepadPoll {
     }
 }
 
+fn is_standalone_guide_wake(
+    change: ButtonChange,
+    desktop_connected: bool,
+    standalone_game_active: bool,
+) -> bool {
+    change.button == Button::Guide && change.pressed && !desktop_connected && standalone_game_active
+}
+
 fn dedupe_consecutive_toggle_edges(changes: Vec<ButtonChange>) -> Vec<ButtonChange> {
     let mut out: Vec<ButtonChange> = Vec::with_capacity(changes.len());
     for c in changes {
@@ -1073,17 +1093,6 @@ where
         // Publish the current controller connection state to the pipe server (#347).
         crate::pipe_server::publish_from_label(&poll.controller_label());
 
-        #[cfg(windows)]
-        if !crate::pipe_server::desktop_connected()
-            && crate::config::gamepad_settings().auto_stop_on_game
-            && crate::gamepad_backend::standalone_game_active_now()
-        {
-            if service_mode {
-                service_log("gamepad loop auto-stopping: standalone game launched");
-            }
-            break;
-        }
-
         match poll.poll_frame(&mut cursor, dt, vk_open()) {
             Ok(actions) => {
                 for action in actions {
@@ -1164,4 +1173,27 @@ where
         service_log("gamepad loop exited (stop flag)");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_standalone_guide_wake, Button, ButtonChange};
+
+    #[test]
+    fn standalone_game_wakes_only_on_guide_press() {
+        let guide = ButtonChange {
+            button: Button::Guide,
+            pressed: true,
+        };
+        assert!(is_standalone_guide_wake(guide, false, true));
+        assert!(!is_standalone_guide_wake(guide, true, true));
+        assert!(!is_standalone_guide_wake(
+            ButtonChange {
+                button: Button::A,
+                pressed: true,
+            },
+            false,
+            true,
+        ));
+    }
 }

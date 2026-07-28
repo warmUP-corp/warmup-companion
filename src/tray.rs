@@ -343,7 +343,7 @@ unsafe fn show_menu(hwnd: HWND) {
             game,
             chk(gs.auto_stop_on_game),
             MENU_AUTOSTOP_ON_GAME,
-            w!("Stop input while a game is running"),
+            w!("Guide-only input while a game is running"),
         );
         let _ = AppendMenuW(menu, MF_POPUP, game.0 as usize, w!("Game detection"));
     }

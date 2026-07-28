@@ -16,7 +16,7 @@ const USERLAND_POLL_FILE: &str = "userland-poll.mode";
 const SETTINGS_FILE: &str = "settings.ini";
 #[cfg(feature = "gamepad")]
 const RUNTIME_STATUS_FILE: &str = "runtime-status.ini";
-#[cfg(windows)]
+#[cfg(all(windows, not(feature = "gamepad")))]
 const PROMPT_USERLAND_DEBUG_FILE: &str = r"C:\ProgramData\WarmupVk\prompt-userland-debug.enabled";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -90,9 +90,11 @@ pub struct GamepadSettings {
     /// Standalone companion behavior: sleep the userland gamepad loop when another
     /// fullscreen game-like window is detected, even without warmUP IPC mode pushes.
     pub sleep_on_game: bool,
-    /// Standalone companion behavior: stop the loop when a fullscreen game-like
-    /// window is detected. Ignored while warmUP is connected over IPC.
+    /// Legacy standalone setting. It now selects Guide-only sleep so the PS button
+    /// remains available instead of terminating the controller loop.
     pub auto_stop_on_game: bool,
+    /// Show the userland prompt debug overlay.
+    pub prompt_userland_debug: bool,
     pub cursor_deadzone: f32,
     pub cursor_speed: f32,
     pub cursor_accel: f32,
@@ -112,6 +114,7 @@ impl Default for GamepadSettings {
             userland_poll_mode: warmup_gamepad::PollMode::Full,
             sleep_on_game: true,
             auto_stop_on_game: false,
+            prompt_userland_debug: false,
             cursor_deadzone: 0.15,
             cursor_speed: 15.0,
             cursor_accel: 2.0,
@@ -145,7 +148,13 @@ pub fn prompt_overlay_enabled() -> bool {
     !off
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "gamepad"))]
+pub fn prompt_userland_debug() -> bool {
+    std::env::var_os("WARMUP_PROMPT_USERLAND_DEBUG").is_some_and(|v| v != "0")
+        || gamepad_settings().prompt_userland_debug
+}
+
+#[cfg(all(windows, not(feature = "gamepad")))]
 pub fn prompt_userland_debug() -> bool {
     std::env::var_os("WARMUP_PROMPT_USERLAND_DEBUG").is_some_and(|v| v != "0")
         || std::path::Path::new(r"C:\ProgramData\WarmupVk\prompt-userland-debug.enabled").is_file()
@@ -161,8 +170,16 @@ pub fn prompt_userland_debug() -> bool {
     false
 }
 
-/// Enable or disable the userland prompt debug overlay sentinel file.
-#[cfg(windows)]
+/// Enable or disable the userland prompt debug overlay.
+#[cfg(all(windows, feature = "gamepad"))]
+pub fn set_prompt_userland_debug(enabled: bool) -> Result<(), String> {
+    set_gamepad_setting(
+        "prompt_userland_debug",
+        if enabled { "true" } else { "false" },
+    )
+}
+
+#[cfg(all(windows, not(feature = "gamepad")))]
 pub fn set_prompt_userland_debug(enabled: bool) -> Result<(), String> {
     let path = std::path::Path::new(PROMPT_USERLAND_DEBUG_FILE);
     if enabled {
@@ -280,6 +297,9 @@ fn apply_gamepad_settings_text(settings: &mut GamepadSettings, text: &str) {
             }
             "auto_stop_on_game" | "stop_on_game" | "stop_when_game_active" => {
                 settings.auto_stop_on_game = parse_bool(value, settings.auto_stop_on_game)
+            }
+            "prompt_userland_debug" => {
+                settings.prompt_userland_debug = parse_bool(value, settings.prompt_userland_debug)
             }
             "cursor_deadzone" => {
                 settings.cursor_deadzone = parse_unit_f32(value, settings.cursor_deadzone)
@@ -452,9 +472,11 @@ const SETTINGS_TEMPLATE: &str = r#"# Warmup Companion settings. One `key = value
 # Gamepad poll mode: full | sleep
 # userland_poll = full
 
-# Sleep / stop the gamepad poll when a fullscreen game is foreground (true|false)
+# Use Guide-only gamepad polling when a fullscreen game is foreground (true|false)
 # sleep_on_game = true
+# Legacy alias for sleep_on_game; never terminates the loop.
 # auto_stop_on_game = false
+# prompt_userland_debug = false
 
 # Cursor: deadzone & smoothing are 0.0-0.95; speed & accel are > 0.0
 # cursor_deadzone = 0.15
@@ -565,7 +587,8 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
         | "sleep_when_game_active"
         | "auto_stop_on_game"
         | "stop_on_game"
-        | "stop_when_game_active" => match value.trim().to_ascii_lowercase().as_str() {
+        | "stop_when_game_active"
+        | "prompt_userland_debug" => match value.trim().to_ascii_lowercase().as_str() {
             "true" | "false" | "1" | "0" | "yes" | "no" | "on" | "off" => Ok(()),
             _ => Err(format!("{key} must be a boolean")),
         },
@@ -657,5 +680,8 @@ mod tests {
 
         apply_gamepad_settings_text(&mut settings, "auto_stop_on_game=true\n");
         assert!(settings.auto_stop_on_game);
+
+        apply_gamepad_settings_text(&mut settings, "prompt_userland_debug=on\n");
+        assert!(settings.prompt_userland_debug);
     }
 }
