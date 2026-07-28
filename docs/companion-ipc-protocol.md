@@ -9,6 +9,7 @@ This spec is the **versioned wire contract** between the two processes (ADR `000
 - **Pipe:** named pipe `\\.\pipe\warmup-input`.
 - **Roles:** companion = **server**, desktop = **reconnecting client**. Both auto-start in indeterminate order; the client retries with backoff until the server is up, and reconnects on server restart.
 - **ACL:** the pipe is ACL'd to the **interactive user** only (the active console session the companion is launched into). No network exposure.
+- **Development builds:** executable-path client trust checks are compiled out. Release builds only accept the installed warmUP executable.
 - **Direction:** full-duplex. "Up" = companion→desktop (input). "Down" = desktop→companion (control).
 
 ## Framing
@@ -50,7 +51,7 @@ The client sends `hello` as its **first** frame after connecting. The server rep
 | `protocolVersion` | both | single integer; bumped on any breaking wire change; v4 is deprecated but still accepted |
 | `config` | client | desktop's current `GamepadConfig` snapshot (so the companion starts with the right tuning); server omits |
 | `mode` | client | desktop's current mode snapshot; server omits |
-| `companionSettings` | client | desktop-pushed companion-local settings snapshot; server omits |
+| `companionSettings` | client | full companion-local settings snapshot, resent on each connection; server omits |
 
 ## Up frames (companion → desktop)
 
@@ -137,12 +138,16 @@ camelCase; every field is optional so warmUP can send partial updates.
 ```
 
 - `sleepOnGame`: persist companion standalone fullscreen-game sleep behavior.
-- `autoStopOnGame`: persist companion standalone fullscreen-game auto-stop behavior.
+- `autoStopOnGame`: legacy alias for standalone Guide-only game sleep; the loop stays alive.
 - `userlandPollPaused`: runtime pause flag for userland polling; mirrored to runtime status.
-- `promptUserlandDebug`: toggles the userland prompt debug overlay sentinel.
+- `promptUserlandDebug`: persists the userland prompt debug overlay setting.
 
 When warmUP is connected, warmUP mode frames are authoritative; standalone fullscreen detection
 does not override `gameActive` / `launcherForegroundNav`.
+warmUP starts with `launcherForegroundNav=true`, so the first connection immediately enters
+launcher mode.
+Without warmUP, fullscreen detection selects the same Guide-only sleep mode, so PS/Guide remains
+available to wake warmUP.
 
 The companion maps cursor/scroll tuning fields to its internal names per the golden fixture's `configFieldMapping` (`sensitivity->cursor_speed`, `accelerationExp->cursor_accel`, `deadzone->cursor_deadzone`, `scrollSensitivity->scroll_speed`).
 

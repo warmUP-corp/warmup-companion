@@ -153,7 +153,7 @@ pub fn desktop_connected() -> bool {
     DESKTOP_CONNECTED.load(Ordering::Relaxed)
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, any(not(debug_assertions), test)))]
 fn same_executable_path(actual: &std::path::Path, expected: &std::path::Path) -> bool {
     let normalize = |path: &std::path::Path| {
         std::fs::canonicalize(path).ok().map(|canonical| {
@@ -894,14 +894,15 @@ mod server {
         apply_companion_settings, apply_config, apply_led, apply_library_watch, apply_mode,
         apply_parental_guard, apply_play_sessions_ack, apply_rumble, clear_desktop_mode, current,
         current_axis, current_battery, drain_buttons, drain_parental_blocked, reset_button_stream,
-        same_executable_path, set_native_vk_request, take_cursor_moved, take_touchpad,
-        tracking_owner_from_process, TrackingOwner, DESKTOP_CONNECTED,
+        set_native_vk_request, take_cursor_moved, take_touchpad, tracking_owner_from_process,
+        TrackingOwner, DESKTOP_CONNECTED,
     };
     use crate::protocol::{
         is_supported_protocol_version, AxisPayload, BatteryPayload, ConnectionPayload, DownFrame,
         Hello, UpFrame, PROTOCOL_VERSION,
     };
     use std::collections::HashSet;
+    #[cfg(not(debug_assertions))]
     use std::path::PathBuf;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
@@ -919,10 +920,9 @@ mod server {
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
         PeekNamedPipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
-    use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
-        PROCESS_QUERY_LIMITED_INFORMATION,
-    };
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    #[cfg(not(debug_assertions))]
+    use windows::Win32::System::Threading::{QueryFullProcessImageNameW, PROCESS_NAME_FORMAT};
 
     const PIPE_NAME: &str = r"\\.\pipe\warmup-input";
     /// SYSTEM full control; the interactive user (the desktop's account) gets read+write.
@@ -1044,48 +1044,53 @@ mod server {
         else {
             return None;
         };
-        let mut buf = [0u16; 32768];
-        let mut len = buf.len() as u32;
-        let ok = unsafe {
-            QueryFullProcessImageNameW(
-                process,
-                PROCESS_NAME_FORMAT(0),
-                windows::core::PWSTR(buf.as_mut_ptr()),
-                &mut len,
-            )
-        }
-        .is_ok();
-        if !ok || len == 0 {
-            unsafe {
-                let _ = CloseHandle(process);
+        #[cfg(not(debug_assertions))]
+        {
+            let mut buf = [0u16; 32768];
+            let mut len = buf.len() as u32;
+            let ok = unsafe {
+                QueryFullProcessImageNameW(
+                    process,
+                    PROCESS_NAME_FORMAT(0),
+                    windows::core::PWSTR(buf.as_mut_ptr()),
+                    &mut len,
+                )
             }
-            return None;
-        }
-        let image = String::from_utf16_lossy(&buf[..len as usize]);
-        let actual_path = PathBuf::from(&image);
-        let expected_path = match crate::warmup_exe_path() {
-            Ok(path) => path,
-            Err(error) => {
+            .is_ok();
+            if !ok || len == 0 {
+                unsafe {
+                    let _ = CloseHandle(process);
+                }
+                return None;
+            }
+            let image = String::from_utf16_lossy(&buf[..len as usize]);
+            let actual_path = PathBuf::from(&image);
+            let expected_path = match crate::warmup_exe_path() {
+                Ok(path) => path,
+                Err(error) => {
+                    crate::install::log_line(&format!(
+                        "pipe client rejected: trusted warmUP path unavailable: {error}"
+                    ));
+                    unsafe {
+                        let _ = CloseHandle(process);
+                    }
+                    return None;
+                }
+            };
+            if !super::same_executable_path(&actual_path, &expected_path) {
                 crate::install::log_line(&format!(
-                    "pipe client rejected: trusted warmUP path unavailable: {error}"
+                    "pipe client rejected: process '{}' does not match trusted '{}'",
+                    actual_path.display(),
+                    expected_path.display()
                 ));
                 unsafe {
                     let _ = CloseHandle(process);
                 }
                 return None;
             }
-        };
-        if !same_executable_path(&actual_path, &expected_path) {
-            crate::install::log_line(&format!(
-                "pipe client rejected: process '{}' does not match trusted '{}'",
-                actual_path.display(),
-                expected_path.display()
-            ));
-            unsafe {
-                let _ = CloseHandle(process);
-            }
-            return None;
         }
+        #[cfg(debug_assertions)]
+        crate::install::log_line("development build: pipe client trust checks disabled");
         let owner = tracking_owner_from_process(process, pid);
         unsafe {
             let _ = CloseHandle(process);

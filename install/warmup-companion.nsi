@@ -19,7 +19,7 @@ SetDatablockOptimize on
 
 !define APPNAME     "Warmup Companion"
 !define COMPANY     "warmUP"
-!define APPVERSION  "0.2.8"
+!define APPVERSION  "0.2.10"
 !define SERVICE     "WarmupVkSvc"
 !define WEBSITE     "https://www.warmup-gamelauncher.com"
 ; install.rs hardcodes this path (no spaces; sc.exe binPath breaks on quotes).
@@ -59,7 +59,7 @@ RequestExecutionLevel admin       ; service install needs admin; elevate the who
 ShowInstDetails hide
 ShowUninstDetails hide
 
-VIProductVersion "0.2.8.0"
+VIProductVersion "0.2.10.0"
 VIAddVersionKey "ProductName"     "${APPNAME}"
 VIAddVersionKey "CompanyName"     "${COMPANY}"
 VIAddVersionKey "FileDescription" "${APPNAME} Setup"
