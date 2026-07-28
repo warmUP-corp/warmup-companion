@@ -20,6 +20,7 @@ const LEGACY_EXE_NAME: &str = "warmup-vk-prototype.exe";
 const LOG_NAME: &str = "service.log";
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
 const DEBUG_UI_FLAG: &str = r"C:\ProgramData\WarmupVk\debug-ui.enabled";
+pub const DEV_EXE_PATH: &str = r"C:\ProgramData\WarmupVk\warmup-exe.path";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Leftover names from manual `sc create` debugging — removed on install/uninstall.
@@ -33,7 +34,7 @@ const TEST_SERVICE_NAMES: &[&str] = &[
 ];
 
 pub fn run_install(debug_ui: bool) {
-    if let Err(e) = install_inner(debug_ui) {
+    if let Err(e) = install_inner(debug_ui, None) {
         eprintln!("install failed: {e}");
         std::process::exit(1);
     }
@@ -48,6 +49,23 @@ pub fn run_install(debug_ui: bool) {
         "Debug UI: {}",
         if debug_ui { "enabled" } else { "disabled" }
     );
+}
+
+pub fn run_install_dev(path: &Path) {
+    let path = match canonical_dev_exe(path) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("install-dev failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = install_inner(true, Some(&path)) {
+        eprintln!("install-dev failed: {e}");
+        std::process::exit(1);
+    }
+    println!("Installed Warmup Companion in DEV mode.");
+    println!("Trusted DEV client: {}", path.display());
+    println!("Log: {DATA_DIR}\\{LOG_NAME}");
 }
 
 pub fn run_uninstall() {
@@ -185,7 +203,7 @@ pub fn request_service_stop() {
     }
 }
 
-fn install_inner(debug_ui: bool) -> Result<(), String> {
+fn install_inner(debug_ui: bool, dev_exe: Option<&Path>) -> Result<(), String> {
     require_admin()?;
     remove_legacy_install_artifacts();
     let src = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -199,6 +217,13 @@ fn install_inner(debug_ui: bool) -> Result<(), String> {
     allow_bin_read_acl()?;
     allow_settings_rw_acl()?;
     set_debug_ui_flag(debug_ui)?;
+    match dev_exe {
+        Some(path) => fs::write(DEV_EXE_PATH, path.to_string_lossy().as_bytes())
+            .map_err(|e| format!("write DEV executable path: {e}"))?,
+        None => {
+            let _ = fs::remove_file(DEV_EXE_PATH);
+        }
+    }
 
     // Stop + delete BEFORE copying — old exe is locked by the running service.
     remove_test_services();
@@ -251,9 +276,14 @@ fn install_inner(debug_ui: bool) -> Result<(), String> {
     sc(&["start", SERVICE_NAME])?;
     verify_service_running()?;
     log_line(&format!(
-        "installed from {} -> {} (debug_ui={debug_ui})",
+        "installed from {} -> {} (debug_ui={debug_ui}, mode={})",
         src.display(),
-        dest.display()
+        dest.display(),
+        if dev_exe.is_some() {
+            "DEV"
+        } else {
+            "production"
+        }
     ));
     Ok(())
 }
@@ -284,8 +314,25 @@ fn uninstall_inner() -> Result<(), String> {
     let _ = fs::remove_file(version);
     let _ = fs::remove_file(icon);
     let _ = fs::remove_file(DEBUG_UI_FLAG);
+    let _ = fs::remove_file(DEV_EXE_PATH);
     log_line("uninstalled");
     Ok(())
+}
+
+fn canonical_dev_exe(path: &Path) -> Result<PathBuf, String> {
+    let path = fs::canonicalize(path)
+        .map_err(|e| format!("invalid DEV executable '{}': {e}", path.display()))?;
+    let is_warmup = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("warmup.exe"));
+    if !path.is_file() || !is_warmup {
+        return Err(format!(
+            "DEV target must be an existing warmup.exe: {}",
+            path.display()
+        ));
+    }
+    Ok(path)
 }
 
 fn set_debug_ui_flag(enabled: bool) -> Result<(), String> {
@@ -456,11 +503,7 @@ fn allow_settings_rw_acl() -> Result<(), String> {
         fs::write(&path, "").map_err(|e| format!("create {}: {e}", path.display()))?;
     }
     let out = Command::new("icacls.exe")
-        .args([
-            &path.display().to_string(),
-            "/grant:r",
-            "*S-1-5-32-545:(M)",
-        ])
+        .args([&path.display().to_string(), "/grant:r", "*S-1-5-32-545:(M)"])
         .output()
         .map_err(|e| format!("icacls.exe: {e}"))?;
     if out.status.success() {

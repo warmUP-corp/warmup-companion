@@ -61,33 +61,45 @@ pub enum PadCommand {
     TriggerRumble { left: f32, right: f32, ms: u32 },
 }
 
-/// Selects the poll mode from the desktop-pushed surface flags. The companion has three
-/// effective surfaces:
-///   - **in-game** (`game_active && !launcher_foreground_nav`, or standalone fullscreen-game
-///     detection when game sleep is enabled): a real game owns the screen →
-///     [`PollMode::Sleep`], only Guide edges flow so the game owns the pad.
-///   - **launcher** (`launcher_foreground_nav`): the launcher is foreground (incl. woken over a
-///     running game) → full poll so the controller drives the launcher UI. Standalone fullscreen
-///     detection is ignored here — warmUP itself is fullscreen and must not trip game sleep.
-///   - **desktop** (`!game_active`): no game and the launcher is backgrounded → full poll so the
-///     controller keeps driving the OS cursor on the Windows desktop.
+/// Sleep while a game or warmUP owns the controller; poll fully only on the desktop.
+/// Without a desktop connection, the fullscreen heuristic provides the game signal.
 fn effective_userland_poll_mode() -> PollMode {
     let settings = crate::config::gamepad_settings();
     let desktop_connected = crate::pipe_server::desktop_connected();
-    let launcher_foreground = crate::pipe_server::launcher_foreground_nav();
-    let desktop_game_active = crate::pipe_server::game_active() && !launcher_foreground;
-    let standalone_game_active = !desktop_connected
-        && standalone_game_sleep_enabled(settings.sleep_on_game, settings.auto_stop_on_game)
-        && standalone_game_active_now();
-    if userland_poll_paused() || desktop_game_active || standalone_game_active {
+    let desktop_surface_active = should_sleep_for_desktop_surface(
+        desktop_connected,
+        crate::pipe_server::game_active(),
+        crate::pipe_server::launcher_foreground_nav(),
+    );
+    let standalone_game_active =
+        !desktop_connected && settings.sleep_on_game && standalone_game_active_now();
+    if userland_poll_paused() || desktop_surface_active || standalone_game_active {
         PollMode::Sleep
     } else {
         settings.userland_poll_mode
     }
 }
 
-fn standalone_game_sleep_enabled(sleep_on_game: bool, legacy_auto_stop_on_game: bool) -> bool {
-    sleep_on_game || legacy_auto_stop_on_game
+fn should_sleep_for_desktop_surface(
+    desktop_connected: bool,
+    game_active: bool,
+    launcher_foreground: bool,
+) -> bool {
+    desktop_connected && (game_active || launcher_foreground)
+}
+
+#[cfg(test)]
+mod poll_mode_tests {
+    use super::should_sleep_for_desktop_surface;
+
+    #[test]
+    fn sleeps_in_games_and_warmup_but_not_on_desktop() {
+        assert!(should_sleep_for_desktop_surface(true, true, false));
+        assert!(should_sleep_for_desktop_surface(true, false, true));
+        assert!(should_sleep_for_desktop_surface(true, true, true));
+        assert!(!should_sleep_for_desktop_surface(true, false, false));
+        assert!(!should_sleep_for_desktop_surface(false, true, true));
+    }
 }
 
 #[cfg(windows)]
@@ -98,17 +110,6 @@ pub fn standalone_game_active_now() -> bool {
 #[cfg(not(windows))]
 pub fn standalone_game_active_now() -> bool {
     false
-}
-
-#[cfg(test)]
-mod tests {
-    use super::standalone_game_sleep_enabled;
-
-    #[test]
-    fn legacy_auto_stop_keeps_guide_only_polling_alive() {
-        assert!(standalone_game_sleep_enabled(false, true));
-        assert!(!standalone_game_sleep_enabled(false, false));
-    }
 }
 
 /// Polls physical controller state and produces normalized axes + button edges.

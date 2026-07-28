@@ -389,7 +389,9 @@ impl DownFrame {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
             "hello" | "config" | "mode" | "rumble" | "led" | "companion_settings" | "native_vk"
-            | "parental_guard" | "library_watch" | "play_sessions_ack" => serde_json::from_str(line),
+            | "parental_guard" | "library_watch" | "play_sessions_ack" => {
+                serde_json::from_str(line)
+            }
             _ => Ok(Self::Unknown),
         }
     }

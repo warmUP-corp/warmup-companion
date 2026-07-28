@@ -611,9 +611,7 @@ impl GamepadPoll {
                     // isn't installed, so we don't fake the launch buzz.
                     self.backend.haptic_tick();
                     #[cfg(windows)]
-                    crate::install::log_line(
-                        "launch hotkey ignored: warmUP is not installed",
-                    );
+                    crate::install::log_line("launch hotkey ignored: warmUP is not installed");
                 }
             }
             if change.button != VK_BUTTON {

@@ -390,11 +390,7 @@ mod tests {
                 install_dir_prefixes: vec![r"c:\games\b\".into()],
             },
         ];
-        let matched = match_process_to_game(
-            "game.exe",
-            Some(r"C:\Games\B\bin\game.exe"),
-            &games,
-        );
+        let matched = match_process_to_game("game.exe", Some(r"C:\Games\B\bin\game.exe"), &games);
         assert_eq!(matched.as_deref(), Some("b"));
     }
 
