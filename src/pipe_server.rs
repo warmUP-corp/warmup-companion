@@ -23,12 +23,9 @@ static CLICKS_ENABLED: AtomicBool = AtomicBool::new(true);
 /// WarmUp webview text entry is active. While true, the companion must not open
 /// or drive the native VK; button edges keep flowing to the desktop web VK.
 static LAUNCHER_OWNS_TEXT_INPUT: AtomicBool = AtomicBool::new(false);
-/// A game session is active (a real game process owns the foreground). Combined with
-/// [`LAUNCHER_FOREGROUND_NAV`] this selects the poll mode: see [`launcher_foreground_nav`].
+/// A game session is active (a real game process owns the foreground).
 static GAME_ACTIVE: AtomicBool = AtomicBool::new(false);
-/// The warmUP launcher window is the foreground surface. When a game session is active but the
-/// user has brought the launcher forward (Guide-wake over a running game), this stays the full
-/// poll mode instead of sleeping, so the controller can navigate the launcher.
+/// The warmUP launcher window is the foreground surface. The companion sleeps while this is true.
 static LAUNCHER_FOREGROUND_NAV: AtomicBool = AtomicBool::new(false);
 /// The standalone warmUP browser/overlay owns the foreground experience. Browser mode keeps
 /// companion L3/R3 actions local (native VK / voice) instead of forwarding them to the launcher.
@@ -125,7 +122,9 @@ pub fn launcher_owns_text_input() -> bool {
 /// Whether the companion native VK should be suppressed because warmUP owns text
 /// entry or an active game handoff is running.
 pub fn native_vk_suppressed() -> bool {
-    LAUNCHER_OWNS_TEXT_INPUT.load(Ordering::Relaxed) || GAME_ACTIVE.load(Ordering::Relaxed)
+    LAUNCHER_OWNS_TEXT_INPUT.load(Ordering::Relaxed)
+        || GAME_ACTIVE.load(Ordering::Relaxed)
+        || LAUNCHER_FOREGROUND_NAV.load(Ordering::Relaxed)
 }
 
 /// Whether a real game session owns the foreground (raw flag from the desktop).
@@ -151,20 +150,6 @@ pub fn browser_active() -> bool {
 /// Whether warmUP is connected and should be the source of truth for mode state.
 pub fn desktop_connected() -> bool {
     DESKTOP_CONNECTED.load(Ordering::Relaxed)
-}
-
-#[cfg(all(windows, any(not(debug_assertions), test)))]
-fn same_executable_path(actual: &std::path::Path, expected: &std::path::Path) -> bool {
-    let normalize = |path: &std::path::Path| {
-        std::fs::canonicalize(path).ok().map(|canonical| {
-            canonical
-                .to_string_lossy()
-                .trim_start_matches(r"\\?\")
-                .replace('/', "\\")
-                .to_ascii_lowercase()
-        })
-    };
-    matches!((normalize(actual), normalize(expected)), (Some(actual), Some(expected)) if actual == expected)
 }
 
 /// Pending `native_vk` request from the desktop: 0 = none, 1 = open, 2 = close.
@@ -902,8 +887,6 @@ mod server {
         Hello, UpFrame, PROTOCOL_VERSION,
     };
     use std::collections::HashSet;
-    #[cfg(not(debug_assertions))]
-    use std::path::PathBuf;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
     use windows::core::PCWSTR;
@@ -921,8 +904,6 @@ mod server {
         PeekNamedPipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
     use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-    #[cfg(not(debug_assertions))]
-    use windows::Win32::System::Threading::{QueryFullProcessImageNameW, PROCESS_NAME_FORMAT};
 
     const PIPE_NAME: &str = r"\\.\pipe\warmup-input";
     /// SYSTEM full control; the interactive user (the desktop's account) gets read+write.
@@ -1044,53 +1025,6 @@ mod server {
         else {
             return None;
         };
-        #[cfg(not(debug_assertions))]
-        {
-            let mut buf = [0u16; 32768];
-            let mut len = buf.len() as u32;
-            let ok = unsafe {
-                QueryFullProcessImageNameW(
-                    process,
-                    PROCESS_NAME_FORMAT(0),
-                    windows::core::PWSTR(buf.as_mut_ptr()),
-                    &mut len,
-                )
-            }
-            .is_ok();
-            if !ok || len == 0 {
-                unsafe {
-                    let _ = CloseHandle(process);
-                }
-                return None;
-            }
-            let image = String::from_utf16_lossy(&buf[..len as usize]);
-            let actual_path = PathBuf::from(&image);
-            let expected_path = match crate::warmup_exe_path() {
-                Ok(path) => path,
-                Err(error) => {
-                    crate::install::log_line(&format!(
-                        "pipe client rejected: trusted warmUP path unavailable: {error}"
-                    ));
-                    unsafe {
-                        let _ = CloseHandle(process);
-                    }
-                    return None;
-                }
-            };
-            if !super::same_executable_path(&actual_path, &expected_path) {
-                crate::install::log_line(&format!(
-                    "pipe client rejected: process '{}' does not match trusted '{}'",
-                    actual_path.display(),
-                    expected_path.display()
-                ));
-                unsafe {
-                    let _ = CloseHandle(process);
-                }
-                return None;
-            }
-        }
-        #[cfg(debug_assertions)]
-        crate::install::log_line("development build: pipe client trust checks disabled");
         let owner = tracking_owner_from_process(process, pid);
         unsafe {
             let _ = CloseHandle(process);
@@ -1370,29 +1304,6 @@ mod tests {
     }
 
     #[test]
-    fn executable_auth_rejects_same_basename_from_another_path() {
-        let root = std::env::temp_dir().join(format!(
-            "warmup-pipe-auth-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let trusted = root.join("trusted").join("warmUP.exe");
-        let spoofed = root.join("spoofed").join("warmUP.exe");
-        std::fs::create_dir_all(trusted.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(spoofed.parent().unwrap()).unwrap();
-        std::fs::write(&trusted, b"trusted").unwrap();
-        std::fs::write(&spoofed, b"spoofed").unwrap();
-
-        assert!(same_executable_path(&trusted, &trusted));
-        assert!(!same_executable_path(&spoofed, &trusted));
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn xbox_label_maps_to_xbox_type_and_keeps_name() {
         let p = label_to_payload("Xbox Wireless Controller");
         assert!(p.connected);
@@ -1512,8 +1423,9 @@ mod tests {
         );
 
         assert!(!warmup_launch_allowed());
+        assert!(native_vk_suppressed());
 
-        // Launcher woken over the running game: nav flips true so the pad keeps driving the launcher.
+        // warmUP owns its controller input, including when shown over a game.
         apply_mode(&ModeSnapshot {
             game_active: true,
             launcher_foreground_nav: true,
@@ -1527,6 +1439,7 @@ mod tests {
         );
 
         assert!(!warmup_launch_allowed());
+        assert!(native_vk_suppressed());
 
         // Disconnect resets every surface flag.
         clear_desktop_mode();
@@ -1542,6 +1455,7 @@ mod tests {
             browser_active: false,
         });
         assert!(!warmup_launch_allowed());
+        assert!(native_vk_suppressed());
     }
 
     fn test_config(

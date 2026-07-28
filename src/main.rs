@@ -47,15 +47,15 @@ mod hid_gamepad;
 #[cfg(all(windows, feature = "gamepad"))]
 mod hid_reader;
 #[cfg(all(windows, feature = "gamepad"))]
-mod pad_decode;
-#[cfg(all(windows, feature = "gamepad"))]
 mod library_watch;
 #[cfg(all(windows, feature = "gamepad"))]
-mod playtime_tracker;
+mod pad_decode;
 #[cfg(all(windows, feature = "gamepad"))]
 mod parental_guard;
 #[cfg(feature = "gamepad")]
 mod pc_cursor;
+#[cfg(all(windows, feature = "gamepad"))]
+mod playtime_tracker;
 #[cfg(all(windows, feature = "gamepad"))]
 mod xinput_backend;
 #[cfg(all(windows, feature = "gamepad"))]
@@ -827,6 +827,14 @@ fn dispatch_install_or_service(args: &[String]) {
             install::run_install(debug_ui);
             std::process::exit(0);
         }
+        Some("install-dev") => {
+            let Some(path) = args.get(2) else {
+                eprintln!("usage: warmup-companion.exe install-dev <path-to-warmup.exe>");
+                std::process::exit(2);
+            };
+            install::run_install_dev(std::path::Path::new(path));
+            std::process::exit(0);
+        }
         Some("uninstall") => {
             install::run_uninstall();
             std::process::exit(0);
@@ -1175,13 +1183,14 @@ pub(crate) fn warmup_exe_path() -> Result<std::path::PathBuf, String> {
         return Err(format!("WARMUP_EXE does not exist: {}", path.display()));
     }
 
-    if let Ok(raw) = std::fs::read_to_string(r"C:\ProgramData\WarmupVk\warmup-exe.path") {
+    if let Ok(raw) = std::fs::read_to_string(crate::install::DEV_EXE_PATH) {
         let path = std::path::PathBuf::from(raw.trim().trim_matches('"'));
         if path.is_file() {
             return Ok(path);
         }
         return Err(format!(
-            r"C:\ProgramData\WarmupVk\warmup-exe.path points to missing exe: {}",
+            "{} points to missing exe: {}",
+            crate::install::DEV_EXE_PATH,
             path.display()
         ));
     }
@@ -1217,7 +1226,7 @@ pub(crate) fn warmup_exe_path() -> Result<std::path::PathBuf, String> {
         .ok_or_else(|| {
             format!(
                 "warmup.exe not found; set WARMUP_EXE or write the full path to {}",
-                r"C:\ProgramData\WarmupVk\warmup-exe.path"
+                crate::install::DEV_EXE_PATH
             )
         })
 }
@@ -1282,21 +1291,16 @@ fn spawn_warmup_as_active_user(exe: &std::path::Path) -> std::io::Result<()> {
         };
         let mut info = PROCESS_INFORMATION::default();
         let mut env = std::ptr::null_mut();
-        let env_created = CreateEnvironmentBlock(&mut env, token, false).is_ok();
-        let env_arg = if env_created {
-            Some(env.cast_const().cast())
-        } else {
-            None
-        };
+        if let Err(error) = CreateEnvironmentBlock(&mut env, token, false) {
+            let _ = CloseHandle(token);
+            return Err(std::io::Error::other(error.to_string()));
+        }
         let cwd_arg = cwd_w
             .as_ref()
             .map(|cwd| PCWSTR(cwd.as_ptr()))
             .unwrap_or_else(PCWSTR::null);
-        let mut flags = CREATE_UNICODE_ENVIRONMENT
+        let flags = CREATE_UNICODE_ENVIRONMENT
             | PROCESS_CREATION_FLAGS(DETACHED_PROCESS.0 | CREATE_NEW_PROCESS_GROUP.0);
-        if !env_created {
-            flags = PROCESS_CREATION_FLAGS(DETACHED_PROCESS.0 | CREATE_NEW_PROCESS_GROUP.0);
-        }
 
         let created = CreateProcessAsUserW(
             token,
@@ -1306,14 +1310,12 @@ fn spawn_warmup_as_active_user(exe: &std::path::Path) -> std::io::Result<()> {
             None,
             false,
             flags,
-            env_arg,
+            Some(env.cast_const().cast()),
             cwd_arg,
             &startup,
             &mut info,
         );
-        if env_created {
-            let _ = DestroyEnvironmentBlock(env);
-        }
+        let _ = DestroyEnvironmentBlock(env);
         let _ = CloseHandle(token);
         created.map_err(|e| std::io::Error::other(e.to_string()))?;
         let _ = CloseHandle(info.hThread);
