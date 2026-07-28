@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.12
+
+- Restore full controller input in warmUP and on the Windows desktop while
+  keeping active games Guide-only.
+
 ## v0.2.11
 
 - Restore warmUP release IPC access while retaining per-user and per-session

@@ -61,7 +61,7 @@ pub enum PadCommand {
     TriggerRumble { left: f32, right: f32, ms: u32 },
 }
 
-/// Sleep while a game or warmUP owns the controller; poll fully only on the desktop.
+/// Sleep while a game owns the controller; poll fully in warmUP and on the desktop.
 /// Without a desktop connection, the fullscreen heuristic provides the game signal.
 fn effective_userland_poll_mode() -> PollMode {
     let settings = crate::config::gamepad_settings();
@@ -85,7 +85,7 @@ fn should_sleep_for_desktop_surface(
     game_active: bool,
     launcher_foreground: bool,
 ) -> bool {
-    desktop_connected && (game_active || launcher_foreground)
+    desktop_connected && game_active && !launcher_foreground
 }
 
 #[cfg(test)]
@@ -93,10 +93,10 @@ mod poll_mode_tests {
     use super::should_sleep_for_desktop_surface;
 
     #[test]
-    fn sleeps_in_games_and_warmup_but_not_on_desktop() {
+    fn sleeps_only_in_games() {
         assert!(should_sleep_for_desktop_surface(true, true, false));
-        assert!(should_sleep_for_desktop_surface(true, false, true));
-        assert!(should_sleep_for_desktop_surface(true, true, true));
+        assert!(!should_sleep_for_desktop_surface(true, false, true));
+        assert!(!should_sleep_for_desktop_surface(true, true, true));
         assert!(!should_sleep_for_desktop_surface(true, false, false));
         assert!(!should_sleep_for_desktop_surface(false, true, true));
     }
