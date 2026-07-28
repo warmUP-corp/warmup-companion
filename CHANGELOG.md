@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.2.11
+
+- Restore warmUP release IPC access while retaining per-user and per-session
+  ownership for offline tracking.
+- Launch warmUP only with a complete active-user environment, preventing broken
+  WebView startup under service/SYSTEM paths.
+- Keep controller input asleep while warmUP or a game owns the foreground.
+- Add an explicit development install mode for trusted local warmUP builds.
+
+## v0.2.10
+
+- Keep controller input Guide-only while a game owns the foreground.
+
 ## v0.2.9
 
 - Restore the desktop-only warmUP launch chord: it is blocked while warmUP is

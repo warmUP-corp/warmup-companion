@@ -112,17 +112,6 @@ pub fn standalone_game_active_now() -> bool {
     false
 }
 
-#[cfg(test)]
-mod tests {
-    use super::standalone_game_sleep_enabled;
-
-    #[test]
-    fn legacy_auto_stop_keeps_guide_only_polling_alive() {
-        assert!(standalone_game_sleep_enabled(false, true));
-        assert!(!standalone_game_sleep_enabled(false, false));
-    }
-}
-
 /// Polls physical controller state and produces normalized axes + button edges.
 ///
 /// Device features (touchpad/gyro/battery/LED/rumble) default to "unsupported":
