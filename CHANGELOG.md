@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.13
+
+- Keep cursor movement and clicks in the same mode so the desktop never gets
+  stuck with movement-only controls.
+- Let warmUP own game/launcher/desktop input state while connected, while
+  retaining standalone game detection.
+- Drain large desktop configuration frames without blocking later mode updates.
+- Respect warmUP's native-keyboard suppression for the R3 voice shortcut.
+
 ## v0.2.12
 
 - Restore full controller input in warmUP and on the Windows desktop while

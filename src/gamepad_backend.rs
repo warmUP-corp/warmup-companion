@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -66,39 +66,68 @@ pub enum PadCommand {
 fn effective_userland_poll_mode() -> PollMode {
     let settings = crate::config::gamepad_settings();
     let desktop_connected = crate::pipe_server::desktop_connected();
-    let desktop_surface_active = should_sleep_for_desktop_surface(
+    let raw_game_active = crate::pipe_server::game_active();
+    let launcher_nav = crate::pipe_server::launcher_foreground_nav();
+    let detected_game_active = settings.sleep_on_game && standalone_game_active_now();
+    let game_active = should_sleep_for_game(
         desktop_connected,
-        crate::pipe_server::game_active(),
-        crate::pipe_server::launcher_foreground_nav(),
+        raw_game_active,
+        launcher_nav,
+        detected_game_active,
     );
-    let standalone_game_active =
-        !desktop_connected && settings.sleep_on_game && standalone_game_active_now();
-    if userland_poll_paused() || desktop_surface_active || standalone_game_active {
+    let paused = userland_poll_paused();
+    let mode = if paused || game_active {
         PollMode::Sleep
     } else {
         settings.userland_poll_mode
+    };
+    type Decision = (bool, bool, bool, bool, bool, PollMode);
+    static LAST_DECISION: OnceLock<Mutex<Option<Decision>>> = OnceLock::new();
+    let decision = (
+        desktop_connected,
+        raw_game_active,
+        launcher_nav,
+        detected_game_active,
+        paused,
+        mode,
+    );
+    if let Ok(mut last) = LAST_DECISION.get_or_init(|| Mutex::new(None)).lock() {
+        if last.as_ref() != Some(&decision) {
+            crate::install::log_line(&format!(
+                "poll mode -> {mode:?}: desktop_connected={desktop_connected} game_active={raw_game_active} launcher_nav={launcher_nav} detected_game={detected_game_active} paused={paused}"
+            ));
+            *last = Some(decision);
+        }
     }
+    mode
 }
 
-fn should_sleep_for_desktop_surface(
+fn should_sleep_for_game(
     desktop_connected: bool,
     game_active: bool,
     launcher_foreground: bool,
+    detected_game_active: bool,
 ) -> bool {
-    desktop_connected && game_active && !launcher_foreground
+    if desktop_connected {
+        game_active && !launcher_foreground
+    } else {
+        detected_game_active
+    }
 }
 
 #[cfg(test)]
 mod poll_mode_tests {
-    use super::should_sleep_for_desktop_surface;
+    use super::should_sleep_for_game;
 
     #[test]
-    fn sleeps_only_in_games() {
-        assert!(should_sleep_for_desktop_surface(true, true, false));
-        assert!(!should_sleep_for_desktop_surface(true, false, true));
-        assert!(!should_sleep_for_desktop_surface(true, true, true));
-        assert!(!should_sleep_for_desktop_surface(true, false, false));
-        assert!(!should_sleep_for_desktop_surface(false, true, true));
+    fn warmup_controls_connected_mode_and_detection_controls_standalone_mode() {
+        assert!(should_sleep_for_game(true, true, false, false));
+        assert!(!should_sleep_for_game(true, false, false, true));
+        assert!(!should_sleep_for_game(true, false, true, false));
+        assert!(!should_sleep_for_game(true, true, true, false));
+        assert!(!should_sleep_for_game(true, false, false, false));
+        assert!(!should_sleep_for_game(false, true, true, false));
+        assert!(should_sleep_for_game(false, false, false, true));
     }
 }
 

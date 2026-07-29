@@ -630,6 +630,14 @@ fn keyboard_theme_from_payload(
 
 #[cfg_attr(not(windows), allow(dead_code))]
 fn apply_mode(p: &ModeSnapshot) {
+    crate::install::log_line(&format!(
+        "pipe mode: game_active={} launcher_nav={} clicks={} launcher_text={} browser={}",
+        p.game_active,
+        p.launcher_foreground_nav,
+        p.clicks_enabled,
+        p.launcher_owns_text_input,
+        p.browser_active
+    ));
     CLICKS_ENABLED.store(p.clicks_enabled, Ordering::Relaxed);
     LAUNCHER_OWNS_TEXT_INPUT.store(p.launcher_owns_text_input, Ordering::Relaxed);
     GAME_ACTIVE.store(p.game_active, Ordering::Relaxed);
@@ -860,6 +868,10 @@ fn reset_button_stream() {
     }
 }
 
+fn inbound_frame_ready(peeked: &[u8], available: u32) -> bool {
+    peeked.contains(&b'\n') || available as usize > peeked.len()
+}
+
 /// Start the pipe server on its own thread. No-op on non-Windows (there the desktop
 /// owns input in-process, so there is no companion to serve).
 #[cfg(windows)]
@@ -878,9 +890,9 @@ mod server {
     use super::{
         apply_companion_settings, apply_config, apply_led, apply_library_watch, apply_mode,
         apply_parental_guard, apply_play_sessions_ack, apply_rumble, clear_desktop_mode, current,
-        current_axis, current_battery, drain_buttons, drain_parental_blocked, reset_button_stream,
-        set_native_vk_request, take_cursor_moved, take_touchpad, tracking_owner_from_process,
-        TrackingOwner, DESKTOP_CONNECTED,
+        current_axis, current_battery, drain_buttons, drain_parental_blocked, inbound_frame_ready,
+        reset_button_stream, set_native_vk_request, take_cursor_moved, take_touchpad,
+        tracking_owner_from_process, TrackingOwner, DESKTOP_CONNECTED,
     };
     use crate::protocol::{
         is_supported_protocol_version, AxisPayload, BatteryPayload, ConnectionPayload, DownFrame,
@@ -1234,8 +1246,8 @@ mod server {
         Ok(())
     }
 
-    /// True when the inbound buffer already contains a complete line (so [`read_line`] will
-    /// not block). Uses `PeekNamedPipe` to inspect without consuming.
+    /// Read once a newline is visible or the frame exceeds the peek buffer; the latter must
+    /// be drained so a large frame cannot permanently hide its newline.
     fn peek_has_newline(pipe: HANDLE) -> std::io::Result<bool> {
         let mut buf = [0u8; 4096];
         let mut read = 0u32;
@@ -1251,7 +1263,7 @@ mod server {
             )
         }
         .map_err(to_io)?;
-        Ok(buf[..read as usize].contains(&b'\n'))
+        Ok(inbound_frame_ready(&buf[..read as usize], avail))
     }
 
     fn read_line(pipe: HANDLE) -> std::io::Result<String> {
@@ -1360,6 +1372,13 @@ mod tests {
         publish_button("B", true);
         reset_button_stream();
         assert!(drain_buttons().is_empty());
+    }
+
+    #[test]
+    fn inbound_frames_larger_than_the_peek_buffer_are_drained() {
+        assert!(inbound_frame_ready(&[b'x'; 4096], 4097));
+        assert!(inbound_frame_ready(b"{}\n", 3));
+        assert!(!inbound_frame_ready(b"{", 1));
     }
 
     #[test]

@@ -481,9 +481,17 @@ impl GamepadPoll {
             axes,
             touchpad,
         } = self.backend.poll_frame()?;
-        self.backend.publish_device_features(&touchpad);
+        let game_owns_input =
+            crate::pipe_server::game_active() && !crate::pipe_server::launcher_foreground_nav();
+        let cursor_injection_enabled =
+            allows_cursor_injection(game_owns_input, crate::pipe_server::clicks_enabled());
+        if !game_owns_input {
+            self.backend.publish_device_features(&touchpad);
+        }
         let (lx, ly, rx, ry) = axes;
-        crate::pipe_server::publish_axis(lx, ly, rx, ry);
+        if !game_owns_input {
+            crate::pipe_server::publish_axis(lx, ly, rx, ry);
+        }
 
         #[cfg(windows)]
         if crate::config::service_mode() {
@@ -519,9 +527,14 @@ impl GamepadPoll {
             return Ok(edges);
         }
 
-        cursor.move_touchpad(touchpad.delta);
-        cursor.move_stick(lx, ly, dt_secs);
-        cursor.scroll_stick(rx, ry, dt_secs);
+        if !cursor_injection_enabled {
+            cursor.set_left_button(false);
+            cursor.set_right_button(false);
+        } else {
+            cursor.move_touchpad(touchpad.delta);
+            cursor.move_stick(lx, ly, dt_secs);
+            cursor.scroll_stick(rx, ry, dt_secs);
+        }
 
         let changes = dedupe_consecutive_toggle_edges(changes);
         let mut edges = Vec::new();
@@ -553,7 +566,10 @@ impl GamepadPoll {
             // R3 starts dictation even with the VK closed, so voice typing into the
             // focused app is a single click — no need to open the keyboard first.
             #[cfg(windows)]
-            if change.button == Button::R3 && change.pressed {
+            if change.button == Button::R3
+                && change.pressed
+                && !crate::pipe_server::native_vk_suppressed()
+            {
                 crate::vk_nav::start_voice_input();
                 self.backend.haptic_alert();
                 continue;
@@ -569,14 +585,14 @@ impl GamepadPoll {
                     _ => {}
                 }
                 let any_click_down = self.a_cursor_down || self.touchpad_cursor_down;
-                cursor.set_left_button(any_click_down && crate::pipe_server::clicks_enabled());
+                cursor.set_left_button(any_click_down && cursor_injection_enabled);
             }
             // B → right-click HOLD on the OS cursor (A=left, B=right, console convention).
             // Gated by clicks_enabled so it stays quiet while the launcher/game owns input;
             // B still forwards to the launcher above for back-nav.
             if change.button == Button::B {
                 self.b_cursor_down = change.pressed;
-                cursor.set_right_button(self.b_cursor_down && crate::pipe_server::clicks_enabled());
+                cursor.set_right_button(self.b_cursor_down && cursor_injection_enabled);
             }
             // Share (SELECT) / Start → Enter into the focused app even with the VK
             // closed, so submit/confirm is one tap. NOT gated by clicks_enabled
@@ -955,6 +971,10 @@ fn is_standalone_guide_wake(
     change.button == Button::Guide && change.pressed && !desktop_connected && standalone_game_active
 }
 
+fn allows_cursor_injection(game_owns_input: bool, clicks_enabled: bool) -> bool {
+    !game_owns_input && clicks_enabled
+}
+
 fn dedupe_consecutive_toggle_edges(changes: Vec<ButtonChange>) -> Vec<ButtonChange> {
     let mut out: Vec<ButtonChange> = Vec::with_capacity(changes.len());
     for c in changes {
@@ -1175,7 +1195,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{is_standalone_guide_wake, Button, ButtonChange};
+    use super::{allows_cursor_injection, is_standalone_guide_wake, Button, ButtonChange};
 
     #[test]
     fn standalone_game_wakes_only_on_guide_press() {
@@ -1193,5 +1213,12 @@ mod tests {
             false,
             true,
         ));
+    }
+
+    #[test]
+    fn cursor_injection_requires_cursor_mode() {
+        assert!(allows_cursor_injection(false, true));
+        assert!(!allows_cursor_injection(false, false));
+        assert!(!allows_cursor_injection(true, true));
     }
 }
