@@ -48,6 +48,9 @@ const MENU_EDIT_SETTINGS: usize = 1012;
 const MENU_MIC_DEFAULT: usize = 1013;
 const MENU_ENGINE_WHISPER: usize = 1014;
 const MENU_ENGINE_PARAKEET: usize = 1015;
+/// Local escape hatch for the "Enable gamepad cursor" master switch, so a user who
+/// turned the cursor off in warmUP can get it back while warmUP is not running.
+const MENU_CURSOR_ENABLED: usize = 1016;
 /// Mic device i is `MENU_MIC_BASE + i` (capped at 32 devices in the menu).
 const MENU_MIC_BASE: usize = 1100;
 /// Global hotkey id for "toggle voice dictation" (Ctrl+Alt+V).
@@ -252,6 +255,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     crate::gamepad_backend::set_userland_poll_paused(paused);
                     let _ = crate::config::write_userland_poll_paused(paused);
                 }
+                MENU_CURSOR_ENABLED => toggle_setting_bool(
+                    "cursor_enabled",
+                    crate::config::gamepad_settings().cursor_enabled,
+                ),
                 MENU_COMPACT => toggle_compact(),
                 MENU_SLEEP_ON_GAME => toggle_setting_bool(
                     "sleep_on_game",
@@ -314,6 +321,12 @@ unsafe fn show_menu(hwnd: HWND) {
         chk(paused),
         MENU_TOGGLE_POLL,
         w!("Pause gamepad input"),
+    );
+    let _ = AppendMenuW(
+        menu,
+        chk(gs.cursor_enabled),
+        MENU_CURSOR_ENABLED,
+        w!("Gamepad cursor"),
     );
 
     // Keyboard.

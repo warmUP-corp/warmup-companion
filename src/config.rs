@@ -95,6 +95,11 @@ pub struct GamepadSettings {
     pub auto_stop_on_game: bool,
     /// Show the userland prompt debug overlay.
     pub prompt_userland_debug: bool,
+    /// Master switch for gamepad-driven mouse control ("Enable gamepad cursor" in
+    /// warmUP, pushed as `config.enabled`). When false the sticks and the touchpad
+    /// stop moving/scrolling the OS cursor and A/B stop emitting OS clicks — button
+    /// edges still reach warmUP over the pipe, so D-pad/focus navigation keeps working.
+    pub cursor_enabled: bool,
     pub cursor_deadzone: f32,
     pub cursor_speed: f32,
     pub cursor_accel: f32,
@@ -115,6 +120,7 @@ impl Default for GamepadSettings {
             sleep_on_game: true,
             auto_stop_on_game: false,
             prompt_userland_debug: false,
+            cursor_enabled: true,
             cursor_deadzone: 0.15,
             cursor_speed: 15.0,
             cursor_accel: 2.0,
@@ -278,6 +284,13 @@ pub fn keyboard_theme() -> KeyboardTheme {
 
 #[cfg(feature = "gamepad")]
 fn apply_gamepad_settings_text(settings: &mut GamepadSettings, text: &str) {
+    let has_cursor_enabled = text.lines().any(|line| {
+        let line = line.trim();
+        !line.starts_with('#')
+            && line
+                .split_once('=')
+                .is_some_and(|(key, _)| key.trim() == "cursor_enabled")
+    });
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -300,6 +313,12 @@ fn apply_gamepad_settings_text(settings: &mut GamepadSettings, text: &str) {
             }
             "prompt_userland_debug" => {
                 settings.prompt_userland_debug = parse_bool(value, settings.prompt_userland_debug)
+            }
+            "cursor_enabled" => {
+                settings.cursor_enabled = parse_bool(value, settings.cursor_enabled)
+            }
+            "gamepad_cursor" if !has_cursor_enabled => {
+                settings.cursor_enabled = parse_bool(value, settings.cursor_enabled)
             }
             "cursor_deadzone" => {
                 settings.cursor_deadzone = parse_unit_f32(value, settings.cursor_deadzone)
@@ -478,6 +497,10 @@ const SETTINGS_TEMPLATE: &str = r#"# Warmup Companion settings. One `key = value
 # auto_stop_on_game = false
 # prompt_userland_debug = false
 
+# Gamepad cursor master switch (true|false). False parks stick/touchpad cursor
+# movement, scrolling and A/B OS clicks; the pad still navigates warmUP via d-pad.
+# cursor_enabled = true
+
 # Cursor: deadzone & smoothing are 0.0-0.95; speed & accel are > 0.0
 # cursor_deadzone = 0.15
 # cursor_speed = 15.0
@@ -582,6 +605,8 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
             .map(|_| ())
             .ok_or_else(|| format!("{key} must be >= 0.0 and < 0.95")),
         "natural_scroll"
+        | "cursor_enabled"
+        | "gamepad_cursor"
         | "sleep_on_game"
         | "game_sleep"
         | "sleep_when_game_active"
@@ -683,5 +708,16 @@ mod tests {
 
         apply_gamepad_settings_text(&mut settings, "prompt_userland_debug=on\n");
         assert!(settings.prompt_userland_debug);
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn cursor_enabled_takes_precedence_over_its_legacy_alias() {
+        let mut settings = GamepadSettings::default();
+        apply_gamepad_settings_text(&mut settings, "gamepad_cursor=false\ncursor_enabled=true\n");
+        assert!(settings.cursor_enabled);
+
+        apply_gamepad_settings_text(&mut settings, "cursor_enabled=false\ngamepad_cursor=true\n");
+        assert!(!settings.cursor_enabled);
     }
 }

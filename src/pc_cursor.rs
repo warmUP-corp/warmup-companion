@@ -121,8 +121,25 @@ impl PcCursor {
         self.on_winlogon = on_winlogon;
     }
 
+    /// Park sub-pixel remainders and smoothing so a re-enabled cursor starts from rest
+    /// instead of gliding on stale state. Also releases a held mouse button: the master
+    /// switch can flip mid-hold, and only edges drive [`set_left_button`], so without
+    /// this a button could stay physically down with no further edge to lift it.
+    fn reset_move_state(&mut self) {
+        self.remainder_x = 0.0;
+        self.remainder_y = 0.0;
+        self.smooth_dx = 0.0;
+        self.smooth_dy = 0.0;
+        self.set_left_button(false);
+        self.set_right_button(false);
+    }
+
     pub fn move_stick(&mut self, stick_x: f32, stick_y: f32, dt_secs: f32) {
         let settings = crate::config::gamepad_settings();
+        if !settings.cursor_enabled {
+            self.reset_move_state();
+            return;
+        }
         let (dx, dy) = stick_delta(
             stick_x,
             stick_y,
@@ -168,6 +185,11 @@ impl PcCursor {
 
     pub fn scroll_stick(&mut self, stick_x: f32, stick_y: f32, dt_secs: f32) {
         let settings = crate::config::gamepad_settings();
+        if !settings.cursor_enabled {
+            self.scroll_remainder_x = 0.0;
+            self.scroll_remainder_y = 0.0;
+            return;
+        }
         let (sx, sy) = scroll_delta(
             stick_x,
             stick_y,
@@ -199,6 +221,10 @@ impl PcCursor {
     }
 
     pub fn move_touchpad(&mut self, delta: Option<(f32, f32)>) {
+        if !crate::config::gamepad_settings().cursor_enabled {
+            self.reset_move_state();
+            return;
+        }
         let Some((dx, dy)) = delta else {
             return;
         };

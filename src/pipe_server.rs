@@ -513,6 +513,12 @@ fn apply_led_config(p: &crate::protocol::ConfigPayload) {
 #[cfg_attr(not(windows), allow(dead_code))]
 fn apply_config(p: &crate::protocol::ConfigPayload) {
     CLICKS_ENABLED.store(p.clicks_enabled, Ordering::Relaxed);
+    // "Enable gamepad cursor" master switch. Persisted like the feel settings so the
+    // choice survives a companion restart and still applies while warmUP is not running.
+    let _ = crate::config::set_gamepad_setting(
+        "cursor_enabled",
+        if p.enabled { "true" } else { "false" },
+    );
     let _ = crate::config::set_gamepad_setting("cursor_deadzone", &p.deadzone.to_string());
     let _ = crate::config::set_gamepad_setting("cursor_speed", &p.sensitivity.to_string());
     let _ = crate::config::set_gamepad_setting("cursor_accel", &p.acceleration_exp.to_string());
