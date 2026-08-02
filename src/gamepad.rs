@@ -527,6 +527,8 @@ impl GamepadPoll {
             return Ok(edges);
         }
 
+        // Second gate on top of this one: the `cursor_enabled` master switch, applied
+        // inside pc_cursor so every entry point (stick, scroll, touchpad) honours it.
         if !cursor_injection_enabled {
             cursor.set_left_button(false);
             cursor.set_right_button(false);
@@ -585,14 +587,22 @@ impl GamepadPoll {
                     _ => {}
                 }
                 let any_click_down = self.a_cursor_down || self.touchpad_cursor_down;
-                cursor.set_left_button(any_click_down && cursor_injection_enabled);
+                cursor.set_left_button(
+                    any_click_down
+                        && cursor_injection_enabled
+                        && crate::config::gamepad_settings().cursor_enabled,
+                );
             }
             // B → right-click HOLD on the OS cursor (A=left, B=right, console convention).
             // Gated by clicks_enabled so it stays quiet while the launcher/game owns input;
             // B still forwards to the launcher above for back-nav.
             if change.button == Button::B {
                 self.b_cursor_down = change.pressed;
-                cursor.set_right_button(self.b_cursor_down && cursor_injection_enabled);
+                cursor.set_right_button(
+                    self.b_cursor_down
+                        && cursor_injection_enabled
+                        && crate::config::gamepad_settings().cursor_enabled,
+                );
             }
             // Share (SELECT) / Start → Enter into the focused app even with the VK
             // closed, so submit/confirm is one tap. NOT gated by clicks_enabled
