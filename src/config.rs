@@ -284,6 +284,13 @@ pub fn keyboard_theme() -> KeyboardTheme {
 
 #[cfg(feature = "gamepad")]
 fn apply_gamepad_settings_text(settings: &mut GamepadSettings, text: &str) {
+    let has_cursor_enabled = text.lines().any(|line| {
+        let line = line.trim();
+        !line.starts_with('#')
+            && line
+                .split_once('=')
+                .is_some_and(|(key, _)| key.trim() == "cursor_enabled")
+    });
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -307,7 +314,10 @@ fn apply_gamepad_settings_text(settings: &mut GamepadSettings, text: &str) {
             "prompt_userland_debug" => {
                 settings.prompt_userland_debug = parse_bool(value, settings.prompt_userland_debug)
             }
-            "cursor_enabled" | "gamepad_cursor" => {
+            "cursor_enabled" => {
+                settings.cursor_enabled = parse_bool(value, settings.cursor_enabled)
+            }
+            "gamepad_cursor" if !has_cursor_enabled => {
                 settings.cursor_enabled = parse_bool(value, settings.cursor_enabled)
             }
             "cursor_deadzone" => {
@@ -698,5 +708,16 @@ mod tests {
 
         apply_gamepad_settings_text(&mut settings, "prompt_userland_debug=on\n");
         assert!(settings.prompt_userland_debug);
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn cursor_enabled_takes_precedence_over_its_legacy_alias() {
+        let mut settings = GamepadSettings::default();
+        apply_gamepad_settings_text(&mut settings, "gamepad_cursor=false\ncursor_enabled=true\n");
+        assert!(settings.cursor_enabled);
+
+        apply_gamepad_settings_text(&mut settings, "cursor_enabled=false\ngamepad_cursor=true\n");
+        assert!(!settings.cursor_enabled);
     }
 }
