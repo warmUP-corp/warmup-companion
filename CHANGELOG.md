@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.14
+
+- Honor warmUP's gamepad-cursor master switch for stick, touchpad, scrolling,
+  and A/B mouse clicks while retaining launcher navigation.
+- Give the canonical cursor setting precedence over its legacy alias.
+
 ## v0.2.13
 
 - Keep cursor movement and clicks in the same mode so the desktop never gets
