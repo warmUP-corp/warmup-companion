@@ -19,7 +19,8 @@ $Makensis = Get-Command makensis -ErrorAction SilentlyContinue
 if (-not $Makensis) {
     $Makensis = @(
         "${env:ProgramFiles(x86)}\NSIS\makensis.exe",
-        "$env:ProgramFiles\NSIS\makensis.exe"
+        "$env:ProgramFiles\NSIS\makensis.exe",
+        "$((Get-ItemProperty 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\NSIS' -ErrorAction SilentlyContinue).InstallLocation)\makensis.exe"
     ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 }
 if ($Makensis) {
@@ -27,8 +28,8 @@ if ($Makensis) {
     # makensis's working directory -- pass SRCROOT as an absolute path so this works
     # no matter where the caller's shell cwd is.
     & $Makensis "/DSRCROOT=$Root" (Join-Path $Root 'install\warmup-companion.nsi')
-} elseif (-not (Test-Path $Setup)) {
-    throw "makensis not found and installer does not exist: $Setup"
+} else {
+    throw "makensis not found; cannot build installer"
 }
 
 $Assets = @($Exe)

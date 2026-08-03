@@ -28,6 +28,20 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 const CLASS_NAME: windows::core::PCWSTR = w!("WarmupCompanionTray");
+const BUILD_INFO: &str = concat!(
+    "v",
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("WARMUP_BUILD_CHECKSUM"),
+    ")"
+);
+const TRAY_TIP: &str = concat!(
+    "Warmup Companion v",
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("WARMUP_BUILD_CHECKSUM"),
+    ")"
+);
 const INSTALLED_ICON_PATH: &str = r"C:\ProgramData\WarmupVk\bin\icon.ico";
 const TRAY_UID: u32 = 1;
 const WM_TRAY: u32 = WM_APP + 10;
@@ -131,7 +145,7 @@ unsafe fn try_add_icon(hwnd: HWND) {
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = WM_TRAY;
     nid.hIcon = load_tray_icon();
-    write_tip(&mut nid, "Warmup Companion");
+    write_tip(&mut nid, TRAY_TIP);
     if Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
         ICON_ADDED.store(true, Ordering::SeqCst);
         let _ = KillTimer(hwnd, ADD_RETRY_TIMER_ID);
@@ -312,6 +326,13 @@ unsafe fn show_menu(hwnd: HWND) {
 
     // Non-clickable header so the menu reads as one app's, not a loose pile of items.
     let _ = AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, w!("Warmup Companion"));
+    let build_info = wide(BUILD_INFO);
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING | MF_DISABLED,
+        0,
+        PCWSTR(build_info.as_ptr()),
+    );
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
 
     // Primary control stays top-level (a stable label + check, not a verb that swaps).
@@ -555,5 +576,15 @@ unsafe fn uninstall() {
     if let Ok(exe) = std::env::current_exe() {
         let exe = exe.display().to_string();
         shell_execute("runas", &exe, Some("uninstall"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_labels_match() {
+        assert_eq!(TRAY_TIP, format!("Warmup Companion {BUILD_INFO}"));
     }
 }
