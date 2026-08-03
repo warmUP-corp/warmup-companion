@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const DEFAULT_MAX_LEXICON: usize = 12_000;
 const DEFAULT_MAX_SENTENCES: usize = 100_000;
@@ -17,6 +18,39 @@ const PREBUILT_NGRAM: &str = "src/predict_ngram_prebuilt.bin";
 const ASSETS_DIR: &str = "assets";
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=WARMUP_BUILD_CHECKSUM");
+    let build_checksum = env::var("WARMUP_BUILD_CHECKSUM").ok().or_else(|| {
+        Command::new("git")
+            .args([
+                "describe",
+                "--always",
+                "--dirty",
+                "--abbrev=7",
+                "--exclude",
+                "*",
+            ])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|checksum| checksum.trim().to_owned())
+    });
+    println!(
+        "cargo:rustc-env=WARMUP_BUILD_CHECKSUM={}",
+        build_checksum.as_deref().unwrap_or("unknown")
+    );
+    if let Ok(output) = Command::new("git")
+        .args(["rev-parse", "--git-path", "logs/HEAD"])
+        .output()
+    {
+        if output.status.success() {
+            println!(
+                "cargo:rerun-if-changed={}",
+                String::from_utf8_lossy(&output.stdout).trim()
+            );
+        }
+    }
+
     println!("cargo:rerun-if-env-changed=WARMUP_REBUILD_NGRAM");
     println!("cargo:rerun-if-env-changed=WARMUP_WRITE_PREBUILT_NGRAM");
     println!("cargo:rerun-if-changed={PREBUILT_NGRAM}");
