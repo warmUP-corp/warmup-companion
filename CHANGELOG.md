@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.2.15
+
+- Show the Companion version and build checksum in its taskbar tray UI.
+
 ## v0.2.14
 
 - Honor warmUP's gamepad-cursor master switch for stick, touchpad, scrolling,
