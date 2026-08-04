@@ -415,6 +415,7 @@ pub struct VkRenderer {
     prompt_format: IDWriteTextFormat,
     icon_cache: HashMap<IconCacheKey, ID2D1Bitmap1>,
     controller_art_cache: HashMap<ControllerArtCacheKey, (ID2D1Bitmap1, u32, u32)>,
+    controller_model_cache: HashMap<ControllerArt, (ID2D1Bitmap1, u32, u32)>,
     prompt_started: Instant,
     /// Gliding focus-ring rect (client px) + the previous draw time, so the ring
     /// eases toward the selected key frame-rate-independently. `None` until the
@@ -558,6 +559,15 @@ impl ControllerArt {
             Self::XboxOne => {
                 include_bytes!("../../assets/controller-models/xbox-one-controller.png")
             }
+        }
+    }
+
+    fn svg(self) -> &'static str {
+        match self {
+            Self::DualSense => {
+                include_str!("../../assets/controller-models/dualsense-controller.svg")
+            }
+            Self::XboxOne => include_str!("../../assets/controller-models/xbox-controller.svg"),
         }
     }
 }
@@ -1019,6 +1029,183 @@ fn controller_center_art_rect(width: f32, height: f32) -> D2D_RECT_F {
 }
 
 #[cfg(feature = "gamepad")]
+fn controller_center_model_rect(width: f32, height: f32) -> D2D_RECT_F {
+    let art = controller_center_art_rect(width, height);
+    let available = D2D_RECT_F {
+        left: art.left + 18.0,
+        top: art.top + 42.0,
+        right: (art.right - 18.0).max(art.left + 19.0),
+        bottom: (art.bottom - 44.0).max(art.top + 43.0),
+    };
+    let available_w = available.right - available.left;
+    let available_h = available.bottom - available.top;
+    let aspect = 5.0 / 3.0;
+    let (model_w, model_h) = if available_w / available_h > aspect {
+        (available_h * aspect, available_h)
+    } else {
+        (available_w, available_w / aspect)
+    };
+    D2D_RECT_F {
+        left: (available.left + available.right - model_w) * 0.5,
+        top: (available.top + available.bottom - model_h) * 0.5,
+        right: (available.left + available.right + model_w) * 0.5,
+        bottom: (available.top + available.bottom + model_h) * 0.5,
+    }
+}
+
+#[cfg(feature = "gamepad")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ControllerModelPoint {
+    x: f32,
+    y: f32,
+}
+
+#[cfg(feature = "gamepad")]
+fn controller_button_position(button: Button, playstation: bool) -> ControllerModelPoint {
+    let (x, y) = match button {
+        Button::Lt => (0.31, 0.25),
+        Button::Lb => (0.29, 0.34),
+        Button::Select => (0.41, 0.40),
+        Button::L3 => {
+            if playstation {
+                (0.37, 0.70)
+            } else {
+                (0.36, 0.57)
+            }
+        }
+        Button::Up => {
+            if playstation {
+                (0.25, 0.50)
+            } else {
+                (0.25, 0.72)
+            }
+        }
+        Button::Left => {
+            if playstation {
+                (0.20, 0.56)
+            } else {
+                (0.20, 0.77)
+            }
+        }
+        Button::Right => {
+            if playstation {
+                (0.30, 0.56)
+            } else {
+                (0.30, 0.77)
+            }
+        }
+        Button::Down => {
+            if playstation {
+                (0.25, 0.62)
+            } else {
+                (0.25, 0.84)
+            }
+        }
+        Button::Touchpad => {
+            if playstation {
+                (0.50, 0.35)
+            } else {
+                (0.50, 0.45)
+            }
+        }
+        Button::Rt => (0.69, 0.25),
+        Button::Rb => (0.71, 0.34),
+        Button::Start => (0.59, 0.40),
+        Button::R3 => {
+            if playstation {
+                (0.63, 0.70)
+            } else {
+                (0.64, 0.72)
+            }
+        }
+        Button::Y => (0.75, 0.43),
+        Button::X => (0.69, 0.52),
+        Button::B => (0.81, 0.52),
+        Button::A => (0.75, 0.61),
+        Button::Guide => {
+            if playstation {
+                (0.50, 0.54)
+            } else {
+                (0.50, 0.49)
+            }
+        }
+    };
+    ControllerModelPoint { x, y }
+}
+
+#[cfg(feature = "gamepad")]
+fn controller_button_size(button: Button, unit: f32) -> (f32, f32) {
+    match button {
+        Button::Lt | Button::Lb | Button::Rt | Button::Rb => (unit * 0.18, unit * 0.075),
+        Button::Up | Button::Left | Button::Right | Button::Down => (unit * 0.085, unit * 0.085),
+        Button::L3 | Button::R3 => (unit * 0.22, unit * 0.22),
+        Button::Touchpad => (unit * 0.29, unit * 0.10),
+        Button::Select | Button::Start => (unit * 0.13, unit * 0.075),
+        Button::Guide => (unit * 0.11, unit * 0.11),
+        _ => (unit * 0.115, unit * 0.115),
+    }
+}
+
+#[cfg(feature = "gamepad")]
+fn controller_button_rect(rect: D2D_RECT_F, button: Button, playstation: bool) -> D2D_RECT_F {
+    let unit = (rect.right - rect.left)
+        .min(rect.bottom - rect.top)
+        .max(1.0);
+    let point = controller_button_position(button, playstation);
+    let (width, height) = controller_button_size(button, unit);
+    let cx = rect.left + (rect.right - rect.left) * point.x;
+    let cy = rect.top + (rect.bottom - rect.top) * point.y;
+    D2D_RECT_F {
+        left: cx - width * 0.5,
+        top: cy - height * 0.5,
+        right: cx + width * 0.5,
+        bottom: cy + height * 0.5,
+    }
+}
+
+#[cfg(feature = "gamepad")]
+fn controller_center_button_hit(x: f32, y: f32, width: f32, height: f32) -> Option<Button> {
+    let model = controller_center_model_rect(width, height);
+    let mut closest = None;
+    for &button in MAPPABLE_BUTTONS {
+        for playstation in [false, true] {
+            let rect = controller_button_rect(model, button, playstation);
+            if x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom {
+                let center_x = (rect.left + rect.right) * 0.5;
+                let center_y = (rect.top + rect.bottom) * 0.5;
+                let distance = (x - center_x).powi(2) + (y - center_y).powi(2);
+                if closest.map_or(true, |(_, best)| distance < best) {
+                    closest = Some((button, distance));
+                }
+            }
+        }
+    }
+    closest.map(|(button, _)| button)
+}
+
+#[cfg(feature = "gamepad")]
+fn controller_visual_label(button: Button, playstation: bool) -> &'static str {
+    match button {
+        Button::A if playstation => "×",
+        Button::B if playstation => "○",
+        Button::X if playstation => "□",
+        Button::Y if playstation => "△",
+        Button::Up => "↑",
+        Button::Left => "←",
+        Button::Right => "→",
+        Button::Down => "↓",
+        Button::Select if playstation => "Create",
+        Button::Select => "View",
+        Button::Start if playstation => "Options",
+        Button::Start => "Menu",
+        Button::Guide if playstation => "PS",
+        Button::Guide => "Xbox",
+        Button::Touchpad => "Touch",
+        _ => controller_button_label(button, if playstation { "DualSense" } else { "Xbox" }),
+    }
+}
+
+#[cfg(feature = "gamepad")]
 fn controller_center_card_rect(button: Button, width: f32, height: f32) -> Option<D2D_RECT_F> {
     let index = MAPPABLE_BUTTONS
         .iter()
@@ -1137,6 +1324,9 @@ pub fn controller_center_hit(
         if x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom {
             return Some(ControllerCenterHit::Button(button));
         }
+    }
+    if let Some(button) = controller_center_button_hit(x, y, width, height) {
+        return Some(ControllerCenterHit::Button(button));
     }
     if let Some(press) = selected {
         for (index, hold) in controller_center_modifier_buttons(press).enumerate() {
@@ -1407,6 +1597,7 @@ impl VkRenderer {
             prompt_format,
             icon_cache: HashMap::new(),
             controller_art_cache: HashMap::new(),
+            controller_model_cache: HashMap::new(),
             prompt_started: Instant::now(),
             anim_sel: None,
             last_draw: None,
@@ -1651,6 +1842,228 @@ impl VkRenderer {
             None,
         );
         Ok(())
+    }
+
+    #[cfg(feature = "gamepad")]
+    unsafe fn draw_controller_model_alpha(
+        &mut self,
+        art: ControllerArt,
+        rect: D2D_RECT_F,
+        opacity: f32,
+    ) -> Result<(), String> {
+        const MODEL_W: u32 = 1000;
+        const MODEL_H: u32 = 600;
+        if !self.controller_model_cache.contains_key(&art) {
+            let opt = resvg::usvg::Options::default();
+            let tree = resvg::usvg::Tree::from_data(art.svg().as_bytes(), &opt)
+                .map_err(|e| format!("parse controller model {art:?}: {e}"))?;
+            let mut pixmap = resvg::tiny_skia::Pixmap::new(MODEL_W, MODEL_H)
+                .ok_or_else(|| format!("alloc controller model pixmap {MODEL_W}x{MODEL_H}"))?;
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::from_scale(1.0, 1.0),
+                &mut pixmap.as_mut(),
+            );
+
+            let mut bgra = pixmap.data().to_vec();
+            for px in bgra.chunks_exact_mut(4) {
+                px.swap(0, 2);
+            }
+            let props = D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+                colorContext: ManuallyDrop::new(None),
+            };
+            let bitmap = self
+                .d2d_context
+                .CreateBitmap(
+                    D2D_SIZE_U {
+                        width: MODEL_W,
+                        height: MODEL_H,
+                    },
+                    Some(bgra.as_ptr() as *const core::ffi::c_void),
+                    MODEL_W * 4,
+                    &props,
+                )
+                .map_err(|e| format!("CreateBitmap controller model {art:?}: {e}"))?;
+            self.controller_model_cache
+                .insert(art, (bitmap, MODEL_W, MODEL_H));
+        }
+
+        let (bitmap, width, height) = self
+            .controller_model_cache
+            .get(&art)
+            .ok_or_else(|| format!("missing controller model cache {art:?}"))?;
+        let source_aspect = *width as f32 / *height as f32;
+        let fit_w = rect.right - rect.left;
+        let fit_h = rect.bottom - rect.top;
+        let (draw_w, draw_h) = if fit_w / fit_h > source_aspect {
+            (fit_h * source_aspect, fit_h)
+        } else {
+            (fit_w, fit_w / source_aspect)
+        };
+        let dest = D2D_RECT_F {
+            left: (rect.left + rect.right - draw_w) * 0.5,
+            top: (rect.top + rect.bottom - draw_h) * 0.5,
+            right: (rect.left + rect.right + draw_w) * 0.5,
+            bottom: (rect.top + rect.bottom + draw_h) * 0.5,
+        };
+        self.d2d_context.DrawBitmap(
+            bitmap,
+            Some(&dest),
+            opacity.clamp(0.0, 1.0),
+            D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+            None,
+            None,
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "gamepad")]
+    unsafe fn draw_controller_model_overlay(
+        &self,
+        model: D2D_RECT_F,
+        frame: &ControllerCenterFrame,
+        family: ControllerIconFamily,
+        surface_brush: &ID2D1SolidColorBrush,
+        key_brush: &ID2D1SolidColorBrush,
+        border_brush: &ID2D1SolidColorBrush,
+        accent_brush: &ID2D1SolidColorBrush,
+        active_brush: &ID2D1SolidColorBrush,
+        ring_brush: &ID2D1SolidColorBrush,
+        text_brush: &ID2D1SolidColorBrush,
+        sel_text_brush: &ID2D1SolidColorBrush,
+    ) {
+        let playstation = family == ControllerIconFamily::Ps5;
+        let pressed = |button: Button| {
+            frame
+                .bindings
+                .iter()
+                .any(|binding| binding.button == button && binding.pressed)
+        };
+        let selected = |button: Button| frame.selected == Some(button);
+
+        for &button in MAPPABLE_BUTTONS {
+            if matches!(button, Button::L3 | Button::R3) {
+                continue;
+            }
+            let rect = controller_button_rect(model, button, playstation);
+            let is_pressed = pressed(button);
+            let is_selected = selected(button);
+            let fill = if is_selected {
+                accent_brush
+            } else if is_pressed {
+                active_brush
+            } else {
+                key_brush
+            };
+            let outline = if is_pressed || is_selected {
+                ring_brush
+            } else {
+                border_brush
+            };
+            let label = if is_pressed || is_selected {
+                sel_text_brush
+            } else {
+                text_brush
+            };
+            let stroke = if is_pressed || is_selected { 2.4 } else { 1.0 };
+            let text = controller_visual_label(button, playstation);
+
+            if matches!(
+                button,
+                Button::A | Button::B | Button::X | Button::Y | Button::Guide
+            ) {
+                let ellipse = D2D1_ELLIPSE {
+                    point: D2D_POINT_2F {
+                        x: (rect.left + rect.right) * 0.5,
+                        y: (rect.top + rect.bottom) * 0.5,
+                    },
+                    radiusX: (rect.right - rect.left) * 0.5,
+                    radiusY: (rect.bottom - rect.top) * 0.5,
+                };
+                self.d2d_context.FillEllipse(&ellipse, fill);
+                self.d2d_context
+                    .DrawEllipse(&ellipse, outline, stroke, None);
+            } else {
+                let rounded = D2D1_ROUNDED_RECT {
+                    rect,
+                    radiusX: (rect.bottom - rect.top) * 0.35,
+                    radiusY: (rect.bottom - rect.top) * 0.35,
+                };
+                self.d2d_context.FillRoundedRectangle(&rounded, fill);
+                self.d2d_context
+                    .DrawRoundedRectangle(&rounded, outline, stroke, None);
+            }
+            draw_center_text(&self.d2d_context, text, &self.chip_format, &rect, label);
+        }
+
+        for (button, axis) in [
+            (Button::L3, (frame.axes.0, frame.axes.1)),
+            (Button::R3, (frame.axes.2, frame.axes.3)),
+        ] {
+            let rect = controller_button_rect(model, button, playstation);
+            let base = D2D1_ELLIPSE {
+                point: D2D_POINT_2F {
+                    x: (rect.left + rect.right) * 0.5,
+                    y: (rect.top + rect.bottom) * 0.5,
+                },
+                radiusX: (rect.right - rect.left) * 0.5,
+                radiusY: (rect.bottom - rect.top) * 0.5,
+            };
+            self.d2d_context.FillEllipse(&base, surface_brush);
+            self.d2d_context.DrawEllipse(&base, border_brush, 1.5, None);
+
+            let x = axis.0.clamp(-1.0, 1.0);
+            let y = axis.1.clamp(-1.0, 1.0);
+            let center_x = base.point.x + x * base.radiusX * 0.52;
+            let center_y = base.point.y - y * base.radiusY * 0.52;
+            let knob = D2D1_ELLIPSE {
+                point: D2D_POINT_2F {
+                    x: center_x,
+                    y: center_y,
+                },
+                radiusX: base.radiusX * 0.48,
+                radiusY: base.radiusY * 0.48,
+            };
+            let is_pressed = pressed(button);
+            let is_selected = selected(button);
+            let fill = if is_selected {
+                accent_brush
+            } else if is_pressed {
+                active_brush
+            } else {
+                accent_brush
+            };
+            self.d2d_context.FillEllipse(&knob, fill);
+            self.d2d_context.DrawEllipse(
+                &knob,
+                if is_pressed || is_selected {
+                    ring_brush
+                } else {
+                    border_brush
+                },
+                if is_pressed || is_selected { 2.4 } else { 1.0 },
+                None,
+            );
+            let label = if is_pressed || is_selected {
+                sel_text_brush
+            } else {
+                text_brush
+            };
+            draw_center_text(
+                &self.d2d_context,
+                controller_visual_label(button, playstation),
+                &self.hint_format,
+                &rect,
+                label,
+            );
+        }
     }
 
     unsafe fn draw_voice_orb(
@@ -2256,32 +2669,51 @@ impl VkRenderer {
             },
             &accent_brush,
         );
-        if !frame.connected {
-            draw_center_text(
-                &self.d2d_context,
-                "Connect a controller to see live input",
-                &self.chip_format,
-                &D2D_RECT_F {
-                    left: art_rect.left + 18.0,
-                    top: art_rect.top + 31.0,
-                    right: art_rect.right - 18.0,
-                    bottom: art_rect.top + 52.0,
-                },
-                &muted_brush,
-            );
-        }
         let art =
             ControllerArt::from_label(frame.controller_label).unwrap_or(ControllerArt::DualSense);
-        self.draw_controller_art_alpha(
-            art,
-            D2D_RECT_F {
+        let family = match art {
+            ControllerArt::DualSense => ControllerIconFamily::Ps5,
+            ControllerArt::XboxOne => ControllerIconFamily::Xbox,
+        };
+        let model_label = if frame.connected {
+            match family {
+                ControllerIconFamily::Ps5 => "PLAYSTATION · DUALSENSE",
+                ControllerIconFamily::Xbox => "XBOX CONTROLLER",
+            }
+        } else {
+            "Connect a controller to see live input"
+        };
+        draw_center_text(
+            &self.d2d_context,
+            model_label,
+            &self.chip_format,
+            &D2D_RECT_F {
                 left: art_rect.left + 18.0,
-                top: art_rect.top + 42.0,
+                top: art_rect.top + 31.0,
                 right: art_rect.right - 18.0,
-                bottom: art_rect.bottom - 50.0,
+                bottom: art_rect.top + 52.0,
             },
+            &muted_brush,
+        );
+        let model_rect = controller_center_model_rect(cw, ch);
+        self.draw_controller_model_alpha(
+            art,
+            model_rect,
             if frame.connected { 1.0 } else { 0.72 },
         )?;
+        self.draw_controller_model_overlay(
+            model_rect,
+            frame,
+            family,
+            &surface_brush,
+            &key_brush,
+            &border_brush,
+            &accent_brush,
+            &active_brush,
+            &ring_brush,
+            &text_brush,
+            &sel_text_brush,
+        );
         let telemetry = if frame.connected {
             format!(
                 "L {:>+.2}, {:>+.2}     R {:>+.2}, {:>+.2}",
@@ -3426,6 +3858,17 @@ mod tests {
     }
 
     #[test]
+    fn controller_models_are_embedded_valid_svg() {
+        for art in [ControllerArt::DualSense, ControllerArt::XboxOne] {
+            assert!(resvg::usvg::Tree::from_data(
+                art.svg().as_bytes(),
+                &resvg::usvg::Options::default(),
+            )
+            .is_ok());
+        }
+    }
+
+    #[test]
     fn controller_icons_use_ps5_for_playstation_and_xbox_as_generic() {
         assert_eq!(
             ControllerIconFamily::from_label("DualSense Wireless Controller"),
@@ -3507,6 +3950,43 @@ mod tests {
             ),
             Some(ControllerCenterHit::Deadzone(30))
         );
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn controller_center_diagram_hits_both_layout_positions() {
+        let width = 1120.0;
+        let height = 760.0;
+        let model = controller_center_model_rect(width, height);
+        for &button in MAPPABLE_BUTTONS {
+            for playstation in [false, true] {
+                let rect = controller_button_rect(model, button, playstation);
+                assert_eq!(
+                    controller_center_hit(
+                        (rect.left + rect.right) * 0.5,
+                        (rect.top + rect.bottom) * 0.5,
+                        width,
+                        height,
+                        None,
+                    ),
+                    Some(ControllerCenterHit::Button(button)),
+                    "diagram hit missed {button:?} playstation={playstation}"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn controller_center_model_rect_matches_svg_aspect_at_resizes() {
+        for (width, height) in [(1120.0, 760.0), (800.0, 620.0)] {
+            let rect = controller_center_model_rect(width, height);
+            let aspect = (rect.right - rect.left) / (rect.bottom - rect.top);
+            assert!(
+                (aspect - 5.0 / 3.0).abs() < 0.001,
+                "{width}x{height}: {aspect}"
+            );
+        }
     }
 
     #[cfg(feature = "gamepad")]

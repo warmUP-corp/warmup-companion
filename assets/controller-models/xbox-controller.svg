@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="600" viewBox="0 0 1000 600">
+  <defs>
+    <linearGradient id="shell" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b3547"/>
+      <stop offset="1" stop-color="#111722"/>
+    </linearGradient>
+    <linearGradient id="grip" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#344157"/>
+      <stop offset="1" stop-color="#161d2b"/>
+    </linearGradient>
+  </defs>
+  <ellipse cx="500" cy="542" rx="365" ry="22" fill="#070a10" opacity=".42"/>
+  <path d="M168 158C232 112 315 116 392 154C461 137 539 137 608 154C685 116 768 112 832 158C892 200 924 302 938 401C951 494 898 542 842 526C789 511 755 444 703 386C631 413 369 413 297 386C245 444 211 511 158 526C102 542 49 494 62 401C76 302 108 200 168 158Z" fill="url(#shell)" stroke="#8190a8" stroke-width="8" stroke-linejoin="round"/>
+  <path d="M355 159C407 139 593 139 645 159L681 205C622 233 378 233 319 205Z" fill="#202a3b" stroke="#54647d" stroke-width="5"/>
+  <path d="M209 172C253 145 312 148 350 167L328 208C280 191 244 192 215 210Z" fill="url(#grip)" opacity=".92"/>
+  <path d="M791 172C747 145 688 148 650 167L672 208C720 191 756 192 785 210Z" fill="url(#grip)" opacity=".92"/>
+  <path d="M410 181H590" stroke="#7f8da3" stroke-width="4" stroke-linecap="round" opacity=".6"/>
+  <rect x="222" y="132" width="150" height="24" rx="12" fill="#3b4960" stroke="#8997ad" stroke-width="4"/>
+  <rect x="628" y="132" width="150" height="24" rx="12" fill="#3b4960" stroke="#8997ad" stroke-width="4"/>
+  <circle cx="423" cy="183" r="7" fill="#91a0b6" opacity=".8"/>
+  <circle cx="449" cy="183" r="7" fill="#91a0b6" opacity=".55"/>
+  <circle cx="551" cy="183" r="7" fill="#91a0b6" opacity=".55"/>
+  <circle cx="577" cy="183" r="7" fill="#91a0b6" opacity=".8"/>
+  <path d="M430 267H570" stroke="#101621" stroke-width="18" stroke-linecap="round" opacity=".8"/>
+  <path d="M382 250C414 230 586 230 618 250" fill="none" stroke="#4b5a72" stroke-width="4" opacity=".65"/>
+</svg>
