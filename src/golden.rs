@@ -2,7 +2,7 @@
 //!
 //! Mirror of `warmUp/apps/desktop/src-tauri/src/gamepad/golden.rs` — the two
 //! processes share the wire contract by checking in an identical fixture format
-//! and loader (ADR 0002 / `docs/companion-ipc-protocol.md`), not a shared crate.
+//! and loader (see `docs/companion-ipc-protocol.md`), not a shared crate.
 //! No parity assertions yet — those land with the injection slice (#349).
 
 use std::collections::BTreeMap;

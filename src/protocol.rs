@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Wire protocol version. Bumped on any breaking frame/framing change. A `hello`
-/// mismatch closes the connection (see ADR 0002).
+/// mismatch closes the connection. See `docs/companion-ipc-protocol.md`.
 ///
 /// v2: additive customisation fields on the `config` frame — `ledEffect`,
 /// `ledBrightness`, `naturalScroll`, `cursorSmoothing` (consumed by the desktop /
