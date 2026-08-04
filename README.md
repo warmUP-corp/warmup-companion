@@ -22,6 +22,7 @@ and TV gaming controller-first when Windows asks for text.
 - Type into desktop apps, UAC prompts, lock screens, and sign-in screens.
 - Use controller-specific Xbox or PlayStation button hints.
 - Use local English suggestions without reading text from the focused app.
+- Voice-type locally with built-in support for optional offline Whisper.cpp and NVIDIA Parakeet speech-to-text engines.
 - Sleep while a game owns the controller, then resume for desktop input.
 
 ### Supported controllers
