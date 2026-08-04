@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 0.8 seconds
-Output:
 <p align="center">
   <img src="assets/promo/warmup-logo-wordmark.png" alt="warmUP" width="360">
 </p>
