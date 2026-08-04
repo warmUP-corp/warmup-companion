@@ -1,27 +1,40 @@
+Exit code: 0
+Wall time: 0.8 seconds
+Output:
 <p align="center">
   <img src="assets/promo/warmup-logo-wordmark.png" alt="warmUP" width="360">
 </p>
 
-# Warmup Companion
+# warmUP Companion
 
-Native Windows companion package for
-[warmUP](https://github.com/warmUP-corp). It gives warmUP controller users a
-gamepad-driven virtual keyboard in normal apps, UAC, lock, and sign-in surfaces
-where the desktop webview cannot inject input.
+> A native Windows virtual keyboard for Xbox and PlayStation controllers.
 
-![warmUP library with the native gamepad keyboard open](assets/promo/warmup-keyboard-library.png)
+[Download for Windows](https://github.com/warmUP-corp/warmup-companion/releases/latest)
+· [Learn about warmUP Game Launcher](https://www.warmup-gamelauncher.com/)
 
-## Why It Exists
+warmUP Companion lets you type on Windows with the controller already in your
+hands. It is the native input layer for the
+[warmUP Game Launcher](https://www.warmup-gamelauncher.com/) and keeps couch
+and TV gaming controller-first when Windows asks for text.
 
-warmUP is the main app. This package handles the privileged Windows input path:
+![Controller-driven virtual keyboard in warmUP on Windows](assets/promo/warmup-keyboard-library.png)
+
+## A controller keyboard for all of Windows
 
 - Open and drive a native on-screen keyboard with a controller.
-- Type into desktop apps and secure Windows surfaces.
+- Type into desktop apps, UAC prompts, lock screens, and sign-in screens.
+- Use controller-specific Xbox or PlayStation button hints.
 - Use local English suggestions without reading text from the focused app.
 - Sleep while a game owns the controller, then resume for desktop input.
-- Keep the input stack auditable before install.
 
-## Trust Model
+### Supported controllers
+
+- Xbox 360 and Xbox One-family controllers
+- PlayStation DualShock 4
+- PlayStation DualSense and DualSense Edge
+- Other compatible HID gamepads recognised through the controller mapping database
+
+## Privacy and security
 
 This repo is intended to be auditable before install.
 
@@ -40,6 +53,9 @@ The service needs high Windows privileges because secure desktop input is not
 available to a normal Tauri/webview process. The installed service is
 `WarmupVkSvc`, runs as LocalSystem, and launches a worker into the active console
 session.
+
+Read the [privacy policy](PRIVACY.md) and [security policy](SECURITY.md) before
+installing.
 
 ## Install
 
@@ -160,3 +176,4 @@ Feature defaults include the Windows service and gamepad support.
 - [Local prediction ADR](docs/adr/0001-local-prediction-sendinput.md)
 - [Companion input authority ADR](docs/adr/0002-companion-gamepad-input-authority.md)
 - [IPC protocol](docs/companion-ipc-protocol.md)
+
