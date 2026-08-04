@@ -1,4 +1,4 @@
-//! Analyzed executable symbols from Ghidra (address -> inferred name).
+//! Analyzed executable symbols (address -> inferred name).
 #![allow(dead_code)]
 
 // Functions

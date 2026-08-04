@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate src/win/vk_layouts.rs from raw bytes dumped from the reference VK layout table.
 
-Sources (Ghidra MCP read_memory):
+Sources:
   * layout record table  @ 0x004a2a94, 17 records * 0x34 bytes
   * string pool          @ 0x00491600, UTF-16LE null-terminated layer strings
   * shared digit prefix  @ 0x00491e80  ("1234567890")
