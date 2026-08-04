@@ -2,11 +2,15 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR,
+};
 use windows::Win32::Graphics::Gdi::ValidateRect;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -15,7 +19,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, KillTimer, SetForegroundWindow, SetTimer,
-    ShowWindow, CW_USEDEFAULT, HMENU, SW_HIDE, SW_SHOWNORMAL, WM_CHAR, WM_CLOSE, WM_DESTROY,
+    ShowWindow, CW_USEDEFAULT, HICON, HMENU, SW_HIDE, SW_SHOWNORMAL, WM_CHAR, WM_CLOSE, WM_DESTROY,
     WM_KEYDOWN, WM_LBUTTONUP, WM_PAINT, WM_SIZE, WM_SYSKEYDOWN, WM_TIMER,
     WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
@@ -126,6 +130,10 @@ impl DesktopApp for CenterApp {
     const BG_COLOR: u32 = WINDOW_BG;
     const WNDPROC: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT = center_wndproc;
 
+    fn window_icon(&self) -> HICON {
+        unsafe { crate::tray::load_tray_icon() }
+    }
+
     fn on_show(&mut self, _lparam: LPARAM) {
         ui_show();
     }
@@ -202,7 +210,7 @@ fn ui_hide() {
 
 unsafe fn create_center_window() -> Result<HWND, String> {
     let instance = GetModuleHandleW(None).map_err(|e| format!("GetModuleHandleW: {e}"))?;
-    CreateWindowExW(
+    let hwnd = CreateWindowExW(
         WS_EX_NOREDIRECTIONBITMAP,
         WINDOW_CLASS,
         w!("Warmup Controller Center"),
@@ -216,7 +224,22 @@ unsafe fn create_center_window() -> Result<HWND, String> {
         windows::Win32::Foundation::HINSTANCE(instance.0),
         None,
     )
-    .map_err(|e| format!("CreateWindowExW: {e}"))
+    .map_err(|e| format!("CreateWindowExW: {e}"))?;
+    let caption_color = COLORREF(WINDOW_BG);
+    let caption_color_ptr = &caption_color as *const COLORREF as *const _;
+    let _ = DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_CAPTION_COLOR,
+        caption_color_ptr,
+        size_of::<COLORREF>() as u32,
+    );
+    let _ = DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_BORDER_COLOR,
+        caption_color_ptr,
+        size_of::<COLORREF>() as u32,
+    );
+    Ok(hwnd)
 }
 
 unsafe extern "system" fn center_wndproc(

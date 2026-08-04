@@ -43,6 +43,7 @@ const TRAY_TIP: &str = concat!(
     ")"
 );
 const INSTALLED_ICON_PATH: &str = r"C:\ProgramData\WarmupVk\bin\icon.ico";
+const SOURCE_ICON_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), r"\assets\icon.ico");
 const TRAY_UID: u32 = 1;
 const WM_TRAY: u32 = WM_APP + 10;
 const ADD_RETRY_TIMER_ID: usize = 1;
@@ -193,8 +194,8 @@ fn first_run_marker() -> Option<std::path::PathBuf> {
     Some(Path::new(&base).join("WarmupVk").join(".welcome_shown"))
 }
 
-unsafe fn load_tray_icon() -> HICON {
-    for path in [INSTALLED_ICON_PATH].map(Path::new) {
+pub(crate) unsafe fn load_tray_icon() -> HICON {
+    for path in [INSTALLED_ICON_PATH, SOURCE_ICON_PATH].map(Path::new) {
         if !path.is_file() {
             continue;
         }

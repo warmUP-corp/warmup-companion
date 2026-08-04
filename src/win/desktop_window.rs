@@ -24,8 +24,8 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, LoadCursorW, PeekMessageW, PostQuitMessage, PostThreadMessageW,
-    RegisterClassW, TranslateMessage, CS_HREDRAW, CS_VREDRAW, IDC_ARROW, MSG, PM_NOREMOVE, WM_USER,
-    WNDCLASSW,
+    RegisterClassW, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HICON, IDC_ARROW, MSG, PM_NOREMOVE,
+    WM_USER, WNDCLASSW,
 };
 
 /// Thread messages the pump understands (posted with `hwnd == NULL`).
@@ -44,6 +44,10 @@ pub trait DesktopApp: Send + 'static {
     const CLASS_NAME: PCWSTR;
     const BG_COLOR: u32;
     const WNDPROC: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
+
+    fn window_icon(&self) -> HICON {
+        HICON::default()
+    }
 
     /// Runs on the UI thread before class registration. `Err` aborts the spawn
     /// (the error is propagated to the caller of [`spawn`]).
@@ -75,6 +79,7 @@ fn run<A: DesktopApp>(ready: SyncSender<Result<u32, String>>, mut app: A) {
         let wc = WNDCLASSW {
             lpfnWndProc: Some(A::WNDPROC),
             hInstance: instance.into(),
+            hIcon: app.window_icon(),
             lpszClassName: A::CLASS_NAME,
             hCursor: LoadCursorW(None, IDC_ARROW).expect("cursor"),
             hbrBackground: bg,
