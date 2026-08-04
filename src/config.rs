@@ -133,18 +133,6 @@ impl Default for GamepadSettings {
     }
 }
 
-/// Winlogon debug overlay / hotkeys. Enabled only by installer debug flag.
-#[cfg(windows)]
-pub fn debug_ui_enabled() -> bool {
-    std::env::var_os("WARMUP_VK_DEBUG_UI").is_some_and(|v| v != "0")
-        || std::path::Path::new(r"C:\ProgramData\WarmupVk\debug-ui.enabled").is_file()
-}
-
-#[cfg(not(windows))]
-pub fn debug_ui_enabled() -> bool {
-    false
-}
-
 /// Winlogon "Press L3 to open keyboard" prompt overlay. User-facing, so default
 /// ON in service mode; killed by `WARMUP_VK_PROMPT=0` or a disable sentinel file.
 #[cfg(windows)]
@@ -507,6 +495,19 @@ const SETTINGS_TEMPLATE: &str = r#"# Warmup Companion settings. One `key = value
 # cursor_accel = 2.0
 # cursor_smoothing = 0.0
 
+# Desktop-only controller actions. Use the Controller Center to configure them,
+# or enter a virtual-key chord, launch target, or command directly. A mapping
+# overrides that button's desktop action and stays inactive while a game,
+# warmUP, or the VK owns input. Workspace actions capture and restore visible
+# app windows by name from the Controller Center.
+# shortcut_a = Ctrl+Alt+VK_80
+# shortcut_b = launch:C:\Games\example.exe
+# shortcut_y = workspace:Coding
+# shortcut_x = command:start "" "https://example.com"
+# Two-button actions use hold+press button names in the key, for example:
+# shortcut_lb+a = launch:https://example.com
+# shortcut_rb+start = workspace:Coding
+
 # Scroll: deadzone 0.0-0.95; speed & accel > 0.0; natural_scroll true|false
 # scroll_deadzone = 0.15
 # scroll_speed = 5.0
@@ -590,6 +591,16 @@ pub fn set_keyboard_theme(theme: &KeyboardTheme) -> Result<(), String> {
 #[cfg(feature = "gamepad")]
 fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
     match key {
+        key if key.starts_with("shortcut_") => {
+            crate::controller_shortcuts::is_valid_setting(key, value)
+                .then_some(())
+                .ok_or_else(|| format!("{key} must be a valid controller action"))
+        }
+        key if key.starts_with("workspace_") => {
+            crate::controller_shortcuts::is_valid_workspace_setting(key, value)
+                .then_some(())
+                .ok_or_else(|| format!("{key} must contain a captured workspace"))
+        }
         "userland_poll" | "userland_poll_mode" | "poll_mode" => {
             let v = value.trim().to_ascii_lowercase();
             if matches!(v.as_str(), "full" | "sleep" | "guide" | "guide-only") {
@@ -691,6 +702,19 @@ mod tests {
         assert!(validate_gamepad_setting("vk_bar_scale", "1.0").is_ok());
         assert!(validate_gamepad_setting("vk_bar_scale", "2.0").is_err());
         assert!(validate_gamepad_setting("vk_bar_scale", "abc").is_err());
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn controller_action_settings_accept_launches_and_commands() {
+        assert!(validate_gamepad_setting("shortcut_a", r"launch:C:\Games\example.exe").is_ok());
+        assert!(validate_gamepad_setting("shortcut_b", "command:echo warmup").is_ok());
+        assert!(validate_gamepad_setting("shortcut_lb+a", "launch:https://example.com").is_ok());
+        assert!(validate_gamepad_setting("shortcut_x", "launch:\n").is_err());
+
+        let workspace = r#"{"windows":[{"executable":"C:\\Apps\\Editor.exe","left":0,"top":0,"width":1280,"height":720,"maximized":false}]}"#;
+        assert!(validate_gamepad_setting("workspace_coding", workspace).is_ok());
+        assert!(validate_gamepad_setting("workspace_coding", r#"{"windows":[]}"#).is_err());
     }
 
     #[cfg(feature = "gamepad")]

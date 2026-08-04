@@ -8,7 +8,8 @@ use crate::gamepad_backend::Button;
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyboardLayout, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_END, VK_RETURN, VK_SPACE, VK_TAB,
+    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_END, VK_LWIN, VK_MENU, VK_RETURN,
+    VK_SHIFT, VK_SPACE, VK_TAB,
 };
 
 #[derive(Clone)]
@@ -932,6 +933,44 @@ fn inject_vk(vk: VIRTUAL_KEY) {
         let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
     }
     suppress_native_keyboard_after_winlogon_inject(collapse);
+}
+
+/// Inject one desktop-only keyboard shortcut. Controller remaps must never type
+/// into a secure credential surface, so this shared send path refuses Winlogon
+/// even if a caller accidentally bypasses its higher-level game/launcher gates.
+pub fn inject_shortcut(key: u16, ctrl: bool, alt: bool, shift: bool, win: bool) -> bool {
+    if key == 0 || crate::win::logon_focus::is_active() {
+        return false;
+    }
+    let key = VIRTUAL_KEY(key);
+    let mut batch = Vec::with_capacity(10);
+    if ctrl {
+        batch.push(vk_event(VK_CONTROL, false));
+    }
+    if alt {
+        batch.push(vk_event(VK_MENU, false));
+    }
+    if shift {
+        batch.push(vk_event(VK_SHIFT, false));
+    }
+    if win {
+        batch.push(vk_event(VK_LWIN, false));
+    }
+    batch.push(vk_event(key, false));
+    batch.push(vk_event(key, true));
+    if win {
+        batch.push(vk_event(VK_LWIN, true));
+    }
+    if shift {
+        batch.push(vk_event(VK_SHIFT, true));
+    }
+    if alt {
+        batch.push(vk_event(VK_MENU, true));
+    }
+    if ctrl {
+        batch.push(vk_event(VK_CONTROL, true));
+    }
+    unsafe { SendInput(&batch, std::mem::size_of::<INPUT>() as i32) as usize == batch.len() }
 }
 
 fn inject_ctrl_key(vk: VIRTUAL_KEY) {

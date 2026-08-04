@@ -36,3 +36,11 @@ Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
 2. Use `detect_changes` for code review.
 3. Use `get_affected_flows` to understand impact.
 4. Use `query_graph` pattern="tests_for" to check coverage.
+
+## Delegation
+
+- For substantial implementation work, use a GPT-5.6 Luna / Max worker task before editing; keep the primary task responsible for review and verification.
+
+## Controller Center
+
+- Desktop actions such as launching an app/site or restoring a workspace are mappings assigned through a generic controller-shortcut system. Any valid single button or two-button chord can map to any supported action; `LB+A` is only an example. The held button modifies the newly pressed button, and the chord executes on the desktop. They are not standalone Controller Center actions.

@@ -10,11 +10,8 @@
 //!
 //! This is a Warmup-only path, separate from the baseline Win32 focus path.
 //!
-//! Step 1 (this module so far): a `dump_foreground_tree()` probe to confirm the
-//! password element's identity (ControlType / IsPassword / Name) on a real
-//! secure desktop before the finder conditions are trusted. COM + the
-//! `IUIAutomation` instance live on the caller thread (the gamepad loop thread,
-//! which is MTA and attached to Winlogon).
+//! The finder runs on the gamepad loop thread, where COM and the `IUIAutomation`
+//! instance are both apartment-bound and attached to Winlogon.
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -32,10 +29,6 @@ use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
 
 /// UIA control-type id for an editable field.
 const CT_EDIT: i32 = 50004;
-
-/// Set by the debug overlay (F9) on the input desktop; drained by the gamepad
-/// loop thread, which owns the COM apartment, to run the dump there.
-static DUMP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// True while the input desktop is Winlogon (published each poll by the gamepad
 /// loop). Gates the per-keystroke focus redirect so userland is untouched.
@@ -62,16 +55,6 @@ thread_local! {
     static PWD_ELEMENT: RefCell<Option<IUIAutomationElement>> = const { RefCell::new(None) };
     /// Last focus status logged, to avoid flooding the log per keystroke.
     static LAST_STATUS: RefCell<Option<&'static str>> = const { RefCell::new(None) };
-}
-
-/// Overlay hook: ask the loop thread to dump the foreground UIA subtree.
-pub fn request_dump() {
-    DUMP_REQUESTED.store(true, Ordering::SeqCst);
-}
-
-/// Loop thread: if a dump was requested, run it here (MTA, on Winlogon).
-pub fn take_dump_request() -> bool {
-    DUMP_REQUESTED.swap(false, Ordering::SeqCst)
 }
 
 fn log(msg: &str) {
@@ -291,95 +274,4 @@ fn automation() -> Option<IUIAutomation> {
             }
         }
     })
-}
-
-/// Map a UIA control-type id to a short label for the dump (full list is large;
-/// only the ones relevant to a credential surface are named).
-fn control_type_label(id: i32) -> &'static str {
-    match id {
-        50000 => "Button",
-        50004 => "Edit",
-        50020 => "Text",
-        50026 => "Group",
-        50032 => "Window",
-        50033 => "Pane",
-        _ => "?",
-    }
-}
-
-/// Dump the foreground window's UIA subtree to the service log: ControlType,
-/// IsPassword, IsKeyboardFocusable, Name, AutomationId, ClassName for each
-/// element. Flat (TreeScope_Subtree + TrueCondition) — enough to identify the
-/// password element before the finder is built. Bounded to avoid log flooding.
-pub fn dump_foreground_tree() {
-    let Some(auto) = automation() else {
-        return;
-    };
-    // SAFETY: all calls below are on COM objects valid for this apartment.
-    unsafe {
-        let fg = GetForegroundWindow();
-        if fg.0.is_null() {
-            log("logon focus: dump — no foreground window");
-            return;
-        }
-        let root: IUIAutomationElement = match auto.ElementFromHandle(fg) {
-            Ok(e) => e,
-            Err(e) => {
-                log(&format!("logon focus: ElementFromHandle failed: {e}"));
-                return;
-            }
-        };
-        let root_name = root
-            .CurrentName()
-            .map(|b| b.to_string())
-            .unwrap_or_default();
-        let root_class = root
-            .CurrentClassName()
-            .map(|b| b.to_string())
-            .unwrap_or_default();
-        log(&format!(
-            "logon focus: dump foreground hwnd=0x{:x} class='{root_class}' name='{root_name}'",
-            fg.0 as usize
-        ));
-
-        let cond = match auto.CreateTrueCondition() {
-            Ok(c) => c,
-            Err(e) => {
-                log(&format!("logon focus: CreateTrueCondition failed: {e}"));
-                return;
-            }
-        };
-        let arr = match root.FindAll(TreeScope_Subtree, &cond) {
-            Ok(a) => a,
-            Err(e) => {
-                log(&format!("logon focus: FindAll failed: {e}"));
-                return;
-            }
-        };
-        let count = arr.Length().unwrap_or(0);
-        log(&format!("logon focus: subtree has {count} element(s)"));
-        let cap = count.min(200);
-        for i in 0..cap {
-            let Ok(el) = arr.GetElement(i) else { continue };
-            let ct = el.CurrentControlType().map(|c| c.0).unwrap_or(0);
-            let is_pwd = el.CurrentIsPassword().map(|b| b.as_bool()).unwrap_or(false);
-            let focusable = el
-                .CurrentIsKeyboardFocusable()
-                .map(|b| b.as_bool())
-                .unwrap_or(false);
-            let name = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
-            let autoid = el
-                .CurrentAutomationId()
-                .map(|b| b.to_string())
-                .unwrap_or_default();
-            let class = el
-                .CurrentClassName()
-                .map(|b| b.to_string())
-                .unwrap_or_default();
-            log(&format!(
-                "  [{i}] ct={ct}({}) pwd={is_pwd} focusable={focusable} name='{name}' autoid='{autoid}' class='{class}'",
-                control_type_label(ct)
-            ));
-        }
-    }
 }

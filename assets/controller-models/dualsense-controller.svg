@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="600" viewBox="0 0 1000 600">
+  <defs>
+    <linearGradient id="shell" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e8eef8"/>
+      <stop offset=".48" stop-color="#b9c7da"/>
+      <stop offset="1" stop-color="#6f809a"/>
+    </linearGradient>
+    <linearGradient id="grip" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#dce5f2"/>
+      <stop offset="1" stop-color="#8395ad"/>
+    </linearGradient>
+  </defs>
+  <ellipse cx="500" cy="542" rx="365" ry="22" fill="#070a10" opacity=".28"/>
+  <path d="M176 150C246 106 319 120 391 160C455 143 545 143 609 160C681 120 754 106 824 150C889 191 924 304 940 406C955 501 906 544 845 525C791 508 753 444 704 390C631 418 369 418 296 390C247 444 209 508 155 525C94 544 45 501 60 406C76 304 111 191 176 150Z" fill="url(#shell)" stroke="#455873" stroke-width="8" stroke-linejoin="round"/>
+  <path d="M344 159C391 136 609 136 656 159L693 221C630 250 370 250 307 221Z" fill="#d5dfed" stroke="#5c6d86" stroke-width="5"/>
+  <rect x="392" y="141" width="216" height="88" rx="27" fill="#71849e" stroke="#41546f" stroke-width="6"/>
+  <path d="M416 151H584" stroke="#dce8f7" stroke-width="7" stroke-linecap="round" opacity=".72"/>
+  <path d="M500 151V218" stroke="#aec1d7" stroke-width="3" opacity=".62"/>
+  <path d="M210 165C253 139 310 145 350 170L327 218C280 197 245 198 214 216Z" fill="url(#grip)"/>
+  <path d="M790 165C747 139 690 145 650 170L673 218C720 197 755 198 786 216Z" fill="url(#grip)"/>
+  <rect x="220" y="128" width="150" height="25" rx="12" fill="#9db0c8" stroke="#455873" stroke-width="4"/>
+  <rect x="630" y="128" width="150" height="25" rx="12" fill="#9db0c8" stroke="#455873" stroke-width="4"/>
+  <path d="M426 279H574" stroke="#40536c" stroke-width="18" stroke-linecap="round" opacity=".72"/>
+  <path d="M374 260C416 237 584 237 626 260" fill="none" stroke="#667a95" stroke-width="4" opacity=".8"/>
+  <circle cx="426" cy="180" r="5" fill="#dce8f7"/>
+  <circle cx="574" cy="180" r="5" fill="#dce8f7"/>
+</svg>

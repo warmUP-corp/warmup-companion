@@ -43,6 +43,7 @@ const TRAY_TIP: &str = concat!(
     ")"
 );
 const INSTALLED_ICON_PATH: &str = r"C:\ProgramData\WarmupVk\bin\icon.ico";
+const SOURCE_ICON_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), r"\assets\icon.ico");
 const TRAY_UID: u32 = 1;
 const WM_TRAY: u32 = WM_APP + 10;
 const ADD_RETRY_TIMER_ID: usize = 1;
@@ -65,6 +66,7 @@ const MENU_ENGINE_PARAKEET: usize = 1015;
 /// Local escape hatch for the "Enable gamepad cursor" master switch, so a user who
 /// turned the cursor off in warmUP can get it back while warmUP is not running.
 const MENU_CURSOR_ENABLED: usize = 1016;
+const MENU_CONTROLLER_CENTER: usize = 1017;
 /// Mic device i is `MENU_MIC_BASE + i` (capped at 32 devices in the menu).
 const MENU_MIC_BASE: usize = 1100;
 /// Global hotkey id for "toggle voice dictation" (Ctrl+Alt+V).
@@ -169,7 +171,7 @@ unsafe fn show_welcome_if_first_run(hwnd: HWND) {
     let body = wide(
         "Your controller keyboard is installed and running.\r\n\r\n\
          1. Connect or pair your controller.\r\n\
-         2. Press Y on the controller to open the keyboard — or lock Windows (Win+L) to use it at sign-in.\r\n\
+         2. Press L3 on the controller to open the keyboard - or lock Windows (Win+L) to use it at sign-in.\r\n\
          3. D-pad to move, A to type, LB/RB to pick word suggestions.\r\n\r\n\
          Right-click the tray icon for status and privacy. Run \"warmup-companion.exe verify\" to self-check the install.",
     );
@@ -192,8 +194,8 @@ fn first_run_marker() -> Option<std::path::PathBuf> {
     Some(Path::new(&base).join("WarmupVk").join(".welcome_shown"))
 }
 
-unsafe fn load_tray_icon() -> HICON {
-    for path in [INSTALLED_ICON_PATH].map(Path::new) {
+pub(crate) unsafe fn load_tray_icon() -> HICON {
+    for path in [INSTALLED_ICON_PATH, SOURCE_ICON_PATH].map(Path::new) {
         if !path.is_file() {
             continue;
         }
@@ -264,6 +266,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_COMMAND => {
             match wparam.0 & 0xffff {
+                MENU_CONTROLLER_CENTER => {
+                    if let Err(e) = crate::win::controller_center::show() {
+                        crate::install::log_line(&format!(
+                            "tray: open Controller Center failed: {e}"
+                        ));
+                    }
+                }
                 MENU_TOGGLE_POLL => {
                     let paused = !crate::gamepad_backend::userland_poll_paused();
                     crate::gamepad_backend::set_userland_poll_paused(paused);
@@ -300,7 +309,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 MENU_UNINSTALL => uninstall(hwnd),
                 MENU_EXIT => {
                     crate::install::request_service_stop();
-                    crate::gamepad::request_stop();
                     PostQuitMessage(0);
                 }
                 _ => {}
@@ -348,6 +356,12 @@ unsafe fn show_menu(hwnd: HWND) {
         chk(gs.cursor_enabled),
         MENU_CURSOR_ENABLED,
         w!("Gamepad cursor"),
+    );
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_CONTROLLER_CENTER,
+        w!("Controller Center…"),
     );
 
     // Keyboard.
@@ -454,7 +468,7 @@ unsafe fn show_menu(hwnd: HWND) {
         w!("Uninstall Warmup Companion…"),
     );
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-    let _ = AppendMenuW(menu, MF_STRING, MENU_EXIT, w!("Exit"));
+    let _ = AppendMenuW(menu, MF_STRING, MENU_EXIT, w!("Exit Warmup Companion"));
 
     let mut pt = POINT::default();
     let _ = GetCursorPos(&mut pt);

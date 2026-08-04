@@ -119,6 +119,12 @@ fn vk_palette(dark: bool) -> VkPalette {
     pal
 }
 
+/// The Controller Center is another native surface of the same product, so it
+/// reads the exact palette the virtual keyboard uses instead of inventing one.
+pub(crate) fn current_vk_palette() -> VkPalette {
+    vk_palette(is_dark_theme())
+}
+
 /// Dark flag, read live from the OS theme.
 /// `HKCU\...\Themes\Personalize\AppsUseLightTheme` (0 = dark). Defaults to dark.
 fn is_dark_theme() -> bool {

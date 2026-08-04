@@ -2,6 +2,7 @@
 //!
 //! Service mode uses XInput (secure desktop). Desktop `--gamepad` uses SDL3.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -38,6 +39,82 @@ pub enum VkLoopAction {
     Close,
     Reopen,
     LaunchWarmup,
+}
+
+#[derive(Default)]
+struct DesktopShortcutState {
+    held: HashSet<Button>,
+    consumed: HashSet<Button>,
+    deferred_single: HashSet<Button>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DesktopShortcutDecision {
+    Pass,
+    Consume,
+    TriggerSingle(Button),
+    TriggerChord(crate::controller_shortcuts::ControllerChord),
+}
+
+impl DesktopShortcutState {
+    fn reset(&mut self) {
+        self.held.clear();
+        self.consumed.clear();
+        self.deferred_single.clear();
+    }
+
+    fn edge(
+        &mut self,
+        change: ButtonChange,
+        allowed: bool,
+        matching_chord: impl Fn(
+            &[Button],
+            Button,
+        ) -> Option<crate::controller_shortcuts::ControllerChord>,
+        is_chord_hold_mapped: impl Fn(Button) -> bool,
+        is_single_mapped: impl Fn(Button) -> bool,
+    ) -> DesktopShortcutDecision {
+        if !allowed {
+            self.reset();
+            return DesktopShortcutDecision::Pass;
+        }
+
+        if change.pressed {
+            if !self.held.insert(change.button) {
+                return DesktopShortcutDecision::Consume;
+            }
+            let held = self.held.iter().copied().collect::<Vec<_>>();
+            if let Some(chord) = matching_chord(&held, change.button) {
+                self.consumed.insert(chord.hold);
+                self.consumed.insert(chord.press);
+                self.deferred_single.remove(&chord.hold);
+                self.deferred_single.remove(&chord.press);
+                return DesktopShortcutDecision::TriggerChord(chord);
+            }
+            if is_chord_hold_mapped(change.button) {
+                self.consumed.insert(change.button);
+                if is_single_mapped(change.button) {
+                    self.deferred_single.insert(change.button);
+                }
+                return DesktopShortcutDecision::Consume;
+            }
+            if is_single_mapped(change.button) {
+                self.consumed.insert(change.button);
+                return DesktopShortcutDecision::TriggerSingle(change.button);
+            }
+            return DesktopShortcutDecision::Pass;
+        }
+
+        self.held.remove(&change.button);
+        if !self.consumed.remove(&change.button) {
+            return DesktopShortcutDecision::Pass;
+        }
+        if self.deferred_single.remove(&change.button) && is_single_mapped(change.button) {
+            DesktopShortcutDecision::TriggerSingle(change.button)
+        } else {
+            DesktopShortcutDecision::Consume
+        }
+    }
 }
 
 enum Backend {
@@ -205,6 +282,7 @@ impl Backend {
 
 pub struct GamepadPoll {
     backend: Backend,
+    desktop_shortcuts: DesktopShortcutState,
     vk_down: bool,
     a_cursor_down: bool,
     touchpad_cursor_down: bool,
@@ -361,6 +439,7 @@ impl GamepadPoll {
     fn new(backend: Backend) -> Self {
         Self {
             backend,
+            desktop_shortcuts: DesktopShortcutState::default(),
             vk_down: false,
             a_cursor_down: false,
             touchpad_cursor_down: false,
@@ -386,6 +465,7 @@ impl GamepadPoll {
 
     /// Clear VK navigation / Y-latch state after close, desktop change, or reopen.
     pub fn reset_vk_controls(&mut self) {
+        self.desktop_shortcuts.reset();
         self.vk_down = false;
         self.a_cursor_down = false;
         self.touchpad_cursor_down = false;
@@ -405,6 +485,7 @@ impl GamepadPoll {
     }
 
     pub fn on_vk_opened(&mut self) {
+        self.desktop_shortcuts.reset();
         self.vk_down = false;
         self.vk_toggle_need_release = true;
         self.vk_nav_grace_until = Some(Instant::now() + VK_NAV_INPUT_GRACE);
@@ -436,6 +517,7 @@ impl GamepadPoll {
         vk_open: bool,
     ) -> Result<Vec<VkLoopAction>, String> {
         if crate::gamepad_backend::userland_poll_paused() {
+            self.desktop_shortcuts.reset();
             self.backend.apply_device_commands();
             cursor.set_left_button(false);
             cursor.set_right_button(false);
@@ -481,6 +563,20 @@ impl GamepadPoll {
             axes,
             touchpad,
         } = self.backend.poll_frame()?;
+        #[cfg(windows)]
+        {
+            let battery = self.backend.battery();
+            let name = self.backend.controller_label();
+            let input = self.backend.live_input_summary();
+            crate::win::controller_center::update(
+                self.backend.is_connected(),
+                &name,
+                &input,
+                axes,
+                battery,
+                &changes,
+            );
+        }
         let game_owns_input =
             crate::pipe_server::game_active() && !crate::pipe_server::launcher_foreground_nav();
         let cursor_injection_enabled =
@@ -501,11 +597,22 @@ impl GamepadPoll {
         }
 
         #[cfg(windows)]
+        if crate::win::controller_center::is_visible() {
+            // The Center captures physical keyboard input for shortcut recording;
+            // keep controller edges visual-only while it is in front.
+            self.desktop_shortcuts.reset();
+            cursor.set_left_button(false);
+            cursor.set_right_button(false);
+            return Ok(Vec::new());
+        }
+
+        #[cfg(windows)]
         let desktop_reopen = self.reopen_on_input_desktop_change(vk_open);
         #[cfg(not(windows))]
         let desktop_reopen = None;
 
         if vk_open {
+            self.desktop_shortcuts.reset();
             #[cfg(windows)]
             {
                 self.sync_stick_nav(lx, ly);
@@ -539,11 +646,41 @@ impl GamepadPoll {
         }
 
         let changes = dedupe_consecutive_toggle_edges(changes);
+        #[cfg(windows)]
+        let desktop_shortcuts_allowed = !game_owns_input
+            && !crate::pipe_server::launcher_foreground_nav()
+            && !crate::pipe_server::native_vk_suppressed()
+            && !crate::gamepad_backend::standalone_game_active_now()
+            && !crate::win::logon_focus::is_active();
         let mut edges = Vec::new();
         if let Some(edge) = desktop_reopen {
             edges.push(edge);
         }
         for change in changes {
+            #[cfg(windows)]
+            {
+                let decision = self.desktop_shortcuts.edge(
+                    change,
+                    desktop_shortcuts_allowed,
+                    crate::controller_shortcuts::matching_chord,
+                    crate::controller_shortcuts::is_chord_hold_mapped,
+                    crate::controller_shortcuts::is_mapped,
+                );
+                match decision {
+                    DesktopShortcutDecision::TriggerSingle(button) => {
+                        let _ = crate::controller_shortcuts::trigger(button);
+                        self.backend.haptic_confirm();
+                        continue;
+                    }
+                    DesktopShortcutDecision::TriggerChord(chord) => {
+                        let _ = crate::controller_shortcuts::trigger_chord(chord);
+                        self.backend.haptic_confirm();
+                        continue;
+                    }
+                    DesktopShortcutDecision::Consume => continue,
+                    DesktopShortcutDecision::Pass => {}
+                }
+            }
             // Forward every edge to the warmUP desktop over the pipe so the launcher grid
             // is gamepad-navigable (#348). The companion still drives its own VK/cursor below.
             // Browser is a special warmUP-owned desktop surface: L3/R3 belong to the companion
@@ -1161,23 +1298,10 @@ where
 
         #[cfg(windows)]
         if service_mode {
-            if crate::config::debug_ui_enabled() {
-                crate::win::debug_overlay::tick();
-            }
             if crate::config::prompt_overlay_enabled() {
                 crate::win::prompt_overlay::tick(vk_open());
             }
             poll.log_desktop_sync_if_due(true);
-            if crate::config::debug_ui_enabled() {
-                if crate::win::debug_overlay::take_vk_toggle_request() {
-                    on_action(VkLoopAction::Toggle);
-                }
-                // Loop thread owns the UIA/COM apartment and (on winlogon) is
-                // attached there, so the foreground dump must run here.
-                if crate::win::logon_focus::take_dump_request() {
-                    crate::win::logon_focus::dump_foreground_tree();
-                }
-            }
         }
 
         // Idle backoff (P2): slow the poll once nothing has needed input for a
@@ -1205,7 +1329,24 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{allows_cursor_injection, is_standalone_guide_wake, Button, ButtonChange};
+    use std::collections::HashSet;
+
+    use super::{
+        allows_cursor_injection, is_standalone_guide_wake, Button, ButtonChange,
+        DesktopShortcutDecision, DesktopShortcutState,
+    };
+    use crate::controller_shortcuts::ControllerChord;
+
+    fn chord_resolver(
+        chords: HashSet<ControllerChord>,
+    ) -> impl Fn(&[Button], Button) -> Option<ControllerChord> {
+        move |held, pressed| {
+            held.iter().copied().find_map(|held_button| {
+                let chord = ControllerChord::new(held_button, pressed)?;
+                chords.contains(&chord).then_some(chord)
+            })
+        }
+    }
 
     #[test]
     fn standalone_game_wakes_only_on_guide_press() {
@@ -1230,5 +1371,239 @@ mod tests {
         assert!(allows_cursor_injection(false, true));
         assert!(!allows_cursor_injection(false, false));
         assert!(!allows_cursor_injection(true, true));
+    }
+
+    #[test]
+    fn lb_a_chord_precedes_a_single_mapping_and_consumes_releases() {
+        let chord = ControllerChord::new(Button::Lb, Button::A).unwrap();
+        let mut state = DesktopShortcutState::default();
+        let is_chord_hold_mapped = |button| button == Button::Lb;
+        let is_single_mapped = |button| button == Button::A;
+
+        assert_eq!(
+            state.edge(
+                ButtonChange {
+                    button: Button::Lb,
+                    pressed: true,
+                },
+                true,
+                chord_resolver(HashSet::from([chord])),
+                is_chord_hold_mapped,
+                is_single_mapped,
+            ),
+            DesktopShortcutDecision::Consume
+        );
+        assert_eq!(
+            state.edge(
+                ButtonChange {
+                    button: Button::A,
+                    pressed: true,
+                },
+                true,
+                chord_resolver(HashSet::from([chord])),
+                is_chord_hold_mapped,
+                is_single_mapped,
+            ),
+            DesktopShortcutDecision::TriggerChord(chord)
+        );
+        assert_eq!(
+            state.edge(
+                ButtonChange {
+                    button: Button::A,
+                    pressed: false,
+                },
+                true,
+                chord_resolver(HashSet::from([chord])),
+                is_chord_hold_mapped,
+                is_single_mapped,
+            ),
+            DesktopShortcutDecision::Consume
+        );
+        assert_eq!(
+            state.edge(
+                ButtonChange {
+                    button: Button::Lb,
+                    pressed: false,
+                },
+                true,
+                chord_resolver(HashSet::from([chord])),
+                is_chord_hold_mapped,
+                is_single_mapped,
+            ),
+            DesktopShortcutDecision::Consume
+        );
+    }
+
+    #[test]
+    fn chord_press_side_keeps_a_alone_normal() {
+        let chord = ControllerChord::new(Button::Lb, Button::A).unwrap();
+        let mut state = DesktopShortcutState::default();
+        let is_chord_hold_mapped = |button| button == Button::Lb;
+
+        assert_eq!(
+            state.edge(
+                ButtonChange {
+                    button: Button::A,
+                    pressed: true,
+                },
+                true,
+                chord_resolver(HashSet::from([chord])),
+                is_chord_hold_mapped,
+                |_| false,
+            ),
+            DesktopShortcutDecision::Pass
+        );
+        assert_eq!(
+            state.edge(
+                ButtonChange {
+                    button: Button::A,
+                    pressed: false,
+                },
+                true,
+                chord_resolver(HashSet::from([chord])),
+                is_chord_hold_mapped,
+                |_| false,
+            ),
+            DesktopShortcutDecision::Pass
+        );
+    }
+
+    #[test]
+    fn reversed_order_does_not_trigger_a_hold_then_lb_chord() {
+        let chord = ControllerChord::new(Button::Lb, Button::A).unwrap();
+        let mut state = DesktopShortcutState::default();
+        let is_chord_hold_mapped = |button| button == Button::Lb;
+
+        assert_eq!(
+            state.edge(
+                ButtonChange {
+                    button: Button::A,
+                    pressed: true,
+                },
+                true,
+                chord_resolver(HashSet::from([chord])),
+                is_chord_hold_mapped,
+                |_| false,
+            ),
+            DesktopShortcutDecision::Pass
+        );
+        assert_eq!(
+            state.edge(
+                ButtonChange {
+                    button: Button::Lb,
+                    pressed: true,
+                },
+                true,
+                chord_resolver(HashSet::from([chord])),
+                is_chord_hold_mapped,
+                |_| false,
+            ),
+            DesktopShortcutDecision::Consume
+        );
+        assert_eq!(
+            state.edge(
+                ButtonChange {
+                    button: Button::Lb,
+                    pressed: false,
+                },
+                true,
+                chord_resolver(HashSet::from([chord])),
+                is_chord_hold_mapped,
+                |_| false,
+            ),
+            DesktopShortcutDecision::Consume
+        );
+    }
+
+    #[test]
+    fn unused_chord_hold_releases_to_single_mapping() {
+        let chord = ControllerChord::new(Button::Lb, Button::A).unwrap();
+        let mut state = DesktopShortcutState::default();
+        let is_chord_hold_mapped = |button| button == Button::Lb;
+        let is_single_mapped = |button| button == Button::Lb;
+
+        assert_eq!(
+            state.edge(
+                ButtonChange {
+                    button: Button::Lb,
+                    pressed: true,
+                },
+                true,
+                chord_resolver(HashSet::from([chord])),
+                is_chord_hold_mapped,
+                is_single_mapped,
+            ),
+            DesktopShortcutDecision::Consume
+        );
+        assert_eq!(
+            state.edge(
+                ButtonChange {
+                    button: Button::Lb,
+                    pressed: false,
+                },
+                true,
+                chord_resolver(HashSet::from([chord])),
+                is_chord_hold_mapped,
+                is_single_mapped,
+            ),
+            DesktopShortcutDecision::TriggerSingle(Button::Lb)
+        );
+    }
+
+    #[test]
+    fn unmapped_chord_falls_back_to_single_button() {
+        let mut state = DesktopShortcutState::default();
+        let no_chords = HashSet::new();
+        let is_chord_hold_mapped = |_| false;
+        let is_single_mapped = |button| button == Button::A;
+
+        assert_eq!(
+            state.edge(
+                ButtonChange {
+                    button: Button::A,
+                    pressed: true,
+                },
+                true,
+                chord_resolver(no_chords),
+                is_chord_hold_mapped,
+                is_single_mapped,
+            ),
+            DesktopShortcutDecision::TriggerSingle(Button::A)
+        );
+    }
+
+    #[test]
+    fn generic_x_y_chord_uses_the_same_edge_rules() {
+        let chord = ControllerChord::new(Button::X, Button::Y).unwrap();
+        let mut state = DesktopShortcutState::default();
+        let is_chord_hold_mapped = |button| button == Button::X;
+        let is_single_mapped = |_| false;
+
+        assert_eq!(
+            state.edge(
+                ButtonChange {
+                    button: Button::X,
+                    pressed: true,
+                },
+                true,
+                chord_resolver(HashSet::from([chord])),
+                is_chord_hold_mapped,
+                is_single_mapped,
+            ),
+            DesktopShortcutDecision::Consume
+        );
+        assert_eq!(
+            state.edge(
+                ButtonChange {
+                    button: Button::Y,
+                    pressed: true,
+                },
+                true,
+                chord_resolver(HashSet::from([chord])),
+                is_chord_hold_mapped,
+                is_single_mapped,
+            ),
+            DesktopShortcutDecision::TriggerChord(chord)
+        );
     }
 }
