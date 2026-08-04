@@ -1,6 +1,6 @@
 //! D3D11 + DXGI composition swapchain + D2D + DirectComposition renderer.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem::ManuallyDrop;
 use std::time::Instant;
 
@@ -51,7 +51,9 @@ use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use crate::vk_nav::{KeyAction, KeyCell, KeyPos, KeyRow};
 #[cfg(feature = "gamepad")]
 use crate::{
-    controller_shortcuts::{DesktopActionKind, MAPPABLE_BUTTONS},
+    controller_shortcuts::{
+        DesktopActionKind, LaunchableApp, Shortcut, WorkspaceWindowCandidate, MAPPABLE_BUTTONS,
+    },
     gamepad_backend::Button,
 };
 
@@ -923,6 +925,14 @@ pub struct ControllerCenterBinding<'a> {
     pub pressed: bool,
 }
 
+#[cfg(feature = "gamepad")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControllerCenterStep {
+    Trigger,
+    Action,
+    Configure,
+}
+
 /// Immutable data for one Controller Center repaint.
 #[cfg(feature = "gamepad")]
 pub struct ControllerCenterFrame<'a> {
@@ -939,8 +949,22 @@ pub struct ControllerCenterFrame<'a> {
     /// Optional held modifier. `None` means the selected trigger is a normal
     /// single-button mapping.
     pub selected_hold: Option<Button>,
-    pub editor_mode: Option<DesktopActionKind>,
-    pub editor_text: &'a str,
+    pub wizard_pending: Option<Button>,
+    pub wizard_step: Option<ControllerCenterStep>,
+    pub wizard_action: Option<DesktopActionKind>,
+    pub wizard_shortcut: Option<Shortcut>,
+    pub launch_target: &'a str,
+    pub app_query: &'a str,
+    pub apps: &'a [LaunchableApp],
+    pub app_matches: &'a [usize],
+    pub app_selected: Option<usize>,
+    pub app_scroll: usize,
+    pub workspace_name: &'a str,
+    pub workspace_candidates: &'a [WorkspaceWindowCandidate],
+    pub workspace_selected_ids: &'a HashSet<isize>,
+    pub workspace_scroll: usize,
+    pub command_text: &'a str,
+    pub wizard_notice: &'a str,
     pub deadzone: f32,
 }
 
@@ -950,10 +974,37 @@ pub struct ControllerCenterFrame<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControllerCenterHit {
     Button(Button),
-    Modifier(Option<Button>),
     Deadzone(u8),
     Action(DesktopActionKind),
+    TriggerCapture,
+    ShortcutCapture,
+    AppSearch,
+    CommandInput,
+    AppRow(usize),
+    AppScrollUp,
+    AppScrollDown,
+    WorkspaceName,
+    WorkspaceRow(usize),
+    WorkspaceScrollUp,
+    WorkspaceScrollDown,
+    Continue,
+    Back,
+    Cancel,
+    Save,
     Clear,
+}
+
+#[cfg(feature = "gamepad")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControllerCenterHitState {
+    pub step: ControllerCenterStep,
+    pub action: Option<DesktopActionKind>,
+    pub app_rows: usize,
+    pub app_can_scroll_up: bool,
+    pub app_can_scroll_down: bool,
+    pub workspace_rows: usize,
+    pub workspace_can_scroll_up: bool,
+    pub workspace_can_scroll_down: bool,
 }
 
 #[cfg(feature = "gamepad")]
@@ -1251,64 +1302,107 @@ fn controller_center_deadzone_rect(width: f32, height: f32) -> D2D_RECT_F {
 }
 
 #[cfg(feature = "gamepad")]
-fn controller_center_action_rect(index: usize, width: f32, height: f32) -> D2D_RECT_F {
-    let drawer = controller_center_drawer_rect(width, height);
-    let left = drawer.left + 16.0;
-    let right = (drawer.right - 16.0).max(left + 4.0);
-    let gap = 8.0;
-    let slots = DesktopActionKind::ALL.len() + 1;
-    let slot_w = ((right - left - gap * (slots - 1) as f32) / slots as f32).max(1.0);
-    let x = left + index.min(slots - 1) as f32 * (slot_w + gap);
-    let top = drawer.top + 124.0;
-    D2D_RECT_F {
-        left: x,
-        top,
-        right: x + slot_w,
-        bottom: top + 34.0,
-    }
-}
+const CENTER_WIZARD_ROWS: usize = 3;
 
 #[cfg(feature = "gamepad")]
-fn controller_center_modifier_rect(index: usize, width: f32, height: f32) -> D2D_RECT_F {
-    const COLS: usize = 10;
+fn controller_center_wizard_content_rect(width: f32, height: f32) -> D2D_RECT_F {
     let drawer = controller_center_drawer_rect(width, height);
-    let left = drawer.left + 16.0;
-    let right = (drawer.right - 16.0).max(left + 4.0);
-    let gap = 5.0;
-    let col = index % COLS;
-    let row = index / COLS;
-    let slot_w = ((right - left - gap * (COLS - 1) as f32) / COLS as f32).max(1.0);
-    let top = drawer.top + 52.0 + row as f32 * 28.0;
-    let x = left + col as f32 * (slot_w + gap);
-    D2D_RECT_F {
-        left: x,
-        top,
-        right: x + slot_w,
-        bottom: top + 24.0,
-    }
-}
-
-#[cfg(feature = "gamepad")]
-fn controller_center_modifier_buttons(press: Button) -> impl Iterator<Item = Option<Button>> {
-    std::iter::once(None).chain(
-        MAPPABLE_BUTTONS
-            .iter()
-            .copied()
-            .filter(move |button| *button != press)
-            .map(Some),
-    )
-}
-
-#[cfg(feature = "gamepad")]
-fn controller_center_input_rect(width: f32, height: f32) -> D2D_RECT_F {
-    let drawer = controller_center_drawer_rect(width, height);
-    let top = drawer.top + 162.0;
+    let slider = controller_center_deadzone_rect(width, height);
     D2D_RECT_F {
         left: drawer.left + 16.0,
-        top,
-        right: drawer.right - 16.0,
-        bottom: top + 40.0,
+        top: drawer.top + 42.0,
+        right: (slider.left - 28.0).max(drawer.left + 240.0),
+        bottom: drawer.bottom - 48.0,
     }
+}
+
+#[cfg(feature = "gamepad")]
+fn controller_center_wizard_action_rect(index: usize, width: f32, height: f32) -> D2D_RECT_F {
+    let content = controller_center_wizard_content_rect(width, height);
+    let gap = 8.0;
+    let slot_w = ((content.right - content.left - gap * 2.0) / 3.0).max(1.0);
+    let x = content.left + index.min(2) as f32 * (slot_w + gap);
+    let top = content.top + 30.0;
+    D2D_RECT_F {
+        left: x,
+        top,
+        right: x + slot_w,
+        bottom: top + 56.0,
+    }
+}
+
+#[cfg(feature = "gamepad")]
+fn controller_center_wizard_trigger_rect(width: f32, height: f32) -> D2D_RECT_F {
+    let content = controller_center_wizard_content_rect(width, height);
+    D2D_RECT_F {
+        left: content.left,
+        top: content.top + 30.0,
+        right: content.right,
+        bottom: content.top + 82.0,
+    }
+}
+
+#[cfg(feature = "gamepad")]
+fn controller_center_wizard_field_rect(width: f32, height: f32) -> D2D_RECT_F {
+    let content = controller_center_wizard_content_rect(width, height);
+    D2D_RECT_F {
+        left: content.left,
+        top: content.top + 26.0,
+        right: content.right,
+        bottom: content.top + 56.0,
+    }
+}
+
+#[cfg(feature = "gamepad")]
+fn controller_center_wizard_list_row_rect(row: usize, width: f32, height: f32) -> D2D_RECT_F {
+    let content = controller_center_wizard_content_rect(width, height);
+    let top = content.top + 60.0 + row.min(CENTER_WIZARD_ROWS - 1) as f32 * 30.0;
+    D2D_RECT_F {
+        left: content.left,
+        top,
+        right: content.right - 30.0,
+        bottom: top + 26.0,
+    }
+}
+
+#[cfg(feature = "gamepad")]
+fn controller_center_wizard_scroll_rect(up: bool, width: f32, height: f32) -> D2D_RECT_F {
+    let content = controller_center_wizard_content_rect(width, height);
+    let top = content.top + 60.0 + if up { 0.0 } else { 60.0 };
+    D2D_RECT_F {
+        left: content.right - 24.0,
+        top,
+        right: content.right,
+        bottom: top + 26.0,
+    }
+}
+
+#[cfg(feature = "gamepad")]
+fn controller_center_wizard_footer_button_rect(
+    index: usize,
+    width: f32,
+    height: f32,
+) -> D2D_RECT_F {
+    let drawer = controller_center_drawer_rect(width, height);
+    let content = controller_center_wizard_content_rect(width, height);
+    let (x, w) = match index {
+        0 => (drawer.left + 16.0, 72.0),
+        1 => (drawer.left + 96.0, 72.0),
+        2 => (drawer.left + 176.0, 132.0),
+        _ => ((content.right - 100.0).max(drawer.left + 320.0), 100.0),
+    };
+    let top = drawer.bottom - 42.0;
+    D2D_RECT_F {
+        left: x,
+        top,
+        right: x + w,
+        bottom: drawer.bottom - 10.0,
+    }
+}
+
+#[cfg(feature = "gamepad")]
+fn controller_center_action_rect(index: usize, width: f32, height: f32) -> D2D_RECT_F {
+    controller_center_wizard_action_rect(index, width, height)
 }
 
 #[cfg(feature = "gamepad")]
@@ -1328,21 +1422,21 @@ pub fn controller_center_hit(
     if let Some(button) = controller_center_button_hit(x, y, width, height) {
         return Some(ControllerCenterHit::Button(button));
     }
-    if let Some(press) = selected {
-        for (index, hold) in controller_center_modifier_buttons(press).enumerate() {
-            let rect = controller_center_modifier_rect(index, width, height);
-            if x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom {
-                return Some(ControllerCenterHit::Modifier(hold));
-            }
-        }
-    }
-    for (index, kind) in DesktopActionKind::ALL.iter().copied().enumerate() {
+    let _ = selected;
+    for (index, kind) in [
+        DesktopActionKind::Shortcut,
+        DesktopActionKind::Launch,
+        DesktopActionKind::Workspace,
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let rect = controller_center_action_rect(index, width, height);
         if x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom {
             return Some(ControllerCenterHit::Action(kind));
         }
     }
-    let clear = controller_center_action_rect(DesktopActionKind::ALL.len(), width, height);
+    let clear = controller_center_wizard_footer_button_rect(2, width, height);
     if x >= clear.left && x <= clear.right && y >= clear.top && y <= clear.bottom {
         return Some(ControllerCenterHit::Clear);
     }
@@ -1355,6 +1449,146 @@ pub fn controller_center_hit(
         ));
     }
     None
+}
+
+#[cfg(feature = "gamepad")]
+pub fn controller_center_hit_with_wizard(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    selected: Option<Button>,
+    state: ControllerCenterHitState,
+) -> Option<ControllerCenterHit> {
+    if let Some(hit) = controller_center_hit(x, y, width, height, selected) {
+        if matches!(
+            hit,
+            ControllerCenterHit::Button(_) | ControllerCenterHit::Deadzone(_)
+        ) {
+            return Some(hit);
+        }
+    }
+    let clear = controller_center_wizard_footer_button_rect(2, width, height);
+    if x >= clear.left && x <= clear.right && y >= clear.top && y <= clear.bottom {
+        return Some(ControllerCenterHit::Clear);
+    }
+    let back = controller_center_wizard_footer_button_rect(0, width, height);
+    if x >= back.left && x <= back.right && y >= back.top && y <= back.bottom {
+        if state.step != ControllerCenterStep::Trigger {
+            return Some(ControllerCenterHit::Back);
+        }
+        return None;
+    }
+    let cancel = controller_center_wizard_footer_button_rect(1, width, height);
+    if x >= cancel.left && x <= cancel.right && y >= cancel.top && y <= cancel.bottom {
+        return Some(ControllerCenterHit::Cancel);
+    }
+    let primary = controller_center_wizard_footer_button_rect(3, width, height);
+    if x >= primary.left && x <= primary.right && y >= primary.top && y <= primary.bottom {
+        return Some(if state.step == ControllerCenterStep::Configure {
+            ControllerCenterHit::Save
+        } else {
+            ControllerCenterHit::Continue
+        });
+    }
+    match state.step {
+        ControllerCenterStep::Trigger => {
+            let rect = controller_center_wizard_trigger_rect(width, height);
+            (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom)
+                .then_some(ControllerCenterHit::TriggerCapture)
+        }
+        ControllerCenterStep::Action => {
+            for (index, kind) in [
+                DesktopActionKind::Shortcut,
+                DesktopActionKind::Launch,
+                DesktopActionKind::Workspace,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let rect = controller_center_wizard_action_rect(index, width, height);
+                if x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom {
+                    return Some(ControllerCenterHit::Action(kind));
+                }
+            }
+            None
+        }
+        ControllerCenterStep::Configure => match state.action {
+            Some(DesktopActionKind::Shortcut) => {
+                let rect = controller_center_wizard_field_rect(width, height);
+                (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom)
+                    .then_some(ControllerCenterHit::ShortcutCapture)
+            }
+            Some(DesktopActionKind::Launch) => {
+                let field = controller_center_wizard_field_rect(width, height);
+                if x >= field.left && x <= field.right && y >= field.top && y <= field.bottom {
+                    return Some(ControllerCenterHit::AppSearch);
+                }
+                for row in 0..CENTER_WIZARD_ROWS.min(state.app_rows) {
+                    let rect = controller_center_wizard_list_row_rect(row, width, height);
+                    if x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom {
+                        return Some(ControllerCenterHit::AppRow(row));
+                    }
+                }
+                let up = controller_center_wizard_scroll_rect(true, width, height);
+                if state.app_can_scroll_up
+                    && x >= up.left
+                    && x <= up.right
+                    && y >= up.top
+                    && y <= up.bottom
+                {
+                    return Some(ControllerCenterHit::AppScrollUp);
+                }
+                let down = controller_center_wizard_scroll_rect(false, width, height);
+                if state.app_can_scroll_down
+                    && x >= down.left
+                    && x <= down.right
+                    && y >= down.top
+                    && y <= down.bottom
+                {
+                    return Some(ControllerCenterHit::AppScrollDown);
+                }
+                None
+            }
+            Some(DesktopActionKind::Workspace) => {
+                let field = controller_center_wizard_field_rect(width, height);
+                if x >= field.left && x <= field.right && y >= field.top && y <= field.bottom {
+                    return Some(ControllerCenterHit::WorkspaceName);
+                }
+                for row in 0..CENTER_WIZARD_ROWS.min(state.workspace_rows) {
+                    let rect = controller_center_wizard_list_row_rect(row, width, height);
+                    if x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom {
+                        return Some(ControllerCenterHit::WorkspaceRow(row));
+                    }
+                }
+                let up = controller_center_wizard_scroll_rect(true, width, height);
+                if state.workspace_can_scroll_up
+                    && x >= up.left
+                    && x <= up.right
+                    && y >= up.top
+                    && y <= up.bottom
+                {
+                    return Some(ControllerCenterHit::WorkspaceScrollUp);
+                }
+                let down = controller_center_wizard_scroll_rect(false, width, height);
+                if state.workspace_can_scroll_down
+                    && x >= down.left
+                    && x <= down.right
+                    && y >= down.top
+                    && y <= down.bottom
+                {
+                    return Some(ControllerCenterHit::WorkspaceScrollDown);
+                }
+                None
+            }
+            Some(DesktopActionKind::Command) => {
+                let rect = controller_center_wizard_field_rect(width, height);
+                (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom)
+                    .then_some(ControllerCenterHit::CommandInput)
+            }
+            None => None,
+        },
+    }
 }
 
 #[cfg(feature = "gamepad")]
@@ -1396,6 +1630,558 @@ unsafe fn draw_center_text(
         D2D1_DRAW_TEXT_OPTIONS_CLIP,
         DWRITE_MEASURING_MODE_NATURAL,
     );
+}
+
+#[cfg(feature = "gamepad")]
+unsafe fn draw_center_wizard(
+    context: &ID2D1DeviceContext,
+    width: f32,
+    height: f32,
+    drawer: &D2D1_ROUNDED_RECT,
+    frame: &ControllerCenterFrame,
+    button: Button,
+    key_brush: &ID2D1SolidColorBrush,
+    accent_brush: &ID2D1SolidColorBrush,
+    ring_brush: &ID2D1SolidColorBrush,
+    border_brush: &ID2D1SolidColorBrush,
+    text_brush: &ID2D1SolidColorBrush,
+    sel_text_brush: &ID2D1SolidColorBrush,
+    muted_brush: &ID2D1SolidColorBrush,
+    hint_format: &IDWriteTextFormat,
+    chip_format: &IDWriteTextFormat,
+) -> Result<(), String> {
+    let content = controller_center_wizard_content_rect(width, height);
+    let step = frame.wizard_step.unwrap_or(ControllerCenterStep::Trigger);
+    let trigger_label = frame.selected_hold.map_or_else(
+        || controller_button_label(button, frame.controller_label).to_string(),
+        |hold| {
+            format!(
+                "{} + {}",
+                controller_button_label(hold, frame.controller_label),
+                controller_button_label(button, frame.controller_label)
+            )
+        },
+    );
+
+    let _ = hint_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    let _ = chip_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+    draw_center_text(
+        context,
+        &format!("SET UP SHORTCUT · {trigger_label}"),
+        hint_format,
+        &D2D_RECT_F {
+            left: drawer.rect.left + 16.0,
+            top: drawer.rect.top + 9.0,
+            right: content.right - 250.0,
+            bottom: drawer.rect.top + 31.0,
+        },
+        text_brush,
+    );
+    draw_center_text(
+        context,
+        "1 Trigger   ›   2 Action   ›   3 Configure",
+        hint_format,
+        &D2D_RECT_F {
+            left: content.right - 250.0,
+            top: drawer.rect.top + 10.0,
+            right: content.right,
+            bottom: drawer.rect.top + 31.0,
+        },
+        muted_brush,
+    );
+
+    let draw_box = |rect: D2D_RECT_F, selected: bool, enabled: bool| {
+        let rounded = D2D1_ROUNDED_RECT {
+            rect,
+            radiusX: 8.0,
+            radiusY: 8.0,
+        };
+        context.FillRoundedRectangle(
+            &rounded,
+            if !enabled {
+                border_brush
+            } else if selected {
+                accent_brush
+            } else {
+                key_brush
+            },
+        );
+        context.DrawRoundedRectangle(
+            &rounded,
+            if selected { ring_brush } else { border_brush },
+            if selected { 2.0 } else { 1.0 },
+            None,
+        );
+    };
+
+    match step {
+        ControllerCenterStep::Trigger => {
+            draw_center_text(
+                context,
+                "TRIGGER · capture from the live controller",
+                hint_format,
+                &D2D_RECT_F {
+                    left: content.left,
+                    top: content.top,
+                    right: content.right,
+                    bottom: content.top + 22.0,
+                },
+                muted_brush,
+            );
+            let rect = controller_center_wizard_trigger_rect(width, height);
+            draw_box(rect, true, true);
+            let captured = format!("Captured: {trigger_label}");
+            draw_center_text(
+                context,
+                &captured,
+                chip_format,
+                &D2D_RECT_F {
+                    left: rect.left + 12.0,
+                    top: rect.top + 5.0,
+                    right: rect.right - 12.0,
+                    bottom: rect.top + 28.0,
+                },
+                sel_text_brush,
+            );
+            let capture_hint = frame.wizard_pending.map_or_else(
+                || "Press and release a button alone, or hold one and press another for a directed chord.".to_string(),
+                |pending| {
+                    format!(
+                        "{} held · release to confirm single, or press another button for a chord",
+                        controller_button_label(pending, frame.controller_label)
+                    )
+                },
+            );
+            draw_center_text(
+                context,
+                &capture_hint,
+                hint_format,
+                &D2D_RECT_F {
+                    left: rect.left + 12.0,
+                    top: rect.top + 29.0,
+                    right: rect.right - 12.0,
+                    bottom: rect.bottom - 5.0,
+                },
+                if frame.wizard_pending.is_some() {
+                    text_brush
+                } else {
+                    muted_brush
+                },
+            );
+            draw_center_text(
+                context,
+                if frame.wizard_notice.is_empty() {
+                    "Nothing is saved during trigger capture. Continue when the trigger is right."
+                } else {
+                    frame.wizard_notice
+                },
+                hint_format,
+                &D2D_RECT_F {
+                    left: content.left,
+                    top: content.top + 88.0,
+                    right: content.right,
+                    bottom: content.top + 111.0,
+                },
+                if frame.wizard_notice.is_empty() {
+                    muted_brush
+                } else {
+                    text_brush
+                },
+            );
+        }
+        ControllerCenterStep::Action => {
+            draw_center_text(
+                context,
+                "ACTION · choose one desktop behavior",
+                hint_format,
+                &D2D_RECT_F {
+                    left: content.left,
+                    top: content.top,
+                    right: content.right,
+                    bottom: content.top + 22.0,
+                },
+                muted_brush,
+            );
+            let choices = [
+                (
+                    DesktopActionKind::Shortcut,
+                    "Keyboard shortcut",
+                    "Capture a Windows key combination",
+                ),
+                (
+                    DesktopActionKind::Launch,
+                    "Open app",
+                    "Choose an installed app or target",
+                ),
+                (
+                    DesktopActionKind::Workspace,
+                    "Restore workspace",
+                    "Save visible window positions and sizes",
+                ),
+            ];
+            for (index, (kind, title, description)) in choices.into_iter().enumerate() {
+                let rect = controller_center_wizard_action_rect(index, width, height);
+                let selected = frame.wizard_action == Some(kind);
+                draw_box(rect, selected, true);
+                draw_center_text(
+                    context,
+                    title,
+                    hint_format,
+                    &D2D_RECT_F {
+                        left: rect.left + 6.0,
+                        top: rect.top + 5.0,
+                        right: rect.right - 6.0,
+                        bottom: rect.top + 26.0,
+                    },
+                    if selected { sel_text_brush } else { text_brush },
+                );
+                draw_center_text(
+                    context,
+                    description,
+                    hint_format,
+                    &D2D_RECT_F {
+                        left: rect.left + 6.0,
+                        top: rect.top + 29.0,
+                        right: rect.right - 6.0,
+                        bottom: rect.bottom - 4.0,
+                    },
+                    if selected {
+                        sel_text_brush
+                    } else {
+                        muted_brush
+                    },
+                );
+            }
+            if frame.wizard_action == Some(DesktopActionKind::Command) {
+                draw_center_text(
+                    context,
+                    "Existing Command mapping loaded for compatibility · Clear or Continue to edit it.",
+                    hint_format,
+                    &D2D_RECT_F {
+                        left: content.left,
+                        top: content.top + 94.0,
+                        right: content.right,
+                        bottom: content.top + 117.0,
+                    },
+                    muted_brush,
+                );
+            }
+        }
+        ControllerCenterStep::Configure => match frame.wizard_action {
+            Some(DesktopActionKind::Shortcut) => {
+                draw_center_text(
+                    context,
+                    "CONFIGURE · keyboard shortcut",
+                    hint_format,
+                    &D2D_RECT_F {
+                        left: content.left,
+                        top: content.top,
+                        right: content.right,
+                        bottom: content.top + 22.0,
+                    },
+                    muted_brush,
+                );
+                let rect = controller_center_wizard_field_rect(width, height);
+                draw_box(rect, true, true);
+                draw_center_text(
+                    context,
+                    frame
+                        .wizard_shortcut
+                        .map(|shortcut| shortcut.display())
+                        .as_deref()
+                        .unwrap_or("Press a key combination here"),
+                    chip_format,
+                    &rect,
+                    if frame.wizard_shortcut.is_some() {
+                        sel_text_brush
+                    } else {
+                        muted_brush
+                    },
+                );
+                draw_center_text(
+                    context,
+                    if frame.wizard_notice.is_empty() {
+                        "Modifier-only keys are ignored. Capture is pending until you press Save."
+                    } else {
+                        frame.wizard_notice
+                    },
+                    hint_format,
+                    &D2D_RECT_F {
+                        left: content.left,
+                        top: content.top + 63.0,
+                        right: content.right,
+                        bottom: content.top + 87.0,
+                    },
+                    if frame.wizard_notice.is_empty() {
+                        muted_brush
+                    } else {
+                        text_brush
+                    },
+                );
+            }
+            Some(DesktopActionKind::Launch) => {
+                draw_center_text(
+                    context,
+                    "CONFIGURE · choose an app",
+                    hint_format,
+                    &D2D_RECT_F {
+                        left: content.left,
+                        top: content.top,
+                        right: content.right,
+                        bottom: content.top + 22.0,
+                    },
+                    muted_brush,
+                );
+                let field = controller_center_wizard_field_rect(width, height);
+                draw_box(field, true, true);
+                let query = if frame.app_query.is_empty() && !frame.launch_target.is_empty() {
+                    format!("Existing target: {}", frame.launch_target)
+                } else if frame.app_query.is_empty() {
+                    "Search app name or target".to_string()
+                } else {
+                    frame.app_query.to_string()
+                };
+                let query_is_placeholder =
+                    frame.app_query.is_empty() && frame.launch_target.is_empty();
+                draw_center_text(
+                    context,
+                    &query,
+                    chip_format,
+                    &D2D_RECT_F {
+                        left: field.left + 12.0,
+                        top: field.top,
+                        right: field.right - 12.0,
+                        bottom: field.bottom,
+                    },
+                    if query_is_placeholder {
+                        muted_brush
+                    } else {
+                        text_brush
+                    },
+                );
+                let indices = frame.app_matches;
+                for row in 0..CENTER_WIZARD_ROWS {
+                    let rect = controller_center_wizard_list_row_rect(row, width, height);
+                    let Some(index) = indices.get(frame.app_scroll + row).copied() else {
+                        break;
+                    };
+                    let selected = frame.app_selected == Some(index);
+                    draw_box(rect, selected, true);
+                    let app = &frame.apps[index];
+                    let label = format!(
+                        "{}{}  ·  {}",
+                        if selected { "✓ " } else { "" },
+                        app.name,
+                        app.target
+                    );
+                    draw_center_text(
+                        context,
+                        &label,
+                        hint_format,
+                        &D2D_RECT_F {
+                            left: rect.left + 8.0,
+                            top: rect.top,
+                            right: rect.right - 8.0,
+                            bottom: rect.bottom,
+                        },
+                        if selected { sel_text_brush } else { text_brush },
+                    );
+                }
+                let indices_len = indices.len();
+                for up in [true, false] {
+                    let rect = controller_center_wizard_scroll_rect(up, width, height);
+                    let enabled = if up {
+                        frame.app_scroll > 0
+                    } else {
+                        frame.app_scroll + CENTER_WIZARD_ROWS < indices_len
+                    };
+                    draw_box(rect, false, enabled);
+                    draw_center_text(
+                        context,
+                        if up { "↑" } else { "↓" },
+                        chip_format,
+                        &rect,
+                        if enabled { text_brush } else { muted_brush },
+                    );
+                }
+                if indices.is_empty() {
+                    draw_center_text(
+                        context,
+                        if frame.wizard_notice.is_empty() {
+                            "No matching apps. Clear the search, or go Back, then Continue to refresh."
+                        } else {
+                            frame.wizard_notice
+                        },
+                        hint_format,
+                        &D2D_RECT_F {
+                            left: content.left,
+                            top: content.top + 64.0,
+                            right: content.right - 30.0,
+                            bottom: content.top + 92.0,
+                        },
+                        muted_brush,
+                    );
+                }
+            }
+            Some(DesktopActionKind::Workspace) => {
+                draw_center_text(
+                    context,
+                    if frame.wizard_notice.is_empty() {
+                        "CONFIGURE · restore current window positions and sizes"
+                    } else {
+                        frame.wizard_notice
+                    },
+                    hint_format,
+                    &D2D_RECT_F {
+                        left: content.left,
+                        top: content.top,
+                        right: content.right,
+                        bottom: content.top + 22.0,
+                    },
+                    muted_brush,
+                );
+                let field = controller_center_wizard_field_rect(width, height);
+                draw_box(field, true, true);
+                let selected_count = frame.workspace_selected_ids.len();
+                let name = if frame.workspace_name.is_empty() {
+                    format!(
+                        "Workspace name · {selected_count} window{} selected",
+                        if selected_count == 1 { "" } else { "s" }
+                    )
+                } else {
+                    format!("{} · {selected_count} selected", frame.workspace_name)
+                };
+                draw_center_text(
+                    context,
+                    &name,
+                    chip_format,
+                    &D2D_RECT_F {
+                        left: field.left + 12.0,
+                        top: field.top,
+                        right: field.right - 12.0,
+                        bottom: field.bottom,
+                    },
+                    if frame.workspace_name.is_empty() {
+                        muted_brush
+                    } else {
+                        text_brush
+                    },
+                );
+                for row in 0..CENTER_WIZARD_ROWS {
+                    let rect = controller_center_wizard_list_row_rect(row, width, height);
+                    let Some(candidate) =
+                        frame.workspace_candidates.get(frame.workspace_scroll + row)
+                    else {
+                        break;
+                    };
+                    let selected = frame.workspace_selected_ids.contains(&candidate.id);
+                    draw_box(rect, selected, true);
+                    let label = format!(
+                        "{}{}  ·  {}",
+                        if selected { "✓ " } else { "" },
+                        if candidate.title.is_empty() {
+                            "Untitled window"
+                        } else {
+                            &candidate.title
+                        },
+                        candidate.executable
+                    );
+                    draw_center_text(
+                        context,
+                        &label,
+                        hint_format,
+                        &D2D_RECT_F {
+                            left: rect.left + 8.0,
+                            top: rect.top,
+                            right: rect.right - 8.0,
+                            bottom: rect.bottom,
+                        },
+                        if selected { sel_text_brush } else { text_brush },
+                    );
+                }
+                for up in [true, false] {
+                    let rect = controller_center_wizard_scroll_rect(up, width, height);
+                    let enabled = if up {
+                        frame.workspace_scroll > 0
+                    } else {
+                        frame.workspace_scroll + CENTER_WIZARD_ROWS
+                            < frame.workspace_candidates.len()
+                    };
+                    draw_box(rect, false, enabled);
+                    draw_center_text(
+                        context,
+                        if up { "↑" } else { "↓" },
+                        chip_format,
+                        &rect,
+                        if enabled { text_brush } else { muted_brush },
+                    );
+                }
+            }
+            Some(DesktopActionKind::Command) => {
+                draw_center_text(
+                    context,
+                    "CONFIGURE · existing Command mapping",
+                    hint_format,
+                    &D2D_RECT_F {
+                        left: content.left,
+                        top: content.top,
+                        right: content.right,
+                        bottom: content.top + 22.0,
+                    },
+                    muted_brush,
+                );
+                let field = controller_center_wizard_field_rect(width, height);
+                draw_box(field, true, true);
+                draw_center_text(
+                    context,
+                    if frame.command_text.is_empty() {
+                        "Existing command"
+                    } else {
+                        frame.command_text
+                    },
+                    chip_format,
+                    &field,
+                    text_brush,
+                );
+            }
+            None => {}
+        },
+    }
+
+    let footer = controller_center_wizard_footer_button_rect(0, width, height);
+    let footer_specs = [
+        (footer, "Back", step != ControllerCenterStep::Trigger),
+        (
+            controller_center_wizard_footer_button_rect(1, width, height),
+            "Cancel",
+            true,
+        ),
+        (
+            controller_center_wizard_footer_button_rect(2, width, height),
+            "Clear existing",
+            true,
+        ),
+        (
+            controller_center_wizard_footer_button_rect(3, width, height),
+            if step == ControllerCenterStep::Configure {
+                "Save"
+            } else {
+                "Continue"
+            },
+            step != ControllerCenterStep::Action || frame.wizard_action.is_some(),
+        ),
+    ];
+    for (rect, label, enabled) in footer_specs {
+        draw_box(rect, false, enabled);
+        draw_center_text(
+            context,
+            label,
+            hint_format,
+            &rect,
+            if enabled { text_brush } else { muted_brush },
+        );
+    }
+    Ok(())
 }
 
 /// Glyph for the Shift key (the Shift-action key reflects `shift`).
@@ -2841,216 +3627,30 @@ impl VkRenderer {
             .DrawRoundedRectangle(&drawer, &border_brush, 1.0, None);
 
         if let Some(button) = frame.selected {
-            let shortcut = frame.selected_hold.map_or_else(
-                || controller_button_label(button, frame.controller_label).to_string(),
-                |hold| {
-                    format!(
-                        "{} + {}",
-                        controller_button_label(hold, frame.controller_label),
-                        controller_button_label(button, frame.controller_label)
-                    )
-                },
-            );
-            let title = format!("1. CONTROLLER SHORTCUT · {shortcut}");
-            draw_center_text(
+            draw_center_wizard(
                 &self.d2d_context,
-                &title,
-                &self.hint_format,
-                &D2D_RECT_F {
-                    left: drawer.rect.left + 16.0,
-                    top: drawer.rect.top + 10.0,
-                    right: drawer.rect.left + 430.0,
-                    bottom: drawer.rect.top + 32.0,
-                },
+                cw,
+                ch,
+                &drawer,
+                frame,
+                button,
+                &key_brush,
+                &accent_brush,
+                &ring_brush,
+                &border_brush,
                 &text_brush,
-            );
-            draw_center_text(
-                &self.d2d_context,
-                if frame.input.is_empty() {
-                    "Choose Single or a held modifier · Esc cancels · Backspace clears"
-                } else {
-                    frame.input
-                },
-                &self.chip_format,
-                &D2D_RECT_F {
-                    left: drawer.rect.left + 448.0,
-                    top: drawer.rect.top + 10.0,
-                    right: drawer.rect.right - 16.0,
-                    bottom: drawer.rect.top + 32.0,
-                },
+                &sel_text_brush,
                 &muted_brush,
-            );
-            for (index, hold) in controller_center_modifier_buttons(button).enumerate() {
-                let rect = controller_center_modifier_rect(index, cw, ch);
-                let selected = frame.selected_hold == hold;
-                let rounded = D2D1_ROUNDED_RECT {
-                    rect,
-                    radiusX: 7.0,
-                    radiusY: 7.0,
-                };
-                self.d2d_context.FillRoundedRectangle(
-                    &rounded,
-                    if selected { &accent_brush } else { &key_brush },
-                );
-                self.d2d_context.DrawRoundedRectangle(
-                    &rounded,
-                    if selected { &ring_brush } else { &border_brush },
-                    if selected { 2.0 } else { 1.0 },
-                    None,
-                );
-                let label = hold.map_or("Single", |hold| {
-                    controller_button_label(hold, frame.controller_label)
-                });
-                draw_center_text(
-                    &self.d2d_context,
-                    label,
-                    &self.chip_format,
-                    &rect,
-                    if selected {
-                        &sel_text_brush
-                    } else {
-                        &text_brush
-                    },
-                );
-            }
-            let _ = self
-                .chip_format
-                .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            draw_center_text(
-                &self.d2d_context,
-                "2. ASSIGNED ACTION",
                 &self.hint_format,
-                &D2D_RECT_F {
-                    left: drawer.rect.left + 16.0,
-                    top: drawer.rect.top + 104.0,
-                    right: drawer.rect.right - 16.0,
-                    bottom: drawer.rect.top + 122.0,
-                },
-                &muted_brush,
-            );
-            let _ = self
-                .chip_format
-                .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-            for (index, kind) in DesktopActionKind::ALL.iter().copied().enumerate() {
-                let rect = controller_center_action_rect(index, cw, ch);
-                let selected = frame.editor_mode == Some(kind);
-                let rounded = D2D1_ROUNDED_RECT {
-                    rect,
-                    radiusX: 8.0,
-                    radiusY: 8.0,
-                };
-                self.d2d_context.FillRoundedRectangle(
-                    &rounded,
-                    if selected { &accent_brush } else { &key_brush },
-                );
-                self.d2d_context.DrawRoundedRectangle(
-                    &rounded,
-                    if selected { &ring_brush } else { &border_brush },
-                    if selected { 2.0 } else { 1.25 },
-                    None,
-                );
-                draw_center_text(
-                    &self.d2d_context,
-                    kind.label(),
-                    &self.chip_format,
-                    &rect,
-                    if selected {
-                        &sel_text_brush
-                    } else {
-                        &text_brush
-                    },
-                );
-            }
-            let clear = controller_center_action_rect(DesktopActionKind::ALL.len(), cw, ch);
-            let clear_rr = D2D1_ROUNDED_RECT {
-                rect: clear,
-                radiusX: 8.0,
-                radiusY: 8.0,
-            };
-            self.d2d_context.FillRoundedRectangle(&clear_rr, &key_brush);
-            self.d2d_context
-                .DrawRoundedRectangle(&clear_rr, &border_brush, 1.25, None);
-            draw_center_text(
-                &self.d2d_context,
-                "Clear",
                 &self.chip_format,
-                &clear,
-                &muted_brush,
-            );
-
-            let input_rect = controller_center_input_rect(cw, ch);
-            let input_rr = D2D1_ROUNDED_RECT {
-                rect: input_rect,
-                radiusX: 9.0,
-                radiusY: 9.0,
-            };
-            self.d2d_context.FillRoundedRectangle(&input_rr, &key_brush);
-            self.d2d_context.DrawRoundedRectangle(
-                &input_rr,
-                if matches!(
-                    frame.editor_mode,
-                    Some(
-                        DesktopActionKind::Launch
-                            | DesktopActionKind::Workspace
-                            | DesktopActionKind::Command
-                    )
-                ) {
-                    &accent_brush
-                } else {
-                    &border_brush
-                },
-                1.25,
-                None,
-            );
-            let editor_hint = match frame.editor_mode {
-                Some(DesktopActionKind::Shortcut) | None => {
-                    "Press a keyboard shortcut. Backspace clears, Esc cancels."
-                }
-                Some(DesktopActionKind::Launch) if frame.editor_text.is_empty() => {
-                    "Type an app path, document, or URL, then press Enter."
-                }
-                Some(DesktopActionKind::Workspace) if frame.editor_text.is_empty() => {
-                    "Name this workspace, then press Enter to capture visible app windows."
-                }
-                Some(DesktopActionKind::Command) if frame.editor_text.is_empty() => {
-                    "Type a command to run hidden, then press Enter."
-                }
-                Some(
-                    DesktopActionKind::Launch
-                    | DesktopActionKind::Workspace
-                    | DesktopActionKind::Command,
-                ) => frame.editor_text,
-            };
-            let editor_brush = if frame.editor_text.is_empty() {
-                &muted_brush
-            } else {
-                &text_brush
-            };
-            let _ = self
-                .chip_format
-                .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            draw_center_text(
-                &self.d2d_context,
-                editor_hint,
-                &self.chip_format,
-                &D2D_RECT_F {
-                    left: input_rect.left + 14.0,
-                    top: input_rect.top,
-                    right: input_rect.right - 14.0,
-                    bottom: input_rect.bottom,
-                },
-                editor_brush,
-            );
-            let _ = self
-                .chip_format
-                .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            )?;
         } else {
             let _ = self
                 .chip_format
                 .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             draw_center_text(
                 &self.d2d_context,
-                "Select a control to map keys, open an app or site, or capture a workspace.",
+                "Select a control to set up a keyboard shortcut, app, or workspace.",
                 &self.chip_format,
                 &D2D_RECT_F {
                     left: drawer.rect.left + 18.0,
@@ -3991,69 +4591,179 @@ mod tests {
 
     #[cfg(feature = "gamepad")]
     #[test]
-    fn controller_center_modifier_regions_cover_single_and_every_other_button() {
+    fn controller_center_wizard_hits_each_visible_primary_control() {
         let width = 1120.0;
         let height = 760.0;
-        let press = Button::A;
-        let modifiers: Vec<_> = controller_center_modifier_buttons(press).collect();
-        assert_eq!(modifiers.len(), MAPPABLE_BUTTONS.len());
-        assert_eq!(modifiers[0], None);
-        assert!(!modifiers.contains(&Some(press)));
+        let center = |rect: D2D_RECT_F| {
+            (
+                (rect.left + rect.right) * 0.5,
+                (rect.top + rect.bottom) * 0.5,
+            )
+        };
+        let trigger_state = ControllerCenterHitState {
+            step: ControllerCenterStep::Trigger,
+            action: None,
+            app_rows: 0,
+            app_can_scroll_up: false,
+            app_can_scroll_down: false,
+            workspace_rows: 0,
+            workspace_can_scroll_up: false,
+            workspace_can_scroll_down: false,
+        };
+        let trigger = center(controller_center_wizard_trigger_rect(width, height));
+        assert_eq!(
+            controller_center_hit_with_wizard(
+                trigger.0,
+                trigger.1,
+                width,
+                height,
+                Some(Button::A),
+                trigger_state,
+            ),
+            Some(ControllerCenterHit::TriggerCapture)
+        );
+        let continue_button = center(controller_center_wizard_footer_button_rect(
+            3, width, height,
+        ));
+        assert_eq!(
+            controller_center_hit_with_wizard(
+                continue_button.0,
+                continue_button.1,
+                width,
+                height,
+                Some(Button::A),
+                trigger_state,
+            ),
+            Some(ControllerCenterHit::Continue)
+        );
 
-        for (index, hold) in modifiers.into_iter().enumerate() {
-            let rect = controller_center_modifier_rect(index, width, height);
+        let action_state = ControllerCenterHitState {
+            step: ControllerCenterStep::Action,
+            action: Some(DesktopActionKind::Launch),
+            ..trigger_state
+        };
+        let action = center(controller_center_wizard_action_rect(1, width, height));
+        assert_eq!(
+            controller_center_hit_with_wizard(
+                action.0,
+                action.1,
+                width,
+                height,
+                Some(Button::A),
+                action_state,
+            ),
+            Some(ControllerCenterHit::Action(DesktopActionKind::Launch))
+        );
+        for (index, expected) in [
+            (0, ControllerCenterHit::Back),
+            (1, ControllerCenterHit::Cancel),
+            (2, ControllerCenterHit::Clear),
+        ] {
+            let rect = center(controller_center_wizard_footer_button_rect(
+                index, width, height,
+            ));
             assert_eq!(
-                controller_center_hit(
-                    (rect.left + rect.right) * 0.5,
-                    (rect.top + rect.bottom) * 0.5,
+                controller_center_hit_with_wizard(
+                    rect.0,
+                    rect.1,
                     width,
                     height,
-                    Some(press),
+                    Some(Button::A),
+                    action_state,
                 ),
-                Some(ControllerCenterHit::Modifier(hold))
+                Some(expected)
             );
         }
 
-        for (width, height) in [(1120.0, 760.0), (960.0, 760.0)] {
-            let modifiers: Vec<_> = controller_center_modifier_buttons(press)
-                .enumerate()
-                .map(|(index, _)| controller_center_modifier_rect(index, width, height))
-                .collect();
-            let actions: Vec<_> = (0..=DesktopActionKind::ALL.len())
-                .map(|index| controller_center_action_rect(index, width, height))
-                .collect();
-            for modifier in &modifiers {
-                for action in &actions {
-                    assert!(
-                        modifier.right <= action.left
-                            || action.right <= modifier.left
-                            || modifier.bottom <= action.top
-                            || action.bottom <= modifier.top,
-                        "modifier {modifier:?} overlaps action {action:?} at {width}x{height}"
-                    );
-                }
-            }
-        }
+        let configure_state = ControllerCenterHitState {
+            step: ControllerCenterStep::Configure,
+            action: Some(DesktopActionKind::Launch),
+            app_rows: 4,
+            app_can_scroll_down: true,
+            ..trigger_state
+        };
+        let search = center(controller_center_wizard_field_rect(width, height));
+        assert_eq!(
+            controller_center_hit_with_wizard(
+                search.0,
+                search.1,
+                width,
+                height,
+                Some(Button::A),
+                configure_state,
+            ),
+            Some(ControllerCenterHit::AppSearch)
+        );
+        let app = center(controller_center_wizard_list_row_rect(0, width, height));
+        assert_eq!(
+            controller_center_hit_with_wizard(
+                app.0,
+                app.1,
+                width,
+                height,
+                Some(Button::A),
+                configure_state,
+            ),
+            Some(ControllerCenterHit::AppRow(0))
+        );
+        let down = center(controller_center_wizard_scroll_rect(false, width, height));
+        assert_eq!(
+            controller_center_hit_with_wizard(
+                down.0,
+                down.1,
+                width,
+                height,
+                Some(Button::A),
+                configure_state,
+            ),
+            Some(ControllerCenterHit::AppScrollDown)
+        );
+        let workspace_state = ControllerCenterHitState {
+            action: Some(DesktopActionKind::Workspace),
+            workspace_rows: 4,
+            workspace_can_scroll_down: true,
+            ..configure_state
+        };
+        let workspace_row = center(controller_center_wizard_list_row_rect(0, width, height));
+        assert_eq!(
+            controller_center_hit_with_wizard(
+                workspace_row.0,
+                workspace_row.1,
+                width,
+                height,
+                Some(Button::A),
+                workspace_state,
+            ),
+            Some(ControllerCenterHit::WorkspaceRow(0))
+        );
+        let save = center(controller_center_wizard_footer_button_rect(
+            3, width, height,
+        ));
+        assert_eq!(
+            controller_center_hit_with_wizard(
+                save.0,
+                save.1,
+                width,
+                height,
+                Some(Button::A),
+                configure_state,
+            ),
+            Some(ControllerCenterHit::Save)
+        );
     }
 
     #[cfg(feature = "gamepad")]
     #[test]
-    fn controller_center_modifier_tiles_do_not_overlap_action_tiles() {
+    fn controller_center_wizard_draw_regions_fit_practical_window_sizes() {
         for (width, height) in [(1120.0, 760.0), (800.0, 620.0)] {
-            let modifier_count = controller_center_modifier_buttons(Button::A).count();
-            for modifier_index in 0..modifier_count {
-                let modifier = controller_center_modifier_rect(modifier_index, width, height);
-                for action_index in 0..=DesktopActionKind::ALL.len() {
-                    let action = controller_center_action_rect(action_index, width, height);
-                    assert!(
-                        modifier.right <= action.left
-                            || action.right <= modifier.left
-                            || modifier.bottom <= action.top
-                            || action.bottom <= modifier.top,
-                        "modifier {modifier_index} overlaps action {action_index} at {width}x{height}"
-                    );
-                }
-            }
+            let drawer = controller_center_drawer_rect(width, height);
+            let content = controller_center_wizard_content_rect(width, height);
+            let footer = controller_center_wizard_footer_button_rect(3, width, height);
+            let last_row = controller_center_wizard_list_row_rect(2, width, height);
+            assert!(content.right < controller_center_deadzone_rect(width, height).left);
+            assert!(last_row.bottom < footer.top);
+            assert!(footer.bottom <= drawer.bottom);
+            assert!(controller_center_wizard_action_rect(2, width, height).bottom < footer.top);
         }
     }
 
