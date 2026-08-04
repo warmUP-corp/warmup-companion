@@ -15,8 +15,7 @@ Warmup Companion is designed for local input, not text collection.
 - It does not read text from arbitrary focused controls for prediction context.
 - It does not upload prediction context or personal dictionary words.
 - It does not enable prediction on UAC, lock, or sign-in surfaces.
-- It does not send telemetry unless Sentry is configured with
-  `WARMUP_SENTRY_DSN`.
+- It does not send crash telemetry.
 
 ## Password Fields
 
@@ -39,16 +38,7 @@ This can include:
 The tray and CLI expose restore paths so users can recover Windows input
 services without reinstalling.
 
-## Crash Telemetry
-
-Sentry is disabled by default. If enabled:
-
-- default PII is disabled
-- server name is disabled
-- tracing/log/metric capture is disabled
-- Rust panics include stack traces
-- native SEH crashes send only a fatal summary
-- minidump files remain local
+## Crash Dumps
 
 Crash dumps in `C:\ProgramData\WarmupVk` can contain sensitive memory. Review
 before sharing.

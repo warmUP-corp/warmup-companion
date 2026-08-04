@@ -34,7 +34,7 @@ This repo is intended to be auditable before install.
 - A local personal dictionary may be stored under `%LOCALAPPDATA%`, but writes
   are skipped when UI Automation reports the focused field is a password field.
 - If password-field detection fails, learning is skipped.
-- Crash telemetry is off unless `WARMUP_SENTRY_DSN` is explicitly set.
+- The app does not send crash telemetry.
 
 The service needs high Windows privileges because secure desktop input is not
 available to a normal Tauri/webview process. The installed service is
@@ -125,25 +125,6 @@ sleep_on_game=true
 
 Legacy `auto_stop_on_game=true` is treated as Guide-only sleep. The controller
 loop no longer exits because that would prevent PS/Guide from waking warmUP.
-
-## Sentry
-
-Sentry is opt-in:
-
-```powershell
-$env:WARMUP_SENTRY_DSN = "https://public-key@o0.ingest.sentry.io/project"
-```
-
-Optional:
-
-```powershell
-$env:WARMUP_SENTRY_ENV = "production"
-$env:WARMUP_SENTRY_RELEASE = "warmup-companion@0.1.0"
-$env:WARMUP_SENTRY_DISABLED = "1"
-```
-
-The integration disables default PII, server name, tracing, logs, and metrics.
-Native SEH crashes send a fatal summary only; local minidumps are not uploaded.
 
 ## Build
 

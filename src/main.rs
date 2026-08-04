@@ -8,7 +8,6 @@ mod pipe_server;
 /// Companion IPC wire frames (#347). Pure serde; used by the pipe server and tests.
 #[allow(dead_code)]
 mod protocol;
-mod sentry_telemetry;
 mod symbols;
 mod time_util;
 mod vk_gate;
@@ -631,7 +630,6 @@ mod repl_scroll {
 }
 
 fn main() {
-    let _sentry = sentry_telemetry::init();
     let args: Vec<String> = env::args().collect();
     #[cfg(windows)]
     dispatch_install_or_service(&args);

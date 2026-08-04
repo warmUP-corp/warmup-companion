@@ -155,7 +155,6 @@ unsafe extern "system" fn seh_filter(info: *const EXCEPTION_POINTERS) -> i32 {
         GetCurrentThreadId()
     );
     crate::install::log_line(&summary);
-    crate::sentry_telemetry::capture_native_crash(summary);
     write_minidump(info);
 
     // Terminate after we have logged + dumped; the launcher will relaunch.

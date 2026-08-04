@@ -526,7 +526,6 @@ unsafe fn show_privacy(hwnd: HWND) {
         "Warmup Companion does not read host app text for prediction.\r\n\
          Prediction uses VK-only local context and is disabled on UAC, lock, and sign-in.\r\n\
          Personal dictionary learning skips password fields and UIA failures.\r\n\
-         Sentry is disabled unless WARMUP_SENTRY_DSN is set.\r\n\
          Service log: C:\\ProgramData\\WarmupVk\\service.log",
     );
     let _ = MessageBoxW(

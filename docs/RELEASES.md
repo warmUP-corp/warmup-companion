@@ -18,8 +18,8 @@ Use this before publishing an OSS release or binary.
 - Installer runs silently (no PowerShell window) when started in its own
   process and writes its output to `C:\ProgramData\WarmupVk\install.log`.
 - Release notes list service name, install path, log path, uninstall command,
-  silent-install behavior and install log path, Sentry opt-in behavior, and
-  native keyboard suppression/restoration behavior.
+  silent-install behavior and install log path, and native keyboard
+  suppression/restoration behavior.
 - Crash-dump handling is documented.
 
 ## Installer
@@ -91,13 +91,6 @@ custodian first, then sign in CI.
 - Ship unsigned with a published SHA-256 checksum and document the SmartScreen
   "More info -> Run anyway" step. This is a documented stopgap, not the final
   state.
-
-## Privacy / Telemetry
-
-- Confirm Sentry is disabled without `WARMUP_SENTRY_DSN`.
-- Confirm no DSN is compiled into public artifacts.
-- Confirm `send_default_pii=false`, no server name, no tracing, no log capture,
-  and no metric capture.
 
 ## Recovery
 

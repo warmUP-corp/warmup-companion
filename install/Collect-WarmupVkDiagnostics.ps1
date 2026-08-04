@@ -35,8 +35,7 @@ if (Test-Path $BinExe) {
 }
 
 Write-Host ""
-Write-Host "=== Trust / Telemetry ==="
-Write-Host "Sentry env: $(if ($env:WARMUP_SENTRY_DSN) { 'enabled by WARMUP_SENTRY_DSN' } else { 'disabled or not inherited by this shell' })"
+Write-Host "=== Trust ==="
 foreach ($Doc in @("README.md", "PRIVACY.md", "SECURITY.md", "LICENSE")) {
     $Path = Join-Path $DataDir $Doc
     if (Test-Path $Path) {

@@ -64,7 +64,6 @@ pub fn run_dispatcher() -> Result<(), String> {
 
 fn service_main(_arguments: Vec<OsString>) {
     std::panic::set_hook(Box::new(|info| {
-        crate::sentry_telemetry::capture_panic(info, "service-launcher");
         install::log_line(&format!("PANIC: {info}"));
     }));
     match run_service_core() {
@@ -138,7 +137,6 @@ fn run_service_core() -> Result<(), String> {
 /// Worker child launched into active console session. Owns XInput polling and VK UI.
 pub fn run_worker() -> Result<(), String> {
     std::panic::set_hook(Box::new(|info| {
-        crate::sentry_telemetry::capture_panic(info, "service-worker");
         install::log_line(&format!("WORKER PANIC: {info}"));
     }));
     std::env::set_var("WARMUP_VK_SERVICE", "1");

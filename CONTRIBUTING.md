@@ -23,5 +23,5 @@ For secure desktop behavior, use the installer and diagnostics scripts:
 ## Review Focus
 
 Changes touching service install, Winlogon, `SendInput`, UI Automation,
-prediction, IPC, Sentry, registry, or crash dumps need explicit privacy/security
+prediction, IPC, registry, or crash dumps need explicit privacy/security
 notes in the PR.

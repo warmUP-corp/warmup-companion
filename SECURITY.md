@@ -16,11 +16,10 @@ secure desktop input. High-risk areas:
 - UI Automation password-field detection.
 - Named pipe IPC with the warmUP desktop.
 - Native keyboard suppression and service/registry restoration.
-- Crash dumps and optional telemetry.
+- Crash dumps.
 
 ## Safe Defaults
 
-- Sentry is disabled unless `WARMUP_SENTRY_DSN` is set.
 - Prediction does not read host application text.
 - Prediction is disabled on secure desktop surfaces.
 - Personal-dictionary learning skips password fields and UIA failures.
