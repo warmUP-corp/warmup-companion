@@ -5,7 +5,7 @@ use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -305,7 +305,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 MENU_DIAGNOSTICS => open_diagnostics(),
                 MENU_PRIVACY => show_privacy(hwnd),
                 MENU_RESTORE_NATIVE_KBD => restore_native_keyboard(hwnd),
-                MENU_UNINSTALL => uninstall(),
+                MENU_UNINSTALL => uninstall(hwnd),
                 MENU_EXIT => {
                     crate::install::request_service_stop();
                     PostQuitMessage(0);
@@ -585,10 +585,30 @@ unsafe fn restore_native_keyboard(hwnd: HWND) {
     );
 }
 
-unsafe fn uninstall() {
-    if let Ok(exe) = std::env::current_exe() {
-        let exe = exe.display().to_string();
-        shell_execute("runas", &exe, Some("uninstall"));
+fn installed_uninstaller_path(program_files: &Path) -> PathBuf {
+    program_files.join("WarmupCompanion").join("uninstall.exe")
+}
+
+fn installed_uninstaller() -> Option<PathBuf> {
+    let program_files =
+        std::env::var_os("ProgramW6432").or_else(|| std::env::var_os("ProgramFiles"))?;
+    let path = installed_uninstaller_path(Path::new(&program_files));
+    path.is_file().then_some(path)
+}
+
+unsafe fn uninstall(hwnd: HWND) {
+    if let Some(exe) = installed_uninstaller() {
+        shell_execute("runas", &exe.display().to_string(), None);
+    } else {
+        let title = wide("Warmup Companion");
+        let body =
+            wide("The uninstaller was not found. Remove Warmup Companion from Settings > Apps.");
+        let _ = MessageBoxW(
+            hwnd,
+            PCWSTR(body.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONINFORMATION,
+        );
     }
 }
 
@@ -599,5 +619,13 @@ mod tests {
     #[test]
     fn build_labels_match() {
         assert_eq!(TRAY_TIP, format!("Warmup Companion {BUILD_INFO}"));
+    }
+
+    #[test]
+    fn installed_uninstaller_path_uses_program_files() {
+        assert_eq!(
+            installed_uninstaller_path(Path::new(r"C:\Program Files")),
+            PathBuf::from(r"C:\Program Files\WarmupCompanion\uninstall.exe")
+        );
     }
 }
