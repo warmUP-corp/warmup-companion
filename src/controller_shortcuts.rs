@@ -1,6 +1,9 @@
 //! User-configured desktop shortcuts for logical controller buttons.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 #[cfg(windows)]
@@ -179,6 +182,24 @@ pub enum ControllerAction {
     Launch(String),
     Workspace(String),
     Command(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LaunchableApp {
+    pub name: String,
+    pub target: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceWindowCandidate {
+    pub id: isize,
+    pub title: String,
+    pub executable: String,
+    pub left: i32,
+    pub top: i32,
+    pub width: i32,
+    pub height: i32,
+    pub maximized: bool,
 }
 
 impl ControllerAction {
@@ -567,6 +588,84 @@ pub fn capture_workspace(name: &str) -> Result<(), String> {
     capture_workspace_inner(name.trim())
 }
 
+pub fn launchable_apps() -> Vec<LaunchableApp> {
+    #[cfg(windows)]
+    {
+        let mut apps = Vec::new();
+        for root in start_menu_program_roots() {
+            collect_launchable_apps(&root, &mut apps);
+        }
+        return sort_and_dedup_launchable_apps(apps);
+    }
+
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+pub fn workspace_window_candidates() -> Vec<WorkspaceWindowCandidate> {
+    #[cfg(windows)]
+    {
+        return desktop_windows(false)
+            .into_iter()
+            .map(|window| WorkspaceWindowCandidate {
+                id: window.hwnd.0 as isize,
+                title: window.title,
+                executable: window.entry.executable,
+                left: window.entry.left,
+                top: window.entry.top,
+                width: window.entry.width,
+                height: window.entry.height,
+                maximized: window.entry.maximized,
+            })
+            .collect();
+    }
+
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+pub fn capture_workspace_windows(name: &str, window_ids: &[isize]) -> Result<(), String> {
+    let name = name.trim();
+    if !valid_workspace_name(name) {
+        return Err("Use a workspace name with letters, numbers, spaces, - or _".to_string());
+    }
+
+    #[cfg(windows)]
+    {
+        let live = desktop_windows(false);
+        let available_ids = live
+            .iter()
+            .map(|window| window.hwnd.0 as isize)
+            .collect::<Vec<_>>();
+        let selected = selected_window_indices(&available_ids, window_ids)?;
+        let mut windows = Vec::with_capacity(selected.len());
+        for index in selected {
+            let entry = live[index].entry.clone();
+            if !entry.validate() {
+                return Err("A selected window has invalid geometry".to_string());
+            }
+            windows.push(entry);
+        }
+        let workspace = Workspace { windows };
+        let value = serde_json::to_string(&workspace)
+            .map_err(|error| format!("encode workspace: {error}"))?;
+        if value.len() > MAX_WORKSPACE_JSON_BYTES {
+            return Err("The selected workspace is too large".to_string());
+        }
+        return crate::config::set_gamepad_setting(&workspace_key(name), &value);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = window_ids;
+        Err("Workspace capture is only available on Windows".to_string())
+    }
+}
+
 fn workspace_key(name: &str) -> String {
     let slug = name
         .trim()
@@ -579,6 +678,101 @@ fn workspace_key(name: &str) -> String {
         })
         .collect::<String>();
     format!("workspace_{slug}")
+}
+
+fn launchable_app_from_path(path: &Path) -> Option<LaunchableApp> {
+    let extension = path.extension()?.to_string_lossy().to_ascii_lowercase();
+    if !matches!(extension.as_str(), "lnk" | "url" | "appref-ms" | "exe") {
+        return None;
+    }
+    let name = path.file_stem()?.to_string_lossy().trim().to_string();
+    (!name.is_empty()).then(|| LaunchableApp {
+        name,
+        target: path.to_string_lossy().into_owned(),
+    })
+}
+
+fn normalize_launchable_target(target: &str) -> String {
+    target.replace('/', "\\").to_ascii_lowercase()
+}
+
+fn sort_and_dedup_launchable_apps(mut apps: Vec<LaunchableApp>) -> Vec<LaunchableApp> {
+    apps.sort_by(|left, right| {
+        left.name
+            .to_ascii_lowercase()
+            .cmp(&right.name.to_ascii_lowercase())
+            .then_with(|| {
+                left.target
+                    .to_ascii_lowercase()
+                    .cmp(&right.target.to_ascii_lowercase())
+            })
+    });
+    let mut targets = HashSet::with_capacity(apps.len());
+    apps.retain(|app| targets.insert(normalize_launchable_target(&app.target)));
+    apps
+}
+
+fn selected_window_indices(
+    available_ids: &[isize],
+    window_ids: &[isize],
+) -> Result<Vec<usize>, String> {
+    if window_ids.is_empty() {
+        return Err("Select at least one window".to_string());
+    }
+    if window_ids.len() > MAX_WORKSPACE_WINDOWS {
+        return Err(format!(
+            "Select no more than {MAX_WORKSPACE_WINDOWS} windows"
+        ));
+    }
+    let mut seen = HashSet::with_capacity(window_ids.len());
+    let mut indices = Vec::with_capacity(window_ids.len());
+    for &window_id in window_ids {
+        if !seen.insert(window_id) {
+            return Err("A window was selected more than once".to_string());
+        }
+        let index = available_ids
+            .iter()
+            .position(|&available_id| available_id == window_id)
+            .ok_or_else(|| "A selected window is no longer available".to_string())?;
+        indices.push(index);
+    }
+    Ok(indices)
+}
+
+#[cfg(windows)]
+fn start_menu_program_roots() -> Vec<PathBuf> {
+    ["APPDATA", "PROGRAMDATA"]
+        .into_iter()
+        .filter_map(|variable| {
+            std::env::var_os(variable).map(|base| {
+                PathBuf::from(base)
+                    .join("Microsoft")
+                    .join("Windows")
+                    .join("Start Menu")
+                    .join("Programs")
+            })
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+fn collect_launchable_apps(directory: &Path, apps: &mut Vec<LaunchableApp>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            collect_launchable_apps(&path, apps);
+        } else if file_type.is_file() {
+            if let Some(app) = launchable_app_from_path(&path) {
+                apps.push(app);
+            }
+        }
+    }
 }
 
 fn load_workspace(name: &str) -> Result<Workspace, String> {
@@ -696,6 +890,7 @@ fn run_command(command: &str) -> Result<(), String> {
 #[derive(Clone)]
 struct LiveWindow {
     hwnd: windows::Win32::Foundation::HWND,
+    title: String,
     entry: WorkspaceWindow,
 }
 
@@ -704,8 +899,8 @@ fn desktop_windows(include_minimized: bool) -> Vec<LiveWindow> {
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindow, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect,
-        GetWindowTextLengthW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed,
-        GWL_EXSTYLE, GW_OWNER, WINDOWPLACEMENT, WS_EX_TOOLWINDOW,
+        GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+        IsZoomed, GWL_EXSTYLE, GW_OWNER, WINDOWPLACEMENT, WS_EX_TOOLWINDOW,
     };
 
     struct Context {
@@ -722,6 +917,17 @@ fn desktop_windows(include_minimized: bool) -> Vec<LiveWindow> {
             || GetWindow(hwnd, GW_OWNER).is_ok()
             || (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0) != 0
         {
+            return BOOL(1);
+        }
+        let mut title_buffer = [0u16; 512];
+        let title_length = GetWindowTextW(hwnd, &mut title_buffer);
+        if title_length <= 0 {
+            return BOOL(1);
+        }
+        let title = String::from_utf16_lossy(&title_buffer[..title_length as usize])
+            .trim()
+            .to_string();
+        if title.is_empty() {
             return BOOL(1);
         }
         let mut pid = 0;
@@ -775,7 +981,7 @@ fn desktop_windows(include_minimized: bool) -> Vec<LiveWindow> {
         if !context.include_minimized && !entry.validate() {
             return BOOL(1);
         }
-        context.windows.push(LiveWindow { hwnd, entry });
+        context.windows.push(LiveWindow { hwnd, title, entry });
         BOOL(1)
     }
 
@@ -1131,5 +1337,61 @@ mod tests {
             "workspace_coding",
             r#"{"windows":[{"executable":"C:\\Apps\\Editor.exe","left":0,"top":0,"width":1280,"height":720,"maximized":false,"extra":true}]}"#
         ));
+    }
+
+    #[test]
+    fn inventory_helpers_filter_sort_and_deduplicate() {
+        let apps = [
+            "C:/Apps/Zeta.EXE",
+            "C:/Apps/readme.txt",
+            "C:/Apps/Editor.LnK",
+            "C:/Apps/Docs.url",
+            "C:/Apps/Remote.AppRef-Ms",
+            "C:/Apps/editor.exe",
+            "c:/apps/EDITOR.EXE",
+        ]
+        .into_iter()
+        .filter_map(|path| launchable_app_from_path(Path::new(path)))
+        .collect();
+        let apps = sort_and_dedup_launchable_apps(apps);
+
+        assert_eq!(
+            apps,
+            vec![
+                LaunchableApp {
+                    name: "Docs".to_string(),
+                    target: "C:/Apps/Docs.url".to_string(),
+                },
+                LaunchableApp {
+                    name: "editor".to_string(),
+                    target: "C:/Apps/editor.exe".to_string(),
+                },
+                LaunchableApp {
+                    name: "Editor".to_string(),
+                    target: "C:/Apps/Editor.LnK".to_string(),
+                },
+                LaunchableApp {
+                    name: "Remote".to_string(),
+                    target: "C:/Apps/Remote.AppRef-Ms".to_string(),
+                },
+                LaunchableApp {
+                    name: "Zeta".to_string(),
+                    target: "C:/Apps/Zeta.EXE".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn selected_window_ids_validate_selection_shape() {
+        let available = [11, 22, 33];
+        assert_eq!(
+            selected_window_indices(&available, &[33, 11]),
+            Ok(vec![2, 0])
+        );
+        assert!(selected_window_indices(&available, &[]).is_err());
+        assert!(selected_window_indices(&available, &[11, 11]).is_err());
+        assert!(selected_window_indices(&available, &[44]).is_err());
+        assert!(selected_window_indices(&available, &vec![11; MAX_WORKSPACE_WINDOWS + 1]).is_err());
     }
 }
