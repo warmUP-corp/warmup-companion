@@ -1,4 +1,5 @@
-pub mod debug_overlay;
+#[cfg(feature = "gamepad")]
+pub mod controller_center;
 pub mod desktop;
 pub mod desktop_window;
 pub mod game_detect;

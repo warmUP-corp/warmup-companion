@@ -1,5 +1,5 @@
 //! Winlogon "Press [L3] to open keyboard" prompt. Paint-only adapter over
-//! [`super::desktop_window`] (sibling to [`super::debug_overlay`]): the shared
+//! [`super::desktop_window`]: the shared
 //! band owns the thread + pump, this module supplies the wndproc and show/hide
 //! bodies. The prompt is the inverse of the keyboard — it appears only while the
 //! VK is *closed* on the secure desktop, so a first-time user knows the gesture.

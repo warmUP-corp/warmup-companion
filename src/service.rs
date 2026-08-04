@@ -454,9 +454,7 @@ unsafe fn create_worker_process(token: HANDLE) -> Result<WorkerProcess, String> 
     } else {
         PROCESS_CREATION_FLAGS(0)
     };
-    if !crate::config::debug_ui_enabled() {
-        flags |= CREATE_NO_WINDOW;
-    }
+    flags |= CREATE_NO_WINDOW;
 
     let created = CreateProcessAsUserW(
         token,

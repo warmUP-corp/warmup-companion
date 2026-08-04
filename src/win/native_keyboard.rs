@@ -583,7 +583,7 @@ fn window_title(hwnd: HWND) -> String {
     }
 }
 
-fn window_process_image(hwnd: HWND) -> Option<String> {
+pub(crate) fn window_process_image(hwnd: HWND) -> Option<String> {
     unsafe {
         let mut pid = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));

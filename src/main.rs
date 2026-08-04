@@ -1,4 +1,6 @@
 mod config;
+#[cfg(feature = "gamepad")]
+mod controller_shortcuts;
 /// Cursor/scroll golden-fixture loader (#346). Pure serde; used by tests and the
 /// math-parity slice (#349). Unused in the normal binary build for now.
 #[allow(dead_code)]
@@ -823,8 +825,7 @@ fn dispatch_install_or_service(args: &[String]) {
     }
     match args.get(1).map(String::as_str) {
         Some("install") => {
-            let debug_ui = args.iter().any(|a| a == "--debug-ui" || a == "--debug");
-            install::run_install(debug_ui);
+            install::run_install();
             std::process::exit(0);
         }
         Some("install-dev") => {
@@ -845,6 +846,10 @@ fn dispatch_install_or_service(args: &[String]) {
         }
         Some("stop") => {
             install::run_stop();
+            std::process::exit(0);
+        }
+        Some("restart") => {
+            install::run_restart();
             std::process::exit(0);
         }
         Some("restore-keyboard") | Some("restore-native-keyboard") => {

@@ -18,8 +18,11 @@ pub const DATA_DIR: &str = r"C:\ProgramData\WarmupVk";
 const EXE_NAME: &str = "warmup-companion.exe";
 const LEGACY_EXE_NAME: &str = "warmup-vk-prototype.exe";
 const LOG_NAME: &str = "service.log";
+const RESTART_SHORTCUT_PATH: &str =
+    r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Warmup Companion.lnk";
+const LEGACY_RESTART_SHORTCUT_PATH: &str = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Warmup Companion\Restart Warmup Companion.lnk";
+const RESTART_HELPER_PATH: &str = r"C:\ProgramData\WarmupVk\bin\restart-warmup-companion.vbs";
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
-const DEBUG_UI_FLAG: &str = r"C:\ProgramData\WarmupVk\debug-ui.enabled";
 pub const DEV_EXE_PATH: &str = r"C:\ProgramData\WarmupVk\warmup-exe.path";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -33,8 +36,8 @@ const TEST_SERVICE_NAMES: &[&str] = &[
     "WarmupVkTest6",
 ];
 
-pub fn run_install(debug_ui: bool) {
-    if let Err(e) = install_inner(debug_ui, None) {
+pub fn run_install() {
+    if let Err(e) = install_inner(None) {
         eprintln!("install failed: {e}");
         std::process::exit(1);
     }
@@ -42,13 +45,9 @@ pub fn run_install(debug_ui: bool) {
     println!("Installed Warmup Companion. Service {SERVICE_NAME} started.");
     println!("Binary (SCM uses this): {}", bin.display());
     println!("NOT C:\\Program Files\\WarmupVk\\ — that path is legacy only.");
-    println!("Reboot or Win+L, then tap Y on the controller at the password screen.");
+    println!("Reboot or Win+L, then press L3 on the controller at the password screen.");
     println!("Check it worked anytime: warmup-companion.exe verify");
     println!("Log: {DATA_DIR}\\{LOG_NAME}");
-    println!(
-        "Debug UI: {}",
-        if debug_ui { "enabled" } else { "disabled" }
-    );
 }
 
 pub fn run_install_dev(path: &Path) {
@@ -59,7 +58,7 @@ pub fn run_install_dev(path: &Path) {
             std::process::exit(1);
         }
     };
-    if let Err(e) = install_inner(true, Some(&path)) {
+    if let Err(e) = install_inner(Some(&path)) {
         eprintln!("install-dev failed: {e}");
         std::process::exit(1);
     }
@@ -191,19 +190,28 @@ pub fn run_stop() {
     }
 }
 
-/// Escape hatch: ask the SCM to stop the service from inside the worker process
-/// (the debug overlay's F8). The worker runs under the duplicated Winlogon
-/// (LocalSystem) token, which has `SERVICE_STOP` rights, so a detached `sc stop`
-/// reaches the launcher's control handler — which tears the worker down. Spawned
-/// with `CREATE_NO_WINDOW` so no console flashes on the secure desktop.
+/// Stop a running companion service if needed, then start it again.
+/// The installed Start Menu shortcut invokes this elevated command.
+pub fn run_restart() {
+    if let Err(e) = restart_service() {
+        eprintln!("restart failed: {e}");
+        std::process::exit(1);
+    }
+    println!("Service {SERVICE_NAME} restarted.");
+}
+
+/// Ask the SCM to stop the service from the interactive worker without flashing a console.
 pub fn request_service_stop() {
     log_line("service stop requested (sc stop)");
-    if let Err(e) = hidden_command("sc").args(["stop", SERVICE_NAME]).spawn() {
+    if let Err(e) = hidden_command("sc.exe")
+        .args(["stop", SERVICE_NAME])
+        .spawn()
+    {
         log_line(&format!("sc stop spawn failed: {e}"));
     }
 }
 
-fn install_inner(debug_ui: bool, dev_exe: Option<&Path>) -> Result<(), String> {
+fn install_inner(dev_exe: Option<&Path>) -> Result<(), String> {
     require_admin()?;
     remove_legacy_install_artifacts();
     let src = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -216,7 +224,8 @@ fn install_inner(debug_ui: bool, dev_exe: Option<&Path>) -> Result<(), String> {
     // exe is copied below and inherits this read access.
     allow_bin_read_acl()?;
     allow_settings_rw_acl()?;
-    set_debug_ui_flag(debug_ui)?;
+    // Remove the obsolete debug-overlay switch left by older installs.
+    let _ = fs::remove_file(r"C:\ProgramData\WarmupVk\debug-ui.enabled");
     match dev_exe {
         Some(path) => fs::write(DEV_EXE_PATH, path.to_string_lossy().as_bytes())
             .map_err(|e| format!("write DEV executable path: {e}"))?,
@@ -276,7 +285,7 @@ fn install_inner(debug_ui: bool, dev_exe: Option<&Path>) -> Result<(), String> {
     sc(&["start", SERVICE_NAME])?;
     verify_service_running()?;
     log_line(&format!(
-        "installed from {} -> {} (debug_ui={debug_ui}, mode={})",
+        "installed from {} -> {} (mode={})",
         src.display(),
         dest.display(),
         if dev_exe.is_some() {
@@ -313,7 +322,10 @@ fn uninstall_inner() -> Result<(), String> {
     let icon = Path::new(DATA_DIR).join("bin").join("icon.ico");
     let _ = fs::remove_file(version);
     let _ = fs::remove_file(icon);
-    let _ = fs::remove_file(DEBUG_UI_FLAG);
+    let _ = fs::remove_file(RESTART_SHORTCUT_PATH);
+    let _ = fs::remove_file(LEGACY_RESTART_SHORTCUT_PATH);
+    let _ = fs::remove_file(RESTART_HELPER_PATH);
+    let _ = fs::remove_file(r"C:\ProgramData\WarmupVk\debug-ui.enabled");
     let _ = fs::remove_file(DEV_EXE_PATH);
     log_line("uninstalled");
     Ok(())
@@ -333,18 +345,6 @@ fn canonical_dev_exe(path: &Path) -> Result<PathBuf, String> {
         ));
     }
     Ok(path)
-}
-
-fn set_debug_ui_flag(enabled: bool) -> Result<(), String> {
-    let flag = Path::new(DEBUG_UI_FLAG);
-    if enabled {
-        fs::write(flag, b"1\n").map_err(|e| format!("write debug UI flag: {e}"))?;
-        log_line("debug ui enabled by installer flag");
-    } else {
-        let _ = fs::remove_file(flag);
-        log_line("debug ui disabled (no installer flag)");
-    }
-    Ok(())
 }
 
 fn uninstall_service_quiet() -> Result<(), String> {
@@ -382,6 +382,22 @@ fn stop_service_blocking() -> Result<StopOutcome, String> {
         }
     }
     Err(format!("{SERVICE_NAME} did not reach STOPPED within 15s"))
+}
+
+fn restart_service() -> Result<(), String> {
+    require_admin()?;
+    match query_service_state()? {
+        None => return Err(format!("Service {SERVICE_NAME} is not installed.")),
+        Some(state) if state != "STOPPED" => match stop_service_blocking()? {
+            StopOutcome::NotInstalled => {
+                return Err(format!("Service {SERVICE_NAME} is not installed."));
+            }
+            StopOutcome::Stopped | StopOutcome::AlreadyStopped => {}
+        },
+        Some(_) => {}
+    }
+    sc(&["start", SERVICE_NAME])?;
+    verify_service_running()
 }
 
 /// Returns `Ok(None)` if the service is not installed, or the current state token

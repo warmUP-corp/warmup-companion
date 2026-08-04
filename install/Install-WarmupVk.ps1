@@ -7,9 +7,6 @@
     cargo build --release
   Desktop test (after install or from target\release):
     warmup-companion.exe --gamepad --real
-  Install with debug overlays/hotkeys enabled:
-    .\install\Install-WarmupVk.ps1 -Debug
-
   Service binary (SCM): C:\ProgramData\WarmupVk\bin\warmup-companion.exe
   Log: C:\ProgramData\WarmupVk\service.log
   Install log (silent runs): C:\ProgramData\WarmupVk\install.log
@@ -23,8 +20,6 @@
   C:\Program Files\WarmupVk\ is NOT used (legacy manual copies only).
 #>
 param(
-    [Alias("Debug")]
-    [switch]$DebugUi,
     # Optional offline voice typing: download a speech engine so the on-screen Mic
     # key appears. Omitted = no download, Mic key stays hidden. Release builds
     # always include the Parakeet engine code; this only chooses what to download.
@@ -93,9 +88,6 @@ if (-not (Test-Admin)) {
         "-File",
         "`"$PSCommandPath`""
     )
-    if ($DebugUi) {
-        $args += "-DebugUi"
-    }
     if ($Speech) {
         $args += "-Speech"
         $args += @("-SpeechModel", $SpeechModel)
@@ -130,6 +122,10 @@ $IconDest = Join-Path $BinDir "icon.ico"
 $DataDir = "C:\ProgramData\WarmupVk"
 $LogFile = "C:\ProgramData\WarmupVk\service.log"
 $LegacyExe = "C:\Program Files\WarmupVk\warmup-vk-prototype.exe"
+$RestartShortcut = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\Warmup Companion.lnk"
+$RestartShortcutDir = Split-Path -Parent $RestartShortcut
+$LegacyRestartShortcut = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\Warmup Companion\Restart Warmup Companion.lnk"
+$RestartHelper = Join-Path $BinDir "restart-warmup-companion.vbs"
 
 function Test-BinaryString {
     param(
@@ -141,6 +137,26 @@ function Test-BinaryString {
     $bytes = [System.IO.File]::ReadAllBytes($Path)
     $text = [System.Text.Encoding]::ASCII.GetString($bytes)
     return $text.Contains($Needle)
+}
+
+function Install-RestartShortcut {
+    New-Item -ItemType Directory -Path $RestartShortcutDir -Force | Out-Null
+    @"
+Set shell = CreateObject("Shell.Application")
+shell.ShellExecute "$BinExe", "restart", "", "runas", 0
+"@ | Set-Content -LiteralPath $RestartHelper -Encoding ASCII
+    Remove-Item -LiteralPath $LegacyRestartShortcut -Force -ErrorAction SilentlyContinue
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($RestartShortcut)
+    $shortcut.TargetPath = "$env:SystemRoot\System32\wscript.exe"
+    $shortcut.Arguments = "`"$RestartHelper`""
+    $shortcut.WorkingDirectory = $BinDir
+    $shortcut.IconLocation = "$IconDest,0"
+    $shortcut.Description = "Start or restart Warmup Companion"
+    $shortcut.Save()
+    if (-not (Test-Path -LiteralPath $RestartShortcut)) {
+        throw "Failed to create restart shortcut: $RestartShortcut"
+    }
 }
 
 Write-Host "=== Warmup Companion install disclosure ===" -ForegroundColor Cyan
@@ -196,12 +212,11 @@ if (Test-Path $IconSrc) {
 }
 
 Write-Host "Installing service..."
-$InstallArgs = @("install")
-if ($DebugUi) {
-    $InstallArgs += "--debug-ui"
-}
-& $Exe @InstallArgs
+& $Exe install
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+Install-RestartShortcut
+Write-Host "OK: restart shortcut installed at $RestartShortcut"
 
 # Optional offline voice typing. Non-fatal: a download failure must not undo the
 # service install — the companion runs fine without it (Mic key just stays hidden).
@@ -241,9 +256,9 @@ Write-Host ""
 Write-Host "=== Install OK ===" -ForegroundColor Green
 Write-Host "Service binary: $BinExe"
 Write-Host "Tray icon:      $IconDest"
+Write-Host "Restart shortcut: $RestartShortcut"
 Write-Host "Log file:       $LogFile"
 Write-Host "Trust docs:     C:\ProgramData\WarmupVk\README.md / PRIVACY.md / SECURITY.md"
-Write-Host "Debug UI:       $(if ($DebugUi) { 'enabled' } else { 'disabled' })"
 Write-Host "Sentry:         $(if ($env:WARMUP_SENTRY_DSN) { 'enabled by WARMUP_SENTRY_DSN' } else { 'disabled' })"
 Write-Host ""
 Write-Host "Important trust notes:"
