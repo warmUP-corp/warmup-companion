@@ -1,4 +1,4 @@
-//! Build-time n-gram tables for `vk_predict` (ADR 0001).
+//! Build-time n-gram tables for `vk_predict`.
 //!
 //! Primary source: [Leipzig Wortschatz](https://wortschatz-leipzig.de/en/download/eng)
 //! `*-words.txt` (frequencies) + `*-sentences.txt` (bi/trigram context).

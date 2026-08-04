@@ -1,4 +1,4 @@
-//! Local prefix prediction (ADR 0001): VK-only context, userland only.
+//! Local prefix prediction: VK-only context, userland only.
 
 use std::collections::HashSet;
 use std::fs;

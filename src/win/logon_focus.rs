@@ -121,7 +121,7 @@ pub fn is_active() -> bool {
     active()
 }
 
-/// Userland personal-dictionary gate (ADR 0001). `None` => conservative skip.
+/// Userland personal-dictionary gate. `None` => conservative skip.
 pub fn focused_is_password_field() -> Option<bool> {
     if active() {
         return Some(false);

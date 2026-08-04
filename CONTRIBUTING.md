@@ -3,7 +3,6 @@
 ## Before Changes
 
 - Read `CONTEXT.md` for product terms.
-- Read relevant ADRs in `docs/adr`.
 - Keep trust-sensitive behavior documented when it changes.
 
 ## Development

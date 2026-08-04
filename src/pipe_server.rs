@@ -1,7 +1,7 @@
 //! Named-pipe server (#347): the companion hosts `\\.\pipe\warmup-input` and streams
 //! `connection` frames to the warmUP desktop client. The companion is always running,
-//! so it is the server; the desktop is a reconnecting client (ADR 0002 /
-//! `docs/companion-ipc-protocol.md`).
+//! so it is the server; the desktop is a reconnecting client. See
+//! `docs/companion-ipc-protocol.md`.
 //!
 //! The gamepad loop calls [`publish_from_label`] every frame with the active backend's
 //! controller label; the server thread streams the latest connection snapshot to the

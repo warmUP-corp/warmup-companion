@@ -170,7 +170,5 @@ Feature defaults include the Windows service and gamepad support.
 ## Architecture Notes
 
 - [Domain glossary](CONTEXT.md)
-- [Local prediction ADR](docs/adr/0001-local-prediction-sendinput.md)
-- [Companion input authority ADR](docs/adr/0002-companion-gamepad-input-authority.md)
 - [IPC protocol](docs/companion-ipc-protocol.md)
 
