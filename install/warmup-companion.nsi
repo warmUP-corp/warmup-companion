@@ -19,7 +19,11 @@ SetDatablockOptimize on
 
 !define APPNAME     "Warmup Companion"
 !define COMPANY     "warmUP"
-!define APPVERSION  "0.2.14"
+; New-ReleaseArtifacts.ps1 passes /DAPPVERSION from Cargo.toml; the literal below
+; is only a fallback for hand-run makensis (it goes stale -- don't trust it).
+!ifndef APPVERSION
+  !define APPVERSION "0.0.0"
+!endif
 !define SERVICE     "WarmupVkSvc"
 !define WEBSITE     "https://www.warmup-gamelauncher.com"
 ; install.rs hardcodes this path (no spaces; sc.exe binPath breaks on quotes).
@@ -59,7 +63,7 @@ RequestExecutionLevel admin       ; service install needs admin; elevate the who
 ShowInstDetails hide
 ShowUninstDetails hide
 
-VIProductVersion "0.2.14.0"
+VIProductVersion "${APPVERSION}.0"
 VIAddVersionKey "ProductName"     "${APPNAME}"
 VIAddVersionKey "CompanyName"     "${COMPANY}"
 VIAddVersionKey "FileDescription" "${APPNAME} Setup"

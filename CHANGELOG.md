@@ -1,10 +1,13 @@
 # Changelog
 
+## v0.2.16
+
+- Do not resize the warmUP Game Launcher when the docked keyboard opens after
+  Guide-close; keep the last eligible app window instead.
+
 ## v0.2.15
 
 - Show the Companion version and build checksum in its taskbar tray UI.
-- Do not resize the warmUP Game Launcher when the docked keyboard opens after
-  Guide-close; keep the last eligible app window instead.
 
 ## v0.2.14
 
