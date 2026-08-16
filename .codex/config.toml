@@ -1,3 +1,5 @@
+model_verbosity = "low"
+model_reasoning_summary = "none"
 [mcp_servers.code-review-graph]
 command = "uvx"
 args = [

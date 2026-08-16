@@ -1,26 +1,136 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="600" viewBox="0 0 1000 600">
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="600" viewBox="0 0 1000 600" data-theme="angular-hud" role="img" aria-label="Xbox controller technical schematic">
   <defs>
-    <linearGradient id="shell" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#2b3547"/>
-      <stop offset="1" stop-color="#111722"/>
-    </linearGradient>
-    <linearGradient id="grip" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#344157"/>
-      <stop offset="1" stop-color="#161d2b"/>
-    </linearGradient>
+    <pattern id="micro-grid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M24 0H0V24" fill="none" stroke="#5ce8f2" stroke-width="1" opacity=".08"/>
+    </pattern>
   </defs>
-  <ellipse cx="500" cy="542" rx="365" ry="22" fill="#070a10" opacity=".42"/>
-  <path d="M168 158C232 112 315 116 392 154C461 137 539 137 608 154C685 116 768 112 832 158C892 200 924 302 938 401C951 494 898 542 842 526C789 511 755 444 703 386C631 413 369 413 297 386C245 444 211 511 158 526C102 542 49 494 62 401C76 302 108 200 168 158Z" fill="url(#shell)" stroke="#8190a8" stroke-width="8" stroke-linejoin="round"/>
-  <path d="M355 159C407 139 593 139 645 159L681 205C622 233 378 233 319 205Z" fill="#202a3b" stroke="#54647d" stroke-width="5"/>
-  <path d="M209 172C253 145 312 148 350 167L328 208C280 191 244 192 215 210Z" fill="url(#grip)" opacity=".92"/>
-  <path d="M791 172C747 145 688 148 650 167L672 208C720 191 756 192 785 210Z" fill="url(#grip)" opacity=".92"/>
-  <path d="M410 181H590" stroke="#7f8da3" stroke-width="4" stroke-linecap="round" opacity=".6"/>
-  <rect x="222" y="132" width="150" height="24" rx="12" fill="#3b4960" stroke="#8997ad" stroke-width="4"/>
-  <rect x="628" y="132" width="150" height="24" rx="12" fill="#3b4960" stroke="#8997ad" stroke-width="4"/>
-  <circle cx="423" cy="183" r="7" fill="#91a0b6" opacity=".8"/>
-  <circle cx="449" cy="183" r="7" fill="#91a0b6" opacity=".55"/>
-  <circle cx="551" cy="183" r="7" fill="#91a0b6" opacity=".55"/>
-  <circle cx="577" cy="183" r="7" fill="#91a0b6" opacity=".8"/>
-  <path d="M430 267H570" stroke="#101621" stroke-width="18" stroke-linecap="round" opacity=".8"/>
-  <path d="M382 250C414 230 586 230 618 250" fill="none" stroke="#4b5a72" stroke-width="4" opacity=".65"/>
+
+  <g id="technical-grid" data-marker="technical-grid" fill="none" stroke="#5ce8f2">
+    <path d="M52 88H214L234 68H382M618 68H766L786 88H948" stroke-width="2" opacity=".44"/>
+    <path d="M52 512H152L174 534H316M684 534H826L848 512H948" stroke-width="2" opacity=".34"/>
+    <path d="M52 104v54m0 284v54M948 104v54m0 284v54" stroke-width="3" opacity=".5"/>
+    <path d="M64 300h42m788 0h42" stroke-width="1" opacity=".4"/>
+    <path d="M82 114h92m652 0h92M82 486h92m652 0h92" stroke-dasharray="4 10" opacity=".28"/>
+  </g>
+  <g id="signal-trace" data-marker="signal-trace" font-family="Segoe UI,Arial,sans-serif" fill="#8bf5fb">
+    <text x="58" y="78" font-size="18" letter-spacing="4" opacity=".72">XB / INPUT ARRAY</text>
+    <text x="942" y="78" font-size="15" text-anchor="end" letter-spacing="3" opacity=".54">LINK 09 // READY</text>
+    <text x="58" y="540" font-size="14" letter-spacing="3" opacity=".48">AXIS VECTOR // 4CH</text>
+    <text x="942" y="540" font-size="14" text-anchor="end" letter-spacing="3" opacity=".48">CONTROL BUS // 18</text>
+  </g>
+
+  <path d="M116 184 190 128 318 122 398 150H602L682 122 810 128 884 184 916 282 938 414 908 484 854 526 810 510 752 438 694 382 638 405H362L306 382 248 438 190 510 146 526 92 484 62 414 84 282Z" fill="#0f161e" stroke="#5ce8f2" stroke-width="7" stroke-linejoin="bevel"/>
+  <path d="M116 184 190 128 318 122 398 150H602L682 122 810 128 884 184 916 282 938 414 908 484 854 526 810 510 752 438 694 382 638 405H362L306 382 248 438 190 510 146 526 92 484 62 414 84 282Z" fill="url(#micro-grid)"/>
+  <path d="M102 292 130 207 204 154 307 149 360 172 328 226 231 244 174 294 146 414 110 454 87 415Z" fill="#18232d" stroke="#71818b" stroke-width="3"/>
+  <path d="M898 292 870 207 796 154 693 149 640 172 672 226 769 244 826 294 854 414 890 454 913 415Z" fill="#18232d" stroke="#71818b" stroke-width="3"/>
+  <path d="M342 156 402 136H598L658 156 628 242 596 264H404L372 242Z" fill="#0a1118" stroke="#5ce8f2" stroke-width="3"/>
+  <path d="M420 292 500 270 580 292 600 356 560 390H440L400 356Z" fill="#121c25" stroke="#71818b" stroke-width="3"/>
+  <path d="M172 494 220 414 276 360M828 494 780 414 724 360" fill="none" stroke="#ff5c70" stroke-width="6"/>
+  <path d="M144 206h54l18-14h86M856 206h-54l-18-14h-86" fill="none" stroke="#ff5c70" stroke-width="3"/>
+
+  <g id="control-grid" data-marker="control-grid" font-family="Segoe UI,Arial,sans-serif" text-anchor="middle">
+    <g id="control-lt" data-control="lt" data-anchor="310,150">
+      <title>LT trigger</title>
+      <path d="M250 132h120l8 13-15 24H257l-15-24Z" fill="#151f29" stroke="#5ce8f2" stroke-width="4"/>
+      <text x="310" y="159" font-size="25" font-weight="700" fill="#d8fbff">LT</text>
+    </g>
+    <g id="control-lb" data-control="lb" data-anchor="290,204">
+      <title>LB bumper</title>
+      <path d="M235 187h110l8 12-12 22H239l-12-22Z" fill="#202b35" stroke="#87949d" stroke-width="3"/>
+      <text x="290" y="212" font-size="22" fill="#d8fbff">LB</text>
+    </g>
+    <g id="control-rt" data-control="rt" data-anchor="690,150">
+      <title>RT trigger</title>
+      <path d="M630 132h120l8 13-15 24H637l-15-24Z" fill="#ff5c70" stroke="#ffc0c8" stroke-width="3"/>
+      <text x="690" y="159" font-size="25" font-weight="700" fill="#11171f">RT</text>
+    </g>
+    <g id="control-rb" data-control="rb" data-anchor="710,204">
+      <title>RB bumper</title>
+      <path d="M655 187h110l8 12-12 22H659l-12-22Z" fill="#202b35" stroke="#87949d" stroke-width="3"/>
+      <text x="710" y="212" font-size="22" fill="#d8fbff">RB</text>
+    </g>
+
+    <g id="control-select" data-control="select" data-anchor="410,240">
+      <title>View</title>
+      <path d="M390 226h40l7 7-7 21h-40l-7-7 7-21Z" fill="#10171f" stroke="#87949d" stroke-width="3"/>
+      <rect x="398" y="233" width="15" height="11" fill="none" stroke="#d8fbff" stroke-width="2"/>
+      <rect x="405" y="238" width="15" height="11" fill="none" stroke="#d8fbff" stroke-width="2"/>
+    </g>
+    <g id="control-start" data-control="start" data-anchor="590,240">
+      <title>Menu</title>
+      <path d="M570 226h40l7 7-7 21h-40l-7-7 7-21Z" fill="#10171f" stroke="#87949d" stroke-width="3"/>
+      <path d="M578 234h24m-24 7h24m-24 7h24" stroke="#d8fbff" stroke-width="3"/>
+    </g>
+    <g id="control-guide" data-control="guide" data-anchor="500,294">
+      <title>Xbox guide</title>
+      <path d="M500 264 524 276 530 300 514 320 486 320 470 300 476 276Z" fill="#141d26" stroke="#5ce8f2" stroke-width="4"/>
+      <path d="m485 281 15 9 15-9-8 14 8 13-15-8-15 8 8-13Z" fill="none" stroke="#d8fbff" stroke-width="3"/>
+    </g>
+    <g id="control-touchpad" data-control="touchpad" data-anchor="500,360">
+      <title>Share</title>
+      <path d="m500 336 24 24-24 24-24-24Z" fill="#10171f" stroke="#87949d" stroke-width="3"/>
+      <path d="M500 348v24m-12-12h24" stroke="#d8fbff" stroke-width="3"/>
+    </g>
+
+    <g id="control-l3" data-control="l3" data-anchor="360,342">
+      <title>Left stick</title>
+      <circle cx="360" cy="342" r="64" fill="#0a1016" stroke="#5ce8f2" stroke-width="4"/>
+      <circle cx="360" cy="342" r="39" fill="#19242d" stroke="#87949d" stroke-width="3"/>
+      <path d="M360 286v14m0 84v14m-56-56h14m84 0h14" stroke="#ff5c70" stroke-width="3"/>
+      <text x="360" y="350" font-size="22" fill="#d8fbff">L3</text>
+    </g>
+    <g id="control-up" data-control="up" data-anchor="250,432">
+      <title>D-pad up</title>
+      <path d="M233 409h34l10 12-18 22h-18l-18-22Z" fill="#111820" stroke="#87949d" stroke-width="3"/>
+      <path d="m250 418-8 11h16Z" fill="#d8fbff"/>
+    </g>
+    <g id="control-left" data-control="left" data-anchor="200,462">
+      <title>D-pad left</title>
+      <path d="m179 444 12-10 22 18v20l-22 18-12-10Z" fill="#111820" stroke="#87949d" stroke-width="3"/>
+      <path d="m188 462 11-8v16Z" fill="#d8fbff"/>
+    </g>
+    <g id="control-right" data-control="right" data-anchor="300,462">
+      <title>D-pad right</title>
+      <path d="m321 444-12-10-22 18v20l22 18 12-10Z" fill="#111820" stroke="#87949d" stroke-width="3"/>
+      <path d="m312 462-11-8v16Z" fill="#d8fbff"/>
+    </g>
+    <g id="control-down" data-control="down" data-anchor="250,504">
+      <title>D-pad down</title>
+      <path d="M233 527h34l10-12-18-22h-18l-18 22Z" fill="#111820" stroke="#87949d" stroke-width="3"/>
+      <path d="m250 518-8-11h16Z" fill="#d8fbff"/>
+    </g>
+    <g id="control-r3" data-control="r3" data-anchor="640,432">
+      <title>Right stick</title>
+      <circle cx="640" cy="432" r="64" fill="#0a1016" stroke="#5ce8f2" stroke-width="4"/>
+      <circle cx="640" cy="432" r="39" fill="#19242d" stroke="#87949d" stroke-width="3"/>
+      <path d="M640 376v14m0 84v14m-56-56h14m84 0h14" stroke="#ff5c70" stroke-width="3"/>
+      <text x="640" y="440" font-size="22" fill="#d8fbff">R3</text>
+    </g>
+
+    <g id="control-y" data-control="y" data-anchor="750,258">
+      <title>Y button</title>
+      <circle cx="750" cy="258" r="31" fill="#10171f" stroke="#5ce8f2" stroke-width="3"/>
+      <text x="750" y="269" font-size="31" font-weight="700" fill="#d8fbff">Y</text>
+    </g>
+    <g id="control-x" data-control="x" data-anchor="690,312">
+      <title>X button</title>
+      <circle cx="690" cy="312" r="31" fill="#10171f" stroke="#87949d" stroke-width="3"/>
+      <text x="690" y="323" font-size="31" font-weight="700" fill="#d8fbff">X</text>
+    </g>
+    <g id="control-b" data-control="b" data-anchor="810,312">
+      <title>B button</title>
+      <circle cx="810" cy="312" r="31" fill="#10171f" stroke="#ff5c70" stroke-width="3"/>
+      <text x="810" y="323" font-size="31" font-weight="700" fill="#ffd5da">B</text>
+    </g>
+    <g id="control-a" data-control="a" data-anchor="750,366">
+      <title>A button</title>
+      <circle cx="750" cy="366" r="31" fill="#10171f" stroke="#87949d" stroke-width="3"/>
+      <text x="750" y="377" font-size="31" font-weight="700" fill="#d8fbff">A</text>
+    </g>
+  </g>
+
+  <g fill="#ff5c70">
+    <path d="M82 258h8v54h-8zM910 258h8v54h-8z"/>
+    <path d="M458 98h84v4h-84z" opacity=".72"/>
+  </g>
 </svg>

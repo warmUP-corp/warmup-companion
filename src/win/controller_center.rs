@@ -7,34 +7,31 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR,
 };
 use windows::Win32::Graphics::Gdi::ValidateRect;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, SetFocus, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LWIN, VK_MENU,
-    VK_RWIN, VK_SHIFT, VK_UP,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_BACK, VK_DOWN, VK_ESCAPE, VK_UP};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetClientRect, KillTimer, SetForegroundWindow, SetTimer,
-    ShowWindow, CW_USEDEFAULT, HICON, HMENU, SW_HIDE, SW_SHOWNORMAL, WM_CHAR, WM_CLOSE, WM_DESTROY,
-    WM_KEYDOWN, WM_LBUTTONUP, WM_PAINT, WM_SIZE, WM_SYSKEYDOWN, WM_TIMER,
-    WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
+    AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, GetClientRect, KillTimer,
+    SetForegroundWindow, SetTimer, ShowWindow, CW_USEDEFAULT, HICON, HMENU, SW_HIDE, SW_SHOWNORMAL,
+    WM_CHAR, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONUP, WM_PAINT, WM_SIZE, WM_SYSKEYDOWN,
+    WM_TIMER, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
 
 use crate::controller_shortcuts::{
-    self, ControllerAction, ControllerChord, DesktopActionKind, LaunchableApp, Shortcut,
-    WorkspaceWindowCandidate, MAPPABLE_BUTTONS,
+    self, ControllerAction, ControllerChord, ControllerTrigger, LaunchableApp, MAPPABLE_BUTTONS,
 };
 use crate::gamepad_backend::{BatteryFrame, Button, ButtonChange};
 
 use super::desktop_window::{self, DesktopApp, DesktopWindowThread};
 use super::vk_renderer::{
-    controller_center_hit, controller_center_hit_with_wizard, ControllerCenterBinding,
-    ControllerCenterFrame, ControllerCenterHit, ControllerCenterHitState, ControllerCenterStep,
-    VkRenderer,
+    controller_center_app_max_scroll, controller_center_hit, controller_center_hit_with_wizard,
+    controller_center_inventory_hit, controller_center_inventory_scroll_hit,
+    controller_center_inventory_visible_rows, ControllerCenterBinding, ControllerCenterFrame,
+    ControllerCenterHit, ControllerCenterHitState, ControllerCenterStep, VkRenderer,
 };
 
 const WINDOW_CLASS: PCWSTR = w!("WarmupControllerCenterWindow");
@@ -185,6 +182,7 @@ struct CenterUi {
     renderer: Option<VkRenderer>,
     wizard: Option<WizardState>,
     deadzone: f32,
+    inventory_scroll: usize,
     notice: String,
 }
 
@@ -245,21 +243,13 @@ fn apply_trigger_input(state: &mut TriggerCaptureState, input: TriggerInput) {
 struct WizardState {
     trigger: TriggerCaptureState,
     step: ControllerCenterStep,
-    action: Option<DesktopActionKind>,
-    shortcut: Option<Shortcut>,
     launch_target: String,
     app_query: String,
     apps: Vec<LaunchableApp>,
     app_matches: Vec<usize>,
     app_selected: Option<usize>,
     app_scroll: usize,
-    workspace_name: String,
-    workspace_candidates: Vec<WorkspaceWindowCandidate>,
-    workspace_selected: HashSet<isize>,
-    workspace_scroll: usize,
-    command_text: String,
     notice: String,
-    overwrite_confirmed: bool,
 }
 
 impl WizardState {
@@ -267,52 +257,47 @@ impl WizardState {
         let mut wizard = Self {
             trigger: TriggerCaptureState::new(button),
             step: ControllerCenterStep::Trigger,
-            action: None,
-            shortcut: None,
             launch_target: String::new(),
             app_query: String::new(),
             apps: Vec::new(),
             app_matches: Vec::new(),
             app_selected: None,
             app_scroll: 0,
-            workspace_name: String::new(),
-            workspace_candidates: Vec::new(),
-            workspace_selected: HashSet::new(),
-            workspace_scroll: 0,
-            command_text: String::new(),
             notice: String::new(),
-            overwrite_confirmed: false,
         };
         wizard.load_existing_action();
         wizard
     }
 
     fn load_existing_action(&mut self) {
-        self.action = None;
-        self.shortcut = None;
         self.launch_target.clear();
         self.app_query.clear();
         self.apps.clear();
         self.app_matches.clear();
         self.app_selected = None;
         self.app_scroll = 0;
-        self.workspace_name.clear();
-        self.workspace_candidates.clear();
-        self.workspace_selected.clear();
-        self.workspace_scroll = 0;
-        self.command_text.clear();
-        self.overwrite_confirmed = false;
+        self.notice.clear();
         let Some(action) =
             selected_mapping(self.trigger.selection.hold, self.trigger.selection.press)
         else {
             return;
         };
-        self.action = Some(action.kind());
         match action {
-            ControllerAction::Shortcut(shortcut) => self.shortcut = Some(shortcut),
+            ControllerAction::Shortcut(shortcut) => {
+                self.notice = format!(
+                    "Current: {}. Choose an app to replace it, or Clear.",
+                    shortcut.display()
+                )
+            }
             ControllerAction::Launch(target) => self.launch_target = target,
-            ControllerAction::Workspace(name) => self.workspace_name = name,
-            ControllerAction::Command(command) => self.command_text = command,
+            ControllerAction::Workspace(name) => {
+                self.notice =
+                    format!("Current: Workspace · {name}. Choose an app to replace it, or Clear.")
+            }
+            ControllerAction::Command(command) => {
+                self.notice =
+                    format!("Current: Run · {command}. Choose an app to replace it, or Clear.")
+            }
         }
     }
 }
@@ -375,6 +360,19 @@ fn ui_hide() {
 
 unsafe fn create_center_window() -> Result<HWND, String> {
     let instance = GetModuleHandleW(None).map_err(|e| format!("GetModuleHandleW: {e}"))?;
+    let mut client = RECT {
+        left: 0,
+        top: 0,
+        right: 1120,
+        bottom: 760,
+    };
+    AdjustWindowRectEx(
+        &mut client,
+        WS_OVERLAPPEDWINDOW,
+        false,
+        WS_EX_NOREDIRECTIONBITMAP,
+    )
+    .map_err(|e| format!("AdjustWindowRectEx: {e}"))?;
     let hwnd = CreateWindowExW(
         WS_EX_NOREDIRECTIONBITMAP,
         WINDOW_CLASS,
@@ -382,8 +380,8 @@ unsafe fn create_center_window() -> Result<HWND, String> {
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        1120,
-        760,
+        client.right - client.left,
+        client.bottom - client.top,
         None,
         HMENU::default(),
         windows::Win32::Foundation::HINSTANCE(instance.0),
@@ -473,19 +471,55 @@ fn handle_click(hwnd: HWND, lparam: LPARAM) {
     }
     let width = (rect.right - rect.left).max(1) as f32;
     let height = (rect.bottom - rect.top).max(1) as f32;
-    let (selected, wizard_state) = UI.with(|slot| {
+    let (selected, wizard_state, inventory, inventory_scroll) = UI.with(|slot| {
         let ui = slot.borrow();
         let selected = ui
             .wizard
             .as_ref()
             .map(|wizard| wizard.trigger.selection.press);
         let state = ui.wizard.as_ref().map(wizard_hit_state);
-        (selected, state)
+        (
+            selected,
+            state,
+            controller_shortcuts::configured_mappings(),
+            ui.inventory_scroll,
+        )
     });
     let hit = wizard_state.map_or_else(
         || controller_center_hit(x, y, width, height, selected),
         |state| controller_center_hit_with_wizard(x, y, width, height, selected, state),
     );
+    let hit = hit.or_else(|| {
+        wizard_state
+            .is_none()
+            .then(|| {
+                controller_center_inventory_hit(
+                    x,
+                    y,
+                    width,
+                    height,
+                    inventory.len(),
+                    inventory_scroll,
+                )
+            })
+            .flatten()
+            .map(ControllerCenterHit::InventoryRow)
+    });
+    let hit = hit.or_else(|| {
+        wizard_state
+            .is_none()
+            .then(|| {
+                controller_center_inventory_scroll_hit(
+                    x,
+                    y,
+                    width,
+                    height,
+                    inventory.len(),
+                    inventory_scroll,
+                )
+            })
+            .flatten()
+    });
     match hit {
         Some(ControllerCenterHit::Button(button)) => {
             select_button(button);
@@ -502,7 +536,6 @@ fn handle_click(hwnd: HWND, lparam: LPARAM) {
                 }),
             }
         }
-        Some(ControllerCenterHit::Action(kind)) => select_action_kind(kind),
         Some(ControllerCenterHit::Continue) => continue_wizard(),
         Some(ControllerCenterHit::Back) => back_wizard(),
         Some(ControllerCenterHit::Cancel) => cancel_wizard(),
@@ -511,32 +544,40 @@ fn handle_click(hwnd: HWND, lparam: LPARAM) {
         Some(ControllerCenterHit::AppRow(row)) => select_app_row(row),
         Some(ControllerCenterHit::AppScrollUp) => scroll_app(-1),
         Some(ControllerCenterHit::AppScrollDown) => scroll_app(1),
-        Some(ControllerCenterHit::WorkspaceRow(row)) => toggle_workspace_row(row),
-        Some(ControllerCenterHit::WorkspaceScrollUp) => scroll_workspace(-1),
-        Some(ControllerCenterHit::WorkspaceScrollDown) => scroll_workspace(1),
-        Some(
-            ControllerCenterHit::TriggerCapture
-            | ControllerCenterHit::ShortcutCapture
-            | ControllerCenterHit::AppSearch
-            | ControllerCenterHit::CommandInput
-            | ControllerCenterHit::WorkspaceName,
-        ) => {}
+        Some(ControllerCenterHit::InventoryRow(row)) => {
+            if let Some(mapping) = inventory.get(row) {
+                select_trigger(mapping.trigger);
+            }
+        }
+        Some(ControllerCenterHit::InventoryScrollUp) => scroll_inventory(-1, height),
+        Some(ControllerCenterHit::InventoryScrollDown) => scroll_inventory(1, height),
+        Some(ControllerCenterHit::TriggerCapture | ControllerCenterHit::AppSearch) => {}
         None => {}
     }
     render_center(hwnd);
+}
+
+fn scroll_inventory(delta: isize, height: f32) {
+    UI.with(|slot| {
+        let mut ui = slot.borrow_mut();
+        let max = controller_shortcuts::configured_mappings()
+            .len()
+            .saturating_sub(controller_center_inventory_visible_rows(height));
+        ui.inventory_scroll = if delta.is_negative() {
+            ui.inventory_scroll.saturating_sub(delta.unsigned_abs())
+        } else {
+            (ui.inventory_scroll + delta as usize).min(max)
+        };
+    });
 }
 
 fn wizard_hit_state(wizard: &WizardState) -> ControllerCenterHitState {
     let app_rows = wizard.app_matches.len();
     ControllerCenterHitState {
         step: wizard.step,
-        action: wizard.action,
         app_rows,
         app_can_scroll_up: wizard.app_scroll > 0,
-        app_can_scroll_down: wizard.app_scroll + 3 < app_rows,
-        workspace_rows: wizard.workspace_candidates.len(),
-        workspace_can_scroll_up: wizard.workspace_scroll > 0,
-        workspace_can_scroll_down: wizard.workspace_scroll + 3 < wizard.workspace_candidates.len(),
+        app_can_scroll_down: wizard.app_scroll < controller_center_app_max_scroll(app_rows),
     }
 }
 
@@ -549,25 +590,23 @@ fn select_button(button: Button) {
     });
 }
 
-fn select_action_kind(kind: DesktopActionKind) {
+fn select_trigger(trigger: ControllerTrigger) {
+    let _ = take_capture_events();
     UI.with(|slot| {
         let mut ui = slot.borrow_mut();
-        let Some(wizard) = ui.wizard.as_mut() else {
-            return;
+        let press = match trigger {
+            ControllerTrigger::Button(button) => button,
+            ControllerTrigger::Chord(chord) => chord.press,
         };
-        if wizard.step != ControllerCenterStep::Action
-            || !matches!(
-                kind,
-                DesktopActionKind::Shortcut
-                    | DesktopActionKind::Launch
-                    | DesktopActionKind::Workspace
-            )
-        {
-            return;
+        let mut wizard = WizardState::new(press);
+        if let ControllerTrigger::Chord(chord) = trigger {
+            wizard.trigger.selection = TriggerSelection {
+                hold: Some(chord.hold),
+                press: chord.press,
+            };
+            wizard.load_existing_action();
         }
-        wizard.action = Some(kind);
-        wizard.overwrite_confirmed = false;
-        wizard.notice.clear();
+        ui.wizard = Some(wizard);
         ui.notice.clear();
     });
 }
@@ -580,26 +619,17 @@ fn continue_wizard() {
         };
         match wizard.step {
             ControllerCenterStep::Trigger => {
-                wizard.step = ControllerCenterStep::Action;
-                wizard.overwrite_confirmed = false;
+                wizard.step = ControllerCenterStep::ChooseApp;
                 wizard.notice.clear();
             }
-            ControllerCenterStep::Action if wizard.action.is_some() => {
-                wizard.step = ControllerCenterStep::Configure;
-                wizard.overwrite_confirmed = false;
-                wizard.notice.clear();
-            }
-            ControllerCenterStep::Action => {
-                wizard.notice = "Choose Keyboard shortcut, Open app, or Restore workspace.".into();
-            }
-            ControllerCenterStep::Configure => {}
+            ControllerCenterStep::ChooseApp => {}
         }
     });
     let should_refresh = UI.with(|slot| {
         slot.borrow()
             .wizard
             .as_ref()
-            .is_some_and(|wizard| wizard.step == ControllerCenterStep::Configure)
+            .is_some_and(|wizard| wizard.step == ControllerCenterStep::ChooseApp)
     });
     if should_refresh {
         refresh_configure_inventory();
@@ -613,11 +643,7 @@ fn back_wizard() {
             return;
         };
         let moved = match wizard.step {
-            ControllerCenterStep::Configure => {
-                wizard.step = ControllerCenterStep::Action;
-                true
-            }
-            ControllerCenterStep::Action => {
+            ControllerCenterStep::ChooseApp => {
                 wizard.step = ControllerCenterStep::Trigger;
                 true
             }
@@ -628,7 +654,6 @@ fn back_wizard() {
             }
         };
         if moved {
-            wizard.overwrite_confirmed = false;
             wizard.notice.clear();
         }
     });
@@ -664,18 +689,10 @@ fn clear_selected_mapping() {
         let message = match result {
             Ok(()) => {
                 if let Some(wizard) = ui.wizard.as_mut() {
-                    wizard.action = None;
-                    wizard.shortcut = None;
                     wizard.launch_target.clear();
                     wizard.app_matches.clear();
                     wizard.app_selected = None;
-                    wizard.workspace_name.clear();
-                    wizard.workspace_selected.clear();
-                    wizard.command_text.clear();
-                    wizard.overwrite_confirmed = false;
-                    if wizard.step == ControllerCenterStep::Configure {
-                        wizard.step = ControllerCenterStep::Action;
-                    }
+                    wizard.step = ControllerCenterStep::Trigger;
                     wizard.notice = format!("{shortcut} mapping cleared");
                 }
                 format!("{shortcut} mapping cleared")
@@ -687,62 +704,35 @@ fn clear_selected_mapping() {
 }
 
 fn handle_key(vk: u16) {
-    let (step, action) = UI.with(|slot| {
-        slot.borrow()
-            .wizard
-            .as_ref()
-            .map(|wizard| (Some(wizard.step), wizard.action))
-            .unwrap_or((None, None))
-    });
+    let step = UI.with(|slot| slot.borrow().wizard.as_ref().map(|wizard| wizard.step));
     if vk == VK_ESCAPE.0 {
         cancel_wizard();
         return;
     }
     if vk == 0x0d {
-        activate_primary(step, action);
+        activate_primary(step);
         return;
     }
     if vk == VK_BACK.0 {
-        edit_wizard_backspace(step, action);
+        edit_wizard_backspace(step);
         return;
     }
-    if matches!(
-        (step, action),
-        (
-            Some(ControllerCenterStep::Configure),
-            Some(DesktopActionKind::Launch | DesktopActionKind::Workspace)
-        )
-    ) && (vk == VK_UP.0 || vk == VK_DOWN.0)
-    {
-        if action == Some(DesktopActionKind::Launch) {
-            scroll_app(if vk == VK_UP.0 { -1 } else { 1 });
-        } else {
-            scroll_workspace(if vk == VK_UP.0 { -1 } else { 1 });
-        }
+    if step == Some(ControllerCenterStep::ChooseApp) && (vk == VK_UP.0 || vk == VK_DOWN.0) {
+        scroll_app(if vk == VK_UP.0 { -1 } else { 1 });
         return;
-    }
-    if step == Some(ControllerCenterStep::Configure) && action == Some(DesktopActionKind::Shortcut)
-    {
-        capture_keyboard_shortcut(vk);
     }
 }
 
-fn activate_primary(step: Option<ControllerCenterStep>, action: Option<DesktopActionKind>) {
+fn activate_primary(step: Option<ControllerCenterStep>) {
     match step {
         Some(ControllerCenterStep::Trigger) => continue_wizard(),
-        Some(ControllerCenterStep::Action) => {
-            if action.is_none() {
-                select_action_kind(DesktopActionKind::Shortcut);
-            }
-            continue_wizard();
-        }
-        Some(ControllerCenterStep::Configure) => save_wizard(),
+        Some(ControllerCenterStep::ChooseApp) => save_wizard(),
         None => {}
     }
 }
 
-fn edit_wizard_backspace(step: Option<ControllerCenterStep>, action: Option<DesktopActionKind>) {
-    if step != Some(ControllerCenterStep::Configure) {
+fn edit_wizard_backspace(step: Option<ControllerCenterStep>) {
+    if step != Some(ControllerCenterStep::ChooseApp) {
         return;
     }
     UI.with(|slot| {
@@ -750,47 +740,10 @@ fn edit_wizard_backspace(step: Option<ControllerCenterStep>, action: Option<Desk
         let Some(wizard) = ui.wizard.as_mut() else {
             return;
         };
-        match action {
-            Some(DesktopActionKind::Launch) => {
-                wizard.app_query.pop();
-                wizard.app_matches = filtered_app_indices(&wizard.apps, &wizard.app_query);
-                wizard.app_selected = None;
-                wizard.app_scroll = 0;
-            }
-            Some(DesktopActionKind::Workspace) => {
-                wizard.workspace_name.pop();
-                wizard.overwrite_confirmed = false;
-            }
-            Some(DesktopActionKind::Command) => {
-                wizard.command_text.pop();
-            }
-            Some(DesktopActionKind::Shortcut) => wizard.shortcut = None,
-            None => {}
-        }
-    });
-}
-
-fn capture_keyboard_shortcut(vk: u16) {
-    if is_modifier_key(vk) {
-        return;
-    }
-    let shortcut = Shortcut::new(
-        vk,
-        key_down(VK_CONTROL),
-        key_down(VK_MENU),
-        key_down(VK_SHIFT),
-        key_down(VK_LWIN) || key_down(VK_RWIN),
-    );
-    UI.with(|slot| {
-        let mut ui = slot.borrow_mut();
-        let Some(wizard) = ui.wizard.as_mut() else {
-            return;
-        };
-        wizard.shortcut = shortcut;
-        wizard.notice = shortcut.map_or_else(
-            || "That key cannot be used as a shortcut key".into(),
-            |shortcut| format!("Captured {} · press Save to apply", shortcut.display()),
-        );
+        wizard.app_query.pop();
+        wizard.app_matches = filtered_app_indices(&wizard.apps, &wizard.app_query);
+        wizard.app_selected = None;
+        wizard.app_scroll = 0;
     });
 }
 
@@ -806,87 +759,37 @@ fn capture_wizard_char(unit: u16) {
         let Some(wizard) = ui.wizard.as_mut() else {
             return;
         };
-        if wizard.step != ControllerCenterStep::Configure {
+        if wizard.step != ControllerCenterStep::ChooseApp {
             return;
         }
-        match wizard.action {
-            Some(DesktopActionKind::Launch)
-                if wizard.app_query.len() + character.len_utf8() <= 256 =>
-            {
-                wizard.app_query.push(character);
-                wizard.app_matches = filtered_app_indices(&wizard.apps, &wizard.app_query);
-                wizard.app_selected = None;
-                wizard.app_scroll = 0;
-            }
-            Some(DesktopActionKind::Workspace)
-                if wizard.workspace_name.len() + character.len_utf8() <= 48 =>
-            {
-                wizard.workspace_name.push(character);
-                wizard.overwrite_confirmed = false;
-            }
-            Some(DesktopActionKind::Command)
-                if wizard.command_text.len() + character.len_utf8() <= 1024 =>
-            {
-                wizard.command_text.push(character);
-            }
-            _ => {}
+        if wizard.app_query.len() + character.len_utf8() <= 256 {
+            wizard.app_query.push(character);
+            wizard.app_matches = filtered_app_indices(&wizard.apps, &wizard.app_query);
+            wizard.app_selected = None;
+            wizard.app_scroll = 0;
         }
     });
 }
 
 fn refresh_configure_inventory() {
-    let (action, hwnd) = UI.with(|slot| {
-        let ui = slot.borrow();
-        (ui.wizard.as_ref().and_then(|wizard| wizard.action), ui.hwnd)
+    let apps = controller_shortcuts::launchable_apps();
+    UI.with(|slot| {
+        let mut ui = slot.borrow_mut();
+        let Some(wizard) = ui.wizard.as_mut() else {
+            return;
+        };
+        wizard.app_selected = apps
+            .iter()
+            .position(|app| app.target == wizard.launch_target);
+        wizard.app_matches = filtered_app_indices(&apps, &wizard.app_query);
+        wizard.apps = apps;
+        wizard.app_scroll = 0;
+        if wizard.apps.is_empty() {
+            wizard.notice =
+                "No launchable apps found. Back, then Continue to refresh after installing an app."
+                    .into();
+        }
     });
-    match action {
-        Some(DesktopActionKind::Launch) => {
-            let apps = controller_shortcuts::launchable_apps();
-            UI.with(|slot| {
-                let mut ui = slot.borrow_mut();
-                let Some(wizard) = ui.wizard.as_mut() else {
-                    return;
-                };
-                wizard.app_selected = apps
-                    .iter()
-                    .position(|app| app.target == wizard.launch_target);
-                wizard.app_matches = filtered_app_indices(&apps, &wizard.app_query);
-                wizard.apps = apps;
-                wizard.app_scroll = 0;
-                wizard.overwrite_confirmed = false;
-                if wizard.apps.is_empty() {
-                    wizard.notice =
-                        "No launchable apps found. Back, then Continue to refresh after installing an app."
-                            .into();
-                }
-            });
-        }
-        Some(DesktopActionKind::Workspace) => {
-            let center_id = hwnd.map(|hwnd| hwnd.0 as isize);
-            let candidates = controller_shortcuts::workspace_window_candidates()
-                .into_iter()
-                .filter(|candidate| Some(candidate.id) != center_id)
-                .collect::<Vec<_>>();
-            UI.with(|slot| {
-                let mut ui = slot.borrow_mut();
-                let Some(wizard) = ui.wizard.as_mut() else {
-                    return;
-                };
-                wizard
-                    .workspace_selected
-                    .retain(|id| candidates.iter().any(|candidate| candidate.id == *id));
-                wizard.workspace_candidates = candidates;
-                wizard.workspace_scroll = 0;
-                wizard.overwrite_confirmed = false;
-                if wizard.workspace_candidates.is_empty() {
-                    wizard.notice =
-                        "No eligible visible windows found. Back, then Continue to refresh after opening an app."
-                            .into();
-                }
-            });
-        }
-        _ => {}
-    }
 }
 
 fn filtered_app_indices(apps: &[LaunchableApp], query: &str) -> Vec<usize> {
@@ -908,15 +811,12 @@ fn select_app_row(row: usize) {
         let Some(wizard) = ui.wizard.as_mut() else {
             return;
         };
-        if wizard.step != ControllerCenterStep::Configure
-            || wizard.action != Some(DesktopActionKind::Launch)
-        {
+        if wizard.step != ControllerCenterStep::ChooseApp {
             return;
         }
         if let Some(index) = wizard.app_matches.get(wizard.app_scroll + row).copied() {
             wizard.app_selected = Some(index);
             wizard.launch_target = wizard.apps[index].target.clone();
-            wizard.overwrite_confirmed = false;
             wizard.notice.clear();
         }
     });
@@ -929,82 +829,13 @@ fn scroll_app(delta: isize) {
             return;
         };
         let count = wizard.app_matches.len();
-        let max_scroll = count.saturating_sub(3);
+        let max_scroll = controller_center_app_max_scroll(count);
         wizard.app_scroll = if delta.is_negative() {
             wizard.app_scroll.saturating_sub(delta.unsigned_abs())
         } else {
             (wizard.app_scroll + delta as usize).min(max_scroll)
         };
-        wizard.overwrite_confirmed = false;
     });
-}
-
-fn toggle_workspace_row(row: usize) {
-    UI.with(|slot| {
-        let mut ui = slot.borrow_mut();
-        let Some(wizard) = ui.wizard.as_mut() else {
-            return;
-        };
-        if wizard.step != ControllerCenterStep::Configure
-            || wizard.action != Some(DesktopActionKind::Workspace)
-        {
-            return;
-        }
-        let Some(candidate) = wizard
-            .workspace_candidates
-            .get(wizard.workspace_scroll + row)
-        else {
-            return;
-        };
-        if !wizard.workspace_selected.insert(candidate.id) {
-            wizard.workspace_selected.remove(&candidate.id);
-        }
-        wizard.overwrite_confirmed = false;
-        wizard.notice.clear();
-    });
-}
-
-fn scroll_workspace(delta: isize) {
-    UI.with(|slot| {
-        let mut ui = slot.borrow_mut();
-        let Some(wizard) = ui.wizard.as_mut() else {
-            return;
-        };
-        let max_scroll = wizard.workspace_candidates.len().saturating_sub(3);
-        wizard.workspace_scroll = if delta.is_negative() {
-            wizard.workspace_scroll.saturating_sub(delta.unsigned_abs())
-        } else {
-            (wizard.workspace_scroll + delta as usize).min(max_scroll)
-        };
-        wizard.overwrite_confirmed = false;
-    });
-}
-
-fn workspace_setting_key(name: &str) -> String {
-    let slug = name
-        .trim()
-        .bytes()
-        .map(|byte| match byte {
-            b'A'..=b'Z' => (byte + 32) as char,
-            b'a'..=b'z' | b'0'..=b'9' | b'_' => byte as char,
-            b' ' | b'-' => '_',
-            _ => '_',
-        })
-        .collect::<String>();
-    format!("workspace_{slug}")
-}
-
-fn workspace_name_exists(name: &str) -> bool {
-    let Some(path) = crate::config::settings_path() else {
-        return false;
-    };
-    let key = workspace_setting_key(name);
-    std::fs::read_to_string(path).ok().is_some_and(|text| {
-        text.lines().any(|line| {
-            line.split_once('=')
-                .is_some_and(|(candidate, _)| candidate.trim() == key)
-        })
-    })
 }
 
 fn save_wizard() {
@@ -1012,64 +843,15 @@ fn save_wizard() {
         return;
     };
     let trigger = wizard.trigger.selection;
-    let duplicate_workspace = wizard.action == Some(DesktopActionKind::Workspace)
-        && ControllerAction::new(DesktopActionKind::Workspace, wizard.workspace_name.trim())
-            .is_some()
-        && workspace_name_exists(&wizard.workspace_name);
-    if duplicate_workspace && !wizard.overwrite_confirmed {
-        UI.with(|slot| {
-            let mut ui = slot.borrow_mut();
-            if let Some(wizard) = ui.wizard.as_mut() {
-                wizard.overwrite_confirmed = true;
-                wizard.notice = format!(
-                    "Workspace \"{}\" already exists. Press Save again to replace it.",
-                    wizard.workspace_name.trim()
-                );
-            }
+    let result = wizard
+        .app_selected
+        .ok_or_else(|| "Select an app from the list before saving".to_string())
+        .and_then(|index| {
+            wizard.apps.get(index).map_or_else(
+                || Err("The selected app is no longer available; refresh the list".to_string()),
+                |app| Ok(ControllerAction::Launch(app.target.clone())),
+            )
         });
-        return;
-    }
-    let result = match wizard.action {
-        Some(DesktopActionKind::Shortcut) => wizard
-            .shortcut
-            .map(ControllerAction::Shortcut)
-            .ok_or_else(|| "Capture a keyboard shortcut before saving".to_string()),
-        Some(DesktopActionKind::Launch) => {
-            let index = wizard
-                .app_selected
-                .ok_or_else(|| "Select an app from the list before saving".to_string());
-            index.and_then(|index| {
-                let app = wizard.apps.get(index).ok_or_else(|| {
-                    "The selected app is no longer available; refresh the list".to_string()
-                })?;
-                Ok(ControllerAction::Launch(app.target.clone()))
-            })
-        }
-        Some(DesktopActionKind::Workspace) => {
-            let name = wizard.workspace_name.trim();
-            let action =
-                ControllerAction::new(DesktopActionKind::Workspace, name).ok_or_else(|| {
-                    "Use a workspace name with letters, numbers, spaces, - or _".to_string()
-                });
-            action.and_then(|action| {
-                if wizard.workspace_selected.is_empty() {
-                    return Err("Select at least one visible window to capture".to_string());
-                }
-                let ids = wizard
-                    .workspace_selected
-                    .iter()
-                    .copied()
-                    .collect::<Vec<_>>();
-                controller_shortcuts::capture_workspace_windows(name, &ids)?;
-                Ok(action)
-            })
-        }
-        Some(DesktopActionKind::Command) => {
-            ControllerAction::new(DesktopActionKind::Command, &wizard.command_text)
-                .ok_or_else(|| "The existing command mapping cannot be empty".to_string())
-        }
-        None => Err("Choose an action before saving".to_string()),
-    };
     let result = result.and_then(|action| {
         set_selected_mapping(trigger.hold, trigger.press, Some(action.clone())).map(|_| action)
     });
@@ -1077,19 +859,11 @@ fn save_wizard() {
         let mut ui = slot.borrow_mut();
         match result {
             Ok(action) => {
-                let message = if duplicate_workspace {
-                    format!(
-                        "{} mapped to {} · existing workspace updated",
-                        selected_shortcut(trigger.hold, trigger.press),
-                        action.display()
-                    )
-                } else {
-                    format!(
-                        "{} mapped to {}",
-                        selected_shortcut(trigger.hold, trigger.press),
-                        action.display()
-                    )
-                };
+                let message = format!(
+                    "{} mapped to {}",
+                    selected_shortcut(trigger.hold, trigger.press),
+                    action.display()
+                );
                 ui.wizard = None;
                 ui.notice = message;
             }
@@ -1149,14 +923,6 @@ fn selected_shortcut(hold: Option<Button>, press: Button) -> String {
     )
 }
 
-fn key_down(key: VIRTUAL_KEY) -> bool {
-    unsafe { GetKeyState(key.0 as i32) < 0 }
-}
-
-fn is_modifier_key(vk: u16) -> bool {
-    matches!(vk, 0x10 | 0x11 | 0x12 | 0x5b | 0x5c | 0xa0..=0xa5)
-}
-
 fn render_center(hwnd: HWND) {
     let capture_events = take_capture_events();
     UI.with(|slot| {
@@ -1189,6 +955,27 @@ fn render_center(hwnd: HWND) {
             pressed: *pressed,
         })
         .collect();
+    let configured = controller_shortcuts::configured_mappings();
+    let inventory_actions: Vec<String> = configured
+        .iter()
+        .map(|mapping| compact_action_label(&mapping.action))
+        .collect();
+    let inventory = configured
+        .iter()
+        .zip(&inventory_actions)
+        .map(|(mapping, action)| match mapping.trigger {
+            ControllerTrigger::Button(press) => super::vk_renderer::ControllerCenterInventoryRow {
+                hold: None,
+                press,
+                action: action.as_str(),
+            },
+            ControllerTrigger::Chord(chord) => super::vk_renderer::ControllerCenterInventoryRow {
+                hold: Some(chord.hold),
+                press: chord.press,
+                action: action.as_str(),
+            },
+        })
+        .collect::<Vec<_>>();
     let palette = super::vk_ui::current_vk_palette();
     let render_error = UI.with(|slot| {
         let mut ui = slot.borrow_mut();
@@ -1198,8 +985,6 @@ fn render_center(hwnd: HWND) {
         let result = {
             let empty_apps: &[LaunchableApp] = &[];
             let empty_matches: &[usize] = &[];
-            let empty_candidates: &[WorkspaceWindowCandidate] = &[];
-            let empty_selection = HashSet::new();
             let wizard = ui.wizard.as_ref();
             let input = if ui.notice.is_empty() {
                 snapshot.input.as_str()
@@ -1216,26 +1001,18 @@ fn render_center(hwnd: HWND) {
                 wired: snapshot.battery.wired,
                 axes: snapshot.axes,
                 bindings: &bindings,
+                inventory: &inventory,
                 selected: wizard.map(|wizard| wizard.trigger.selection.press),
                 selected_hold: wizard.and_then(|wizard| wizard.trigger.selection.hold),
                 wizard_pending: wizard.and_then(|wizard| wizard.trigger.pending_single),
                 wizard_step: wizard.map(|wizard| wizard.step),
-                wizard_action: wizard.and_then(|wizard| wizard.action),
-                wizard_shortcut: wizard.and_then(|wizard| wizard.shortcut),
                 launch_target: wizard.map_or("", |wizard| wizard.launch_target.as_str()),
                 app_query: wizard.map_or("", |wizard| wizard.app_query.as_str()),
                 apps: wizard.map_or(empty_apps, |wizard| wizard.apps.as_slice()),
                 app_matches: wizard.map_or(empty_matches, |wizard| wizard.app_matches.as_slice()),
                 app_selected: wizard.and_then(|wizard| wizard.app_selected),
                 app_scroll: wizard.map_or(0, |wizard| wizard.app_scroll),
-                workspace_name: wizard.map_or("", |wizard| wizard.workspace_name.as_str()),
-                workspace_candidates: wizard.map_or(empty_candidates, |wizard| {
-                    wizard.workspace_candidates.as_slice()
-                }),
-                workspace_selected_ids: wizard
-                    .map_or(&empty_selection, |wizard| &wizard.workspace_selected),
-                workspace_scroll: wizard.map_or(0, |wizard| wizard.workspace_scroll),
-                command_text: wizard.map_or("", |wizard| wizard.command_text.as_str()),
+                inventory_scroll: ui.inventory_scroll,
                 wizard_notice: wizard.map_or("", |wizard| wizard.notice.as_str()),
                 deadzone: ui.deadzone,
             };

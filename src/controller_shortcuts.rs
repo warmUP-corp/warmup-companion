@@ -49,6 +49,32 @@ pub struct ControllerChord {
     pub press: Button,
 }
 
+/// The exact persisted trigger for a Controller Center mapping. Chords are
+/// deliberately directed: `hold` is down before `press` is actuated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum ControllerTrigger {
+    Button(Button),
+    Chord(ControllerChord),
+}
+
+impl ControllerTrigger {
+    pub fn setting_key(self) -> String {
+        match self {
+            Self::Button(button) => setting_key(button),
+            Self::Chord(chord) => chord.setting_key(),
+        }
+    }
+}
+
+/// A read-only, deterministic view of an individual configured mapping.
+/// Consumers should route clear and replacement through `trigger`, rather
+/// than reducing a chord to its press button.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfiguredControllerMapping {
+    pub trigger: ControllerTrigger,
+    pub action: ControllerAction,
+}
+
 impl ControllerChord {
     pub fn new(hold: Button, press: Button) -> Option<Self> {
         if hold == press || !MAPPABLE_BUTTONS.contains(&hold) || !MAPPABLE_BUTTONS.contains(&press)
@@ -472,6 +498,43 @@ pub fn chord_mapping(hold: Button, press: Button) -> Option<ControllerAction> {
     };
     load(&mut state);
     state.chords.get(&chord).cloned()
+}
+
+/// Enumerate all configured mappings in controller order: every single button
+/// first, then directed chords ordered by held button and press button. This
+/// intentionally includes legacy Shortcut, Workspace, and Command actions.
+pub fn configured_mappings() -> Vec<ConfiguredControllerMapping> {
+    let Ok(mut state) = state().lock() else {
+        return Vec::new();
+    };
+    load(&mut state);
+    configured_mappings_from_state(&state)
+}
+
+fn configured_mappings_from_state(state: &ShortcutState) -> Vec<ConfiguredControllerMapping> {
+    let mut mappings = Vec::new();
+    for &button in MAPPABLE_BUTTONS {
+        if let Some(action) = state.mappings.get(&button) {
+            mappings.push(ConfiguredControllerMapping {
+                trigger: ControllerTrigger::Button(button),
+                action: action.clone(),
+            });
+        }
+    }
+    for &hold in MAPPABLE_BUTTONS {
+        for &press in MAPPABLE_BUTTONS {
+            let Some(chord) = ControllerChord::new(hold, press) else {
+                continue;
+            };
+            if let Some(action) = state.chords.get(&chord) {
+                mappings.push(ConfiguredControllerMapping {
+                    trigger: ControllerTrigger::Chord(chord),
+                    action: action.clone(),
+                });
+            }
+        }
+    }
+    mappings
 }
 
 /// Resolve a directed two-button action against the currently held buttons.
@@ -1257,6 +1320,49 @@ mod tests {
         assert!(!is_valid_setting(
             "shortcut_x+unknown",
             "command:echo generic"
+        ));
+    }
+
+    #[test]
+    fn configured_inventory_is_deterministic_and_keeps_legacy_directed_chords() {
+        let mut state = ShortcutState::default();
+        state.mappings.insert(
+            Button::A,
+            ControllerAction::Launch("C:/Apps/Warmup.exe".into()),
+        );
+        state.mappings.insert(
+            Button::Lb,
+            ControllerAction::Shortcut(Shortcut::new(0x50, true, false, false, false).unwrap()),
+        );
+        state.chords.insert(
+            ControllerChord::new(Button::Lb, Button::A).unwrap(),
+            ControllerAction::Workspace("Coding".into()),
+        );
+        state.chords.insert(
+            ControllerChord::new(Button::A, Button::Lb).unwrap(),
+            ControllerAction::Command("echo directed".into()),
+        );
+
+        let inventory = configured_mappings_from_state(&state);
+        assert_eq!(
+            inventory
+                .iter()
+                .map(|mapping| mapping.trigger.setting_key())
+                .collect::<Vec<_>>(),
+            vec![
+                "shortcut_lb",
+                "shortcut_a",
+                "shortcut_lb+a",
+                "shortcut_a+lb"
+            ]
+        );
+        assert!(matches!(
+            inventory[2].action,
+            ControllerAction::Workspace(ref name) if name == "Coding"
+        ));
+        assert!(matches!(
+            inventory[3].action,
+            ControllerAction::Command(ref command) if command == "echo directed"
         ));
     }
 
