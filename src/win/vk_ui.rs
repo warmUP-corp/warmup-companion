@@ -14,21 +14,25 @@ use std::time::{Duration, Instant};
 use crate::vk_nav::{self, KeyAction, KeyCell};
 
 use windows::core::w;
-use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HMODULE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, ValidateRect, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+use windows::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetSystemMetrics, GetWindowRect,
-    IsWindowVisible, IsZoomed, KillTimer, PostThreadMessageW, SetTimer, SetWindowPos, ShowWindow,
-    EVENT_SYSTEM_DESKTOPSWITCH, EVENT_SYSTEM_FOREGROUND, HMENU, HWND_NOTOPMOST, HWND_TOPMOST,
-    MA_NOACTIVATE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SWP_SHOWWINDOW, SW_MAXIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE, WINDOWPOS, WINEVENT_OUTOFCONTEXT,
-    WM_DESTROY, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_PAINT, WM_TIMER, WM_WINDOWPOSCHANGING,
-    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClassNameW, GetClientRect, GetSystemMetrics,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible, IsZoomed,
+    KillTimer, PostThreadMessageW, SetTimer, SetWindowPos, ShowWindow, EVENT_SYSTEM_DESKTOPSWITCH,
+    EVENT_SYSTEM_FOREGROUND, HMENU, HWND_NOTOPMOST, HWND_TOPMOST, MA_NOACTIVATE, SM_CXSCREEN,
+    SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_MAXIMIZE,
+    SW_RESTORE, SW_SHOWNOACTIVATE, WINDOWPOS, WINEVENT_OUTOFCONTEXT, WM_DESTROY, WM_LBUTTONDOWN,
+    WM_MOUSEACTIVATE, WM_PAINT, WM_TIMER, WM_WINDOWPOSCHANGING, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use super::desktop;
@@ -60,6 +64,11 @@ const APP_REFLOW_MS: u64 = 150;
 static VK_VISIBLE: AtomicBool = AtomicBool::new(false);
 static UI_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 static VK_HWND: AtomicIsize = AtomicIsize::new(0);
+/// Last foreground app we are willing to shrink for the docked keyboard.
+/// Guide-close leaves the warmUP launcher as the OS foreground window; we keep
+/// the previous eligible HWND so opening the VK does not resize the launcher
+/// back into focus.
+static LAST_REFLOW_HWND: AtomicIsize = AtomicIsize::new(0);
 
 /// Class background brush colour (dark default; per-paint theme overrides it).
 const BG_FILL: u32 = 0x001f1f1f;
@@ -351,8 +360,11 @@ fn ui_show(attach: VkAttach) {
         super::native_keyboard::suppress_for(Duration::from_secs(10));
     }
     // Capture the app that currently has focus BEFORE we create our (NOACTIVATE)
-    // window, so we can shrink it to make room for the keyboard.
-    let prev_fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+    // window, so we can shrink it to make room for the keyboard. If the launcher
+    // is still foreground after Guide-close, use the last eligible app instead.
+    let prev_fg = unsafe {
+        pick_reflow_target(windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow())
+    };
     // Read the HWND only; destroy_vk_window clears state + drops the renderer in order.
     // The borrow is released here, so the synchronous WM_DESTROY can re-borrow safely.
     let old = UI.with(|ui| ui.borrow().hwnd);
@@ -443,28 +455,22 @@ fn ui_hide() {
 }
 
 /// Shrink `app` so its bottom sits at `dock_top`, freeing the keyboard's strip.
-/// Returns the original rect to restore later. Skips our own window and shell/system
-/// windows (don't reflow the desktop or sign-in UI).
+/// Returns the original rect to restore later. Skips our own window, the warmUP
+/// launcher, and shell/system windows (don't reflow the desktop or sign-in UI).
 unsafe fn reserve_app_space(
     app: HWND,
     dock_top: i32,
 ) -> Option<(HWND, windows::Win32::Foundation::RECT, bool)> {
-    if app.0.is_null() {
+    if app.0.is_null() || !IsWindowVisible(app).as_bool() {
         return None;
     }
-    let mut cls = [0u16; 64];
-    let n = windows::Win32::UI::WindowsAndMessaging::GetClassNameW(app, &mut cls);
-    let name = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
-    let blocked = [
-        "WarmupXboxVkWindow",
-        "Shell_TrayWnd",
-        "Shell_SecondaryTrayWnd",
-        "Progman",
-        "WorkerW",
-        "Windows.UI.Core.CoreWindow",
-        "LogonUI",
-    ];
-    if blocked.iter().any(|b| name == *b) {
+    let name = window_class_name(app);
+    let exe = window_exe_basename(app);
+    let title = window_title(app);
+    if app_reflow_blocked(&name, &exe, &title) {
+        vk_log::log(&format!(
+            "reserved space: skipped '{name}' exe='{exe}' title='{title}'"
+        ));
         return None;
     }
     let mut r = windows::Win32::Foundation::RECT::default();
@@ -489,6 +495,104 @@ unsafe fn reserve_app_space(
         "reserved space: shrank '{name}' to bottom={dock_top}"
     ));
     Some((app, r, restore_maximized))
+}
+
+/// Windows the docked keyboard must not resize. The warmUP launcher is in this
+/// set because Guide-close leaves it as the last foreground window; `SetWindowPos`
+/// / `SW_RESTORE` on that HWND brings the launcher back into focus.
+fn app_reflow_blocked(class: &str, exe: &str, title: &str) -> bool {
+    const BLOCKED_CLASSES: &[&str] = &[
+        "WarmupXboxVkWindow",
+        "Shell_TrayWnd",
+        "Shell_SecondaryTrayWnd",
+        "Progman",
+        "WorkerW",
+        "Windows.UI.Core.CoreWindow",
+        "LogonUI",
+    ];
+    BLOCKED_CLASSES.iter().any(|b| class == *b) || vk_nav::is_warmup_launcher_window(exe, title)
+}
+
+fn remember_reflow_target(hwnd: HWND) {
+    if is_usable_reflow_target(hwnd) {
+        LAST_REFLOW_HWND.store(hwnd.0 as isize, Ordering::Release);
+    }
+}
+
+fn pick_reflow_target(fg: HWND) -> HWND {
+    remember_reflow_target(fg);
+    if is_usable_reflow_target(fg) {
+        return fg;
+    }
+    let saved = HWND(LAST_REFLOW_HWND.load(Ordering::Acquire) as *mut _);
+    if is_usable_reflow_target(saved) {
+        saved
+    } else {
+        HWND::default()
+    }
+}
+
+fn is_usable_reflow_target(hwnd: HWND) -> bool {
+    if hwnd.0.is_null() {
+        return false;
+    }
+    unsafe {
+        if !IsWindow(hwnd).as_bool() || !IsWindowVisible(hwnd).as_bool() {
+            return false;
+        }
+    }
+    !app_reflow_blocked(
+        &window_class_name(hwnd),
+        &window_exe_basename(hwnd),
+        &window_title(hwnd),
+    )
+}
+
+fn window_class_name(hwnd: HWND) -> String {
+    let mut cls = [0u16; 64];
+    let n = unsafe { GetClassNameW(hwnd, &mut cls) };
+    String::from_utf16_lossy(&cls[..n.max(0) as usize])
+}
+
+fn window_title(hwnd: HWND) -> String {
+    let mut buf = [0u16; 256];
+    let n = unsafe { GetWindowTextW(hwnd, &mut buf) };
+    if n > 0 {
+        String::from_utf16_lossy(&buf[..n as usize])
+    } else {
+        String::new()
+    }
+}
+
+fn window_exe_basename(hwnd: HWND) -> String {
+    unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == 0 {
+            return String::new();
+        }
+        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return String::new();
+        };
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .is_ok();
+        let _ = CloseHandle(process);
+        if !ok || len == 0 {
+            return String::new();
+        }
+        std::path::Path::new(&String::from_utf16_lossy(&buf[..len as usize]))
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string()
+    }
 }
 
 fn reservation_plan(
@@ -586,15 +690,18 @@ unsafe extern "system" fn on_desktop_switch(
 /// EVENT_SYSTEM_FOREGROUND callback. Re-asserts topmost when
 /// foreground changes; LogonUI grabs foreground aggressively on the secure desktop.
 /// Event-driven re-assert complements the 200ms z-order timer.
+/// Also records the last eligible reflow target while the keyboard is hidden, so
+/// Guide-close → VK-open does not treat the launcher as the window to shrink.
 unsafe extern "system" fn on_foreground(
     _hook: HWINEVENTHOOK,
     _event: u32,
-    _hwnd: HWND,
+    hwnd: HWND,
     _id_object: i32,
     _id_child: i32,
     _thread: u32,
     _time: u32,
 ) {
+    remember_reflow_target(hwnd);
     if !VK_VISIBLE.load(Ordering::SeqCst) {
         return;
     }
@@ -1038,5 +1145,31 @@ mod tests {
             bottom: 1080,
         };
         assert_eq!(reservation_plan(&rect, 700, true), Some((700, true)));
+    }
+
+    #[test]
+    fn docked_keyboard_does_not_reflow_warmup_launcher() {
+        assert!(app_reflow_blocked(
+            "Chrome_WidgetWin_1",
+            "warmup.exe",
+            "warmUP"
+        ));
+        assert!(app_reflow_blocked("Chrome_WidgetWin_1", "warmup.exe", ""));
+        assert!(!app_reflow_blocked(
+            "Chrome_WidgetWin_1",
+            "warmup.exe",
+            "warmUP Browser"
+        ));
+        assert!(!app_reflow_blocked(
+            "Chrome_WidgetWin_1",
+            "chrome.exe",
+            "Gmail"
+        ));
+        assert!(app_reflow_blocked(
+            "WarmupXboxVkWindow",
+            "warmup-companion.exe",
+            ""
+        ));
+        assert!(app_reflow_blocked("Shell_TrayWnd", "explorer.exe", ""));
     }
 }

@@ -27,7 +27,9 @@ if ($Makensis) {
     # NSIS resolves File/LicenseData paths relative to the .nsi's own directory, not
     # makensis's working directory -- pass SRCROOT as an absolute path so this works
     # no matter where the caller's shell cwd is.
-    & $Makensis "/DSRCROOT=$Root" (Join-Path $Root 'install\warmup-companion.nsi')
+    $Version = (Select-String -Path (Join-Path $Root 'Cargo.toml') -Pattern '^version\s*=\s*"(.+)"' |
+        Select-Object -First 1).Matches[0].Groups[1].Value
+    & $Makensis "/DSRCROOT=$Root" "/DAPPVERSION=$Version" (Join-Path $Root 'install\warmup-companion.nsi')
 } else {
     throw "makensis not found; cannot build installer"
 }

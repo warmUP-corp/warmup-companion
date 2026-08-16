@@ -715,12 +715,23 @@ fn foreground_info() -> (usize, String, String, String) {
     }
 }
 
+/// True if `exe`/`title` identify the warmUP game launcher rather than the
+/// standalone browser/overlay. The docked keyboard must not resize this window:
+/// Guide-close leaves it foreground, and reflowing it brings the launcher back.
+pub(crate) fn is_warmup_launcher_window(exe: &str, title: &str) -> bool {
+    exe.eq_ignore_ascii_case("warmup.exe") && !is_warmup_browser_title(title)
+}
+
+fn is_warmup_browser_title(title: &str) -> bool {
+    title.eq_ignore_ascii_case("warmUP Browser")
+        || title.eq_ignore_ascii_case("warmUP Browser Overlay")
+}
+
 /// True if the OS foreground window belongs to the warmUP desktop app.
 fn foreground_is_warmup_browser_info(exe: &str, title: &str) -> bool {
     crate::pipe_server::browser_active()
         && exe.eq_ignore_ascii_case("warmup.exe")
-        && (title.eq_ignore_ascii_case("warmUP Browser")
-            || title.eq_ignore_ascii_case("warmUP Browser Overlay"))
+        && is_warmup_browser_title(title)
 }
 
 pub(crate) fn foreground_is_warmup_browser() -> bool {
@@ -1017,6 +1028,25 @@ fn suppress_native_keyboard_after_winlogon_inject(on_winlogon: bool) {
 fn active_langid() -> u32 {
     let hkl = unsafe { GetKeyboardLayout(0) };
     (hkl.0 as usize as u32) & 0xffff
+}
+
+#[cfg(test)]
+mod launcher_window_tests {
+    use super::{is_warmup_browser_title, is_warmup_launcher_window};
+
+    #[test]
+    fn launcher_exe_is_skipped_unless_title_is_the_browser() {
+        assert!(is_warmup_launcher_window("warmup.exe", "warmUP"));
+        assert!(is_warmup_launcher_window("WARMUP.EXE", ""));
+        assert!(!is_warmup_launcher_window("warmup.exe", "warmUP Browser"));
+        assert!(!is_warmup_launcher_window(
+            "warmup.exe",
+            "warmUP Browser Overlay"
+        ));
+        assert!(!is_warmup_launcher_window("chrome.exe", "warmUP"));
+        assert!(is_warmup_browser_title("warmUP Browser"));
+        assert!(!is_warmup_browser_title("warmUP"));
+    }
 }
 
 #[cfg(all(test, feature = "gamepad"))]
