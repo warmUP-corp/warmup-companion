@@ -18,6 +18,17 @@ const PREBUILT_NGRAM: &str = "src/predict_ngram_prebuilt.bin";
 const ASSETS_DIR: &str = "assets";
 
 fn main() {
+    // Common Controls v6 manifest so the Controller Center's native checkboxes,
+    // trackbars and buttons render themed (flat) instead of Win95-style.
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        let manifest = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("app.manifest");
+        println!("cargo:rerun-if-changed=app.manifest");
+        println!("cargo:rustc-link-arg-bins=/MANIFEST:EMBED");
+        println!(
+            "cargo:rustc-link-arg-bins=/MANIFESTINPUT:{}",
+            manifest.display()
+        );
+    }
     println!("cargo:rerun-if-env-changed=WARMUP_BUILD_CHECKSUM");
     let build_checksum = env::var("WARMUP_BUILD_CHECKSUM").ok().or_else(|| {
         Command::new("git")

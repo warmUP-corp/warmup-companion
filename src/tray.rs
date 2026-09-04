@@ -65,6 +65,7 @@ const MENU_ENGINE_PARAKEET: usize = 1015;
 /// Local escape hatch for the "Enable gamepad cursor" master switch, so a user who
 /// turned the cursor off in warmUP can get it back while warmUP is not running.
 const MENU_CURSOR_ENABLED: usize = 1016;
+const MENU_CONTROLLER_CENTER: usize = 1017;
 /// Mic device i is `MENU_MIC_BASE + i` (capped at 32 devices in the menu).
 const MENU_MIC_BASE: usize = 1100;
 /// Global hotkey id for "toggle voice dictation" (Ctrl+Alt+V).
@@ -273,6 +274,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     "cursor_enabled",
                     crate::config::gamepad_settings().cursor_enabled,
                 ),
+                MENU_CONTROLLER_CENTER => crate::win::controller_center::show(),
                 MENU_COMPACT => toggle_compact(),
                 MENU_SLEEP_ON_GAME => toggle_setting_bool(
                     "sleep_on_game",
@@ -348,6 +350,12 @@ unsafe fn show_menu(hwnd: HWND) {
         chk(gs.cursor_enabled),
         MENU_CURSOR_ENABLED,
         w!("Gamepad cursor"),
+    );
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_CONTROLLER_CENTER,
+        w!("Controller Center..."),
     );
 
     // Keyboard.
@@ -497,7 +505,7 @@ unsafe fn open_log() {
     shell_execute("open", "notepad.exe", Some(SERVICE_LOG_PATH));
 }
 
-unsafe fn edit_settings() {
+pub(crate) unsafe fn edit_settings() {
     if let Some(path) = crate::config::ensure_settings_file() {
         shell_execute("open", "notepad.exe", Some(&path.display().to_string()));
     }
