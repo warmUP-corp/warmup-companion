@@ -2837,7 +2837,7 @@ dependencies = [
 
 [[package]]
 name = "warmup-companion"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "cpal",
  "ctrlc",

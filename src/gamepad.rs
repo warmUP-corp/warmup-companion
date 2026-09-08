@@ -293,6 +293,12 @@ impl GamepadPoll {
             return;
         }
         let on_winlogon = Self::input_desktop_is_winlogon();
+        let xbox_pad = on_winlogon && self.backend.controller_label().starts_with("XInput");
+        crate::win::native_keyboard::set_logon_pad_is_xbox(xbox_pad);
+        let signin = on_winlogon
+            && crate::xinput_backend::logon_credential_window()
+                .is_none_or(crate::win::native_keyboard::window_is_logonui);
+        crate::win::native_keyboard::set_logon_signin_surface(signin);
         // Publish each poll so the per-keystroke UIA focus redirect (vk_nav send
         // path) gates correctly and records this loop thread's apartment.
         crate::win::logon_focus::set_active(on_winlogon);
@@ -302,7 +308,7 @@ impl GamepadPoll {
         // navigation when an XInput (Xbox) pad drives the lock screen — the
         // registry switch doesn't gate that path, so the panel must be hidden
         // on sight. Idempotent: `suppress_for` no-ops while a sweep is running.
-        if on_winlogon {
+        if on_winlogon && !crate::win::native_keyboard::yield_logon_to_native() {
             crate::win::native_keyboard::suppress_for(std::time::Duration::from_secs(3));
         }
         let using_xinput = matches!(self.backend, Backend::XInput(_));
@@ -523,6 +529,27 @@ impl GamepadPoll {
                 if let Some(edge) = self.handle_vk_open_button(change) {
                     edges.push(edge);
                 }
+            }
+            return Ok(edges);
+        }
+
+        #[cfg(windows)]
+        if Self::service_signin_desktop() && crate::win::native_keyboard::yield_logon_to_native() {
+            cursor.set_left_button(false);
+            cursor.set_right_button(false);
+            self.a_cursor_down = false;
+            self.touchpad_cursor_down = false;
+            self.b_cursor_down = false;
+            if !crate::win::native_keyboard::logon_pad_is_xbox() {
+                for change in &changes {
+                    if change.pressed && crate::vk_nav::inject_logon_pin(change.button) {
+                        self.backend.haptic_tick();
+                    }
+                }
+            }
+            let mut edges = Vec::new();
+            if let Some(edge) = desktop_reopen {
+                edges.push(edge);
             }
             return Ok(edges);
         }
@@ -1040,6 +1067,9 @@ where
 }
 
 #[cfg(windows)]
+static NATIVE_VK_SKIP_LOGGED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(windows)]
 fn service_log(msg: &str) {
     if crate::config::service_mode() {
         crate::install::log_line(msg);
@@ -1138,6 +1168,18 @@ where
                         }
                         VkLoopAction::Toggle => {
                             let was_open = vk_open();
+                            #[cfg(windows)]
+                            if !was_open
+                                && GamepadPoll::service_signin_desktop()
+                                && crate::win::native_keyboard::yield_logon_to_native()
+                            {
+                                if !NATIVE_VK_SKIP_LOGGED.swap(true, Ordering::SeqCst) {
+                                    service_log(
+                                        "VK open skipped: native sign-in keyboard available",
+                                    );
+                                }
+                                continue;
+                            }
                             on_action(action);
                             if vk_open() && !was_open {
                                 poll.on_vk_opened();

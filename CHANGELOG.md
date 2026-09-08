@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.17
+
+- Yield the sign-in screen to Windows' native controller keyboard on Windows 11
+  builds 26100.4762 and newer: no prompt card, no companion keyboard, and no
+  native-panel suppression while LogonUI owns the secure desktop. Xbox pads are
+  handled by Windows; PlayStation pads get their buttons translated into the
+  PIN legend keystrokes, with A/Start as Enter and B as Escape on dialogs
+  without a PIN field. UAC and other secure prompts keep the previous behavior.
+  Override with `WARMUP_NATIVE_LOGON_VK=1|0`.
+
 ## v0.2.16
 
 - Do not resize the warmUP Game Launcher when the docked keyboard opens after

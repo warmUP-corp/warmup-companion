@@ -8,7 +8,8 @@ use crate::gamepad_backend::Button;
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyboardLayout, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_END, VK_RETURN, VK_SPACE, VK_TAB,
+    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_END, VK_ESCAPE, VK_RETURN, VK_SPACE,
+    VK_TAB,
 };
 
 #[derive(Clone)]
@@ -931,6 +932,50 @@ fn push_collapse(batch: &mut Vec<INPUT>, on_winlogon: bool) {
         batch.push(vk_event(VK_END, false));
         batch.push(vk_event(VK_END, true));
     }
+}
+
+// ponytail: mirrors Windows' sign-in PIN legend for Xbox pads; unverified, fix from the on-screen legend
+#[cfg(feature = "gamepad")]
+pub fn logon_pin_key(b: Button) -> Option<VIRTUAL_KEY> {
+    Some(match b {
+        Button::Up => VIRTUAL_KEY(b'1' as u16),
+        Button::Down => VIRTUAL_KEY(b'2' as u16),
+        Button::Left => VIRTUAL_KEY(b'3' as u16),
+        Button::Right => VIRTUAL_KEY(b'4' as u16),
+        Button::Lb => VIRTUAL_KEY(b'5' as u16),
+        Button::Rb => VIRTUAL_KEY(b'6' as u16),
+        Button::Lt => VIRTUAL_KEY(b'7' as u16),
+        Button::Rt => VIRTUAL_KEY(b'8' as u16),
+        Button::Y => VIRTUAL_KEY(b'9' as u16),
+        Button::A => VIRTUAL_KEY(b'0' as u16),
+        Button::X => VK_BACK,
+        Button::Start => VK_RETURN,
+        _ => return None,
+    })
+}
+
+#[cfg(feature = "gamepad")]
+pub fn inject_logon_pin(b: Button) -> bool {
+    let focused = focus_for_inject();
+    let vk = if focused {
+        logon_pin_key(b)
+    } else {
+        match b {
+            Button::A | Button::Start => Some(VK_RETURN),
+            Button::B => Some(VK_ESCAPE),
+            _ => None,
+        }
+    };
+    let Some(vk) = vk else { return false };
+    let mut batch: Vec<INPUT> = Vec::with_capacity(4);
+    push_collapse(&mut batch, focused);
+    batch.push(vk_event(vk, false));
+    batch.push(vk_event(vk, true));
+    unsafe {
+        let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
+    }
+    suppress_native_keyboard_after_winlogon_inject(focused);
+    true
 }
 
 fn inject_vk(vk: VIRTUAL_KEY) {
