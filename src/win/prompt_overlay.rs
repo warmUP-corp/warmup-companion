@@ -315,7 +315,8 @@ pub fn tick(vk_open: bool) {
     c.last_tick = now;
 
     let userland_debug = crate::config::prompt_userland_debug();
-    let on_winlogon = super::surface::input().is_some_and(|s| s.is_winlogon());
+    let on_winlogon = super::surface::input().is_some_and(|s| s.is_winlogon())
+        && !super::native_keyboard::yield_logon_to_native();
     let connected = crate::debug_state::snapshot().connected;
     c.update_connected_visual(connected, now);
     let connected_intro_active = c.connected_visual_until.is_some_and(|until| now < until);
