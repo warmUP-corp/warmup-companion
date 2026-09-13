@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Opening the native keyboard with L3 or starting dictation with R3 on the Windows
+  desktop no longer also sends that shortcut to warmUP's dock/topbar, which could
+  bring the minimized launcher over the app being typed into.
+
 ## v0.2.17
 
 - Yield the sign-in screen to Windows' native controller keyboard on Windows 11
