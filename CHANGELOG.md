@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-### Fixed
+## v0.2.18
 
 - Opening the native keyboard with L3 or starting dictation with R3 on the Windows
   desktop no longer also sends that shortcut to warmUP's dock/topbar, which could
