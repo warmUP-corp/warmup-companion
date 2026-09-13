@@ -32,6 +32,16 @@ const HAPTIC_ALERT_MS: u32 = 45;
 /// move, chip cycle) — short and faint so fast typing reads as texture, not buzz.
 const HAPTIC_TICK_MS: u32 = 8;
 
+/// Desktop text-entry shortcuts belong to the companion, not the launcher's dock/topbar.
+fn companion_owns_stick_click(
+    button: Button,
+    native_vk_suppressed: bool,
+    warmup_browser_foreground: bool,
+) -> bool {
+    matches!(button, Button::L3 | Button::R3)
+        && (!native_vk_suppressed || warmup_browser_foreground)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VkLoopAction {
     Toggle,
@@ -571,13 +581,17 @@ impl GamepadPoll {
             edges.push(edge);
         }
         for change in changes {
-            // Forward every edge to the warmUP desktop over the pipe so the launcher grid
-            // is gamepad-navigable (#348). The companion still drives its own VK/cursor below.
-            // Browser is a special warmUP-owned desktop surface: L3/R3 belong to the companion
-            // there (native VK / voice) and must not leak to the main launcher dock/topbar.
-            let browser_owns_stick_click = matches!(change.button, Button::L3 | Button::R3)
+            // Use one mode snapshot for forwarding and local handling. Sending L3 to warmUP
+            // while also opening the native VK lets a delayed launcher event open/focus its dock
+            // over the user's browser. Keep desktop VK/voice shortcuts local, just as in Browser.
+            let native_vk_suppressed = crate::pipe_server::native_vk_suppressed();
+            let warmup_browser_foreground = matches!(change.button, Button::L3 | Button::R3)
                 && crate::vk_nav::foreground_is_warmup_browser();
-            if !browser_owns_stick_click {
+            if !companion_owns_stick_click(
+                change.button,
+                native_vk_suppressed,
+                warmup_browser_foreground,
+            ) {
                 crate::pipe_server::publish_button(change.button.as_str(), change.pressed);
             }
             #[cfg(windows)]
@@ -595,10 +609,7 @@ impl GamepadPoll {
             // R3 starts dictation even with the VK closed, so voice typing into the
             // focused app is a single click — no need to open the keyboard first.
             #[cfg(windows)]
-            if change.button == Button::R3
-                && change.pressed
-                && !crate::pipe_server::native_vk_suppressed()
-            {
+            if change.button == Button::R3 && change.pressed && !native_vk_suppressed {
                 crate::vk_nav::start_voice_input();
                 self.backend.haptic_alert();
                 continue;
@@ -638,7 +649,7 @@ impl GamepadPoll {
             // ponytail: also fires on the SELECT edge of the SELECT+LB+X launch combo —
             // one stray Enter during that 3-finger hold; split to release-edge if it bites.
             if matches!(change.button, Button::Select | Button::Start) && change.pressed {
-                let suppressed = crate::pipe_server::native_vk_suppressed();
+                let suppressed = native_vk_suppressed;
                 crate::install::log_line(&format!(
                     "{} press, vk closed: suppressed={suppressed} clicks_enabled={} -> {}",
                     change.button.as_str(),
@@ -650,7 +661,7 @@ impl GamepadPoll {
                     self.backend.haptic_confirm();
                 }
             }
-            if crate::pipe_server::native_vk_suppressed() {
+            if native_vk_suppressed {
                 continue;
             }
             if crate::pipe_server::warmup_launch_allowed() && self.update_launch_hotkey(change) {
@@ -1247,7 +1258,39 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{allows_cursor_injection, is_standalone_guide_wake, Button, ButtonChange};
+    use super::{
+        allows_cursor_injection, companion_owns_stick_click, is_standalone_guide_wake, Button,
+        ButtonChange,
+    };
+
+    #[test]
+    fn desktop_keyboard_and_dictation_shortcuts_do_not_reach_launcher() {
+        for button in [Button::L3, Button::R3] {
+            // Guide-minimized launcher, with an external browser in front.
+            assert!(companion_owns_stick_click(button, false, false));
+            // The warmUP browser owns these shortcuts too.
+            assert!(companion_owns_stick_click(button, false, true));
+            assert!(companion_owns_stick_click(button, true, true));
+        }
+    }
+
+    #[test]
+    fn foreground_launcher_keeps_its_dock_and_topbar_shortcuts() {
+        for button in [Button::L3, Button::R3] {
+            assert!(!companion_owns_stick_click(button, true, false));
+        }
+    }
+
+    #[test]
+    fn desktop_shortcut_filter_preserves_guide_wake_and_other_buttons() {
+        for button in [Button::Guide, Button::Select, Button::A, Button::Up] {
+            for suppressed in [false, true] {
+                for browser in [false, true] {
+                    assert!(!companion_owns_stick_click(button, suppressed, browser));
+                }
+            }
+        }
+    }
 
     #[test]
     fn standalone_game_wakes_only_on_guide_press() {
