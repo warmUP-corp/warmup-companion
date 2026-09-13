@@ -161,6 +161,7 @@ fields keep the native keyboard's current dark/light default for that color slot
 - `protocolVersion` is a **single integer**, currently `6`.
 - Deprecated protocol versions remain accepted while their frames are wire-compatible; currently accepted deprecated versions: `5`, `4`.
 - `browserActive` is an additive v4-compatible mode field; old companions ignore it, new companions use it to keep browser L3/R3 local to native VK/voice.
+- While native VK input is unsuppressed (Windows desktop), L3/R3 edges stay local to the companion and are not also emitted as launcher `button` frames. This prevents the same shortcut from opening the keyboard/dictation and the minimized launcher's dock/topbar. Foreground launcher navigation still receives L3/R3; Guide forwarding is unchanged.
 - `axis` is an additive v4-compatible up-frame; old desktop clients ignore it as unknown, old companions simply omit it.
 - `led` is an additive v4-compatible down-frame for one-shot test writes; old companions ignore it as unknown.
 - Additive fields may stay on the current protocol when both directions are default/unknown-field tolerant.
