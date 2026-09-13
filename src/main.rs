@@ -637,6 +637,14 @@ fn main() {
     dispatch_install_or_service(&args);
     #[cfg(all(windows, feature = "gamepad"))]
     tray::spawn();
+    // Dev aid: open the Controller Center directly (no service, no tray click).
+    #[cfg(all(windows, feature = "gamepad"))]
+    if args.iter().any(|a| a == "--controller-center") {
+        win::controller_center::show();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+    }
 
     let use_real_win32 = args.iter().any(|a| a == "--real")
         || env::var_os("WARMUP_REAL_VK").is_some_and(|v| v != "0");
