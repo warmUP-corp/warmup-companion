@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- Restore the Companion keyboard and L3 prompt as the default at Windows sign-in,
+  including password entry. Native-only PIN input now requires the explicit
+  `WARMUP_NATIVE_LOGON_VK=1` override; that mode no longer hides its own keyboard
+  during focus changes or PlayStation PIN injection.
+- Reset cached controller reports, held buttons/triggers, credential focus and
+  device readers after resume, also recovering when a power notification is
+  missed. Cancel pending HID reads before releasing their buffers.
+
 ## v0.2.18
 
 - Opening the native keyboard with L3 or starting dictation with R3 on the Windows

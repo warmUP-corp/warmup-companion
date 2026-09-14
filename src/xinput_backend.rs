@@ -20,6 +20,7 @@ use windows::Win32::Foundation::{
     BOOL, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, WAIT_TIMEOUT, WPARAM,
 };
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryA};
+use windows::Win32::System::SystemInformation::GetTickCount64;
 
 // WM_POWERBROADCAST wParam values (Win32_System_Power feature not enabled; these
 // are stable platform constants). Resume-from-suspend / resume-automatic.
@@ -359,6 +360,7 @@ unsafe fn force_foreground(hwnd: HWND, current_fg: HWND) {
 
 #[allow(dead_code)]
 struct PollState {
+    last_poll_ms: u64,
     get_state: XInputGetStateFn,
     get_keystroke: Option<XInputGetKeystrokeFn>,
     tx: mpsc::Sender<SecureMsg>,
@@ -405,7 +407,91 @@ thread_local! {
     static POLL_STATE: RefCell<Option<PollState>> = const { RefCell::new(None) };
 }
 
+fn poll_gap_requires_reset(previous_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(previous_ms) >= 5_000
+}
+
+impl PollState {
+    fn new(
+        get_state: XInputGetStateFn,
+        get_keystroke: Option<XInputGetKeystrokeFn>,
+        tx: mpsc::Sender<SecureMsg>,
+    ) -> Self {
+        Self {
+            last_poll_ms: unsafe { GetTickCount64() },
+            get_state,
+            get_keystroke,
+            tx,
+            prev_buttons: [0; 4],
+            active_slot: None,
+            connected_prev: [false; 4],
+            last_status: crate::time_util::stale(Duration::from_secs(60)),
+            last_no_pad: crate::time_util::stale(Duration::from_secs(60)),
+            last_probe_log: crate::time_util::stale(Duration::from_secs(60)),
+            iter_count: 0,
+            hid_devices: HashMap::new(),
+            hid_readers: Vec::new(),
+            last_hid_scan: crate::time_util::stale(Duration::from_secs(60)),
+            last_hid: PadSample::default(),
+            hid_diag_count: 0,
+            suppress_until_zero: false,
+            keystroke_events: 0,
+            last_raw_report: Vec::new(),
+            xusb: Vec::new(),
+            last_xusb: None,
+            hid_active_prev: false,
+            last_xusb_scan: crate::time_util::stale(Duration::from_secs(60)),
+            last_slot_err_log: crate::time_util::stale(Duration::from_secs(60)),
+            prev_trigger_left: false,
+            prev_trigger_right: false,
+        }
+    }
+
+    fn reset_after_resume(&mut self) {
+        let _ = self.tx.send(SecureMsg::Reset);
+        for (slot, previous) in self.prev_buttons.iter_mut().enumerate() {
+            if *previous != 0 {
+                let _ = self.tx.send(SecureMsg::Buttons {
+                    slot: slot as u32,
+                    prev: *previous,
+                    cur: 0,
+                });
+                *previous = 0;
+            }
+        }
+        for (held, button) in [
+            (&mut self.prev_trigger_left, Button::Lt),
+            (&mut self.prev_trigger_right, Button::Rt),
+        ] {
+            if *held {
+                let _ = self.tx.send(SecureMsg::Trigger(ButtonChange {
+                    button,
+                    pressed: false,
+                }));
+                *held = false;
+            }
+        }
+        self.xusb.clear();
+        self.hid_readers.clear();
+        self.hid_devices.clear();
+        self.last_xusb = None;
+        self.last_hid = PadSample::default();
+        self.last_raw_report.clear();
+        self.suppress_until_zero = false;
+        self.connected_prev = [false; 4];
+        self.active_slot = None;
+        self.hid_active_prev = false;
+        self.last_xusb_scan = crate::time_util::stale(Duration::from_secs(60));
+        self.last_hid_scan = crate::time_util::stale(Duration::from_secs(60));
+        self.last_poll_ms = unsafe { GetTickCount64() };
+        LOGON_FG_HWND.store(0, Ordering::Relaxed);
+        INJECT_HOLD_ACTIVE.store(false, Ordering::Relaxed);
+        INJECT_HOLD_TICKS.store(0, Ordering::Relaxed);
+    }
+}
+
 enum SecureMsg {
+    Reset,
     Ready(String),
     Slots([bool; 4]),
     Buttons { slot: u32, prev: u16, cur: u16 },
@@ -607,6 +693,19 @@ impl XInputBackend {
         let got_msg = !messages.is_empty();
         for msg in messages {
             match msg {
+                SecureMsg::Reset => {
+                    // Discard input queued before suspend; releases follow the
+                    // reset so the loop can unlock its L3/trigger latches.
+                    // A second resume notification can arrive in this same
+                    // drain. Preserve releases from the first reset.
+                    self.pending.retain(|edge| !edge.pressed);
+                    self.prev_buttons = [0; 4];
+                    self.active_slot = None;
+                    self.slot_connected = [false; 4];
+                    self.axes = (0.0, 0.0, 0.0, 0.0);
+                    self.clear_secure_state();
+                    crate::win::logon_focus::reset_after_resume();
+                }
                 SecureMsg::Ready(desktop) => {
                     service_log(&format!("XInput secure helper: thread on {desktop}"));
                 }
@@ -953,33 +1052,7 @@ fn secure_poll_main(
     };
 
     POLL_STATE.with(|s| {
-        *s.borrow_mut() = Some(PollState {
-            get_state,
-            get_keystroke,
-            tx: tx.clone(),
-            prev_buttons: [0; 4],
-            active_slot: None,
-            connected_prev: [false; 4],
-            last_status: crate::time_util::stale(Duration::from_secs(60)),
-            last_no_pad: crate::time_util::stale(Duration::from_secs(60)),
-            last_probe_log: crate::time_util::stale(Duration::from_secs(60)),
-            iter_count: 0,
-            hid_devices: HashMap::new(),
-            hid_readers: Vec::new(),
-            last_hid_scan: crate::time_util::stale(Duration::from_secs(60)),
-            last_hid: PadSample::default(),
-            hid_diag_count: 0,
-            suppress_until_zero: false,
-            keystroke_events: 0,
-            last_raw_report: Vec::new(),
-            xusb: Vec::new(),
-            last_xusb: None,
-            hid_active_prev: false,
-            last_xusb_scan: crate::time_util::stale(Duration::from_secs(60)),
-            last_slot_err_log: crate::time_util::stale(Duration::from_secs(60)),
-            prev_trigger_left: false,
-            prev_trigger_right: false,
-        });
+        *s.borrow_mut() = Some(PollState::new(get_state, get_keystroke, tx.clone()));
     });
 
     // Open physical XUSB pads directly — the focus-gate bypass for Winlogon.
@@ -1146,10 +1219,7 @@ unsafe extern "system" fn anchor_wndproc(
         {
             POLL_STATE.with(|s| {
                 if let Some(state) = s.borrow_mut().as_mut() {
-                    state.xusb.clear();
-                    state.hid_readers.clear();
-                    state.last_xusb_scan = crate::time_util::stale(Duration::from_secs(60));
-                    state.last_hid_scan = crate::time_util::stale(Duration::from_secs(60));
+                    state.reset_after_resume();
                     let _ = state.tx.send(SecureMsg::Error(
                         "resume: flushing pad handles for re-enum".into(),
                     ));
@@ -1359,6 +1429,17 @@ fn report_hex(report: &[u8]) -> String {
 
 #[allow(dead_code)]
 fn poll_xinput_tick(state: &mut PollState) {
+    // GetTickCount64 includes time asleep. The secure-desktop window can miss
+    // a power broadcast during desktop transitions; a long polling gap must
+    // recover the same way, even if a HID read is still pending forever.
+    let now = unsafe { GetTickCount64() };
+    if poll_gap_requires_reset(state.last_poll_ms, now) {
+        state.reset_after_resume();
+        let _ = state.tx.send(SecureMsg::Error(
+            "resume: polling gap; resetting pad state".into(),
+        ));
+    }
+    state.last_poll_ms = now;
     // Re-enumerate XUSB pads while we have none — a controller connected after the
     // worker started (common at the lock screen) was missed by the one-shot
     // `open_all`, leaving only the foreground-gated DLL (always zeroed here).
@@ -1823,6 +1904,75 @@ fn service_log(msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    unsafe extern "system" fn disconnected_state(_: u32, _: *mut XINPUT_STATE) -> u32 {
+        ERROR_DEVICE_NOT_CONNECTED
+    }
+
+    #[test]
+    fn resume_releases_l3_and_triggers_and_discards_cached_reports() {
+        let (tx, rx) = mpsc::channel();
+        let mut state = PollState::new(disconnected_state, None, tx);
+        let l3 = windows::Win32::UI::Input::XboxController::XINPUT_GAMEPAD_LEFT_THUMB.0;
+        state.prev_buttons[0] = l3;
+        state.prev_trigger_left = true;
+        state.prev_trigger_right = true;
+        state.last_hid.buttons = l3;
+        state.last_xusb = Some(XusbReport {
+            buttons: l3,
+            ..Default::default()
+        });
+        state.suppress_until_zero = true;
+        state.connected_prev[0] = true;
+        state.active_slot = Some(0);
+        state.hid_active_prev = true;
+
+        state.reset_after_resume();
+
+        assert!(matches!(rx.try_recv(), Ok(SecureMsg::Reset)));
+        assert!(
+            matches!(rx.try_recv(), Ok(SecureMsg::Buttons { slot: 0, prev, cur: 0 }) if prev == l3)
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(SecureMsg::Trigger(ButtonChange {
+                button: Button::Lt,
+                pressed: false
+            }))
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(SecureMsg::Trigger(ButtonChange {
+                button: Button::Rt,
+                pressed: false
+            }))
+        ));
+        assert_eq!(state.prev_buttons, [0; 4]);
+        assert!(!state.prev_trigger_left && !state.prev_trigger_right);
+        assert_eq!(state.last_hid.buttons, 0);
+        assert!(state.last_xusb.is_none());
+        assert!(!state.suppress_until_zero);
+        assert_eq!(state.connected_prev, [false; 4]);
+        assert!(state.active_slot.is_none());
+        assert!(!state.hid_active_prev);
+        // The next L3 press must produce a fresh down edge, not look held.
+        assert!(button_edges(state.prev_buttons[0], l3)
+            .iter()
+            .any(|edge| edge.button == Button::L3 && edge.pressed));
+        // Windows may send both automatic and interactive resume notifications.
+        state.reset_after_resume();
+        assert!(matches!(rx.try_recv(), Ok(SecureMsg::Reset)));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn missing_resume_broadcast_is_detected_from_polling_gap() {
+        assert!(!poll_gap_requires_reset(100, 108));
+        assert!(!poll_gap_requires_reset(100, 5099));
+        assert!(poll_gap_requires_reset(100, 5100));
+        assert!(poll_gap_requires_reset(100, 28_800_100));
+        assert!(!poll_gap_requires_reset(100, 99));
+    }
 
     #[test]
     fn controller_label_identifies_secure_hid_source() {

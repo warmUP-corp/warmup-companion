@@ -20,7 +20,7 @@ use windows::Win32::Storage::FileSystem::{
     CreateFileW, ReadFile, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject};
-use windows::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::UI::Input::{
     GetRawInputDeviceInfoW, GetRawInputDeviceList, RAWINPUTDEVICELIST, RIDI_DEVICEINFO,
     RID_DEVICE_INFO, RIM_TYPEHID,
@@ -253,7 +253,14 @@ impl HidReader {
 impl Drop for HidReader {
     fn drop(&mut self) {
         unsafe {
-            // Closing a handle with a pending overlapped read cancels it.
+            // Resume recovery drops readers with in-flight I/O. Cancellation
+            // is asynchronous: keep the buffer and OVERLAPPED alive until the
+            // driver has completed the cancelled read, then close the handles.
+            if self.pending {
+                let _ = CancelIoEx(self.handle, Some(&*self.overlapped));
+                let mut transferred = 0;
+                let _ = GetOverlappedResult(self.handle, &*self.overlapped, &mut transferred, true);
+            }
             let _ = CloseHandle(self.handle);
             let _ = CloseHandle(self.event);
         }

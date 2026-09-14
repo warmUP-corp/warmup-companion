@@ -126,6 +126,15 @@ pub fn is_active() -> bool {
     active()
 }
 
+/// Called on the loop/UIA thread after the secure reader resumes. The desktop
+/// may still be Winlogon, but its credential tree and text-input service may
+/// have been recreated while asleep, so transition-only setup is insufficient.
+pub fn reset_after_resume() {
+    clear_cache();
+    NATIVE_SUPPRESSED.store(false, Ordering::SeqCst);
+    set_active(active());
+}
+
 /// Userland personal-dictionary gate. `None` => conservative skip.
 pub fn focused_is_password_field() -> Option<bool> {
     if active() {
