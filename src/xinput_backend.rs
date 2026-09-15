@@ -311,11 +311,9 @@ const POLL_TIMER_MS: u32 = 8;
 /// The credential window (LogonUI / UAC) the poll tick last saw in foreground —
 /// what we steal from. The inject path restores it so SendInput lands there.
 static LOGON_FG_HWND: AtomicIsize = AtomicIsize::new(0);
-/// While > 0 the poll tick skips reclaiming foreground for the anchor, so an
-/// inject burst (focus + SendInput on the loop thread) keeps LogonUI foreground
-/// long enough for its keys to land. Decremented once per ~8ms poll tick.
+/// While > 0, pause foreground-gated DLL state reads during credential input.
+/// Direct HID/XUSB reports keep flowing. Decremented once per ~8ms poll tick.
 static INJECT_HOLD_TICKS: AtomicU32 = AtomicU32::new(0);
-static INJECT_HOLD_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Poll ticks to suppress the reclaim per committed key (~8ms each ⇒ ~48ms).
 const INJECT_HOLD_WINDOW: u32 = 6;
 
@@ -327,12 +325,21 @@ pub fn logon_credential_window() -> Option<HWND> {
     (h != 0).then_some(HWND(h as *mut _))
 }
 
-/// Suppress the anchor's foreground reclaim for one inject burst so the loop
-/// thread can foreground LogonUI and SendInput uninterrupted. Called from the
-/// inject path; the poll tick reclaims foreground once the window elapses.
+/// Let credential input settle before consuming foreground-gated DLL state.
+/// Direct controller reports remain authoritative throughout the hold.
 pub fn begin_inject_hold() {
-    INJECT_HOLD_ACTIVE.store(true, Ordering::Relaxed);
     INJECT_HOLD_TICKS.store(INJECT_HOLD_WINDOW, Ordering::Relaxed);
+}
+
+fn pause_for_inject(ticks: &AtomicU32, direct_input: bool) -> bool {
+    let remaining = ticks
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+        .unwrap_or(0);
+    // Direct HID/XUSB reads are not foreground-gated. Keep processing their
+    // real press/release edges while the credential field receives input.
+    // Never reset button history when the hold expires: that manufactures a
+    // new press from a held/cached report and can feed an endless PIN loop.
+    remaining > 0 && !direct_input
 }
 
 /// Reliably take foreground for `hwnd` even against a window that keeps grabbing
@@ -449,6 +456,25 @@ impl PollState {
 
     fn reset_after_resume(&mut self) {
         let _ = self.tx.send(SecureMsg::Reset);
+        self.release_input();
+        self.xusb.clear();
+        self.hid_readers.clear();
+        self.hid_devices.clear();
+        self.last_xusb = None;
+        self.last_hid = PadSample::default();
+        self.last_raw_report.clear();
+        self.suppress_until_zero = false;
+        self.connected_prev = [false; 4];
+        self.active_slot = None;
+        self.hid_active_prev = false;
+        self.last_xusb_scan = crate::time_util::stale(Duration::from_secs(60));
+        self.last_hid_scan = crate::time_util::stale(Duration::from_secs(60));
+        self.last_poll_ms = unsafe { GetTickCount64() };
+        LOGON_FG_HWND.store(0, Ordering::Relaxed);
+        INJECT_HOLD_TICKS.store(0, Ordering::Relaxed);
+    }
+
+    fn release_input(&mut self) {
         for (slot, previous) in self.prev_buttons.iter_mut().enumerate() {
             if *previous != 0 {
                 let _ = self.tx.send(SecureMsg::Buttons {
@@ -471,22 +497,6 @@ impl PollState {
                 *held = false;
             }
         }
-        self.xusb.clear();
-        self.hid_readers.clear();
-        self.hid_devices.clear();
-        self.last_xusb = None;
-        self.last_hid = PadSample::default();
-        self.last_raw_report.clear();
-        self.suppress_until_zero = false;
-        self.connected_prev = [false; 4];
-        self.active_slot = None;
-        self.hid_active_prev = false;
-        self.last_xusb_scan = crate::time_util::stale(Duration::from_secs(60));
-        self.last_hid_scan = crate::time_util::stale(Duration::from_secs(60));
-        self.last_poll_ms = unsafe { GetTickCount64() };
-        LOGON_FG_HWND.store(0, Ordering::Relaxed);
-        INJECT_HOLD_ACTIVE.store(false, Ordering::Relaxed);
-        INJECT_HOLD_TICKS.store(0, Ordering::Relaxed);
     }
 }
 
@@ -1459,6 +1469,9 @@ fn poll_xinput_tick(state: &mut PollState) {
     // connected after spawn — common at the lock screen — was missed by the
     // one-shot open in secure_poll_main).
     state.hid_readers.retain(|r| !r.is_dead());
+    if state.hid_readers.is_empty() {
+        state.last_hid = PadSample::default();
+    }
     // Re-enumerate quickly while we have no readers so a replugged pad recovers in
     // ~150ms, not ~1s. Gated on is_empty(), so this only runs when there's nothing
     // to read — never during normal streaming.
@@ -1513,11 +1526,9 @@ fn poll_xinput_tick(state: &mut PollState) {
                 "XInputGetState({slot}) error {err}"
             )));
         }
-        // XInputGetKeystroke is foreground-gated like GetState. When physical XUSB
-        // pads are open we read buttons directly from the driver below (no
-        // foreground needed), so skip the gated path entirely — otherwise it would
-        // fight `prev_buttons` with the XUSB edges.
-        if state.xusb.is_empty() {
+        // XInputGetKeystroke is foreground-gated like GetState. With direct HID
+        // or XUSB readers, skip it so two sources cannot fight over prev_buttons.
+        if state.xusb.is_empty() && state.hid_readers.is_empty() {
             if let Some(get_keystroke) = state.get_keystroke {
                 state.keystroke_events +=
                     secure_poll_keystrokes(&state.tx, get_keystroke, slot, &mut state.prev_buttons);
@@ -1573,27 +1584,16 @@ fn poll_xinput_tick(state: &mut PollState) {
         let _ = state.tx.send(SecureMsg::HidActive(hid_authoritative));
     }
 
-    if INJECT_HOLD_ACTIVE.load(Ordering::Relaxed) {
-        let ticks = INJECT_HOLD_TICKS.load(Ordering::Relaxed);
-        if ticks > 0 {
-            INJECT_HOLD_TICKS.store(ticks - 1, Ordering::Relaxed);
-            let _ = state.tx.send(SecureMsg::Axes((0.0, 0.0, 0.0, 0.0)));
-            return;
-        }
-
-        INJECT_HOLD_ACTIVE.store(false, Ordering::Relaxed);
+    if !connected.iter().any(|&present| present) {
+        state.release_input();
+        state.last_hid = PadSample::default();
         state.last_xusb = None;
-        for (slot, prev) in state.prev_buttons.iter_mut().enumerate() {
-            if *prev != 0 {
-                let old = *prev;
-                *prev = 0;
-                let _ = state.tx.send(SecureMsg::Buttons {
-                    slot: slot as u32,
-                    prev: old,
-                    cur: 0,
-                });
-            }
-        }
+    }
+
+    if pause_for_inject(
+        &INJECT_HOLD_TICKS,
+        hid_authoritative || !state.xusb.is_empty(),
+    ) {
         let _ = state.tx.send(SecureMsg::Axes((0.0, 0.0, 0.0, 0.0)));
         return;
     }
@@ -1730,6 +1730,7 @@ fn poll_xinput_tick(state: &mut PollState) {
     };
 
     let Some(slot) = slot else {
+        let _ = state.tx.send(SecureMsg::Axes((0.0, 0.0, 0.0, 0.0)));
         if state.last_no_pad.elapsed() >= Duration::from_secs(15) {
             state.last_no_pad = Instant::now();
             let _ = state.tx.send(SecureMsg::NoController);
@@ -1907,6 +1908,65 @@ mod tests {
 
     unsafe extern "system" fn disconnected_state(_: u32, _: *mut XINPUT_STATE) -> u32 {
         ERROR_DEVICE_NOT_CONNECTED
+    }
+
+    #[test]
+    fn inject_hold_does_not_interrupt_direct_input_or_repeat_a_held_button() {
+        let ticks = AtomicU32::new(INJECT_HOLD_WINDOW);
+        let mut previous = 0;
+        let mut presses = 0;
+        for current in std::iter::repeat_n(XINPUT_GAMEPAD_DPAD_UP.0, 20).chain([0]) {
+            assert!(!pause_for_inject(&ticks, true));
+            presses += button_edges(previous, current)
+                .iter()
+                .filter(|edge| edge.pressed)
+                .count();
+            previous = current;
+        }
+        assert_eq!(presses, 1);
+        assert_eq!(ticks.load(Ordering::Relaxed), 0);
+        ticks.store(INJECT_HOLD_WINDOW, Ordering::Relaxed);
+        for _ in 0..INJECT_HOLD_WINDOW {
+            assert!(pause_for_inject(&ticks, false));
+        }
+        assert!(!pause_for_inject(&ticks, false));
+    }
+
+    #[test]
+    fn disconnect_releases_buttons_and_triggers_once() {
+        let (tx, rx) = mpsc::channel();
+        let mut state = PollState::new(disconnected_state, None, tx);
+        state.prev_buttons[0] = XINPUT_GAMEPAD_A.0 | XINPUT_GAMEPAD_DPAD_UP.0;
+        state.prev_trigger_left = true;
+        state.prev_trigger_right = true;
+        state.release_input();
+        let messages: Vec<_> = rx.try_iter().collect();
+        assert_eq!(messages.len(), 3);
+        assert!(matches!(
+            messages[0],
+            SecureMsg::Buttons {
+                slot: 0,
+                cur: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            messages[1],
+            SecureMsg::Trigger(ButtonChange {
+                button: Button::Lt,
+                pressed: false
+            })
+        ));
+        assert!(matches!(
+            messages[2],
+            SecureMsg::Trigger(ButtonChange {
+                button: Button::Rt,
+                pressed: false
+            })
+        ));
+        state.release_input();
+        assert!(rx.try_recv().is_err());
+        assert_eq!(state.prev_buttons, [0; 4]);
     }
 
     #[test]

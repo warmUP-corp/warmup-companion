@@ -237,7 +237,8 @@ pub fn decode_report_logged(device: &mut DeviceState, report: &[u8]) -> (PadSamp
             (b, lt, rt, if b != 0 { "ds4-bt" } else { "" })
         }
         HidProfile::SonyDs5Usb => {
-            let (b, lt, rt) = parse_sony_mask(report, 0x01, 8, 9, Some(10))
+            let (b, lt, rt) = parse_dualsense_simple(report)
+                .or_else(|| parse_sony_mask(report, 0x01, 8, 9, Some(10)))
                 .or_else(|| parse_sony_mask(report, 0x31, 9, 10, Some(11)))
                 .or_else(|| parse_sony_mask_without_report_id(report, 7, 8, Some(9)))
                 .or_else(|| parse_sony_mask_without_report_id(report, 8, 9, Some(10)))
@@ -245,7 +246,8 @@ pub fn decode_report_logged(device: &mut DeviceState, report: &[u8]) -> (PadSamp
             (b, lt, rt, if b != 0 { "ds5-usb" } else { "" })
         }
         HidProfile::SonyDs5Bluetooth => {
-            let (b, lt, rt) = parse_sony_mask(report, 0x31, 9, 10, Some(11))
+            let (b, lt, rt) = parse_dualsense_simple(report)
+                .or_else(|| parse_sony_mask(report, 0x31, 9, 10, Some(11)))
                 .or_else(|| parse_sony_mask(report, 0x01, 8, 9, Some(10)))
                 .or_else(|| parse_sony_mask_without_report_id(report, 8, 9, Some(10)))
                 .or_else(|| parse_sony_mask_without_report_id(report, 7, 8, Some(9)))
@@ -372,6 +374,19 @@ fn plausible_mask(raw: u16) -> Option<u16> {
 
 fn is_dualsense_pid(pid: u16) -> bool {
     matches!(pid, 0x0ce6 | 0x0df2)
+}
+
+fn parse_dualsense_simple(report: &[u8]) -> Option<(u16, u8, u8)> {
+    // Bluetooth starts in simple mode: report 0x01, 10 bytes (78 with Windows
+    // padding). Unlike USB 0x01, buttons are at 5/6/7, not 8/9/10. Reading the
+    // idle left trigger at byte 8 as a hat produces phantom D-pad Up / PIN '1'.
+    // Layout and lengths: SDL src/joystick/hidapi/SDL_hidapi_ps5.c,
+    // PS5SimpleStatePacket_t and HIDAPI_DriverPS5_UpdateDevice.
+    if report.first() != Some(&0x01) || !matches!(report.len(), 10 | 78) {
+        return None;
+    }
+    let (buttons, _, _) = sony_buttons_from_pair(report[5], report[6], Some(report[7]));
+    Some((buttons, report[8], report[9]))
 }
 
 fn parse_sony_mask(
@@ -1063,6 +1078,40 @@ mod tests {
             name: String::new(),
             xusb_btn_offset: u8::MAX,
             preparsed_storage: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn dualsense_simple_bluetooth_idle_and_triggers_do_not_press_dpad() {
+        for profile in [HidProfile::SonyDs5Usb, HidProfile::SonyDs5Bluetooth] {
+            for len in [10, 78] {
+                let mut report = vec![0u8; len];
+                report[0] = 1;
+                report[1..5].fill(128);
+                report[5] = 8; // neutral hat, no buttons
+                let mut device = sony_device(profile);
+                for trigger in [0, 1, 8, 128, 255] {
+                    report[8] = trigger;
+                    report[9] = trigger;
+                    let (sample, _) = decode_report_logged(&mut device, &report);
+                    assert_eq!(sample.buttons, 0, "len={len}, trigger={trigger}");
+                    assert_eq!((sample.lt, sample.rt), (trigger, trigger));
+                    assert_eq!(
+                        (sample.lx, sample.ly, sample.rx, sample.ry),
+                        (0.0, 0.0, 0.0, 0.0)
+                    );
+                }
+                for (hat, expected) in [
+                    (0, XINPUT_GAMEPAD_DPAD_UP.0),
+                    (8, 0),
+                    (0x28, XINPUT_GAMEPAD_A.0),
+                    (8, 0),
+                ] {
+                    report[5] = hat;
+                    let (sample, _) = decode_report_logged(&mut device, &report);
+                    assert_eq!(sample.buttons, expected);
+                }
+            }
         }
     }
 }

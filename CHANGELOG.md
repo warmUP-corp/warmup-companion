@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Fix phantom PIN digits from DualSense Bluetooth simple reports at Windows
+  sign-in. Preserve held-button history during credential injection and release
+  buttons and triggers when the last controller disconnects.
+
 - Restore the Companion keyboard and L3 prompt as the default at Windows sign-in,
   including password entry. Native-only PIN input now requires the explicit
   `WARMUP_NATIVE_LOGON_VK=1` override; that mode no longer hides its own keyboard
