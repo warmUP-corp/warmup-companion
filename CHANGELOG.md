@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- Keys now visibly press: the key that fires dips to 96% and settles back over
+  150 ms. A/click dips the focused key; the B, Y and Start shortcuts dip the
+  Backspace, Space and Enter keys they stand in for, so the badge mapping is
+  learned by watching, not reading.
+- Suggestion strip polish: a soft layered shadow replaces the hard offset
+  copy, the highlighted word sits concentrically inside the pill, and the
+  strip fades up into place (120 ms) when a word starts offering candidates.
+  Dismissal stays instant.
+- Floating keyboard card: corner radius is now derived from the key radius plus
+  the card padding (concentric corners), and the key block gets the same 18 px
+  inset at the bottom as at the sides.
+- Motion values for the keyboard live in one place (`src/vk_motion.rs`) with
+  unit tests, instead of scattered constants.
+
 ## v0.2.18
 
 - Opening the native keyboard with L3 or starting dictation with R3 on the Windows
