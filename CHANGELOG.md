@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## v0.2.19
 
 - Sign-in / lock: keep the companion overlay keyboard. Windows' gamepad PIN
   keyboard (TabTip / CoreInputView Gamepad) is no longer used on builds that
