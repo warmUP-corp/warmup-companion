@@ -228,13 +228,17 @@ fn install_inner(debug_ui: bool, dev_exe: Option<&Path>) -> Result<(), String> {
     // Stop + delete BEFORE copying — old exe is locked by the running service.
     remove_test_services();
     uninstall_service_quiet()?;
+    // The SCM launcher's worker is CreateProcessAsUser'd into the console
+    // session. `sc stop` can report STOPPED while that child still holds the
+    // ProgramData exe (seen as os error 32 on copy, service left deleted).
+    kill_other_companion_processes();
 
     let dest = Path::new(INSTALL_DIR).join(EXE_NAME);
     let legacy_dest = Path::new(INSTALL_DIR).join(LEGACY_EXE_NAME);
     if legacy_dest.exists() {
         let _ = fs::remove_file(&legacy_dest);
     }
-    fs::copy(&src, &dest).map_err(|e| format!("copy exe to {INSTALL_DIR}: {e}"))?;
+    copy_installed_exe(&src, &dest)?;
     if !dest.is_file() {
         return Err(format!(
             "install copy missing: {} (service will not start)",
@@ -354,6 +358,53 @@ fn uninstall_service_quiet() -> Result<(), String> {
         Err(e) if e.contains("1060") => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+/// Kill every `warmup-companion.exe` except this process. The installer is
+/// itself that image (`target\release\... install`), so `/IM` without a PID
+/// filter would abort the copy.
+fn kill_other_companion_processes() {
+    let self_pid = std::process::id();
+    match hidden_command("taskkill")
+        .args(["/F", "/IM", EXE_NAME, "/FI", &format!("PID ne {self_pid}")])
+        .output()
+    {
+        Ok(o) => {
+            let msg = format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            let msg = msg.trim();
+            if !msg.is_empty() {
+                log_line(&format!("taskkill other {EXE_NAME}: {msg}"));
+            }
+        }
+        Err(e) => log_line(&format!("taskkill other {EXE_NAME} failed: {e}")),
+    }
+}
+
+fn copy_installed_exe(src: &Path, dest: &Path) -> Result<(), String> {
+    let mut last = None;
+    for attempt in 1..=8 {
+        match fs::copy(src, dest) {
+            Ok(_) => return Ok(()),
+            Err(e) if e.raw_os_error() == Some(32) => {
+                log_line(&format!(
+                    "install copy locked (attempt {attempt}): {e}; retrying"
+                ));
+                last = Some(e);
+                kill_other_companion_processes();
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+            Err(e) => return Err(format!("copy exe to {INSTALL_DIR}: {e}")),
+        }
+    }
+    Err(format!(
+        "copy exe to {INSTALL_DIR}: {}",
+        last.map(|e| e.to_string())
+            .unwrap_or_else(|| "file in use".into())
+    ))
 }
 
 enum StopOutcome {

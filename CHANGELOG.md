@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+- Sign-in / lock: keep the companion overlay keyboard. Windows' gamepad PIN
+  keyboard (TabTip / CoreInputView Gamepad) is no longer used on builds that
+  ship one — it was overlapping the overlay and skipping L3. While LogonUI is
+  up, `ControllerToVKMapping` is turned off so focusing the PIN field does not
+  summon it. `WARMUP_NATIVE_LOGON_VK=1` still opts back into the OS keyboard.
+- Controller-connected card: the pill ⇄ card morph no longer moves or resizes
+  the window mid-animation (that was the drift and the missing artwork); both
+  states now live on one 720×420 canvas and the card grows upward out of the
+  pill. The controller PNG is decoded when the overlay is created, not on the
+  first card frame, so the expand no longer stutters. Pill text fades out
+  before the title and art fade in. Ready ⇄ "Connect controller" swaps in
+  place instead of tearing the window down. `prompt_userland_debug` now loops
+  no pad → card → ready every 6.5 s so the morph can be watched on the desktop.
+- Controller Center polish: the right-hand tab rail is clickable again
+  (SS_NOTIFY labels + icons), colored from the keyboard theme (bg/key/accent/
+  text/border, including settings.ini overrides); the selected tab uses the
+  accent on a concentric key-colored pill; slider values use tabular
+  figure-spaces; checkboxes and footer buttons are 40 px hit targets.
+- Install: kill leftover companion workers and retry copying the exe when
+  `sc stop` reports STOPPED but `C:\ProgramData\WarmupVk\bin\warmup-companion.exe`
+  is still locked.
 - Voice orb: peak-normalize mic level against the learned noise floor so
   DualSense / controller speech (quiet, sitting close to a high floor) fills
   the orb instead of barely twitching. Headset mics still saturate at the top.

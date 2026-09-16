@@ -40,7 +40,13 @@ use super::desktop_window::{
     self, DesktopApp, DesktopWindowThread, WM_APP_HIDE, WM_APP_REPAINT, WM_APP_SHOW,
 };
 use super::vk_log;
-use super::vk_renderer::{self, VkPalette, VkRenderer};
+pub use super::vk_renderer::VkPalette;
+use super::vk_renderer::{self, VkRenderer};
+
+/// Live keyboard palette (OS dark/light defaults, then `settings.ini` overrides).
+pub fn theme_palette() -> VkPalette {
+    vk_palette(is_dark_theme())
+}
 
 const WINDOW_CLASS: windows::core::PCWSTR = w!("WarmupXboxVkWindow");
 

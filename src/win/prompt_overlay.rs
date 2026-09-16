@@ -30,10 +30,11 @@ use super::vk_renderer::{self, VkRenderer};
 
 const WINDOW_CLASS: windows::core::PCWSTR = w!("WarmupPromptOverlayWindow");
 
+/// One canvas for the prompt pill AND the connection card: the pill sits in the
+/// bottom `vk_renderer::PROMPT_PILL_H` band and the card grows upward out of it,
+/// so the morph never moves or resizes the window (that is what made it drift).
 const PANEL_W: i32 = 720;
-const PANEL_H: i32 = 116;
-const CONNECTED_PANEL_W: i32 = 600;
-const CONNECTED_PANEL_H: i32 = 420;
+const PANEL_H: i32 = 420;
 /// Gap between the pill's bottom edge and the bottom of the primary monitor.
 const MARGIN_BOTTOM: i32 = 72;
 /// Dictation pill: orb + phase title + R3 stop hint, hugging the right edge,
@@ -47,6 +48,10 @@ const REPAINT_TIMER_MS: u32 = 16;
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
 const CONNECTED_VISUAL_DURATION: Duration = Duration::from_millis(2400);
 const MORPH_DURATION: Duration = Duration::from_millis(420);
+/// Userland debug replays the Winlogon connect sequence on a loop so the morph
+/// can be watched on the normal desktop: no pad → card → ready prompt.
+const DEBUG_REPLAY_PERIOD: Duration = Duration::from_millis(6500);
+const DEBUG_REPLAY_CONNECT_AT: Duration = Duration::from_millis(1500);
 
 const PROMPT_PREFIX: &str = "Press ";
 const PROMPT_SUFFIX: &str = " for keyboard";
@@ -65,6 +70,7 @@ struct PromptOverlayController {
     last_connected: bool,
     connected_visual_until: Option<Instant>,
     connected_card_shown: bool,
+    debug_epoch: Instant,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,13 +85,6 @@ struct PromptRect {
     y: i32,
     w: i32,
     h: i32,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct WindowMorph {
-    from: PromptRect,
-    to: PromptRect,
-    start: Instant,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -105,7 +104,20 @@ impl Default for PromptOverlayController {
             last_connected: false,
             connected_visual_until: None,
             connected_card_shown: false,
+            debug_epoch: Instant::now(),
         }
+    }
+}
+
+/// Visual for the userland debug replay at `elapsed` since the loop started.
+fn debug_replay_visual(elapsed: Duration) -> PromptVisual {
+    let phase = Duration::from_nanos((elapsed.as_nanos() % DEBUG_REPLAY_PERIOD.as_nanos()) as u64);
+    if phase < DEBUG_REPLAY_CONNECT_AT {
+        PromptVisual::NoPad
+    } else if phase < DEBUG_REPLAY_CONNECT_AT + CONNECTED_VISUAL_DURATION {
+        PromptVisual::Connected
+    } else {
+        PromptVisual::Ready
     }
 }
 
@@ -209,8 +221,6 @@ thread_local! {
     static HWND_STATE: std::cell::Cell<Option<HWND>> = const { std::cell::Cell::new(None) };
     static RENDERER: RefCell<Option<VkRenderer>> = const { RefCell::new(None) };
     static VISUAL_STATE: std::cell::Cell<PromptVisual> = const { std::cell::Cell::new(PromptVisual::Ready) };
-    static WINDOW_RECT_STATE: std::cell::Cell<Option<PromptRect>> = const { std::cell::Cell::new(None) };
-    static WINDOW_MORPH: std::cell::Cell<Option<WindowMorph>> = const { std::cell::Cell::new(None) };
     static VISUAL_MORPH: std::cell::Cell<Option<VisualMorph>> = const { std::cell::Cell::new(None) };
     /// Dictation pill clocks: when it appeared (entrance), when its phase title
     /// last changed (label fade), and when its exit fade began (`ui_hide`).
@@ -271,19 +281,6 @@ fn eased_morph_progress(start: Instant, now: Instant) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn lerp_i32(a: i32, b: i32, t: f32) -> i32 {
-    (a as f32 + (b - a) as f32 * t).round() as i32
-}
-
-fn lerp_rect(a: PromptRect, b: PromptRect, t: f32) -> PromptRect {
-    PromptRect {
-        x: lerp_i32(a.x, b.x, t),
-        y: lerp_i32(a.y, b.y, t),
-        w: lerp_i32(a.w, b.w, t).max(1),
-        h: lerp_i32(a.h, b.h, t).max(1),
-    }
-}
-
 fn active_visual_morph(now: Instant) -> Option<(PromptVisual, PromptVisual, f32)> {
     VISUAL_MORPH.with(|state| {
         let morph = state.get()?;
@@ -307,31 +304,6 @@ unsafe fn target_rect_for_visual(visual: PromptVisual) -> PromptRect {
         (((cx - w) / 2).max(0), (cy - h - MARGIN_BOTTOM).max(0))
     };
     PromptRect { x, y, w, h }
-}
-
-unsafe fn tick_window_morph(hwnd: HWND, now: Instant) {
-    WINDOW_MORPH.with(|state| {
-        let Some(morph) = state.get() else {
-            return;
-        };
-        let raw = raw_morph_progress(morph.start, now);
-        let rect = if raw >= 1.0 {
-            state.set(None);
-            morph.to
-        } else {
-            lerp_rect(morph.from, morph.to, eased_morph_progress(morph.start, now))
-        };
-        WINDOW_RECT_STATE.with(|s| s.set(Some(rect)));
-        let _ = SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
-            rect.x,
-            rect.y,
-            rect.w,
-            rect.h,
-            SWP_SHOWWINDOW | SWP_NOACTIVATE,
-        );
-    });
 }
 
 static CONTROLLER: OnceLock<Mutex<PromptOverlayController>> = OnceLock::new();
@@ -370,7 +342,7 @@ pub fn tick(vk_open: bool) {
             Some(PromptVisual::from_voice_phase(p))
         }
     } else if userland_debug {
-        Some(PromptVisual::Connected)
+        Some(debug_replay_visual(now.duration_since(c.debug_epoch)))
     } else if on_winlogon {
         if vk_open {
             None
@@ -441,54 +413,33 @@ pub fn tick(vk_open: bool) {
 fn ui_show(visual: PromptVisual) {
     let previous = VISUAL_STATE.with(|state| state.get());
     let existing = HWND_STATE.with(|state| state.get());
-    if existing.is_some()
-        && previous != visual
-        && !can_morph_between(previous, visual)
-        && !same_voice_pill(previous, visual)
-    {
+    // Prompt visuals (ready / no pad / card) share one canvas and swap or morph in
+    // place; only a voice <-> prompt change needs a different window.
+    if existing.is_some() && visual_is_voice(previous) != visual_is_voice(visual) {
         ui_hide();
     }
 
     VISUAL_STATE.with(|state| state.set(visual));
-    let target = unsafe { target_rect_for_visual(visual) };
     let now = Instant::now();
     if let Some(hwnd) = HWND_STATE.with(|state| state.get()) {
-        let from = WINDOW_RECT_STATE
-            .with(|state| state.get())
-            .unwrap_or_else(|| unsafe { target_rect_for_visual(previous) });
-        if previous != visual && visual_is_voice(previous) && visual_is_voice(visual) {
-            // Same pill, new phase: fade the new title in.
+        // Same window, new visual: either a voice phase swap or a pill ⇄ card
+        // morph. Both keep the window where it is and animate on the surface.
+        if previous != visual && same_voice_pill(previous, visual) {
             VOICE_LABEL_AT.with(|c| c.set(Some(now)));
         }
-        if previous != visual {
-            WINDOW_MORPH.with(|state| {
-                state.set(Some(WindowMorph {
-                    from,
-                    to: target,
+        if can_morph_between(previous, visual) {
+            VISUAL_MORPH.with(|state| {
+                state.set(Some(VisualMorph {
+                    from: previous,
+                    to: visual,
                     start: now,
                 }))
             });
-            VISUAL_MORPH.with(|state| {
-                state.set(if can_morph_between(previous, visual) {
-                    Some(VisualMorph {
-                        from: previous,
-                        to: visual,
-                        start: now,
-                    })
-                } else {
-                    None
-                })
-            });
         }
-        unsafe {
-            tick_window_morph(hwnd, now);
-            render_prompt(hwnd);
-        }
+        render_prompt(hwnd);
         return;
     }
 
-    WINDOW_RECT_STATE.with(|state| state.set(Some(target)));
-    WINDOW_MORPH.with(|state| state.set(None));
     VISUAL_MORPH.with(|state| state.set(None));
     // Fresh pill: arm the entrance; the title rides the pill's own fade.
     VOICE_SHOWN_AT.with(|c| c.set(visual_is_voice(visual).then_some(now)));
@@ -507,20 +458,32 @@ fn ui_show(visual: PromptVisual) {
         Ok(hwnd) => {
             HWND_STATE.with(|state| state.set(Some(hwnd)));
             unsafe {
-                let (x, y) = bottom_center();
-                let (w, h) = panel_size_for_visual(visual);
+                let rect = target_rect_for_visual(visual);
                 let _ = SetWindowPos(
                     hwnd,
                     HWND_TOPMOST,
-                    x,
-                    y,
-                    w,
-                    h,
+                    rect.x,
+                    rect.y,
+                    rect.w,
+                    rect.h,
                     SWP_SHOWWINDOW | SWP_NOACTIVATE,
                 );
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                 match VkRenderer::create(hwnd) {
-                    Ok(r) => {
+                    Ok(mut r) => {
+                        // Decode the card artwork now so the first card frame
+                        // doesn't stall the morph mid-expand.
+                        if !userland_only {
+                            let name = crate::debug_state::snapshot().name;
+                            let label = if name.trim().is_empty() {
+                                "Xbox Wireless Controller".to_string()
+                            } else {
+                                name
+                            };
+                            if let Err(e) = r.preload_controller_art(&label) {
+                                service_log(&format!("prompt ui: art preload: {e}"));
+                            }
+                        }
                         RENDERER.with(|c| *c.borrow_mut() = Some(r));
                         service_log("prompt ui: D3D11/DComp renderer created");
                     }
@@ -546,8 +509,6 @@ fn ui_hide() {
         // Drop the renderer (releases the DComp target bound to this HWND) BEFORE
         // DestroyWindow, or releasing it against a dead HWND crashes.
         RENDERER.with(|c| *c.borrow_mut() = None);
-        WINDOW_RECT_STATE.with(|state| state.set(None));
-        WINDOW_MORPH.with(|state| state.set(None));
         VISUAL_MORPH.with(|state| state.set(None));
         VOICE_SHOWN_AT.with(|c| c.set(None));
         VOICE_LABEL_AT.with(|c| c.set(None));
@@ -576,20 +537,11 @@ unsafe fn fade_out_voice(hwnd: HWND) {
     }
 }
 
-/// Bottom-center of the primary monitor.
-unsafe fn bottom_center() -> (i32, i32) {
-    let visual = VISUAL_STATE.with(|state| state.get());
-    let rect = target_rect_for_visual(visual);
-    (rect.x, rect.y)
-}
-
 fn panel_size_for_visual(visual: PromptVisual) -> (i32, i32) {
-    match visual {
-        PromptVisual::Connected => (CONNECTED_PANEL_W, CONNECTED_PANEL_H),
-        PromptVisual::Listening | PromptVisual::Transcribing | PromptVisual::Starting => {
-            (VOICE_W, VOICE_H)
-        }
-        PromptVisual::Ready | PromptVisual::NoPad => (PANEL_W, PANEL_H),
+    if visual_is_voice(visual) {
+        (VOICE_W, VOICE_H)
+    } else {
+        (PANEL_W, PANEL_H)
     }
 }
 
@@ -674,16 +626,19 @@ fn connected_card_title(label: &str) -> String {
 /// keyboard theme so the prompt matches the VK card; the L3 chip keeps its own.
 fn render_prompt(hwnd: HWND) {
     let now = Instant::now();
-    unsafe {
-        tick_window_morph(hwnd, now);
-    }
     let theme = crate::config::keyboard_theme();
     let bg = theme.bg.unwrap_or(DEFAULT_BG);
     let border = theme.border.or(theme.accent).unwrap_or(DEFAULT_BORDER);
     let text = theme.text.unwrap_or(DEFAULT_TEXT);
     let visual = VISUAL_STATE.with(|state| state.get());
-    let visual_morph = active_visual_morph(now);
     let snapshot = crate::debug_state::snapshot();
+    // Pill ⇄ card blend, and which pill (ready / no pad) sits under the card.
+    let (card_t, pill_visual) = match active_visual_morph(now) {
+        Some((from, PromptVisual::Connected, t)) => (t, from),
+        Some((PromptVisual::Connected, to, t)) => (1.0 - t, to),
+        _ if visual == PromptVisual::Connected => (1.0, PromptVisual::Ready),
+        _ => (0.0, visual),
+    };
     RENDERER.with(|c| {
         if let Ok(mut slot) = c.try_borrow_mut() {
             if let Some(r) = slot.as_mut() {
@@ -702,87 +657,51 @@ fn render_prompt(hwnd: HWND) {
                         name
                     };
                     let title = connected_card_title(controller_label);
-                    let result = if let Some((from, to, t)) = visual_morph {
-                        if matches!(from, PromptVisual::Connected)
-                            || matches!(to, PromptVisual::Connected)
-                        {
-                            let card_t = if matches!(to, PromptVisual::Connected) {
-                                t
-                            } else {
-                                1.0 - t
-                            };
-                            r.draw_prompt_card_morph(
-                                bg,
-                                border,
-                                text,
-                                PROMPT_PREFIX,
-                                PROMPT_SUFFIX,
-                                true,
-                                &title,
-                                controller_label,
-                                card_t,
-                            )
-                        } else {
-                            r.draw_prompt(
-                                bg,
-                                border,
-                                text,
-                                PROMPT_PREFIX,
-                                PROMPT_SUFFIX,
-                                true,
-                                snapshot.name.trim(),
-                            )
-                        }
+                    let result = if visual_is_voice(visual) {
+                        let accent = theme.accent.or(theme.border).unwrap_or(DEFAULT_BORDER);
+                        let (alpha, scale, label_alpha) = voice_transition(now);
+                        r.draw_voice(&vk_renderer::VoicePill {
+                            bg,
+                            border,
+                            accent,
+                            text,
+                            level: crate::win::speech_input::voice_level(),
+                            phase: visual
+                                .voice_phase()
+                                .unwrap_or(vk_renderer::VoicePhase::Listening),
+                            controller_label: name,
+                            alpha,
+                            scale,
+                            label_alpha,
+                        })
+                    } else if pill_visual == PromptVisual::NoPad {
+                        r.draw_prompt_card(&vk_renderer::PromptCard {
+                            bg,
+                            border,
+                            text_color: text,
+                            pill_border: vk_renderer::mix_color(border, bg, 0.45),
+                            pill_text: vk_renderer::mix_color(text, bg, 0.58),
+                            prefix: NO_PAD_PROMPT,
+                            suffix: "",
+                            show_l3: false,
+                            title: &title,
+                            controller_label,
+                            card_t,
+                        })
                     } else {
-                        match visual {
-                            PromptVisual::Connected => {
-                                r.draw_connected_prompt(bg, border, text, &title, controller_label)
-                            }
-                            PromptVisual::Ready => r.draw_prompt(
-                                bg,
-                                border,
-                                text,
-                                PROMPT_PREFIX,
-                                PROMPT_SUFFIX,
-                                true,
-                                snapshot.name.trim(),
-                            ),
-                            PromptVisual::NoPad => {
-                                let muted_text = crate::win::vk_renderer::mix_color(text, bg, 0.58);
-                                let muted_border =
-                                    crate::win::vk_renderer::mix_color(border, bg, 0.45);
-                                r.draw_prompt(
-                                    bg,
-                                    muted_border,
-                                    muted_text,
-                                    NO_PAD_PROMPT,
-                                    "",
-                                    false,
-                                    "",
-                                )
-                            }
-                            PromptVisual::Listening
-                            | PromptVisual::Transcribing
-                            | PromptVisual::Starting => {
-                                let accent =
-                                    theme.accent.or(theme.border).unwrap_or(DEFAULT_BORDER);
-                                let (alpha, scale, label_alpha) = voice_transition(now);
-                                r.draw_voice(&vk_renderer::VoicePill {
-                                    bg,
-                                    border,
-                                    accent,
-                                    text,
-                                    level: crate::win::speech_input::voice_level(),
-                                    phase: visual
-                                        .voice_phase()
-                                        .unwrap_or(vk_renderer::VoicePhase::Listening),
-                                    controller_label: snapshot.name.trim(),
-                                    alpha,
-                                    scale,
-                                    label_alpha,
-                                })
-                            }
-                        }
+                        r.draw_prompt_card(&vk_renderer::PromptCard {
+                            bg,
+                            border,
+                            text_color: text,
+                            pill_border: border,
+                            pill_text: text,
+                            prefix: PROMPT_PREFIX,
+                            suffix: PROMPT_SUFFIX,
+                            show_l3: true,
+                            title: &title,
+                            controller_label,
+                            card_t,
+                        })
                     };
                     if let Err(e) = result {
                         service_log(&format!("prompt ui: renderer draw: {e}"));
@@ -816,6 +735,31 @@ mod tests {
 
         controller.update_connected_visual(true, now + CONNECTED_VISUAL_DURATION * 2);
         assert!(controller.connected_visual_until.is_none());
+    }
+
+    #[test]
+    fn debug_replay_walks_no_pad_card_ready() {
+        assert_eq!(debug_replay_visual(Duration::ZERO), PromptVisual::NoPad);
+        assert_eq!(
+            debug_replay_visual(DEBUG_REPLAY_CONNECT_AT),
+            PromptVisual::Connected
+        );
+        assert_eq!(
+            debug_replay_visual(DEBUG_REPLAY_CONNECT_AT + CONNECTED_VISUAL_DURATION),
+            PromptVisual::Ready
+        );
+        assert_eq!(
+            debug_replay_visual(DEBUG_REPLAY_PERIOD),
+            PromptVisual::NoPad
+        );
+        assert!(can_morph_between(
+            PromptVisual::NoPad,
+            PromptVisual::Connected
+        ));
+        assert!(can_morph_between(
+            PromptVisual::Connected,
+            PromptVisual::Ready
+        ));
     }
 
     #[test]
