@@ -123,6 +123,10 @@ struct NavState {
     /// Held input button (A/B/Y) auto-repeating its action.
     repeat_key: Option<RepeatKey>,
     repeat_deadline: Option<Instant>,
+    /// Key that most recently fired and when, so the renderer can dip it for
+    /// press feedback. Covers A on the focused key as well as the B/Y/Start
+    /// shortcuts, which light up the key they stand in for.
+    last_press: Option<(KeyPos, Instant)>,
 }
 
 static NAV: Mutex<NavState> = Mutex::new(NavState {
@@ -141,6 +145,7 @@ static NAV: Mutex<NavState> = Mutex::new(NavState {
     hold_deadline: None,
     repeat_key: None,
     repeat_deadline: None,
+    last_press: None,
 });
 
 /// Which held button drives the key auto-repeat.
@@ -284,6 +289,7 @@ pub fn reset_selection() {
         nav.hold_deadline = None;
         nav.repeat_key = None;
         nav.repeat_deadline = None;
+        nav.last_press = None;
         rebuild(&mut nav);
     }
     crate::vk_predict::reset();
@@ -291,6 +297,38 @@ pub fn reset_selection() {
 
 pub fn selection() -> KeyPos {
     NAV.lock().map(|n| n.pos).unwrap_or_default()
+}
+
+/// The key that fired most recently and when, for the renderer's press dip.
+pub fn press_feedback() -> Option<(KeyPos, Instant)> {
+    NAV.lock().ok().and_then(|n| n.last_press)
+}
+
+fn mark_pressed(pos: KeyPos) {
+    if let Ok(mut nav) = NAV.lock() {
+        nav.last_press = Some((pos, Instant::now()));
+    }
+}
+
+/// Light up the first key on the grid whose action matches, so a controller
+/// shortcut (B = Backspace, Y = Space, Start = Enter) visibly presses the key it
+/// stands in for. Teaches the badge mapping without a tutorial.
+fn mark_pressed_action(matches: impl Fn(&KeyAction) -> bool) {
+    if let Ok(mut nav) = NAV.lock() {
+        let found = nav.rows.iter().enumerate().find_map(|(row, r)| {
+            r.keys
+                .iter()
+                .position(|k| matches(&k.action))
+                .map(|col| KeyPos { row, col })
+        });
+        if let Some(pos) = found {
+            nav.last_press = Some((pos, Instant::now()));
+        }
+    }
+}
+
+fn is_vk(action: &KeyAction, vk: VIRTUAL_KEY) -> bool {
+    matches!(action, KeyAction::Vk(v) if *v == vk)
 }
 
 pub fn rows_snapshot() -> Vec<KeyRow> {
@@ -483,6 +521,7 @@ pub fn tick_key_repeat(now: Instant) -> bool {
             // Selection may have moved mid-hold; stop if the key under focus
             // no longer repeats (e.g. d-pad onto Shift while holding A).
             if let Some(key) = selected_key().filter(key_repeats) {
+                mark_pressed(selection());
                 activate_key(&key);
             } else {
                 repeat_released(RepeatKey::Activate);
@@ -509,8 +548,15 @@ pub fn dpad_released(dir: Button) {
 
 pub fn activate_selection() {
     if let Some(key) = selected_key() {
+        mark_pressed(selection());
         activate_key(&key);
     }
+}
+
+/// Fire a specific key (mouse/touch on the grid) and register it for press feedback.
+pub fn activate_at(pos: KeyPos, key: &KeyCell) {
+    mark_pressed(pos);
+    activate_key(key);
 }
 
 pub fn copy_selection() {
@@ -815,17 +861,20 @@ fn request_ui_repaint() {
 }
 
 pub fn backspace() {
+    mark_pressed_action(|a| is_vk(a, VK_BACK));
     crate::vk_predict::on_backspace();
     inject_vk(VK_BACK);
 }
 
 pub fn space() {
+    mark_pressed_action(|a| is_vk(a, VK_SPACE));
     crate::vk_predict::on_space();
     inject_vk(VK_SPACE);
     after_insert();
 }
 
 pub fn enter() {
+    mark_pressed_action(|a| is_vk(a, VK_RETURN));
     crate::vk_predict::on_boundary();
     inject_vk(VK_RETURN);
 }
@@ -1091,6 +1140,55 @@ mod launcher_window_tests {
         assert!(!is_warmup_launcher_window("chrome.exe", "warmUP"));
         assert!(is_warmup_browser_title("warmUP Browser"));
         assert!(!is_warmup_browser_title("warmUP"));
+    }
+}
+
+#[cfg(test)]
+mod press_feedback_tests {
+    use super::*;
+
+    fn key_at(pos: KeyPos) -> KeyCell {
+        let rows = rows_snapshot();
+        rows[pos.row].keys[pos.col].clone()
+    }
+
+    #[test]
+    fn shortcut_buttons_light_up_the_key_they_stand_in_for() {
+        // Seed the grid directly (not via reset_selection) so this never touches
+        // the shared vk_predict global.
+        {
+            let mut nav = NAV.lock().unwrap();
+            nav.layer = Layer::Lower;
+            rebuild(&mut nav);
+        }
+        for (vk, label) in [
+            (VK_BACK, "Backspace"),
+            (VK_SPACE, "Space"),
+            (VK_RETURN, "Enter"),
+        ] {
+            let before = Instant::now();
+            mark_pressed_action(|a| is_vk(a, vk));
+            let (pos, at) = press_feedback().expect("a matching key exists on every layer");
+            assert!(at >= before);
+            let key = key_at(pos);
+            assert!(is_vk(&key.action, vk), "{label}: got {:?}", key.label);
+        }
+    }
+
+    #[test]
+    fn unmatched_action_leaves_the_previous_press_alone() {
+        {
+            let mut nav = NAV.lock().unwrap();
+            nav.layer = Layer::Lower;
+            rebuild(&mut nav);
+        }
+        mark_pressed_action(|a| is_vk(a, VK_BACK));
+        let first = press_feedback();
+        mark_pressed_action(|a| is_vk(a, VK_ESCAPE));
+        assert_eq!(
+            press_feedback().map(|(p, t)| (p.row, p.col, t)),
+            first.map(|(p, t)| (p.row, p.col, t))
+        );
     }
 }
 
