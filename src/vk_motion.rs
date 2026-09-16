@@ -63,6 +63,57 @@ pub fn concentric_radius(inner_radius: f32, padding: f32) -> f32 {
     inner_radius + padding.max(0.0)
 }
 
+/// Dictation pill entrance: opacity 0→1 with a scale from [`VOICE_ENTER_SCALE`].
+/// R3 starts dictation a handful of times a day, so this stays short.
+pub const VOICE_ENTER_MS: f32 = 160.0;
+pub const VOICE_ENTER_SCALE: f32 = 0.95;
+/// Dictation pill exit: a plain fade, shorter than the entrance.
+pub const VOICE_EXIT_MS: f32 = 120.0;
+/// Phase label swap (Starting → Listening → Transcribing): new label fades in.
+pub const VOICE_LABEL_FADE_MS: f32 = 150.0;
+
+/// `(opacity, scale)` for the dictation pill `elapsed_ms` after it appeared.
+pub fn voice_enter(elapsed_ms: f32) -> (f32, f32) {
+    let t = ease_out_cubic(progress(elapsed_ms, VOICE_ENTER_MS));
+    (t, VOICE_ENTER_SCALE + (1.0 - VOICE_ENTER_SCALE) * t)
+}
+
+/// Opacity for the dictation pill `elapsed_ms` into its exit fade.
+pub fn voice_exit(elapsed_ms: f32) -> f32 {
+    1.0 - ease_out_cubic(progress(elapsed_ms, VOICE_EXIT_MS))
+}
+
+/// Opacity of a freshly swapped phase label `elapsed_ms` after the swap.
+pub fn voice_label_fade(elapsed_ms: f32) -> f32 {
+    ease_out_cubic(progress(elapsed_ms, VOICE_LABEL_FADE_MS))
+}
+
+/// Mic-level envelope: react to speech almost at once, let go slowly, so the orb
+/// jumps with the voice and breathes out instead of flickering with each 50 ms
+/// level sample.
+pub const LEVEL_ATTACK_MS: f32 = 40.0;
+pub const LEVEL_RELEASE_MS: f32 = 180.0;
+
+/// Move `current` toward `target` by one frame of `dt_ms`, with a fast attack
+/// and slow release. Frame-rate independent.
+pub fn smooth_level(current: f32, target: f32, dt_ms: f32) -> f32 {
+    let target = target.clamp(0.0, 1.0);
+    if dt_ms <= 0.0 {
+        return current;
+    }
+    let tau = if target > current {
+        LEVEL_ATTACK_MS
+    } else {
+        LEVEL_RELEASE_MS
+    };
+    let k = 1.0 - (-dt_ms / tau).exp();
+    (current + (target - current) * k).clamp(0.0, 1.0)
+}
+
+/// Indeterminate "transcribing" pulse rate. Brisker than a lazy breath: the
+/// same wait feels shorter when the indicator moves with purpose.
+pub const TRANSCRIBE_PULSE_HZ: f32 = 1.6;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +174,41 @@ mod tests {
             assert!(v >= last);
             last = v;
         }
+    }
+
+    #[test]
+    fn voice_pill_enters_from_a_visible_size_and_exits_faster() {
+        let (a0, s0) = voice_enter(0.0);
+        assert_eq!(a0, 0.0);
+        // Nothing appears from scale(0).
+        assert_eq!(s0, VOICE_ENTER_SCALE);
+        assert!(VOICE_ENTER_SCALE >= 0.9);
+        assert_eq!(voice_enter(VOICE_ENTER_MS), (1.0, 1.0));
+        assert_eq!(voice_exit(0.0), 1.0);
+        assert_eq!(voice_exit(VOICE_EXIT_MS), 0.0);
+        assert!(VOICE_EXIT_MS < VOICE_ENTER_MS);
+        assert!(VOICE_ENTER_MS <= 300.0);
+        assert_eq!(voice_label_fade(0.0), 0.0);
+        assert_eq!(voice_label_fade(VOICE_LABEL_FADE_MS), 1.0);
+    }
+
+    #[test]
+    fn level_envelope_attacks_fast_and_releases_slow() {
+        // One 16 ms frame toward a loud target covers most of the distance...
+        let up = smooth_level(0.0, 1.0, 16.0);
+        assert!(up > 0.3, "attack too slow: {up}");
+        // ...while the same frame toward silence only lets go a little.
+        let down = smooth_level(1.0, 0.0, 16.0);
+        assert!(down > 0.9, "release too fast: {down}");
+        assert!(LEVEL_RELEASE_MS > LEVEL_ATTACK_MS * 3.0);
+        // Converges and stays in range.
+        let mut v = 0.0;
+        for _ in 0..60 {
+            v = smooth_level(v, 0.7, 16.0);
+        }
+        assert!((v - 0.7).abs() < 0.01);
+        assert_eq!(smooth_level(0.5, 0.8, 0.0), 0.5);
+        assert!(smooth_level(0.5, 7.0, 16.0) <= 1.0);
     }
 
     #[test]
