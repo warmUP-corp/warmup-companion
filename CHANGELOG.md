@@ -21,6 +21,34 @@
 - Reset cached controller reports, held buttons/triggers, credential focus and
   device readers after resume, also recovering when a power notification is
   missed. Cancel pending HID reads before releasing their buffers.
+- Voice orb: peak-normalize mic level against the learned noise floor so
+  DualSense / controller speech (quiet, sitting close to a high floor) fills
+  the orb instead of barely twitching. Headset mics still saturate at the top.
+- Dictation pauses whatever is playing (Spotify, YouTube, and other SMTC
+  sessions) for the recording so speaker audio doesn't bleed into the mic, then
+  resumes those sessions when transcription finishes.
+- Keys now visibly press: the key that fires dips to 96% and settles back over
+  150 ms. A/click dips the focused key; the B, Y and Start shortcuts dip the
+  Backspace, Space and Enter keys they stand in for, so the badge mapping is
+  learned by watching, not reading.
+- Suggestion strip polish: a soft layered shadow replaces the hard offset
+  copy, the highlighted word sits concentrically inside the pill, and the
+  strip fades up into place (120 ms) when a word starts offering candidates.
+  Dismissal stays instant.
+- Floating keyboard card: corner radius is now derived from the key radius plus
+  the card padding (concentric corners), and the key block gets the same 18 px
+  inset at the bottom as at the sides.
+- Dictation UI: the keyboard-closed voice indicator is now a labelled pill
+  (orb, phase title, and the controller's R3 glyph with "Stop" while
+  listening) instead of a bare orb, so the phase is readable without watching
+  the motion. "Starting…" is shown distinctly while the helper spins up, since
+  speech in that gap is not captured. The pill fades and scales in (160 ms),
+  fades out (120 ms) instead of blinking away, and phase changes swap the title
+  in place instead of recreating the window. Mic level uses one fast-attack /
+  slow-release envelope on both the pill and the keyboard's mic key, and the
+  transcribing pulse is brisker.
+- Motion values for the keyboard live in one place (`src/vk_motion.rs`) with
+  unit tests, instead of scattered constants.
 
 ## v0.2.18
 

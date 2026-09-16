@@ -12,6 +12,10 @@ mod sentry_telemetry;
 mod symbols;
 mod time_util;
 mod vk_gate;
+/// Motion tokens for the on-screen keyboard (press feedback, strip entrance).
+/// Pure maths; only the Windows renderer consumes it at runtime.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod vk_motion;
 
 #[cfg(windows)]
 mod crash;

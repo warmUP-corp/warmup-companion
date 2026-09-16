@@ -997,6 +997,131 @@ mod engine {
         parakeet::serve()
     }
 
+    /// Pauses whatever the system is playing (Spotify, YouTube, …) so speaker
+    /// output doesn't bleed into the mic, and resumes those sessions when
+    /// dictation ends — even if transcription fails.
+    struct MediaPause {
+        aumids: Vec<String>,
+    }
+
+    impl MediaPause {
+        fn hold() -> Self {
+            let aumids = smtc_pause_playing();
+            if !aumids.is_empty() {
+                log(&format!("speech: paused {} media session(s)", aumids.len()));
+            }
+            Self { aumids }
+        }
+    }
+
+    impl Drop for MediaPause {
+        fn drop(&mut self) {
+            if self.aumids.is_empty() {
+                return;
+            }
+            let n = smtc_resume(&self.aumids);
+            if n > 0 {
+                log(&format!("speech: resumed {n} media session(s)"));
+            }
+        }
+    }
+
+    fn smtc_manager(
+    ) -> Option<windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager> {
+        windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
+            .and_then(|op| op.get())
+            .ok()
+    }
+
+    fn smtc_is_playing(
+        session: &windows::Media::Control::GlobalSystemMediaTransportControlsSession,
+    ) -> bool {
+        use windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status;
+        session
+            .GetPlaybackInfo()
+            .ok()
+            .and_then(|info| info.PlaybackStatus().ok())
+            == Some(Status::Playing)
+    }
+
+    fn smtc_is_paused(
+        session: &windows::Media::Control::GlobalSystemMediaTransportControlsSession,
+    ) -> bool {
+        use windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status;
+        session
+            .GetPlaybackInfo()
+            .ok()
+            .and_then(|info| info.PlaybackStatus().ok())
+            == Some(Status::Paused)
+    }
+
+    fn smtc_aumid(
+        session: &windows::Media::Control::GlobalSystemMediaTransportControlsSession,
+    ) -> String {
+        session
+            .SourceAppUserModelId()
+            .ok()
+            .map(|s| s.to_string())
+            .unwrap_or_default()
+    }
+
+    /// Pause every SMTC session that is currently Playing. Returns the AUMIDs we
+    /// paused so Drop can resume only those, and never starts paused media.
+    fn smtc_pause_playing() -> Vec<String> {
+        let Some(manager) = smtc_manager() else {
+            return Vec::new();
+        };
+        let Ok(sessions) = manager.GetSessions() else {
+            return Vec::new();
+        };
+        let n = sessions.Size().unwrap_or(0);
+        let mut paused = Vec::new();
+        for i in 0..n {
+            let Ok(session) = sessions.GetAt(i) else {
+                continue;
+            };
+            if !smtc_is_playing(&session) {
+                continue;
+            }
+            let id = smtc_aumid(&session);
+            match session.TryPauseAsync().and_then(|op| op.get()) {
+                Ok(true) => paused.push(id),
+                Ok(false) => {}
+                Err(e) => log(&format!("speech: media pause failed: {e}")),
+            }
+        }
+        paused
+    }
+
+    fn smtc_resume(aumids: &[String]) -> usize {
+        let Some(manager) = smtc_manager() else {
+            return 0;
+        };
+        let Ok(sessions) = manager.GetSessions() else {
+            return 0;
+        };
+        let n = sessions.Size().unwrap_or(0);
+        let mut resumed = 0usize;
+        for i in 0..n {
+            let Ok(session) = sessions.GetAt(i) else {
+                continue;
+            };
+            let id = smtc_aumid(&session);
+            if !aumids.iter().any(|want| want == &id) {
+                continue;
+            }
+            if !smtc_is_paused(&session) {
+                continue;
+            }
+            match session.TryPlayAsync().and_then(|op| op.get()) {
+                Ok(true) => resumed += 1,
+                Ok(false) => {}
+                Err(e) => log(&format!("speech: media resume failed: {e}")),
+            }
+        }
+        resumed
+    }
+
     /// Capture the mic, segment utterances by silence, transcribe each via the
     /// resident server, and inject the text. Blocks until idle auto-stop; the
     /// worker kills this process for a manual toggle-off.
@@ -1014,6 +1139,10 @@ mod engine {
         let channels = supported.channels() as usize;
         let sample_format = supported.sample_format();
         let config: cpal::StreamConfig = supported.into();
+
+        // Pause Spotify/YouTube/etc. before the first capture tick so speaker
+        // playback doesn't bleed into the controller mic. Drop resumes them.
+        let _media = MediaPause::hold();
 
         let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<f32>::new()));
         let err_fn = |e: cpal::StreamError| log(&format!("mic stream error: {e}"));
@@ -1077,7 +1206,7 @@ mod engine {
         if let Ok(mut b) = buf.lock() {
             all.append(&mut b);
         }
-        let mut level = 0.0f32;
+        let mut glow = crate::vk_motion::VoiceGlow::new();
         let mut since_log = 0.0f32;
         // Adaptive noise floor for auto-stop + a voice-relative glow level. The
         // DualSense floor is high (~0.1), so gate speech RELATIVE to a learned floor
@@ -1117,16 +1246,17 @@ mod engine {
                 silence_s += dt;
                 noise = noise * 0.97 + rms * 0.03; // track the floor only during quiet
             }
-            // Glow level = voice energy ABOVE the floor, normalized + smoothed, so the
-            // glow reacts to speech and stays dark on the noise floor.
-            let target = ((rms - gate).max(0.0) / 0.12).clamp(0.0, 1.0);
-            level = level * 0.5 + target * 0.5;
-            set_level(level);
+            // Peak-normalize above the floor so DualSense/controller speech, which
+            // sits close to a high noise floor, still fills the orb. Auto-stop keeps
+            // the stricter gate above; this is display-only. The renderer already
+            // applies the attack/release envelope — don't double-smooth here.
+            let target = glow.tick(rms, noise, dt * 1000.0);
+            set_level(target);
 
             since_log += dt;
             if since_log >= 2.0 {
                 log(&format!(
-                    "speech: recording {secs:.0}s rms={rms:.3} floor={noise:.3}"
+                    "speech: recording {secs:.0}s rms={rms:.3} floor={noise:.3} glow={target:.2}"
                 ));
                 since_log = 0.0;
             }
