@@ -292,6 +292,10 @@ fn uninstall_inner() -> Result<(), String> {
     require_admin()?;
     remove_test_services();
     uninstall_service_quiet()?;
+    // The service may have been stopped mid-Winlogon with sign-in overrides
+    // live; the persisted record lets this process put Windows back.
+    crate::win::native_keyboard::restore_auto_invoke();
+    crate::win::native_keyboard::ensure_search_service_running();
     let exe = Path::new(INSTALL_DIR).join(EXE_NAME);
     if exe.exists() {
         fs::remove_file(&exe).ok();

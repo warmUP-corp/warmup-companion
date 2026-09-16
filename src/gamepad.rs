@@ -1251,6 +1251,10 @@ where
     }
     #[cfg(windows)]
     if service_mode {
+        // Companion is leaving. Hand text input back to Windows even if the
+        // stop arrived while we owned the secure desktop.
+        crate::win::native_keyboard::restore_auto_invoke();
+        crate::win::native_keyboard::ensure_search_service_running();
         service_log("gamepad loop exited (stop flag)");
     }
     Ok(())
