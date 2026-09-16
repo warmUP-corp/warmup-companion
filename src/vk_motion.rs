@@ -94,6 +94,48 @@ pub fn voice_label_fade(elapsed_ms: f32) -> f32 {
 pub const LEVEL_ATTACK_MS: f32 = 40.0;
 pub const LEVEL_RELEASE_MS: f32 = 180.0;
 
+/// Visual gate as a multiple of the learned noise floor. Looser than the
+/// auto-stop gate (1.6×): DualSense self-noise is high (~0.1 RMS) and speech
+/// rides close to it, so a strict gate leaves the orb dead while the user talks.
+const GLOW_GATE_MUL: f32 = 1.08;
+/// Extra absolute lift on the visual gate so floor jitter doesn't spark the orb.
+const GLOW_GATE_ADD: f32 = 0.004;
+/// Floor on the peak span before any speech arrives. Small so a quiet controller
+/// mic can still fill the orb; peak-tracking stretches this on the first syllable.
+const GLOW_MIN_SPAN: f32 = 0.012;
+/// Peak-envelope time constant: a shout shouldn't lock the range for the rest of
+/// the utterance.
+const GLOW_PEAK_TAU_MS: f32 = 2200.0;
+/// Perceptual lift (sqrt): conversational speech, not only peaks, reads as hitting.
+const GLOW_GAMMA: f32 = 0.5;
+
+/// Rolling AGC for the voice orb: maps RMS above a noise floor onto 0..1 by
+/// peak-normalizing, so a DualSense mic and a headset both fill the orb.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VoiceGlow {
+    peak: f32,
+}
+
+impl VoiceGlow {
+    pub const fn new() -> Self {
+        Self { peak: 0.0 }
+    }
+
+    /// `floor` is the learned noise RMS. `dt_ms` is the capture tick (≈50 ms).
+    pub fn tick(&mut self, rms: f32, floor: f32, dt_ms: f32) -> f32 {
+        let gate = (floor * GLOW_GATE_MUL + GLOW_GATE_ADD).max(0.0);
+        let excess = (rms - gate).max(0.0);
+        let decay = if dt_ms <= 0.0 {
+            1.0
+        } else {
+            (-dt_ms / GLOW_PEAK_TAU_MS).exp()
+        };
+        self.peak = excess.max(self.peak * decay);
+        let span = self.peak.max(GLOW_MIN_SPAN);
+        (excess / span).clamp(0.0, 1.0).powf(GLOW_GAMMA)
+    }
+}
+
 /// Move `current` toward `target` by one frame of `dt_ms`, with a fast attack
 /// and slow release. Frame-rate independent.
 pub fn smooth_level(current: f32, target: f32, dt_ms: f32) -> f32 {
@@ -216,5 +258,43 @@ mod tests {
         assert_eq!(concentric_radius(6.8, 18.0), 24.8);
         assert_eq!(concentric_radius(20.0, 0.0), 20.0);
         assert_eq!(concentric_radius(20.0, -5.0), 20.0);
+    }
+
+    #[test]
+    fn dualsense_speech_fills_the_orb() {
+        // DualSense floor ~0.1; speech sits just above it. The old mapping was
+        // `(rms - 1.6*floor) / 0.12`, which is 0 at rms=0.14.
+        let mut g = VoiceGlow::new();
+        let glow = g.tick(0.14, 0.10, 50.0);
+        assert!(
+            glow > 0.7,
+            "controller speech should hit the orb, got {glow}"
+        );
+    }
+
+    #[test]
+    fn noise_floor_keeps_the_orb_dark() {
+        let mut g = VoiceGlow::new();
+        let glow = g.tick(0.10, 0.10, 50.0);
+        assert!(glow < 0.05, "floor should not light the orb, got {glow}");
+    }
+
+    #[test]
+    fn headset_peak_stays_in_range() {
+        let mut g = VoiceGlow::new();
+        let glow = g.tick(0.40, 0.02, 50.0);
+        assert!((0.0..=1.0).contains(&glow));
+        assert!(glow > 0.85, "loud speech should saturate, got {glow}");
+    }
+
+    #[test]
+    fn half_peak_still_reads_as_speech() {
+        let mut g = VoiceGlow::new();
+        let _ = g.tick(0.20, 0.05, 50.0);
+        let half = g.tick(0.125, 0.05, 50.0);
+        assert!(
+            half > 0.5 && half < 0.95,
+            "conversational follow-up should stay visible, got {half}"
+        );
     }
 }

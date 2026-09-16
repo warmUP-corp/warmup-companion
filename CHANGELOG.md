@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Voice orb: peak-normalize mic level against the learned noise floor so
+  DualSense / controller speech (quiet, sitting close to a high floor) fills
+  the orb instead of barely twitching. Headset mics still saturate at the top.
+- Dictation pauses whatever is playing (Spotify, YouTube, and other SMTC
+  sessions) for the recording so speaker audio doesn't bleed into the mic, then
+  resumes those sessions when transcription finishes.
 - Keys now visibly press: the key that fires dips to 96% and settles back over
   150 ms. A/click dips the focused key; the B, Y and Start shortcuts dip the
   Backspace, Space and Enter keys they stand in for, so the badge mapping is
