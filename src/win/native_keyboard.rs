@@ -7,16 +7,16 @@
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM, WPARAM};
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegQueryValueExW, RegSetValueExW, HKEY,
-    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_DWORD,
-    REG_OPTION_NON_VOLATILE, REG_VALUE_TYPE,
+    RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_QUERY_VALUE, KEY_SET_VALUE,
+    REG_DWORD, REG_OPTION_NON_VOLATILE, REG_VALUE_TYPE,
 };
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, TerminateProcess, PROCESS_NAME_WIN32,
@@ -462,6 +462,108 @@ unsafe fn read_dword(hkey: HKEY, value_name: &[u16]) -> Option<u32> {
     }
 }
 
+const NATIVE_LOGON_VK_BUILD: u32 = 26100;
+const NATIVE_LOGON_VK_UBR: u32 = 4762;
+
+static NATIVE_LOGON_VK: OnceLock<bool> = OnceLock::new();
+
+static LOGON_XBOX_PAD: AtomicBool = AtomicBool::new(false);
+
+pub fn set_logon_pad_is_xbox(xbox: bool) {
+    LOGON_XBOX_PAD.store(xbox, Ordering::SeqCst);
+}
+
+pub fn logon_pad_is_xbox() -> bool {
+    LOGON_XBOX_PAD.load(Ordering::SeqCst)
+}
+
+static LOGON_SIGNIN_SURFACE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_logon_signin_surface(signin: bool) {
+    LOGON_SIGNIN_SURFACE.store(signin, Ordering::SeqCst);
+}
+
+pub fn window_is_logonui(hwnd: HWND) -> bool {
+    window_process_image(hwnd)
+        .as_deref()
+        .and_then(|p| p.rsplit(['\\', '/']).next())
+        .is_some_and(|image| image.eq_ignore_ascii_case("LogonUI.exe"))
+}
+
+pub fn yield_logon_to_native() -> bool {
+    native_logon_keyboard_available() && LOGON_SIGNIN_SURFACE.load(Ordering::SeqCst)
+}
+
+fn build_has_native_logon_vk(build: u32, ubr: u32) -> bool {
+    build > NATIVE_LOGON_VK_BUILD || (build == NATIVE_LOGON_VK_BUILD && ubr >= NATIVE_LOGON_VK_UBR)
+}
+
+pub fn native_logon_keyboard_available() -> bool {
+    *NATIVE_LOGON_VK.get_or_init(|| {
+        if let Ok(v) = std::env::var("WARMUP_NATIVE_LOGON_VK") {
+            let native = v != "0";
+            crate::install::log_line(&format!(
+                "native kbd: logon VK native={native} (env override '{v}')"
+            ));
+            return native;
+        }
+        let (build, ubr) = current_windows_build();
+        let native = match (build, ubr) {
+            (Some(b), Some(u)) => build_has_native_logon_vk(b, u),
+            _ => false,
+        };
+        crate::install::log_line(&format!(
+            "native kbd: logon VK build={}.{} native={native} (registry)",
+            build.map(|b| b.to_string()).unwrap_or_else(|| "?".into()),
+            ubr.map(|u| u.to_string()).unwrap_or_else(|| "?".into()),
+        ));
+        native
+    })
+}
+
+fn current_windows_build() -> (Option<u32>, Option<u32>) {
+    unsafe {
+        let subkey = wide(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
+        let mut hkey = HKEY::default();
+        let rc = RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(subkey.as_ptr()),
+            0,
+            KEY_QUERY_VALUE,
+            &mut hkey,
+        );
+        if rc.0 != 0 {
+            return (None, None);
+        }
+        let build = read_sz(hkey, &wide("CurrentBuildNumber")).and_then(|s| s.trim().parse().ok());
+        let ubr = read_dword(hkey, &wide("UBR"));
+        let _ = RegCloseKey(hkey);
+        (build, ubr)
+    }
+}
+
+unsafe fn read_sz(hkey: HKEY, value_name: &[u16]) -> Option<String> {
+    let mut buf = [0u16; 64];
+    let mut len = (buf.len() * 2) as u32;
+    let rc = RegQueryValueExW(
+        hkey,
+        PCWSTR(value_name.as_ptr()),
+        None,
+        None,
+        Some(buf.as_mut_ptr() as *mut u8),
+        Some(&mut len),
+    );
+    if rc.0 != 0 {
+        return None;
+    }
+    let chars = (len as usize / 2).min(buf.len());
+    Some(
+        String::from_utf16_lossy(&buf[..chars])
+            .trim_end_matches('\0')
+            .to_string(),
+    )
+}
+
 pub fn suppress() {
     unsafe {
         let _ = EnumWindows(Some(enum_window), LPARAM(0));
@@ -620,4 +722,17 @@ fn is_native_keyboard_window(class: &str, title: &str, process: Option<&str>) ->
             && (title == "Microsoft Text Input Application"
                 || title == "Windows Input Experience"
                 || title.contains("Text Input")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_has_native_logon_vk;
+
+    #[test]
+    fn native_logon_vk_threshold() {
+        assert!(!build_has_native_logon_vk(26100, 4761));
+        assert!(build_has_native_logon_vk(26100, 4762));
+        assert!(build_has_native_logon_vk(26200, 0));
+        assert!(!build_has_native_logon_vk(22631, 9999));
+    }
 }

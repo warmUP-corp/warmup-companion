@@ -53,6 +53,8 @@ static NEED_SEARCH_START: AtomicBool = AtomicBool::new(true);
 /// mouse path never inits COM on the wrong apartment.
 static LOOP_TID: AtomicU32 = AtomicU32::new(0);
 
+static NATIVE_SUPPRESSED: AtomicBool = AtomicBool::new(false);
+
 thread_local! {
     /// COM initialized (MTA) on this thread? One-shot.
     static COM_READY: RefCell<bool> = const { RefCell::new(false) };
@@ -85,17 +87,20 @@ pub fn set_active(on_winlogon: bool) {
     let was = ON_WINLOGON.swap(on_winlogon, Ordering::SeqCst);
     if on_winlogon {
         LOOP_TID.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
-        if !was {
-            // Entered the secure desktop: stop the native touch keyboard being
-            // summoned on credential-field focus (the hide loop only flashes it),
-            // and stop the search service live so the gamepad keyboard can't be
-            // summoned. `Start` is left untouched (always auto) so userland — and
-            // any reboot — can bring it straight back.
-            crate::win::native_keyboard::disable_auto_invoke();
-            crate::win::native_keyboard::stop_search_service();
-            NEED_SEARCH_START.store(true, Ordering::SeqCst);
+        let want = !crate::win::native_keyboard::yield_logon_to_native();
+        if want != NATIVE_SUPPRESSED.load(Ordering::SeqCst) {
+            if want {
+                crate::win::native_keyboard::disable_auto_invoke();
+                crate::win::native_keyboard::stop_search_service();
+                NEED_SEARCH_START.store(true, Ordering::SeqCst);
+            } else {
+                crate::win::native_keyboard::restore_auto_invoke();
+                crate::win::native_keyboard::ensure_search_service_running();
+            }
+            NATIVE_SUPPRESSED.store(want, Ordering::SeqCst);
         }
     } else {
+        NATIVE_SUPPRESSED.store(false, Ordering::SeqCst);
         // Userland. Re-start the search service once per transition (and once at
         // startup) so Start-menu search works. Guarded by NEED_SEARCH_START so we
         // don't spawn `sc.exe` every poll; the startup default of `true` also

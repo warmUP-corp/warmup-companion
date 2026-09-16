@@ -26,7 +26,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::desktop;
 use super::desktop_window::{self, DesktopApp, DesktopWindowThread};
-use super::vk_renderer::VkRenderer;
+use super::vk_renderer::{self, VkRenderer};
 
 const WINDOW_CLASS: windows::core::PCWSTR = w!("WarmupPromptOverlayWindow");
 
@@ -36,9 +36,10 @@ const CONNECTED_PANEL_W: i32 = 600;
 const CONNECTED_PANEL_H: i32 = 420;
 /// Gap between the pill's bottom edge and the bottom of the primary monitor.
 const MARGIN_BOTTOM: i32 = 72;
-/// Voice glow overlay: small + subtle, hugging the right edge, vertically centered.
-const VOICE_W: i32 = 150;
-const VOICE_H: i32 = 150;
+/// Dictation pill: orb + phase title + R3 stop hint, hugging the right edge,
+/// vertically centered. Wide enough for "Transcribing…" at the 28px prompt font.
+const VOICE_W: i32 = 420;
+const VOICE_H: i32 = 104;
 const MARGIN_RIGHT: i32 = 40;
 const REPAINT_TIMER_ID: usize = 12;
 /// ~60 fps so the reactive voice glow animates smoothly.
@@ -129,6 +130,9 @@ enum PromptVisual {
     Listening,
     /// Voice dictation stopped; transcribing the recording.
     Transcribing,
+    /// Voice helper launched but the mic isn't capturing yet — speech here is
+    /// lost, so it must not look like Listening.
+    Starting,
 }
 
 impl PromptVisual {
@@ -139,6 +143,7 @@ impl PromptVisual {
             PromptVisual::Connected => 3,
             PromptVisual::Listening => 4,
             PromptVisual::Transcribing => 5,
+            PromptVisual::Starting => 6,
         })
     }
 
@@ -148,7 +153,26 @@ impl PromptVisual {
             3 => PromptVisual::Connected,
             4 => PromptVisual::Listening,
             5 => PromptVisual::Transcribing,
+            6 => PromptVisual::Starting,
             _ => PromptVisual::Ready,
+        }
+    }
+
+    fn voice_phase(self) -> Option<vk_renderer::VoicePhase> {
+        match self {
+            PromptVisual::Starting => Some(vk_renderer::VoicePhase::Starting),
+            PromptVisual::Listening => Some(vk_renderer::VoicePhase::Listening),
+            PromptVisual::Transcribing => Some(vk_renderer::VoicePhase::Transcribing),
+            _ => None,
+        }
+    }
+
+    /// Helper phase string (`speech_input::voice_ui_phase`) -> pill visual.
+    fn from_voice_phase(phase: &str) -> Self {
+        match phase {
+            "transcribing" => PromptVisual::Transcribing,
+            "starting" => PromptVisual::Starting,
+            _ => PromptVisual::Listening,
         }
     }
 }
@@ -188,23 +212,38 @@ thread_local! {
     static WINDOW_RECT_STATE: std::cell::Cell<Option<PromptRect>> = const { std::cell::Cell::new(None) };
     static WINDOW_MORPH: std::cell::Cell<Option<WindowMorph>> = const { std::cell::Cell::new(None) };
     static VISUAL_MORPH: std::cell::Cell<Option<VisualMorph>> = const { std::cell::Cell::new(None) };
-    /// Render-side smoothed mic level — lerps toward the helper's published value
-    /// each (60 fps) repaint so the glow glides instead of stepping at the helper rate.
-    static VOICE_LEVEL: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+    /// Dictation pill clocks: when it appeared (entrance), when its phase title
+    /// last changed (label fade), and when its exit fade began (`ui_hide`).
+    static VOICE_SHOWN_AT: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    static VOICE_LABEL_AT: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    static VOICE_EXIT_AT: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
 }
 
-fn smoothed_voice_level() -> f32 {
-    let target = crate::win::speech_input::voice_level();
-    VOICE_LEVEL.with(|c| {
-        let v = c.get();
-        let n = v + (target - v) * 0.35;
-        c.set(n);
-        n
-    })
+/// `(alpha, scale, label_alpha)` for the dictation pill at `now`: entrance
+/// fade/scale, times the exit fade once one has started, plus the phase-label fade.
+fn voice_transition(now: Instant) -> (f32, f32, f32) {
+    let ms =
+        |at: Option<Instant>| at.map(|t| now.saturating_duration_since(t).as_secs_f32() * 1000.0);
+    let (mut alpha, scale) = ms(VOICE_SHOWN_AT.with(|c| c.get()))
+        .map(crate::vk_motion::voice_enter)
+        .unwrap_or((1.0, 1.0));
+    if let Some(exit_ms) = ms(VOICE_EXIT_AT.with(|c| c.get())) {
+        alpha *= crate::vk_motion::voice_exit(exit_ms);
+    }
+    let label_alpha = ms(VOICE_LABEL_AT.with(|c| c.get()))
+        .map(crate::vk_motion::voice_label_fade)
+        .unwrap_or(1.0);
+    (alpha, scale, label_alpha)
 }
 
 fn visual_is_voice(visual: PromptVisual) -> bool {
-    matches!(visual, PromptVisual::Listening | PromptVisual::Transcribing)
+    visual.voice_phase().is_some()
+}
+
+/// Starting -> Listening -> Transcribing all live in the one dictation pill: keep
+/// the window and swap the title, instead of tearing the pill down and back up.
+fn same_voice_pill(from: PromptVisual, to: PromptVisual) -> bool {
+    visual_is_voice(from) && visual_is_voice(to)
 }
 
 fn thread_kind_for_visual(visual: PromptVisual) -> PromptThreadKind {
@@ -315,7 +354,8 @@ pub fn tick(vk_open: bool) {
     c.last_tick = now;
 
     let userland_debug = crate::config::prompt_userland_debug();
-    let on_winlogon = super::surface::input().is_some_and(|s| s.is_winlogon());
+    let on_winlogon = super::surface::input().is_some_and(|s| s.is_winlogon())
+        && !super::native_keyboard::yield_logon_to_native();
     let connected = crate::debug_state::snapshot().connected;
     c.update_connected_visual(connected, now);
     let connected_intro_active = c.connected_visual_until.is_some_and(|until| now < until);
@@ -326,10 +366,8 @@ pub fn tick(vk_open: bool) {
     let visual = if let Some(p) = voice.as_deref() {
         if vk_open {
             None
-        } else if p == "transcribing" {
-            Some(PromptVisual::Transcribing)
         } else {
-            Some(PromptVisual::Listening)
+            Some(PromptVisual::from_voice_phase(p))
         }
     } else if userland_debug {
         Some(PromptVisual::Connected)
@@ -390,6 +428,7 @@ pub fn tick(vk_open: bool) {
                 (PromptVisual::NoPad, _) => "prompt ui: shown (Winlogon, no pad connected)",
                 (PromptVisual::Listening, _) => "prompt ui: shown (voice listening)",
                 (PromptVisual::Transcribing, _) => "prompt ui: shown (voice transcribing)",
+                (PromptVisual::Starting, _) => "prompt ui: shown (voice starting)",
             });
         } else {
             let _ = thread.hide();
@@ -402,7 +441,11 @@ pub fn tick(vk_open: bool) {
 fn ui_show(visual: PromptVisual) {
     let previous = VISUAL_STATE.with(|state| state.get());
     let existing = HWND_STATE.with(|state| state.get());
-    if existing.is_some() && !can_morph_between(previous, visual) && previous != visual {
+    if existing.is_some()
+        && previous != visual
+        && !can_morph_between(previous, visual)
+        && !same_voice_pill(previous, visual)
+    {
         ui_hide();
     }
 
@@ -413,6 +456,10 @@ fn ui_show(visual: PromptVisual) {
         let from = WINDOW_RECT_STATE
             .with(|state| state.get())
             .unwrap_or_else(|| unsafe { target_rect_for_visual(previous) });
+        if previous != visual && visual_is_voice(previous) && visual_is_voice(visual) {
+            // Same pill, new phase: fade the new title in.
+            VOICE_LABEL_AT.with(|c| c.set(Some(now)));
+        }
         if previous != visual {
             WINDOW_MORPH.with(|state| {
                 state.set(Some(WindowMorph {
@@ -443,10 +490,14 @@ fn ui_show(visual: PromptVisual) {
     WINDOW_RECT_STATE.with(|state| state.set(Some(target)));
     WINDOW_MORPH.with(|state| state.set(None));
     VISUAL_MORPH.with(|state| state.set(None));
+    // Fresh pill: arm the entrance; the title rides the pill's own fade.
+    VOICE_SHOWN_AT.with(|c| c.set(visual_is_voice(visual).then_some(now)));
+    VOICE_LABEL_AT.with(|c| c.set(None));
+    VOICE_EXIT_AT.with(|c| c.set(None));
     // Voice pill is userland-only and the thread is already on the user desktop
     // (attached once in on_ready); re-attaching there fails with ERROR_BUSY and
     // mis-places the window. Only the Winlogon prompts re-attach per show.
-    let userland_only = matches!(visual, PromptVisual::Listening | PromptVisual::Transcribing);
+    let userland_only = visual_is_voice(visual);
     if !userland_only {
         if let Err(e) = desktop::attach_input() {
             service_log(&format!("prompt ui: desktop attach failed: {e}"));
@@ -484,6 +535,12 @@ fn ui_show(visual: PromptVisual) {
 }
 
 fn ui_hide() {
+    let hwnd = HWND_STATE.with(|state| state.get());
+    if let Some(hwnd) = hwnd {
+        if visual_is_voice(VISUAL_STATE.with(|s| s.get())) {
+            unsafe { fade_out_voice(hwnd) };
+        }
+    }
     let hwnd = HWND_STATE.with(|state| state.take());
     if let Some(hwnd) = hwnd {
         // Drop the renderer (releases the DComp target bound to this HWND) BEFORE
@@ -492,10 +549,30 @@ fn ui_hide() {
         WINDOW_RECT_STATE.with(|state| state.set(None));
         WINDOW_MORPH.with(|state| state.set(None));
         VISUAL_MORPH.with(|state| state.set(None));
+        VOICE_SHOWN_AT.with(|c| c.set(None));
+        VOICE_LABEL_AT.with(|c| c.set(None));
+        VOICE_EXIT_AT.with(|c| c.set(None));
         unsafe {
             let _ = KillTimer(hwnd, REPAINT_TIMER_ID);
             let _ = DestroyWindow(hwnd);
         }
+    }
+}
+
+/// Fade the dictation pill out over `VOICE_EXIT_MS` before it is destroyed, so
+/// dictation ending (auto-stop, R3, or the keyboard opening) doesn't just blink
+/// the pill away. Steps at the repaint cadence on this UI thread, like the
+/// keyboard's own slide-out.
+unsafe fn fade_out_voice(hwnd: HWND) {
+    let started = Instant::now();
+    VOICE_EXIT_AT.with(|c| c.set(Some(started)));
+    let dur = Duration::from_millis(crate::vk_motion::VOICE_EXIT_MS as u64);
+    loop {
+        render_prompt(hwnd);
+        if started.elapsed() >= dur {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(REPAINT_TIMER_MS as u64));
     }
 }
 
@@ -509,7 +586,9 @@ unsafe fn bottom_center() -> (i32, i32) {
 fn panel_size_for_visual(visual: PromptVisual) -> (i32, i32) {
     match visual {
         PromptVisual::Connected => (CONNECTED_PANEL_W, CONNECTED_PANEL_H),
-        PromptVisual::Listening | PromptVisual::Transcribing => (VOICE_W, VOICE_H),
+        PromptVisual::Listening | PromptVisual::Transcribing | PromptVisual::Starting => {
+            (VOICE_W, VOICE_H)
+        }
         PromptVisual::Ready | PromptVisual::NoPad => (PANEL_W, PANEL_H),
     }
 }
@@ -682,15 +761,26 @@ fn render_prompt(hwnd: HWND) {
                                     "",
                                 )
                             }
-                            PromptVisual::Listening => {
+                            PromptVisual::Listening
+                            | PromptVisual::Transcribing
+                            | PromptVisual::Starting => {
                                 let accent =
                                     theme.accent.or(theme.border).unwrap_or(DEFAULT_BORDER);
-                                r.draw_voice(accent, smoothed_voice_level(), false)
-                            }
-                            PromptVisual::Transcribing => {
-                                let accent =
-                                    theme.accent.or(theme.border).unwrap_or(DEFAULT_BORDER);
-                                r.draw_voice(accent, smoothed_voice_level(), true)
+                                let (alpha, scale, label_alpha) = voice_transition(now);
+                                r.draw_voice(&vk_renderer::VoicePill {
+                                    bg,
+                                    border,
+                                    accent,
+                                    text,
+                                    level: crate::win::speech_input::voice_level(),
+                                    phase: visual
+                                        .voice_phase()
+                                        .unwrap_or(vk_renderer::VoicePhase::Listening),
+                                    controller_label: snapshot.name.trim(),
+                                    alpha,
+                                    scale,
+                                    label_alpha,
+                                })
                             }
                         }
                     };
@@ -740,9 +830,53 @@ mod tests {
     }
 
     #[test]
+    fn voice_phases_share_one_pill_and_never_morph_into_prompts() {
+        assert_eq!(
+            PromptVisual::from_voice_phase("starting"),
+            PromptVisual::Starting
+        );
+        assert_eq!(
+            PromptVisual::from_voice_phase("listening"),
+            PromptVisual::Listening
+        );
+        assert_eq!(
+            PromptVisual::from_voice_phase("transcribing"),
+            PromptVisual::Transcribing
+        );
+        // Unknown/empty phase strings default to Listening, never to a prompt.
+        assert!(visual_is_voice(PromptVisual::from_voice_phase("")));
+
+        assert!(same_voice_pill(
+            PromptVisual::Starting,
+            PromptVisual::Listening
+        ));
+        assert!(same_voice_pill(
+            PromptVisual::Listening,
+            PromptVisual::Transcribing
+        ));
+        assert!(!same_voice_pill(
+            PromptVisual::Listening,
+            PromptVisual::Ready
+        ));
+        assert!(!can_morph_between(
+            PromptVisual::Listening,
+            PromptVisual::Connected
+        ));
+        assert_eq!(
+            PromptVisual::Starting.voice_phase(),
+            Some(vk_renderer::VoicePhase::Starting)
+        );
+        assert_eq!(PromptVisual::Ready.voice_phase(), None);
+    }
+
+    #[test]
     fn voice_uses_separate_overlay_thread_kind() {
         assert_eq!(
             thread_kind_for_visual(PromptVisual::Listening),
+            PromptThreadKind::Voice
+        );
+        assert_eq!(
+            thread_kind_for_visual(PromptVisual::Starting),
             PromptThreadKind::Voice
         );
         assert_eq!(
