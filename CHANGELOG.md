@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- Turn off Windows' controller sign-in keyboard by policy while Companion owns
+  the secure desktop (`TextInput/TouchKeyboardControllerModeAvailability=2`,
+  `EnableTouchKeyboardAutoInvokeInDesktopMode=0`, `AllowInputPanel=0`), instead
+  of only hiding its window after it appears. Persist every overridden value to
+  `signin-overrides.json` so a crashed or restarted service, and the
+  `restore-keyboard` command, can restore Windows text input. Log a
+  `sign-in ownership: OWNED|NOT GUARANTEED` read-back after applying, and add
+  `warmup-companion.exe signin-report` to print it on demand.
 - Fix phantom PIN digits from DualSense Bluetooth simple reports at Windows
   sign-in. Preserve held-button history during credential injection and release
   buttons and triggers when the last controller disconnects.

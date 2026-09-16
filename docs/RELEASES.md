@@ -113,3 +113,10 @@ custodian first, then sign in CI.
 warmup-companion.exe restore-keyboard
 warmup-companion.exe uninstall
 ```
+
+- Verify sign-in ownership on the lock screen (Xbox pad, then DualSense over
+  Bluetooth; PIN and password accounts): the service log shows
+  `sign-in ownership: OWNED` after each Winlogon entry, and after unlocking
+  `warmup-companion.exe signin-report` shows every override `MISSING` again
+  (restored) with `C:\ProgramData\WarmupVk\signin-overrides.json` gone. A
+  `NOT GUARANTEED` line or a `native kbd seen (unmatched)` line is a blocker.
