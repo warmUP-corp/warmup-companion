@@ -852,6 +852,11 @@ fn dispatch_install_or_service(args: &[String]) {
             crate::win::native_keyboard::ensure_search_service_running();
             install::log_line("restore-keyboard: requested Windows keyboard service restore");
             println!("Requested Windows touch keyboard/search service restore.");
+            println!("{}", crate::win::native_keyboard::signin_ownership_report());
+            std::process::exit(0);
+        }
+        Some("signin-report") => {
+            println!("{}", crate::win::native_keyboard::signin_ownership_report());
             std::process::exit(0);
         }
         #[cfg(feature = "gamepad")]

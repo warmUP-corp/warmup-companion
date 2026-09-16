@@ -48,6 +48,10 @@ static ON_WINLOGON: AtomicBool = AtomicBool::new(false);
 /// without spawning `sc.exe` on every poll.
 static NEED_SEARCH_START: AtomicBool = AtomicBool::new(true);
 
+/// One-shot: the first time this process sees userland, undo any sign-in
+/// overrides a previous run left live (it died on the secure desktop).
+static ORPHAN_RESTORE_PENDING: AtomicBool = AtomicBool::new(true);
+
 /// Thread id of the gamepad loop (the COM/UIA apartment + Winlogon-attached
 /// thread). `focus_password_field` no-ops off this thread so the VK UI thread's
 /// mouse path never inits COM on the wrong apartment.
@@ -112,6 +116,8 @@ pub fn set_active(on_winlogon: bool) {
         if was {
             clear_cache();
             crate::win::native_keyboard::restore_auto_invoke();
+        } else if ORPHAN_RESTORE_PENDING.swap(false, Ordering::SeqCst) {
+            crate::win::native_keyboard::restore_orphaned_overrides();
         }
     }
 }
