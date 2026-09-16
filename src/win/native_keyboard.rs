@@ -1,8 +1,10 @@
 //! Best-effort suppression for Windows' built-in touch keyboard/input panel.
 //!
-//! The sign-in PIN field can ask Windows to show its own keyboard when focus is
-//! retargeted. Warmup owns the visible VK, so hide any native panel windows that
-//! appear on the current desktop.
+//! Warmup draws its own overlay keyboard (`WarmupXboxVkWindow`) and never asks
+//! for `CoreInputViewKind::Gamepad`. The sign-in PIN field still auto-opens
+//! TabTip's gamepad layout when an XInput pad focuses an Edit, so while we own
+//! the overlay we disable TabletTip auto-invoke, stop the input services, set
+//! `ControllerToVKMapping` to off, and hide/kill TabTip / TextInputHost.
 
 use std::path::Path;
 use std::process::Command;
@@ -55,12 +57,21 @@ const SEARCH_SERVICE: &str = "TextInputManagementService";
 // Registry `Start`-toggled services. TextInputManagementService is deliberately
 // NOT here (see SEARCH_SERVICE) — it is toggled by live stop/start instead.
 const TEXT_INPUT_SERVICES: &[&str] = &["TabletInputService"];
+/// Shell mapping that turns a connected gamepad into virtual keys and then
+/// auto-shows TabTip's Gamepad layout on Edit focus. Off while Warmup's overlay
+/// owns typing; prior value restored with [`restore_auto_invoke`].
+const CONTROLLER_VK_SUBKEY: &str =
+    r"SOFTWARE\Microsoft\Input\Settings\ControllerProcessor\ControllerToVKMapping";
+const CONTROLLER_VK_VALUE: &str = "Enabled";
 
 /// `Some(priors)` while we have TabletTip values overridden. Each prior is the
 /// value to restore (`None` = absent, delete it).
 static AUTO_INVOKE_SAVED: Mutex<Option<Vec<TipPrior>>> = Mutex::new(None);
 static TEXT_INPUT_SERVICES_SAVED: Mutex<Option<Vec<(&'static str, Option<u32>)>>> =
     Mutex::new(None);
+/// `Some(prior)` while `ControllerToVKMapping\Enabled` is overridden.
+/// Inner `None` means the value was absent and should be deleted on restore.
+static CONTROLLER_VK_SAVED: Mutex<Option<Option<u32>>> = Mutex::new(None);
 
 #[derive(Clone, Copy)]
 struct TipPrior {
@@ -93,6 +104,7 @@ fn wide(s: &str) -> Vec<u16> {
 /// profile, saving the prior value for [`restore_auto_invoke`]. Idempotent:
 /// once overridden, repeated calls are no-ops (the prior value stays captured).
 pub fn disable_auto_invoke() {
+    disable_controller_to_vk_mapping();
     let Ok(mut saved) = AUTO_INVOKE_SAVED.lock() else {
         return;
     };
@@ -112,6 +124,7 @@ pub fn disable_auto_invoke() {
 /// it was originally absent). No-op if we never overrode it.
 pub fn restore_auto_invoke() {
     restore_text_input_services();
+    restore_controller_to_vk_mapping();
 
     let Ok(mut saved) = AUTO_INVOKE_SAVED.lock() else {
         return;
@@ -124,6 +137,102 @@ pub fn restore_auto_invoke() {
         restore_tablet_tip_value(p);
     }
     crate::install::log_line("native kbd: restored TabletTip keyboard values");
+}
+
+fn disable_controller_to_vk_mapping() {
+    let Ok(mut saved) = CONTROLLER_VK_SAVED.lock() else {
+        return;
+    };
+    if saved.is_some() {
+        return;
+    }
+    unsafe {
+        let subkey_w = wide(CONTROLLER_VK_SUBKEY);
+        let mut hkey = HKEY::default();
+        let rc = RegCreateKeyExW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(subkey_w.as_ptr()),
+            0,
+            PCWSTR::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_QUERY_VALUE | KEY_SET_VALUE,
+            None,
+            &mut hkey,
+            None,
+        );
+        if rc.0 != 0 {
+            crate::install::log_line(&format!(
+                "native kbd: ControllerToVKMapping key open failed rc={}",
+                rc.0
+            ));
+            return;
+        }
+        let value_w = wide(CONTROLLER_VK_VALUE);
+        let prior = read_dword(hkey, &value_w);
+        let desired = 0u32.to_le_bytes();
+        let rc = RegSetValueExW(hkey, PCWSTR(value_w.as_ptr()), 0, REG_DWORD, Some(&desired));
+        let _ = RegCloseKey(hkey);
+        if rc.0 == 0 {
+            *saved = Some(prior);
+            crate::install::log_line(&format!(
+                "native kbd: set ControllerToVKMapping\\Enabled=0 (prior={prior:?})"
+            ));
+        } else {
+            crate::install::log_line(&format!(
+                "native kbd: ControllerToVKMapping set failed rc={}",
+                rc.0
+            ));
+        }
+    }
+}
+
+fn restore_controller_to_vk_mapping() {
+    let Ok(mut saved) = CONTROLLER_VK_SAVED.lock() else {
+        return;
+    };
+    let Some(prior) = saved.take() else {
+        return;
+    };
+    unsafe {
+        let subkey_w = wide(CONTROLLER_VK_SUBKEY);
+        let mut hkey = HKEY::default();
+        let rc = RegCreateKeyExW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(subkey_w.as_ptr()),
+            0,
+            PCWSTR::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            None,
+            &mut hkey,
+            None,
+        );
+        if rc.0 != 0 {
+            *saved = Some(prior);
+            crate::install::log_line(&format!(
+                "native kbd: ControllerToVKMapping restore key open failed rc={}",
+                rc.0
+            ));
+            return;
+        }
+        let value_w = wide(CONTROLLER_VK_VALUE);
+        match prior {
+            Some(v) => {
+                let _ = RegSetValueExW(
+                    hkey,
+                    PCWSTR(value_w.as_ptr()),
+                    0,
+                    REG_DWORD,
+                    Some(&v.to_le_bytes()),
+                );
+            }
+            None => {
+                let _ = RegDeleteValueW(hkey, PCWSTR(value_w.as_ptr()));
+            }
+        }
+        let _ = RegCloseKey(hkey);
+    }
+    crate::install::log_line("native kbd: restored ControllerToVKMapping");
 }
 
 fn override_tablet_tip_values(root: TipRoot, subkey: &'static str, priors: &mut Vec<TipPrior>) {
@@ -462,6 +571,10 @@ unsafe fn read_dword(hkey: HKEY, value_name: &[u16]) -> Option<u32> {
     }
 }
 
+/// Windows 11 24H2 KB5062660+ ships a gamepad PIN keyboard on LogonUI.
+/// Detected for logs only — we do not yield to it unless
+/// `WARMUP_NATIVE_LOGON_VK` is a non-zero value. The OS keyboard overlaps
+/// our overlay (CoreInputView Gamepad / TabTip) and L3 then does nothing.
 const NATIVE_LOGON_VK_BUILD: u32 = 26100;
 const NATIVE_LOGON_VK_UBR: u32 = 4762;
 
@@ -498,24 +611,26 @@ fn build_has_native_logon_vk(build: u32, ubr: u32) -> bool {
     build > NATIVE_LOGON_VK_BUILD || (build == NATIVE_LOGON_VK_BUILD && ubr >= NATIVE_LOGON_VK_UBR)
 }
 
+/// Opt into Windows' gamepad PIN keyboard. Unset or `"0"` keeps Warmup's
+/// overlay; any other value stands down the overlay on LogonUI.
+fn native_logon_vk_opt_in(env: Option<&str>) -> bool {
+    env.is_some_and(|v| v != "0")
+}
+
 pub fn native_logon_keyboard_available() -> bool {
     *NATIVE_LOGON_VK.get_or_init(|| {
-        if let Ok(v) = std::env::var("WARMUP_NATIVE_LOGON_VK") {
-            let native = v != "0";
-            crate::install::log_line(&format!(
-                "native kbd: logon VK native={native} (env override '{v}')"
-            ));
-            return native;
-        }
+        let env = std::env::var("WARMUP_NATIVE_LOGON_VK").ok();
+        let native = native_logon_vk_opt_in(env.as_deref());
         let (build, ubr) = current_windows_build();
-        let native = match (build, ubr) {
+        let os_has_native = match (build, ubr) {
             (Some(b), Some(u)) => build_has_native_logon_vk(b, u),
             _ => false,
         };
         crate::install::log_line(&format!(
-            "native kbd: logon VK build={}.{} native={native} (registry)",
+            "native kbd: logon VK native={native} os_has_native={os_has_native} build={}.{} env={}",
             build.map(|b| b.to_string()).unwrap_or_else(|| "?".into()),
             ubr.map(|u| u.to_string()).unwrap_or_else(|| "?".into()),
+            env.as_deref().unwrap_or("(unset)"),
         ));
         native
     })
@@ -726,7 +841,7 @@ fn is_native_keyboard_window(class: &str, title: &str, process: Option<&str>) ->
 
 #[cfg(test)]
 mod tests {
-    use super::build_has_native_logon_vk;
+    use super::{build_has_native_logon_vk, native_logon_vk_opt_in};
 
     #[test]
     fn native_logon_vk_threshold() {
@@ -734,5 +849,13 @@ mod tests {
         assert!(build_has_native_logon_vk(26100, 4762));
         assert!(build_has_native_logon_vk(26200, 0));
         assert!(!build_has_native_logon_vk(22631, 9999));
+    }
+
+    #[test]
+    fn native_logon_vk_stays_off_unless_env_opts_in() {
+        assert!(!native_logon_vk_opt_in(None));
+        assert!(!native_logon_vk_opt_in(Some("0")));
+        assert!(native_logon_vk_opt_in(Some("1")));
+        assert!(native_logon_vk_opt_in(Some("yes")));
     }
 }

@@ -31,6 +31,8 @@ temporarily suppresses those windows so the controller keyboard remains usable.
 This can include:
 
 - TabletTip auto-invoke registry values for the current user and `.DEFAULT`.
+- `HKLM\SOFTWARE\Microsoft\Input\Settings\ControllerProcessor\ControllerToVKMapping`
+  `Enabled=0`, with the prior value saved in process.
 - `TabletInputService` start value, with prior value saved in process.
 - Live stop/start of `TextInputManagementService`.
 - Closing or terminating `TextInputHost.exe`, `TabTip.exe`, or `osk.exe` only on
