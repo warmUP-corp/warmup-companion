@@ -533,6 +533,8 @@ pub struct VkRenderer {
     sublabel_format: IDWriteTextFormat,
     /// Fixed large font for the connect/keyboard prompt pills (10-foot UI).
     prompt_format: IDWriteTextFormat,
+    /// Secondary line on the dictation pill ("Stop" beside the R3 glyph).
+    voice_hint_format: IDWriteTextFormat,
     icon_cache: HashMap<IconCacheKey, ID2D1Bitmap1>,
     controller_art_cache: HashMap<ControllerArtCacheKey, (ID2D1Bitmap1, u32, u32)>,
     prompt_started: Instant,
@@ -545,6 +547,10 @@ pub struct VkRenderer {
     /// short fade/rise entrance. `None` while hidden (exit is instant: the strip
     /// comes and goes once per word, so motion there adds nothing).
     strip_shown_at: Option<Instant>,
+    /// Mic-level envelope state (`vk_motion::smooth_level`), shared by the mic
+    /// key orb and the dictation pill so both breathe the same way.
+    level: f32,
+    level_at: Option<Instant>,
     _d3d: ID3D11Device,
     _d2d_device: ID2D1Device,
     _dcomp_device: IDCompositionDevice,
@@ -601,6 +607,14 @@ const HINT_TOP: f32 = CHIP_TOP + (CHIP_H - HINT_PILL_H) * 0.5;
 const HINT_GAP: f32 = 12.0;
 const KEY_HINT_BADGE_MAX: f32 = 38.0;
 const KEY_HINT_BADGE_INSET: f32 = 7.0;
+/// Dictation pill secondary text size (DIPs); the title reuses the 28px prompt font.
+const VOICE_HINT_PX: f32 = 18.0;
+/// Dictation pill: horizontal padding at the pill's rounded ends.
+const VOICE_PAD_X: f32 = 12.0;
+/// Gap between the orb slot and the text column, and between the R3 glyph and "Stop".
+const VOICE_GAP: f32 = 10.0;
+/// Height of the R3 glyph on the hint line.
+const VOICE_HINT_ICON: f32 = 30.0;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum VkIcon {
@@ -1012,7 +1026,7 @@ pub struct VkModifiers {
 /// selection/glyph-branch logic is testable without a NAV lock or a D2D device.
 /// Voice helper phase, for the phase-coded mic halo (so startup/transcribe don't
 /// look identical to idle listening).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VoicePhase {
     Starting,
     Listening,
@@ -1213,6 +1227,20 @@ impl VkRenderer {
                 &locale,
             )
             .map_err(|e| format!("CreateTextFormat (prompt): {e}"))?;
+        let voice_hint_format = dwrite
+            .CreateTextFormat(
+                w!("Segoe UI"),
+                &fonts,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                VOICE_HINT_PX,
+                &locale,
+            )
+            .map_err(|e| format!("CreateTextFormat (voice hint): {e}"))?;
+        let _ = voice_hint_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        let _ = voice_hint_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        let _ = voice_hint_format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
 
         // Centre labels in their key rects (DWrite defaults to top-left).
         for f in [&text_format, &glyph_format] {
@@ -1240,12 +1268,15 @@ impl VkRenderer {
             chip_format,
             sublabel_format,
             prompt_format,
+            voice_hint_format,
             icon_cache: HashMap::new(),
             controller_art_cache: HashMap::new(),
             prompt_started: Instant::now(),
             anim_sel: None,
             last_draw: None,
             strip_shown_at: None,
+            level: 0.0,
+            level_at: None,
             _d3d: d3d,
             _d2d_device: d2d_device,
             _dcomp_device: dcomp_device,
@@ -1488,6 +1519,21 @@ impl VkRenderer {
         Ok(())
     }
 
+    /// Advance the mic-level envelope toward `target` for this frame.
+    fn smoothed_level(&mut self, target: f32, now: Instant) -> f32 {
+        let dt_ms = self
+            .level_at
+            .map(|t| now.duration_since(t).as_secs_f32() * 1000.0)
+            .unwrap_or(0.0);
+        self.level_at = Some(now);
+        self.level = if dt_ms > 0.0 {
+            crate::vk_motion::smooth_level(self.level, target, dt_ms)
+        } else {
+            target.clamp(0.0, 1.0)
+        };
+        self.level
+    }
+
     unsafe fn draw_voice_orb(
         &mut self,
         accent: u32,
@@ -1500,7 +1546,7 @@ impl VkRenderer {
     ) -> Result<(), String> {
         let t = self.prompt_started.elapsed().as_secs_f32();
         let amp = if transcribing {
-            (t * std::f32::consts::TAU * 1.1).sin() * 0.5 + 0.5
+            (t * std::f32::consts::TAU * crate::vk_motion::TRANSCRIBE_PULSE_HZ).sin() * 0.5 + 0.5
         } else {
             level.clamp(0.0, 1.0)
         };
@@ -1772,13 +1818,14 @@ impl VkRenderer {
                         .min(rect.rect.bottom - rect.rect.top)
                         * 0.56)
                         .max(1.0);
+                    let level = self.smoothed_level(voice_level, now);
                     self.d2d_context.PushAxisAlignedClip(
                         &rect.rect,
                         windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                     );
                     self.draw_voice_orb(
                         pal.accent,
-                        voice_level,
+                        level,
                         matches!(voice_phase, VoicePhase::Transcribing),
                         cx,
                         cy,
@@ -2563,17 +2610,30 @@ impl VkRenderer {
         Ok(())
     }
 
-    /// Subtle, audio-reactive voice glow for the right-edge overlay: soft concentric
-    /// rings + a core dot that grow/brighten with `level` (live mic energy, 0..1).
-    /// `transcribing` swaps the live level for a gentle auto-pulse while it works.
-    pub unsafe fn draw_voice(
-        &mut self,
-        accent: u32,
-        level: f32,
-        transcribing: bool,
-    ) -> Result<(), String> {
+    /// Dictation pill for the keyboard-closed case: the audio-reactive orb on the
+    /// left, a phase title beside it, and — while listening — the controller's
+    /// R3 glyph with "Stop" so the exit is always on screen. Every phase has a
+    /// static cue (title, hint, orb brightness); motion is never the only signal.
+    pub unsafe fn draw_voice(&mut self, pill: &VoicePill) -> Result<(), String> {
+        let VoicePill {
+            bg,
+            border,
+            accent,
+            text,
+            level,
+            phase,
+            controller_label,
+            alpha,
+            scale,
+            label_alpha,
+        } = *pill;
         let cw = self.width as f32;
         let ch = self.height as f32;
+        let now = Instant::now();
+        let alpha = alpha.clamp(0.0, 1.0);
+        let label_alpha = label_alpha.clamp(0.0, 1.0) * alpha;
+        let level = self.smoothed_level(level, now);
+
         self.d2d_context.BeginDraw();
         self.d2d_context.Clear(Some(&D2D1_COLOR_F {
             r: 0.0,
@@ -2581,12 +2641,135 @@ impl VkRenderer {
             b: 0.0,
             a: 0.0,
         }));
+        // Entrance scale about the pill centre (modal-style: it is anchored to
+        // nothing on screen, so centre is the right origin).
+        self.d2d_context
+            .SetTransform(&scale_about(scale.clamp(0.5, 1.0), cw * 0.5, ch * 0.5));
 
-        let cx = cw * 0.5;
-        let cy = ch * 0.5;
-        let unit = cw.min(ch) * 0.5;
-        self.draw_voice_orb(accent, level, transcribing, cx, cy, unit, 1.0)?;
+        // Fully rounded pill filling the window minus a hairline for the stroke.
+        let panel = D2D_RECT_F {
+            left: FLOATING_PANEL_INSET,
+            top: FLOATING_PANEL_INSET,
+            right: cw - FLOATING_PANEL_INSET,
+            bottom: ch - FLOATING_PANEL_INSET,
+        };
+        let radius = (panel.bottom - panel.top) * 0.5;
+        let rounded = D2D1_ROUNDED_RECT {
+            rect: panel,
+            radiusX: radius,
+            radiusY: radius,
+        };
+        draw_soft_shadow(&self.d2d_context, panel, radius, alpha)?;
+        let bg_brush = solid_brush(&self.d2d_context, colorref_alpha(bg, 0.94 * alpha))?;
+        let border_brush = solid_brush(
+            &self.d2d_context,
+            colorref_alpha(colorref_mix(0x00FFFFFF, border, 0.38), 0.9 * alpha),
+        )?;
+        self.d2d_context.FillRoundedRectangle(&rounded, &bg_brush);
+        self.d2d_context
+            .DrawRoundedRectangle(&rounded, &border_brush, 1.25, None);
 
+        // Orb in a square slot at the rounded left end. Starting: dim, no live
+        // level yet (mic isn't capturing), so the user waits a beat before talking.
+        let slot = ch;
+        let orb_cx = panel.left + slot * 0.5;
+        let orb_cy = ch * 0.5;
+        let (orb_alpha, transcribing) = match phase {
+            VoicePhase::Starting => (0.45, false),
+            VoicePhase::Listening => (1.0, false),
+            VoicePhase::Transcribing => (1.0, true),
+        };
+        self.d2d_context.PushAxisAlignedClip(
+            &D2D_RECT_F {
+                left: panel.left,
+                top: panel.top,
+                right: panel.left + slot,
+                bottom: panel.bottom,
+            },
+            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+        );
+        self.draw_voice_orb(
+            accent,
+            level,
+            transcribing,
+            orb_cx,
+            orb_cy,
+            slot * 0.42,
+            orb_alpha * alpha,
+        )?;
+        self.d2d_context.PopAxisAlignedClip();
+
+        // Text column: title, and a hint line only while there is something to do.
+        let (title, muted) = voice_phase_title(phase);
+        let title_alpha = if muted { 0.7 } else { 1.0 } * label_alpha;
+        let title_brush = solid_brush(&self.d2d_context, colorref_alpha(text, title_alpha))?;
+        let text_left = panel.left + slot + VOICE_GAP;
+        let text_right = panel.right - radius.max(VOICE_PAD_X);
+        let _ = self
+            .prompt_format
+            .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        let _ = self
+            .prompt_format
+            .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        let _ = self
+            .prompt_format
+            .SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        let show_hint = matches!(phase, VoicePhase::Listening);
+        // Title is vertically centred alone; with a hint it moves up to share the
+        // height (title band on top, hint band below).
+        let title_h = 36.0;
+        let hint_h = VOICE_HINT_ICON.max(VOICE_HINT_PX + 6.0);
+        let stack_h = if show_hint { title_h + hint_h } else { title_h };
+        let stack_top = ch * 0.5 - stack_h * 0.5;
+        let title_w: Vec<u16> = title.encode_utf16().collect();
+        self.d2d_context.DrawText(
+            &title_w,
+            &self.prompt_format,
+            &D2D_RECT_F {
+                left: text_left,
+                top: stack_top,
+                right: text_right,
+                bottom: stack_top + title_h,
+            },
+            &title_brush,
+            D2D1_DRAW_TEXT_OPTIONS_CLIP,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
+        let _ = self
+            .prompt_format
+            .SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+
+        if show_hint {
+            let hint_top = stack_top + title_h;
+            let icon_rect = D2D_RECT_F {
+                left: text_left,
+                top: hint_top + (hint_h - VOICE_HINT_ICON) * 0.5,
+                right: text_left + VOICE_HINT_ICON,
+                bottom: hint_top + (hint_h + VOICE_HINT_ICON) * 0.5,
+            };
+            let icon = ControllerIconFamily::from_label(controller_label)
+                .hint_icon("R3")
+                .unwrap_or(VkIcon::R3Xbox);
+            self.draw_svg_icon_alpha(icon, icon_rect, text, label_alpha)?;
+            let hint_brush =
+                solid_brush(&self.d2d_context, colorref_alpha(text, 0.72 * label_alpha))?;
+            let hint_w: Vec<u16> = VOICE_STOP_HINT.encode_utf16().collect();
+            self.d2d_context.DrawText(
+                &hint_w,
+                &self.voice_hint_format,
+                &D2D_RECT_F {
+                    left: icon_rect.right + VOICE_GAP * 0.6,
+                    top: hint_top,
+                    right: text_right,
+                    bottom: hint_top + hint_h,
+                },
+                &hint_brush,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+
+        self.d2d_context.SetTransform(&IDENTITY);
         self.d2d_context
             .EndDraw(None, None)
             .map_err(|e| format!("EndDraw: {e}"))?;
@@ -2595,6 +2778,35 @@ impl VkRenderer {
             .ok()
             .map_err(|e| format!("Present: {e}"))?;
         Ok(())
+    }
+}
+
+/// Everything one frame of the dictation pill needs. `alpha`/`scale` carry the
+/// enter/exit transition; `label_alpha` fades a freshly swapped phase title in.
+pub struct VoicePill<'a> {
+    pub bg: u32,
+    pub border: u32,
+    pub accent: u32,
+    pub text: u32,
+    /// Raw published mic level (0..1); the renderer applies the envelope.
+    pub level: f32,
+    pub phase: VoicePhase,
+    pub controller_label: &'a str,
+    pub alpha: f32,
+    pub scale: f32,
+    pub label_alpha: f32,
+}
+
+/// Hint text beside the R3 glyph while listening.
+const VOICE_STOP_HINT: &str = "Stop";
+
+/// `(title, muted)` for a dictation phase. Muted phases are the ones the user is
+/// waiting on rather than driving.
+fn voice_phase_title(phase: VoicePhase) -> (&'static str, bool) {
+    match phase {
+        VoicePhase::Starting => ("Starting\u{2026}", true),
+        VoicePhase::Listening => ("Listening", false),
+        VoicePhase::Transcribing => ("Transcribing\u{2026}", true),
     }
 }
 
@@ -2830,6 +3042,20 @@ mod tests {
         assert!(cx < 146.0 && cx > 100.0);
         assert_eq!(scale_about(1.0, 3.0, 4.0).M31, 0.0);
         assert_eq!(translate(0.0, 4.0).M32, 4.0);
+    }
+
+    #[test]
+    fn every_dictation_phase_has_a_static_cue() {
+        // Motion is never the only feedback channel: each phase names itself,
+        // and the phases the user merely waits on read as muted.
+        let (starting, m1) = voice_phase_title(VoicePhase::Starting);
+        let (listening, m2) = voice_phase_title(VoicePhase::Listening);
+        let (transcribing, m3) = voice_phase_title(VoicePhase::Transcribing);
+        assert!(starting.starts_with("Starting") && m1);
+        assert_eq!((listening, m2), ("Listening", false));
+        assert!(transcribing.starts_with("Transcribing") && m3);
+        assert_ne!(starting, listening);
+        assert_eq!(VOICE_STOP_HINT, "Stop");
     }
 
     #[test]
