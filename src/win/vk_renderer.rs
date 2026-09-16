@@ -151,17 +151,104 @@ fn chip_width(word: &str) -> f32 {
     (n * 7.8 + CHIP_PAD_X * 2.0).clamp(CHIP_MIN_W, 200.0)
 }
 
-unsafe fn draw_candidate_strip(
+/// Identity transform for the D2D device context.
+const IDENTITY: Matrix3x2 = Matrix3x2 {
+    M11: 1.0,
+    M12: 0.0,
+    M21: 0.0,
+    M22: 1.0,
+    M31: 0.0,
+    M32: 0.0,
+};
+
+/// Uniform scale `s` about `(cx, cy)`, for press feedback on a single key.
+fn scale_about(s: f32, cx: f32, cy: f32) -> Matrix3x2 {
+    Matrix3x2 {
+        M11: s,
+        M12: 0.0,
+        M21: 0.0,
+        M22: s,
+        M31: cx * (1.0 - s),
+        M32: cy * (1.0 - s),
+    }
+}
+
+fn translate(dx: f32, dy: f32) -> Matrix3x2 {
+    Matrix3x2 {
+        M11: 1.0,
+        M12: 0.0,
+        M21: 0.0,
+        M22: 1.0,
+        M31: dx,
+        M32: dy,
+    }
+}
+
+/// Layered transparent rings that stand in for a blurred drop shadow: each
+/// entry is `(y_offset, spread, alpha)` for one filled rounded rect drawn under
+/// the surface, tight and darker close to it, wider and fainter further out.
+/// Cheap (no effect graph) and reads as soft elevation instead of a hard,
+/// offset copy of the surface.
+const SOFT_SHADOW_LAYERS: [(f32, f32, f32); 4] = [
+    (1.0, 0.0, 0.16),
+    (2.0, 1.0, 0.10),
+    (4.0, 3.0, 0.07),
+    (8.0, 6.0, 0.04),
+];
+
+unsafe fn draw_soft_shadow(
     ctx: &ID2D1DeviceContext,
+    rect: D2D_RECT_F,
+    radius: f32,
+    alpha: f32,
+) -> Result<(), String> {
+    for (dy, spread, a) in SOFT_SHADOW_LAYERS {
+        let brush = solid_brush(ctx, colorref_alpha(0x000000, a * alpha))?;
+        let r = radius + spread;
+        ctx.FillRoundedRectangle(
+            &D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: rect.left - spread,
+                    top: rect.top - spread + dy,
+                    right: rect.right + spread,
+                    bottom: rect.bottom + spread + dy,
+                },
+                radiusX: r,
+                radiusY: r,
+            },
+            &brush,
+        );
+    }
+    Ok(())
+}
+
+/// Everything the suggestion strip borrows from the key pass to paint itself.
+struct StripPaint<'a> {
+    ctx: &'a ID2D1DeviceContext,
+    accent: &'a ID2D1SolidColorBrush,
+    text: &'a ID2D1SolidColorBrush,
+    sel_text: &'a ID2D1SolidColorBrush,
+    chip_format: &'a IDWriteTextFormat,
+    hint_format: &'a IDWriteTextFormat,
+    pal: &'a VkPalette,
+    icons: ControllerIconFamily,
+}
+
+/// Brushes for one LB/RB shortcut pill.
+struct HintBrushes {
+    fill: ID2D1SolidColorBrush,
+    outline: ID2D1SolidColorBrush,
+    text: ID2D1SolidColorBrush,
+}
+
+/// `alpha` / `dy` come from the strip's entrance (fade in while rising a few px);
+/// once settled they are `1.0` / `0.0` and this draws the steady state.
+unsafe fn draw_candidate_strip(
+    p: &StripPaint,
     cw: f32,
     strip: &crate::vk_predict::StripState,
-    accent_brush: &ID2D1SolidColorBrush,
-    text_brush: &ID2D1SolidColorBrush,
-    sel_text_brush: &ID2D1SolidColorBrush,
-    chip_format: &IDWriteTextFormat,
-    hint_format: &IDWriteTextFormat,
-    pal: &VkPalette,
-    controller_icons: ControllerIconFamily,
+    alpha: f32,
+    dy: f32,
 ) -> Result<(), String> {
     let mut widths = [0.0f32; 3];
     let mut count = 0usize;
@@ -175,16 +262,53 @@ unsafe fn draw_candidate_strip(
     if count == 0 {
         return Ok(());
     }
+    let alpha = alpha.clamp(0.0, 1.0);
+    if alpha <= 0.0 {
+        return Ok(());
+    }
+    p.ctx.SetTransform(&translate(0.0, dy));
+    // Shared brushes are borrowed from the key pass; fade them for the entrance
+    // and hand them back opaque.
+    for b in [p.accent, p.text, p.sel_text] {
+        b.SetOpacity(alpha);
+    }
+    let result = draw_candidate_strip_body(p, cw, strip, &widths, count, alpha);
+    for b in [p.accent, p.text, p.sel_text] {
+        b.SetOpacity(1.0);
+    }
+    p.ctx.SetTransform(&IDENTITY);
+    result
+}
 
+unsafe fn draw_candidate_strip_body(
+    p: &StripPaint,
+    cw: f32,
+    strip: &crate::vk_predict::StripState,
+    widths: &[f32; 3],
+    count: usize,
+    alpha: f32,
+) -> Result<(), String> {
+    let StripPaint {
+        ctx,
+        accent: accent_brush,
+        text: text_brush,
+        sel_text: sel_text_brush,
+        chip_format,
+        hint_format,
+        pal,
+        icons: controller_icons,
+    } = *p;
     let total_w: f32 = widths.iter().sum::<f32>() + CHIP_GAP * (count.saturating_sub(1) as f32);
     let chips_left = (cw - total_w) / 2.0;
-    let outline = solid_brush(ctx, colorref_alpha(pal.text, 0.22))?;
-    let hint_fill = solid_brush(ctx, colorref_alpha(pal.text, 0.10))?;
-    let hint_text = solid_brush(ctx, colorref_alpha(pal.text, 0.72))?;
+    let hint = HintBrushes {
+        fill: solid_brush(ctx, colorref_alpha(pal.text, 0.10 * alpha))?,
+        outline: solid_brush(ctx, colorref_alpha(pal.text, 0.22 * alpha))?,
+        text: solid_brush(ctx, colorref_alpha(pal.text, 0.72 * alpha))?,
+    };
 
     // One pill in the band reserved above the keys (the key layout leaves room, so
-    // the keyboard never shifts). Elevated surface + border + a soft offset shadow
-    // so it reads as a distinct suggestion bar sitting above the keys.
+    // the keyboard never shifts). Elevated surface + border + a soft layered
+    // shadow so it reads as a suggestion bar floating above the keys.
     let pill = D2D_RECT_F {
         left: chips_left - CHIP_PAD_X,
         top: CHIP_TOP,
@@ -197,17 +321,12 @@ unsafe fn draw_candidate_strip(
         radiusX: pill_radius,
         radiusY: pill_radius,
     };
-    let shadow = solid_brush(ctx, colorref_alpha(0x000000, 0.30))?;
-    ctx.FillRoundedRectangle(
-        &rounded(D2D_RECT_F {
-            top: pill.top + 3.0,
-            bottom: pill.bottom + 3.0,
-            ..pill
-        }),
-        &shadow,
-    );
-    let surface = solid_brush(ctx, colorref(mix_color(0xFFFFFF, pal.key, 0.10)))?;
-    let border = solid_brush(ctx, colorref(pal.border))?;
+    draw_soft_shadow(ctx, pill, pill_radius, alpha)?;
+    let surface = solid_brush(
+        ctx,
+        colorref_alpha(mix_color(0xFFFFFF, pal.key, 0.10), alpha),
+    )?;
+    let border = solid_brush(ctx, colorref_alpha(pal.border, alpha))?;
     ctx.FillRoundedRectangle(&rounded(pill), &surface);
     ctx.DrawRoundedRectangle(&rounded(pill), &border, 1.25, None);
 
@@ -217,24 +336,25 @@ unsafe fn draw_candidate_strip(
         "LB",
         controller_icons.hint_icon("LB"),
         pill.left - HINT_PILL_W - HINT_GAP,
-        &hint_fill,
-        &outline,
-        &hint_text,
+        &hint,
         hint_format,
+        alpha,
     )?;
     draw_shortcut_pill(
         ctx,
         "RB",
         controller_icons.hint_icon("RB"),
         pill.right + HINT_GAP,
-        &hint_fill,
-        &outline,
-        &hint_text,
+        &hint,
         hint_format,
+        alpha,
     )?;
 
-    // Words inside the pill; the highlighted one gets an accent inner fill.
-    let inner_radius = CHIP_H * 0.42;
+    // Words inside the pill; the highlighted one gets an accent inner fill that
+    // sits CHIP_HIGHLIGHT_INSET inside the pill. Concentric: outer = inner +
+    // padding, so the highlight's radius is the pill's minus that inset and the
+    // two curves run parallel instead of fighting at the ends.
+    let inner_radius = pill_radius - CHIP_HIGHLIGHT_INSET;
     let mut x = chips_left;
     for (i, word) in strip.visible.iter().enumerate() {
         if word.is_empty() {
@@ -251,7 +371,12 @@ unsafe fn draw_candidate_strip(
         if selected {
             ctx.FillRoundedRectangle(
                 &D2D1_ROUNDED_RECT {
-                    rect: slot,
+                    rect: D2D_RECT_F {
+                        left: slot.left,
+                        top: slot.top + CHIP_HIGHLIGHT_INSET,
+                        right: slot.right,
+                        bottom: slot.bottom - CHIP_HIGHLIGHT_INSET,
+                    },
                     radiusX: inner_radius,
                     radiusY: inner_radius,
                 },
@@ -284,10 +409,9 @@ unsafe fn draw_shortcut_pill(
     label: &str,
     icon: Option<VkIcon>,
     x: f32,
-    fill: &ID2D1SolidColorBrush,
-    outline: &ID2D1SolidColorBrush,
-    text: &ID2D1SolidColorBrush,
+    brushes: &HintBrushes,
     format: &IDWriteTextFormat,
+    alpha: f32,
 ) -> Result<(), String> {
     if x < 0.0 {
         return Ok(());
@@ -302,17 +426,17 @@ unsafe fn draw_shortcut_pill(
         radiusX: HINT_PILL_H * 0.5,
         radiusY: HINT_PILL_H * 0.5,
     };
-    ctx.FillRoundedRectangle(&rect, fill);
-    ctx.DrawRoundedRectangle(&rect, outline, 1.0, None);
+    ctx.FillRoundedRectangle(&rect, &brushes.fill);
+    ctx.DrawRoundedRectangle(&rect, &brushes.outline, 1.0, None);
     if let Some(icon) = icon {
-        draw_uncached_svg_icon(ctx, icon, rect.rect)?;
+        draw_uncached_svg_icon(ctx, icon, rect.rect, alpha)?;
     } else {
         let wide: Vec<u16> = label.encode_utf16().collect();
         ctx.DrawText(
             &wide,
             format,
             &rect.rect,
-            text,
+            &brushes.text,
             D2D1_DRAW_TEXT_OPTIONS_NONE,
             DWRITE_MEASURING_MODE_NATURAL,
         );
@@ -324,6 +448,7 @@ unsafe fn draw_uncached_svg_icon(
     ctx: &ID2D1DeviceContext,
     icon: VkIcon,
     rect: D2D_RECT_F,
+    opacity: f32,
 ) -> Result<(), String> {
     let h = rect.bottom - rect.top;
     let draw_px = (h * 0.94).round().clamp(24.0, 64.0);
@@ -373,7 +498,7 @@ unsafe fn draw_uncached_svg_icon(
     ctx.DrawBitmap(
         &bitmap,
         Some(&dest),
-        1.0,
+        opacity.clamp(0.0, 1.0),
         D2D1_INTERPOLATION_MODE_LINEAR,
         None,
         None,
@@ -416,6 +541,10 @@ pub struct VkRenderer {
     /// first frame, where it snaps to the selection.
     anim_sel: Option<D2D_RECT_F>,
     last_draw: Option<Instant>,
+    /// When the suggestion strip last went from hidden to shown, driving its
+    /// short fade/rise entrance. `None` while hidden (exit is instant: the strip
+    /// comes and goes once per word, so motion there adds nothing).
+    strip_shown_at: Option<Instant>,
     _d3d: ID3D11Device,
     _d2d_device: ID2D1Device,
     _dcomp_device: IDCompositionDevice,
@@ -439,6 +568,16 @@ const SEL_GLIDE_TAU: f32 = 0.045;
 
 /// Uniform padding between the floating card's rounded edge and its key grid.
 pub const FLOATING_PAD: f32 = 18.0;
+/// Hairline the floating panel is inset from the window so its antialiased
+/// stroke is never clipped.
+const FLOATING_PANEL_INSET: f32 = 1.0;
+
+/// Floating-card corner radius for keys `key_h` tall: concentric with the key
+/// corners (`outer = inner + padding`), so the card's curve runs parallel to the
+/// corner keys instead of the two radii fighting.
+fn floating_card_radius(key_h: f32) -> f32 {
+    crate::vk_motion::concentric_radius(key_h * RADIUS_FRAC, FLOATING_PAD - FLOATING_PANEL_INSET)
+}
 
 const CHIP_H: f32 = 48.0;
 const CHIP_GAP: f32 = 10.0;
@@ -451,6 +590,9 @@ const CHIP_TOP: f32 = 11.0;
 pub const STRIP_BAND_H: f32 = CHIP_TOP + CHIP_H + 8.0;
 const CHIP_LABEL_INSET_X: f32 = 8.0;
 const CHIP_LABEL_INSET_Y: f32 = 4.0;
+/// Vertical inset of the highlighted chip inside the pill; also the padding the
+/// concentric radius is derived from.
+const CHIP_HIGHLIGHT_INSET: f32 = 4.0;
 /// Chip label size in DIPs — independent of key label scaling.
 const CHIP_FONT_PX: f32 = 14.0;
 const HINT_PILL_W: f32 = 40.0;
@@ -888,6 +1030,10 @@ pub struct VkFrame<'a> {
     pub candidates: Option<&'a crate::vk_predict::StripState>,
     pub floating: bool,
     pub modifiers: VkModifiers,
+    /// Key that just fired and its current press-feedback scale (`vk_motion::press_scale`),
+    /// `None` once settled. The fill, label and badge dip together about the
+    /// key's centre; the layout rects never move.
+    pub pressed: Option<(KeyPos, f32)>,
     pub controller_label: &'a str,
     /// Voice input is reachable on this surface (false on Winlogon, where
     /// LocalSystem has no mic consent). Drives the mic key's truthful state.
@@ -1099,6 +1245,7 @@ impl VkRenderer {
             prompt_started: Instant::now(),
             anim_sel: None,
             last_draw: None,
+            strip_shown_at: None,
             _d3d: d3d,
             _d2d_device: d2d_device,
             _dcomp_device: dcomp_device,
@@ -1432,6 +1579,7 @@ impl VkRenderer {
             candidates,
             floating,
             modifiers,
+            pressed,
             controller_label,
             voice_available,
             voice_active,
@@ -1441,10 +1589,25 @@ impl VkRenderer {
         let controller_icons = ControllerIconFamily::from_label(controller_label);
         let cw = self.width as f32;
         let ch = self.height as f32;
+        let now = Instant::now();
 
         self.d2d_context.BeginDraw();
+        // Per-key press transforms below are scoped; start every frame clean in
+        // case a previous frame bailed mid-key.
+        self.d2d_context.SetTransform(&IDENTITY);
 
         let rects = key_rects(cw, ch, scale_w, rows, top_inset);
+
+        // Suggestion strip entrance clock: arm on hidden->shown, drop on hide.
+        match (candidates.is_some(), self.strip_shown_at) {
+            (true, None) => self.strip_shown_at = Some(now),
+            (false, Some(_)) => self.strip_shown_at = None,
+            _ => {}
+        }
+        let (strip_alpha, strip_dy) = self
+            .strip_shown_at
+            .map(|t| crate::vk_motion::strip_enter(now.duration_since(t).as_secs_f32() * 1000.0))
+            .unwrap_or((1.0, 0.0));
 
         // Ease the focus ring toward the selected key. The accent fill still snaps
         // (so each key's label colour is unambiguous); only the bright ring glides,
@@ -1459,7 +1622,6 @@ impl VkRenderer {
                 bottom: kr.bottom,
             })
         {
-            let now = Instant::now();
             let dt = self
                 .last_draw
                 .map(|t| now.duration_since(t).as_secs_f32())
@@ -1489,12 +1651,19 @@ impl VkRenderer {
                 b: 0.0,
                 a: 0.0,
             }));
-            let radius = (ch * 0.06).clamp(14.0, 30.0);
+            // Concentric with the keys: card radius = key radius + the padding
+            // between the key block and the card edge (the panel rect is inset a
+            // hairline from the window, so that hairline comes off the padding).
+            let key_h = rects
+                .first()
+                .map(|kr| kr.bottom - kr.top)
+                .unwrap_or(REF_KEY_W * KEY_ASPECT);
+            let radius = floating_card_radius(key_h);
             let panel = D2D_RECT_F {
-                left: 1.0,
-                top: 1.0,
-                right: cw - 1.0,
-                bottom: ch - 1.0,
+                left: FLOATING_PANEL_INSET,
+                top: FLOATING_PANEL_INSET,
+                right: cw - FLOATING_PANEL_INSET,
+                bottom: ch - FLOATING_PANEL_INSET,
             };
             let rounded = D2D1_ROUNDED_RECT {
                 rect: panel,
@@ -1530,6 +1699,18 @@ impl VkRenderer {
         for kr in &rects {
             let key = &rows[kr.pos.row].keys[kr.pos.col];
             let selected = sel.row == kr.pos.row && sel.col == kr.pos.col;
+            // Press feedback: the key that just fired dips (0.96 -> 1.0) about its
+            // own centre, so the interface visibly acknowledges every keystroke.
+            let press = pressed
+                .filter(|(p, _)| p.row == kr.pos.row && p.col == kr.pos.col)
+                .map(|(_, s)| s);
+            if let Some(s) = press {
+                self.d2d_context.SetTransform(&scale_about(
+                    s,
+                    (kr.left + kr.right) * 0.5,
+                    (kr.top + kr.bottom) * 0.5,
+                ));
+            }
             // Radius scales with key height (6.8px @ 68px key).
             let radius = (kr.bottom - kr.top) * RADIUS_FRAC;
             let rect = D2D1_ROUNDED_RECT {
@@ -1708,9 +1889,14 @@ impl VkRenderer {
                     );
                 }
             }
+            if press.is_some() {
+                self.d2d_context.SetTransform(&IDENTITY);
+            }
         }
 
-        // Gliding focus ring on top of the keys, at the eased position.
+        // Gliding focus ring on top of the keys, at the eased position. When the
+        // focused key is the one dipping, the ring dips with it so the whole
+        // button presses as one piece.
         if let Some(ring) = self.anim_sel {
             let radius = (ring.bottom - ring.top) * RADIUS_FRAC;
             let rr = D2D1_ROUNDED_RECT {
@@ -1718,24 +1904,36 @@ impl VkRenderer {
                 radiusX: radius,
                 radiusY: radius,
             };
+            let ring_press = pressed
+                .filter(|(p, _)| p.row == sel.row && p.col == sel.col)
+                .map(|(_, s)| s);
+            if let Some(s) = ring_press {
+                self.d2d_context.SetTransform(&scale_about(
+                    s,
+                    (ring.left + ring.right) * 0.5,
+                    (ring.top + ring.bottom) * 0.5,
+                ));
+            }
             self.d2d_context
                 .DrawRoundedRectangle(&rr, &sel_ring_brush, 2.5, None);
+            if ring_press.is_some() {
+                self.d2d_context.SetTransform(&IDENTITY);
+            }
         }
 
         // Suggestion pill last, so it floats on top of the keys (and the ring).
         if let Some(strip) = candidates {
-            draw_candidate_strip(
-                &self.d2d_context,
-                cw,
-                strip,
-                &accent_brush,
-                &text_brush,
-                &sel_text_brush,
-                &self.chip_format,
-                &self.hint_format,
+            let paint = StripPaint {
+                ctx: &self.d2d_context,
+                accent: &accent_brush,
+                text: &text_brush,
+                sel_text: &sel_text_brush,
+                chip_format: &self.chip_format,
+                hint_format: &self.hint_format,
                 pal,
-                controller_icons,
-            )?;
+                icons: controller_icons,
+            };
+            draw_candidate_strip(&paint, cw, strip, strip_alpha, strip_dy)?;
         }
 
         drop(key_brush);
@@ -2579,6 +2777,59 @@ mod tests {
             Some(VkIcon::XboxX)
         );
         assert_eq!(ControllerIconFamily::Xbox.hint_icon("unknown"), None);
+    }
+
+    #[test]
+    fn floating_card_corners_are_concentric_with_the_keys() {
+        // 1080p reference key: 68px tall -> 6.8px corners. Card padding is 18px
+        // minus the 1px panel hairline, so the card corner must be 6.8 + 17.
+        let key_r = 68.0 * RADIUS_FRAC;
+        assert!((floating_card_radius(68.0) - (key_r + 17.0)).abs() < 1e-4);
+        // Scales with the keys (smaller monitor -> smaller keys -> tighter card).
+        assert!(floating_card_radius(48.0) < floating_card_radius(68.0));
+    }
+
+    #[test]
+    fn strip_highlight_is_concentric_inside_the_pill() {
+        // The highlighted chip sits CHIP_HIGHLIGHT_INSET inside a fully-rounded
+        // pill, so its radius must be the pill's minus that inset; a pill radius
+        // is half the chip height.
+        let pill_radius = CHIP_H * 0.5;
+        let inner = pill_radius - CHIP_HIGHLIGHT_INSET;
+        assert_eq!(
+            crate::vk_motion::concentric_radius(inner, CHIP_HIGHLIGHT_INSET),
+            pill_radius
+        );
+        // The inset leaves the chip label's own inset untouched.
+        assert!(CHIP_HIGHLIGHT_INSET <= CHIP_LABEL_INSET_Y);
+    }
+
+    #[test]
+    fn soft_shadow_fades_out_as_it_spreads() {
+        // Layers go from tight and darker to wide and fainter, and none is
+        // heavy enough to read as a hard-edged copy of the surface.
+        let mut last_spread = -1.0;
+        let mut last_alpha = 1.0;
+        for (dy, spread, alpha) in SOFT_SHADOW_LAYERS {
+            assert!(dy >= 0.0 && spread >= last_spread);
+            assert!(alpha < last_alpha && alpha <= 0.2);
+            last_spread = spread;
+            last_alpha = alpha;
+        }
+    }
+
+    #[test]
+    fn press_transform_scales_about_the_key_centre() {
+        let m = scale_about(0.96, 100.0, 50.0);
+        // Centre is a fixed point: (100, 50) -> (100, 50).
+        let x = m.M11 * 100.0 + m.M21 * 50.0 + m.M31;
+        let y = m.M12 * 100.0 + m.M22 * 50.0 + m.M32;
+        assert!((x - 100.0).abs() < 1e-4 && (y - 50.0).abs() < 1e-4);
+        // A corner moves inward toward the centre.
+        let cx = m.M11 * 146.0 + m.M31;
+        assert!(cx < 146.0 && cx > 100.0);
+        assert_eq!(scale_about(1.0, 3.0, 4.0).M31, 0.0);
+        assert_eq!(translate(0.0, 4.0).M32, 4.0);
     }
 
     #[test]

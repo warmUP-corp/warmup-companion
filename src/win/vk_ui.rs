@@ -727,8 +727,9 @@ unsafe extern "system" fn vk_wndproc(
         WM_LBUTTONDOWN => {
             let x = (lparam.0 & 0xFFFF) as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i32;
-            if let Some(key) = hit_test(hwnd, x, y) {
-                vk_nav::activate_key(&key);
+            if let Some((pos, key)) = hit_test(hwnd, x, y) {
+                vk_nav::activate_at(pos, &key);
+                request_repaint();
             }
             LRESULT(0)
         }
@@ -835,9 +836,9 @@ unsafe fn vk_dock_rect() -> (i32, i32, i32, i32) {
 }
 
 /// Floating-card rect `(x, y, w, h)` for a given top-chrome inset. The card wraps
-/// the keys at docked scale; its height = `chrome + key block + pad`, so a smaller
-/// `chrome` (collapsed strip) makes a genuinely shorter card. Bottom edge stays put
-/// (y moves down as it shrinks) so the keys don't jump.
+/// the keys at docked scale; its height = `chrome + key block + 2 * pad`, so a
+/// smaller `chrome` (collapsed strip) makes a genuinely shorter card. Bottom edge
+/// stays put (y moves down as it shrinks) so the keys don't jump.
 unsafe fn floating_card_rect(chrome: f32) -> (i32, i32, i32, i32) {
     let m = target_monitor_rect();
     let full_w = (m.right - m.left).max(1);
@@ -846,13 +847,26 @@ unsafe fn floating_card_rect(chrome: f32) -> (i32, i32, i32, i32) {
     let scale_w = full_w as f32;
     let (grid_w, block_h) = vk_renderer::grid_size(scale_w, &rows);
     let pad = vk_renderer::FLOATING_PAD;
-    let w = ((grid_w + pad * 2.0).round() as i32).min(full_w);
-    // Floor only needs to fit the keys + pad; the chrome is what collapses.
-    let card_h = ((chrome + block_h + pad).round() as i32).clamp(100, full_h);
+    let (w, card_h) = floating_card_size(grid_w, block_h, chrome, pad);
+    let w = w.min(full_w);
+    let card_h = card_h.clamp(100, full_h);
     let margin = (((full_h as f32) * 0.04).round() as i32).clamp(28, 80);
     let x = m.left + (full_w - w) / 2;
     let y = m.bottom - card_h - margin;
     (x, y, w, card_h)
+}
+
+/// `(w, h)` of the floating card wrapping a `grid_w` x `block_h` key block under
+/// `chrome` px of top band. The renderer centres the block in the space below
+/// the chrome, so the card needs `pad` on *both* sides of it vertically to land
+/// the same `pad` at the bottom edge as at the sides (the corner radius is
+/// derived from that padding, so an uneven inset would break the concentric
+/// corners).
+fn floating_card_size(grid_w: f32, block_h: f32, chrome: f32, pad: f32) -> (i32, i32) {
+    (
+        (grid_w + pad * 2.0).round() as i32,
+        (chrome + block_h + pad * 2.0).round() as i32,
+    )
 }
 
 /// Width used to scale key size (92px @ 1920 reference). Always the monitor
@@ -1041,6 +1055,12 @@ fn render_frame() {
             let sel = vk_nav::selection();
             let (shift, caps) = vk_nav::modifier_state();
             let scale_w = vk_scale_w();
+            // Press dip for the key that just fired; dropped once it has settled
+            // so the steady state draws with no transform at all.
+            let pressed = vk_nav::press_feedback().and_then(|(pos, at)| {
+                let ms = at.elapsed().as_secs_f32() * 1000.0;
+                crate::vk_motion::press_active(ms).then(|| (pos, crate::vk_motion::press_scale(ms)))
+            });
             let controller_snapshot = crate::debug_state::snapshot();
             // One logical snapshot: rows, selection and modifiers captured
             // together so the glyph icons can't tear from the layout.
@@ -1056,6 +1076,7 @@ fn render_frame() {
                 candidates: candidates.as_ref(),
                 floating,
                 modifiers: vk_renderer::VkModifiers { shift, caps },
+                pressed,
                 controller_label: controller_snapshot.name.trim(),
                 // Voice needs both a non-secure desktop (LocalSystem has no mic
                 // consent on Winlogon) and the optional whisper sidecar+model
@@ -1105,7 +1126,7 @@ pub fn wait_until_visible(timeout: Duration) -> bool {
     is_vk_visible()
 }
 
-fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<KeyCell> {
+fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<(vk_nav::KeyPos, KeyCell)> {
     let mut client = windows::Win32::Foundation::RECT::default();
     unsafe {
         let _ = GetClientRect(hwnd, &mut client);
@@ -1126,7 +1147,8 @@ fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<KeyCell> {
             return rows
                 .get(kr.pos.row)
                 .and_then(|r| r.keys.get(kr.pos.col))
-                .cloned();
+                .cloned()
+                .map(|key| (kr.pos, key));
         }
     }
     None
@@ -1145,6 +1167,19 @@ mod tests {
             bottom: 1080,
         };
         assert_eq!(reservation_plan(&rect, 700, true), Some((700, true)));
+    }
+
+    #[test]
+    fn floating_card_pads_the_key_block_evenly() {
+        // Key block 1000x300 under a 67px chrome band with 18px padding: the
+        // renderer centres the block below the chrome, so the card must carry
+        // 2*pad vertically to leave exactly `pad` at the bottom and both sides.
+        let (w, h) = floating_card_size(1000.0, 300.0, 67.0, 18.0);
+        assert_eq!(w, 1036);
+        assert_eq!(h, 67 + 300 + 36);
+        let bottom_pad = (h as f32 - 67.0 - 300.0) / 2.0;
+        let side_pad = (w as f32 - 1000.0) / 2.0;
+        assert_eq!(bottom_pad, side_pad);
     }
 
     #[test]
