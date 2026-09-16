@@ -13,6 +13,15 @@
 - Floating keyboard card: corner radius is now derived from the key radius plus
   the card padding (concentric corners), and the key block gets the same 18 px
   inset at the bottom as at the sides.
+- Dictation UI: the keyboard-closed voice indicator is now a labelled pill
+  (orb, phase title, and the controller's R3 glyph with "Stop" while
+  listening) instead of a bare orb, so the phase is readable without watching
+  the motion. "Starting…" is shown distinctly while the helper spins up, since
+  speech in that gap is not captured. The pill fades and scales in (160 ms),
+  fades out (120 ms) instead of blinking away, and phase changes swap the title
+  in place instead of recreating the window. Mic level uses one fast-attack /
+  slow-release envelope on both the pill and the keyboard's mic key, and the
+  transcribing pulse is brisker.
 - Motion values for the keyboard live in one place (`src/vk_motion.rs`) with
   unit tests, instead of scattered constants.
 
