@@ -44,8 +44,11 @@ SetDatablockOptimize on
 !include "LogicLib.nsh"
 !include "nsDialogs.nsh"
 !include "Sections.nsh"
+!include "FileFunc.nsh"
+!insertmacro GetOptions
 
 Var ModelChoice
+Var UpdateMode
 Var RbTiny
 Var RbBase
 Var RbSmall
@@ -130,14 +133,22 @@ Section "!Warmup Companion service (required)" SEC_MAIN
   File "/oname=icon.ico" "${SRCROOT}\assets\icon.ico"
 
   ; Register + start the service. This self-copies the exe to
-  ; C:\ProgramData\WarmupVk\bin and creates WarmupVkSvc (LocalSystem, auto-start).
-  DetailPrint "Stopping stale ${APPNAME} processes..."
-  nsExec::ExecToLog 'taskkill /F /IM warmup-companion.exe'
-  Pop $0
-  nsExec::ExecToLog 'taskkill /F /IM warmup-vk-prototype.exe'
-  Pop $0
+  ; C:\ProgramData\WarmupVk\bin. A first install creates WarmupVkSvc; an update
+  ; (`/UPDATE`, or silent over an existing copy) stops, replaces the binary, and
+  ; starts the existing service — it does not delete and recreate it.
+  ${If} $UpdateMode != 1
+    DetailPrint "Stopping stale ${APPNAME} processes..."
+    nsExec::ExecToLog 'taskkill /F /IM warmup-companion.exe'
+    Pop $0
+    nsExec::ExecToLog 'taskkill /F /IM warmup-vk-prototype.exe'
+    Pop $0
+  ${EndIf}
 
-  DetailPrint "Installing the ${SERVICE} service..."
+  ${If} $UpdateMode == 1
+    DetailPrint "Updating the ${SERVICE} service in place..."
+  ${Else}
+    DetailPrint "Installing the ${SERVICE} service..."
+  ${EndIf}
   nsExec::ExecToLog '"$INSTDIR\warmup-companion.exe" install'
   Pop $0
   ${If} $0 != 0
@@ -194,6 +205,25 @@ Function .onInit
   ; skips the component and model pages, so it cannot rely on page selections.
   StrCpy $ModelChoice "parakeet"
   SectionSetFlags ${SEC_SPEECH} ${SF_SELECTED}
+  StrCpy $UpdateMode 0
+
+  ${GetOptions} $CMDLINE "/UPDATE" $R0
+  IfErrors +2
+    StrCpy $UpdateMode 1
+
+  ; A silent re-run over an existing copy is an update, not a first install —
+  ; even when the caller only passed /S (how warmUP used to invoke this setup).
+  IfSilent 0 init_update_done
+    IfFileExists "$INSTDIR\uninstall.exe" 0 init_update_done
+      StrCpy $UpdateMode 1
+  init_update_done:
+
+  ; Do not re-download the ~670 MB voice model on every silent update.
+  ${If} $UpdateMode == 1
+    IfFileExists "${DATADIR}\speech\parakeet\encoder-model.int8.onnx" 0 init_speech_keep
+      SectionSetFlags ${SEC_SPEECH} 0
+    init_speech_keep:
+  ${EndIf}
 FunctionEnd
 
 LangString DESC_MAIN   ${LANG_ENGLISH} "The Warmup Companion service (sign-in / lock / UAC gamepad keyboard). Required."

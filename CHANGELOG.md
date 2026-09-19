@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Windows updates now replace the service binary in place: stop, copy, start.
+  Silent `/S` over an existing install is treated as `/UPDATE`, so the service
+  is not deleted and recreated, and Parakeet is not downloaded again when the
+  model is already present.
+
 ## v0.2.19
 
 - Sign-in / lock: keep the companion overlay keyboard. Windows' gamepad PIN

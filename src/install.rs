@@ -225,12 +225,15 @@ fn install_inner(debug_ui: bool, dev_exe: Option<&Path>) -> Result<(), String> {
         }
     }
 
-    // Stop + delete BEFORE copying — old exe is locked by the running service.
+    // The running service locks ProgramData\...\warmup-companion.exe. Stop it
+    // (and leftover workers) so the copy can replace the binary. Do not delete
+    // the SCM registration: an update is in-place (stop → replace → start),
+    // not uninstall/reinstall. Recreate the service only when it is missing.
     remove_test_services();
-    uninstall_service_quiet()?;
+    stop_service_blocking()?;
     // The SCM launcher's worker is CreateProcessAsUser'd into the console
     // session. `sc stop` can report STOPPED while that child still holds the
-    // ProgramData exe (seen as os error 32 on copy, service left deleted).
+    // ProgramData exe (seen as os error 32 on copy).
     kill_other_companion_processes();
 
     let dest = Path::new(INSTALL_DIR).join(EXE_NAME);
@@ -256,7 +259,10 @@ fn install_inner(debug_ui: bool, dev_exe: Option<&Path>) -> Result<(), String> {
     // sc.exe: `binPath=` and path are separate argv tokens; no quotes (path has no spaces).
     // SCM starts the exe directly; main() dispatches to service_dispatcher when argc == 1.
     let exe = dest.display().to_string();
-    sc(&["create", SERVICE_NAME, "binPath=", &exe])?;
+    match query_service_state()? {
+        None => sc(&["create", SERVICE_NAME, "binPath=", &exe])?,
+        Some(_) => sc(&["config", SERVICE_NAME, "binPath=", &exe])?,
+    }
     // sc.exe wants `start=` and `auto` as separate argv tokens (not one `start= auto` string).
     sc(&["config", SERVICE_NAME, "start=", "auto"])?;
     sc(&["config", SERVICE_NAME, "DisplayName=", DISPLAY_NAME])?;
