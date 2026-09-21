@@ -18,10 +18,11 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::ValidateRect;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, KillTimer, SetTimer,
-    SetWindowPos, ShowWindow, HMENU, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE,
-    SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, WM_DESTROY, WM_PAINT, WM_TIMER, WS_EX_NOACTIVATE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, GetWindowLongPtrW, KillTimer,
+    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, HMENU, HTTRANSPARENT,
+    HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW,
+    SW_HIDE, SW_SHOWNOACTIVATE, WM_DESTROY, WM_NCHITTEST, WM_PAINT, WM_TIMER, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use super::desktop;
@@ -38,7 +39,8 @@ const PANEL_H: i32 = 420;
 /// Gap between the pill's bottom edge and the bottom of the primary monitor.
 const MARGIN_BOTTOM: i32 = 72;
 /// Dictation pill: orb + phase title + R3 stop hint, hugging the right edge,
-/// vertically centered. Wide enough for "Transcribing…" at the 28px prompt font.
+/// vertically centered. Wide enough for "Listening" at the 28px prompt font.
+/// Transcription leaves this pill: the window grows to the whole display.
 const VOICE_W: i32 = 420;
 const VOICE_H: i32 = 104;
 const MARGIN_RIGHT: i32 = 40;
@@ -138,12 +140,15 @@ enum PromptVisual {
     Ready,
     NoPad,
     Connected,
-    /// Voice dictation is recording (mic on, VK closed).
+    /// Mic is open. Same fullscreen frame as transcription; the cloud uses the
+    /// speaking state.
     Listening,
-    /// Voice dictation stopped; transcribing the recording.
+    /// Recording stopped. Same frame; the cloud uses the thinking state.
     Transcribing,
-    /// Voice helper launched but the mic isn't capturing yet — speech here is
-    /// lost, so it must not look like Listening.
+    /// Keyboard is open during any voice phase: the same fullscreen border, and
+    /// the cloud stays on the mic key at the same size.
+    VoiceBorder,
+    /// Voice helper launched but the mic isn't capturing yet.
     Starting,
 }
 
@@ -156,6 +161,7 @@ impl PromptVisual {
             PromptVisual::Listening => 4,
             PromptVisual::Transcribing => 5,
             PromptVisual::Starting => 6,
+            PromptVisual::VoiceBorder => 7,
         })
     }
 
@@ -166,6 +172,7 @@ impl PromptVisual {
             4 => PromptVisual::Listening,
             5 => PromptVisual::Transcribing,
             6 => PromptVisual::Starting,
+            7 => PromptVisual::VoiceBorder,
             _ => PromptVisual::Ready,
         }
     }
@@ -173,7 +180,9 @@ impl PromptVisual {
     fn voice_phase(self) -> Option<vk_renderer::VoicePhase> {
         match self {
             PromptVisual::Starting => Some(vk_renderer::VoicePhase::Starting),
-            PromptVisual::Listening => Some(vk_renderer::VoicePhase::Listening),
+            PromptVisual::Listening | PromptVisual::VoiceBorder => {
+                Some(vk_renderer::VoicePhase::Listening)
+            }
             PromptVisual::Transcribing => Some(vk_renderer::VoicePhase::Transcribing),
             _ => None,
         }
@@ -294,16 +303,75 @@ fn active_visual_morph(now: Instant) -> Option<(PromptVisual, PromptVisual, f32)
     })
 }
 
-unsafe fn target_rect_for_visual(visual: PromptVisual) -> PromptRect {
-    let cx = GetSystemMetrics(SM_CXSCREEN);
-    let cy = GetSystemMetrics(SM_CYSCREEN);
+fn fullscreen_border(visual: PromptVisual) -> bool {
+    visual_is_voice(visual)
+}
+
+/// Where the overlay sits. Transcription covers the primary display so the
+/// border can run along its edges; everything else stays a small panel.
+fn overlay_rect(visual: PromptVisual, screen_w: i32, screen_h: i32) -> PromptRect {
+    let screen_w = screen_w.max(1);
+    let screen_h = screen_h.max(1);
+    if fullscreen_border(visual) {
+        return PromptRect {
+            x: 0,
+            y: 0,
+            w: screen_w,
+            h: screen_h,
+        };
+    }
     let (w, h) = panel_size_for_visual(visual);
     let (x, y) = if visual_is_voice(visual) {
-        ((cx - w - MARGIN_RIGHT).max(0), ((cy - h) / 2).max(0))
+        (
+            (screen_w - w - MARGIN_RIGHT).max(0),
+            ((screen_h - h) / 2).max(0),
+        )
     } else {
-        (((cx - w) / 2).max(0), (cy - h - MARGIN_BOTTOM).max(0))
+        (
+            ((screen_w - w) / 2).max(0),
+            (screen_h - h - MARGIN_BOTTOM).max(0),
+        )
     };
     PromptRect { x, y, w, h }
+}
+
+unsafe fn target_rect_for_visual(visual: PromptVisual) -> PromptRect {
+    overlay_rect(
+        visual,
+        GetSystemMetrics(SM_CXSCREEN),
+        GetSystemMetrics(SM_CYSCREEN),
+    )
+}
+
+/// Move the overlay to `visual`'s rect. Transcription is click-through: the
+/// window covers the display, and a hit would otherwise swallow the desktop
+/// and the keyboard under the border.
+unsafe fn place_overlay(hwnd: HWND, visual: PromptVisual, show: bool) {
+    let rect = target_rect_for_visual(visual);
+    let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+    let bit = WS_EX_TRANSPARENT.0;
+    let ex = if fullscreen_border(visual) {
+        ex | bit
+    } else {
+        ex & !bit
+    };
+    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex as isize);
+    let mut flags = SWP_NOACTIVATE | SWP_FRAMECHANGED;
+    if show {
+        flags |= SWP_SHOWWINDOW;
+    }
+    let _ = SetWindowPos(hwnd, HWND_TOPMOST, rect.x, rect.y, rect.w, rect.h, flags);
+}
+
+/// Talking and transcription share one fullscreen frame. With the keyboard open
+/// the cloud stays on the mic key, so the overlay is only the border.
+fn voice_overlay_visual(phase: Option<&str>, vk_open: bool) -> Option<PromptVisual> {
+    let phase = phase?;
+    if vk_open {
+        Some(PromptVisual::VoiceBorder)
+    } else {
+        Some(PromptVisual::from_voice_phase(phase))
+    }
 }
 
 static CONTROLLER: OnceLock<Mutex<PromptOverlayController>> = OnceLock::new();
@@ -331,16 +399,12 @@ pub fn tick(vk_open: bool) {
     let connected = crate::debug_state::snapshot().connected;
     c.update_connected_visual(connected, now);
     let connected_intro_active = c.connected_visual_until.is_some_and(|until| now < until);
-    // Voice dictation takes priority on ANY desktop: R3 can start it with the VK
-    // closed, so this pill is the "currently listening" indicator. While the VK is
-    // open its own mic-key halo shows the phase, so the pill yields then.
+    // Voice dictation takes priority on ANY desktop. While the VK is open its
+    // mic key shows listening/starting, so the pill yields — transcription
+    // still takes the screen, because that's the full-display border.
     let voice = crate::win::speech_input::voice_ui_phase();
-    let visual = if let Some(p) = voice.as_deref() {
-        if vk_open {
-            None
-        } else {
-            Some(PromptVisual::from_voice_phase(p))
-        }
+    let visual = if voice.is_some() {
+        voice_overlay_visual(voice.as_deref(), vk_open)
     } else if userland_debug {
         Some(debug_replay_visual(now.duration_since(c.debug_epoch)))
     } else if on_winlogon {
@@ -400,6 +464,7 @@ pub fn tick(vk_open: bool) {
                 (PromptVisual::NoPad, _) => "prompt ui: shown (Winlogon, no pad connected)",
                 (PromptVisual::Listening, _) => "prompt ui: shown (voice listening)",
                 (PromptVisual::Transcribing, _) => "prompt ui: shown (voice transcribing)",
+                (PromptVisual::VoiceBorder, _) => "prompt ui: shown (voice, display border)",
                 (PromptVisual::Starting, _) => "prompt ui: shown (voice starting)",
             });
         } else {
@@ -426,6 +491,18 @@ fn ui_show(visual: PromptVisual) {
         // morph. Both keep the window where it is and animate on the surface.
         if previous != visual && same_voice_pill(previous, visual) {
             VOICE_LABEL_AT.with(|c| c.set(Some(now)));
+        }
+        // Listening -> transcription grows the pill to the display. Hide across
+        // the resize: showing first stretches the old pill over the whole screen
+        // for a frame (the "flash"), and a failed swapchain resize then leaves
+        // that frame up.
+        if fullscreen_border(previous) != fullscreen_border(visual) {
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+                place_overlay(hwnd, visual, false);
+                render_prompt(hwnd);
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
         }
         if can_morph_between(previous, visual) {
             VISUAL_MORPH.with(|state| {
@@ -458,16 +535,7 @@ fn ui_show(visual: PromptVisual) {
         Ok(hwnd) => {
             HWND_STATE.with(|state| state.set(Some(hwnd)));
             unsafe {
-                let rect = target_rect_for_visual(visual);
-                let _ = SetWindowPos(
-                    hwnd,
-                    HWND_TOPMOST,
-                    rect.x,
-                    rect.y,
-                    rect.w,
-                    rect.h,
-                    SWP_SHOWWINDOW | SWP_NOACTIVATE,
-                );
+                place_overlay(hwnd, visual, true);
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                 match VkRenderer::create(hwnd) {
                     Ok(mut r) => {
@@ -572,6 +640,11 @@ unsafe extern "system" fn prompt_wndproc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
+        // Fullscreen transcription frame must not eat clicks meant for the
+        // desktop or the keyboard underneath the border.
+        WM_NCHITTEST if fullscreen_border(VISUAL_STATE.with(|state| state.get())) => {
+            LRESULT(HTTRANSPARENT as isize)
+        }
         WM_PAINT => {
             render_prompt(hwnd);
             let _ = ValidateRect(hwnd, None);
@@ -673,6 +746,8 @@ fn render_prompt(hwnd: HWND) {
                             alpha,
                             scale,
                             label_alpha,
+                            // Keyboard-open transcription keeps the cloud on the mic key.
+                            show_orb: visual != PromptVisual::VoiceBorder,
                         })
                     } else if pill_visual == PromptVisual::NoPad {
                         r.draw_prompt_card(&vk_renderer::PromptCard {
@@ -831,5 +906,48 @@ mod tests {
             thread_kind_for_visual(PromptVisual::Ready),
             PromptThreadKind::Prompt
         );
+    }
+
+    #[test]
+    fn talking_and_transcription_share_the_fullscreen_frame() {
+        for visual in [
+            PromptVisual::Listening,
+            PromptVisual::Transcribing,
+            PromptVisual::Starting,
+            PromptVisual::VoiceBorder,
+        ] {
+            let rect = overlay_rect(visual, 1920, 1080);
+            assert_eq!((rect.x, rect.y, rect.w, rect.h), (0, 0, 1920, 1080));
+            assert!(fullscreen_border(visual));
+        }
+    }
+
+    #[test]
+    fn voice_border_while_the_keyboard_is_open_keeps_the_same_frame() {
+        assert_eq!(
+            voice_overlay_visual(Some("listening"), false),
+            Some(PromptVisual::Listening)
+        );
+        assert_eq!(
+            voice_overlay_visual(Some("transcribing"), false),
+            Some(PromptVisual::Transcribing)
+        );
+        assert_eq!(
+            voice_overlay_visual(Some("listening"), true),
+            Some(PromptVisual::VoiceBorder)
+        );
+        assert_eq!(
+            voice_overlay_visual(Some("transcribing"), true),
+            Some(PromptVisual::VoiceBorder)
+        );
+        assert_eq!(voice_overlay_visual(None, false), None);
+        assert!(same_voice_pill(
+            PromptVisual::Listening,
+            PromptVisual::Transcribing
+        ));
+        assert!(same_voice_pill(
+            PromptVisual::Transcribing,
+            PromptVisual::VoiceBorder
+        ));
     }
 }

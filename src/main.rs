@@ -5,6 +5,10 @@ mod config;
 mod golden;
 /// Named-pipe server (#347): streams gamepad connection state to the warmUP desktop.
 mod pipe_server;
+mod cli;
+mod device_commands;
+mod led_engine;
+mod tracking_owner;
 /// Companion IPC wire frames (#347). Pure serde; used by the pipe server and tests.
 #[allow(dead_code)]
 mod protocol;
@@ -23,6 +27,8 @@ mod crash;
 mod install;
 #[cfg(all(windows, feature = "service"))]
 mod service;
+#[cfg(all(windows, feature = "service"))]
+mod service_worker;
 #[cfg(all(windows, feature = "gamepad"))]
 mod tray;
 
@@ -43,6 +49,8 @@ mod win;
 mod win;
 
 #[cfg(feature = "gamepad")]
+mod warmup_launch;
+#[cfg(feature = "gamepad")]
 mod gamepad;
 #[cfg(feature = "gamepad")]
 mod gamepad_backend;
@@ -56,14 +64,25 @@ mod library_watch;
 mod pad_decode;
 #[cfg(all(windows, feature = "gamepad"))]
 mod parental_guard;
+#[cfg(all(windows, feature = "gamepad"))]
+mod parental_store;
 #[cfg(feature = "gamepad")]
 mod pc_cursor;
+#[cfg(windows)]
+mod predict_dict;
+#[cfg(all(windows, feature = "gamepad"))]
+mod process_guard;
+#[cfg(all(windows, feature = "gamepad"))]
+mod playtime_store;
 #[cfg(all(windows, feature = "gamepad"))]
 mod playtime_tracker;
 #[cfg(all(windows, feature = "gamepad"))]
 mod xinput_backend;
 #[cfg(all(windows, feature = "gamepad"))]
 mod xusb_ioctl;
+
+#[cfg(feature = "gamepad")]
+pub(crate) use warmup_launch::warmup_installed;
 
 use std::env;
 use std::fmt;
@@ -78,7 +97,7 @@ use symbols::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Desktop {
+pub(crate) enum Desktop {
     Default,
     Winlogon,
 }
@@ -638,7 +657,7 @@ fn main() {
     let _sentry = sentry_telemetry::init();
     let args: Vec<String> = env::args().collect();
     #[cfg(windows)]
-    dispatch_install_or_service(&args);
+    cli::dispatch_install_or_service(&args);
     #[cfg(all(windows, feature = "gamepad"))]
     tray::spawn();
     // Dev aid: open the Controller Center directly (no service, no tray click).
@@ -655,7 +674,7 @@ fn main() {
     if args.iter().any(|a| a == "--gamepad") {
         #[cfg(feature = "gamepad")]
         {
-            return run_gamepad_mode();
+            return warmup_launch::run_gamepad_mode();
         }
         #[cfg(not(feature = "gamepad"))]
         {
@@ -692,7 +711,7 @@ fn main() {
             continue;
         }
         match cmd.as_str() {
-            "help" => print_help(),
+            "help" => cli::print_help(),
             "state" => {}
             "normal" => app.start_normal(),
             "boot" => app.start_boot(),
@@ -796,600 +815,4 @@ fn main() {
 
         repl_scroll::paint_state_panel(&app);
     }
-}
-
-#[cfg(windows)]
-fn has_interactive_console() -> bool {
-    use windows::Win32::System::Console::GetConsoleWindow;
-    unsafe {
-        let hwnd = GetConsoleWindow();
-        !hwnd.0.is_null()
-    }
-}
-
-#[cfg(windows)]
-fn dispatch_install_or_service(args: &[String]) {
-    // Mic recognition runs here, as the real logged-in user (the worker spawns us
-    // via CreateProcessAsUserW). Short-lived: recognize until silence, then exit.
-    if args.iter().any(|a| a == "--speech-helper") {
-        let code = match crate::win::speech_input::run_blocking() {
-            Ok(()) => 0,
-            Err(e) => {
-                install::log_line(&format!("speech helper failed: {e}"));
-                1
-            }
-        };
-        std::process::exit(code);
-    }
-    // Resident parakeet model host: loaded once, kept warm across mic toggles. Spawned
-    // detached by the speech helper (already in the user session) on first parakeet use.
-    if args.iter().any(|a| a == "--parakeet-server") {
-        let code = match crate::win::speech_input::run_parakeet_server() {
-            Ok(()) => 0,
-            Err(e) => {
-                install::log_line(&format!("parakeet-server failed: {e}"));
-                1
-            }
-        };
-        std::process::exit(code);
-    }
-    match args.get(1).map(String::as_str) {
-        Some("install") => {
-            let debug_ui = args.iter().any(|a| a == "--debug-ui" || a == "--debug");
-            install::run_install(debug_ui);
-            std::process::exit(0);
-        }
-        Some("install-dev") => {
-            let Some(path) = args.get(2) else {
-                eprintln!("usage: warmup-companion.exe install-dev <path-to-warmup.exe>");
-                std::process::exit(2);
-            };
-            install::run_install_dev(std::path::Path::new(path));
-            std::process::exit(0);
-        }
-        Some("uninstall") => {
-            install::run_uninstall();
-            std::process::exit(0);
-        }
-        Some("verify") => {
-            install::run_verify();
-            std::process::exit(0);
-        }
-        Some("stop") => {
-            install::run_stop();
-            std::process::exit(0);
-        }
-        Some("restore-keyboard") | Some("restore-native-keyboard") => {
-            crate::win::native_keyboard::restore_auto_invoke();
-            crate::win::native_keyboard::ensure_search_service_running();
-            install::log_line("restore-keyboard: requested Windows keyboard service restore");
-            println!("Requested Windows touch keyboard/search service restore.");
-            std::process::exit(0);
-        }
-        #[cfg(feature = "gamepad")]
-        Some("settings") => {
-            run_settings_command(args);
-            std::process::exit(0);
-        }
-        _ => {}
-    }
-    #[cfg(feature = "service")]
-    {
-        if args.iter().any(|a| a == "--service-worker") {
-            #[cfg(feature = "gamepad")]
-            tray::spawn();
-            match service::run_worker() {
-                Ok(()) => std::process::exit(0),
-                Err(e) => {
-                    install::log_line(&format!("service worker failed: {e}"));
-                    std::process::exit(1);
-                }
-            }
-        }
-        let scm_start = args.len() <= 1 && !has_interactive_console();
-        let force_service = args.iter().any(|a| a == "--service");
-        if scm_start || force_service {
-            if service::run_dispatcher().is_ok() {
-                std::process::exit(0);
-            } else if force_service {
-                install::log_line("--service: not running under SCM");
-                std::process::exit(1);
-            }
-        }
-    }
-    #[cfg(not(feature = "service"))]
-    if args.iter().any(|a| a == "--service") {
-        eprintln!("Rebuild with default features enabled: cargo build --release");
-        std::process::exit(1);
-    }
-}
-
-#[cfg(all(windows, feature = "gamepad"))]
-fn run_settings_command(args: &[String]) {
-    let usage = "usage:
-  warmup-companion.exe settings get
-  warmup-companion.exe settings path
-  warmup-companion.exe settings set <key> <value>
-  warmup-companion.exe settings sleep-on-game <get|on|off>
-  warmup-companion.exe settings auto-stop-on-game <get|on|off>
-  warmup-companion.exe settings userland-poll <get|full|sleep|path>";
-    match args.get(2).map(String::as_str) {
-        Some("get") | None => print_gamepad_settings(),
-        Some("path") => match crate::config::settings_path() {
-            Some(path) => println!("{}", path.display()),
-            None => {
-                eprintln!("LOCALAPPDATA is not set");
-                std::process::exit(1);
-            }
-        },
-        Some("set") => {
-            let Some(key) = args.get(3) else {
-                eprintln!("{usage}");
-                std::process::exit(2);
-            };
-            let Some(value) = args.get(4) else {
-                eprintln!("{usage}");
-                std::process::exit(2);
-            };
-            if let Err(e) = crate::config::set_gamepad_setting(key, value) {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
-            println!("{key}={value}");
-        }
-        Some("userland-poll") => match args.get(3).map(String::as_str) {
-            Some("get") | None => {
-                let mode = crate::config::userland_gamepad_poll_mode();
-                println!("{}", poll_mode_name(mode));
-            }
-            Some("full") => {
-                if let Err(e) =
-                    crate::config::set_userland_gamepad_poll_mode(warmup_gamepad::PollMode::Full)
-                {
-                    eprintln!("{e}");
-                    std::process::exit(1);
-                }
-                println!("full");
-            }
-            Some("sleep") | Some("guide") | Some("guide-only") => {
-                if let Err(e) =
-                    crate::config::set_userland_gamepad_poll_mode(warmup_gamepad::PollMode::Sleep)
-                {
-                    eprintln!("{e}");
-                    std::process::exit(1);
-                }
-                println!("sleep");
-            }
-            Some("path") => match crate::config::settings_path() {
-                Some(path) => println!("{}", path.display()),
-                None => {
-                    eprintln!("LOCALAPPDATA is not set");
-                    std::process::exit(1);
-                }
-            },
-            Some(_) => {
-                eprintln!("{usage}");
-                std::process::exit(2);
-            }
-        },
-        Some("sleep-on-game") => match args.get(3).map(String::as_str) {
-            Some("get") | None => {
-                println!("{}", crate::config::gamepad_settings().sleep_on_game);
-            }
-            Some("on") | Some("true") | Some("1") => {
-                if let Err(e) = crate::config::set_gamepad_setting("sleep_on_game", "true") {
-                    eprintln!("{e}");
-                    std::process::exit(1);
-                }
-                println!("true");
-            }
-            Some("off") | Some("false") | Some("0") => {
-                if let Err(e) = crate::config::set_gamepad_setting("sleep_on_game", "false") {
-                    eprintln!("{e}");
-                    std::process::exit(1);
-                }
-                println!("false");
-            }
-            Some(_) => {
-                eprintln!("{usage}");
-                std::process::exit(2);
-            }
-        },
-        Some("auto-stop-on-game") => match args.get(3).map(String::as_str) {
-            Some("get") | None => {
-                println!("{}", crate::config::gamepad_settings().auto_stop_on_game);
-            }
-            Some("on") | Some("true") | Some("1") => {
-                if let Err(e) = crate::config::set_gamepad_setting("auto_stop_on_game", "true") {
-                    eprintln!("{e}");
-                    std::process::exit(1);
-                }
-                println!("true");
-            }
-            Some("off") | Some("false") | Some("0") => {
-                if let Err(e) = crate::config::set_gamepad_setting("auto_stop_on_game", "false") {
-                    eprintln!("{e}");
-                    std::process::exit(1);
-                }
-                println!("false");
-            }
-            Some(_) => {
-                eprintln!("{usage}");
-                std::process::exit(2);
-            }
-        },
-        Some(_) => {
-            eprintln!("{usage}");
-            std::process::exit(2);
-        }
-    }
-}
-
-#[cfg(all(windows, feature = "gamepad"))]
-fn poll_mode_name(mode: warmup_gamepad::PollMode) -> &'static str {
-    match mode {
-        warmup_gamepad::PollMode::Full => "full",
-        warmup_gamepad::PollMode::Sleep => "sleep",
-    }
-}
-
-#[cfg(all(windows, feature = "gamepad"))]
-fn print_gamepad_settings() {
-    let s = crate::config::gamepad_settings();
-    println!("userland_poll={}", poll_mode_name(s.userland_poll_mode));
-    println!("sleep_on_game={}", s.sleep_on_game);
-    println!("auto_stop_on_game={}", s.auto_stop_on_game);
-    println!("cursor_deadzone={}", s.cursor_deadzone);
-    println!("cursor_speed={}", s.cursor_speed);
-    println!("cursor_accel={}", s.cursor_accel);
-    println!("scroll_deadzone={}", s.scroll_deadzone);
-    println!("scroll_speed={}", s.scroll_speed);
-    println!("scroll_accel={}", s.scroll_accel);
-}
-
-#[cfg(feature = "gamepad")]
-fn run_gamepad_mode() {
-    let use_real = env::args().any(|a| a == "--real")
-        || env::var_os("WARMUP_REAL_VK").is_some_and(|v| v != "0")
-        || cfg!(windows);
-    let args: Vec<String> = env::args().collect();
-    let mut app = App::default();
-    app.use_real_win32 = use_real;
-    if args.iter().any(|a| a == "--boot") {
-        app.start_boot();
-        println!("> --boot: service path + {G_BOOT_SERVICE_MODE}");
-    }
-    if args
-        .iter()
-        .any(|a| a == "--cfg-winlogon" || a == "--winlogon")
-    {
-        app.config_winlogon_0xd9 = true;
-        println!("> --cfg-winlogon: config +0xd9 set");
-        if app.boot_mode {
-            app.attach_named(Desktop::Winlogon);
-        }
-    }
-    println!("Warmup Companion gamepad mode — sticks move mouse; L3 toggles VK");
-    if use_real {
-        println!("real Win32 VK enabled (WarmupXboxVkWindow)");
-    }
-    println!("Sign-in service: build default release, then `install` as Admin");
-    repl_scroll::paint_state_panel(&app);
-    let vk_open = std::cell::Cell::new(false);
-    let result = run_boot_gamepad_loop(&mut app, &vk_open, false);
-    if let Some(session) = app.vk_session.take() {
-        session.close();
-    }
-    match result {
-        Ok(()) => println!("> exited"),
-        Err(e) => {
-            eprintln!("gamepad: {e}");
-            std::process::exit(1);
-        }
-    }
-}
-
-#[cfg(feature = "gamepad")]
-pub(crate) fn run_boot_gamepad_loop(
-    app: &mut App,
-    vk_open: &std::cell::Cell<bool>,
-    service_mode: bool,
-) -> Result<(), String> {
-    // The companion owns the device; host the pipe so the warmUP desktop can read
-    // connection state over IPC (#347). No-op on non-Windows.
-    crate::pipe_server::spawn();
-    #[cfg(windows)]
-    crate::parental_guard::spawn_guardian_loop();
-    #[cfg(windows)]
-    crate::playtime_tracker::spawn_tracker_loop();
-    let on_action = |action: gamepad::VkLoopAction| match action {
-        gamepad::VkLoopAction::Toggle => {
-            app.toggle_virtual_keyboard_combo();
-            vk_open.set(app.vk_session.is_some());
-            if !service_mode {
-                repl_scroll::paint_state_panel(&*app);
-            } else {
-                #[cfg(windows)]
-                {
-                    if app.vk_session.is_some() {
-                        let vis = win::is_vk_visible();
-                        install::log_line(&format!("VK opened (window visible={vis})"));
-                    } else {
-                        install::log_line("VK closed");
-                    }
-                }
-            }
-        }
-        gamepad::VkLoopAction::Close => {
-            app.close_vk();
-            vk_open.set(false);
-            if !service_mode {
-                repl_scroll::paint_state_panel(&*app);
-            } else {
-                #[cfg(windows)]
-                install::log_line("VK closed");
-            }
-        }
-        gamepad::VkLoopAction::Reopen => {
-            app.close_vk();
-            let attach = vk_gate::attach_for(app.gate_input());
-            app.open_xbox_vk(attach);
-            vk_open.set(app.vk_session.is_some());
-            if !service_mode {
-                repl_scroll::paint_state_panel(&*app);
-            } else {
-                #[cfg(windows)]
-                {
-                    if app.vk_session.is_some() {
-                        let vis = win::is_vk_visible();
-                        install::log_line(&format!("VK reopened (window visible={vis})"));
-                    } else {
-                        install::log_line("VK reopen failed");
-                    }
-                }
-            }
-        }
-        gamepad::VkLoopAction::LaunchWarmup => {
-            if let Err(e) = launch_warmup_exe() {
-                eprintln!("launch warmup.exe: {e}");
-                #[cfg(windows)]
-                if service_mode {
-                    install::log_line(&format!("launch warmup.exe failed: {e}"));
-                }
-            } else {
-                #[cfg(windows)]
-                if service_mode {
-                    install::log_line("launched warmup.exe from controller hotkey");
-                }
-            }
-        }
-    };
-    if service_mode {
-        gamepad::run_watch_loop_service(|| vk_open.get(), on_action)
-    } else {
-        gamepad::run_watch_loop(|| vk_open.get(), on_action)
-    }
-}
-
-#[cfg(feature = "gamepad")]
-fn launch_warmup_exe() -> Result<(), String> {
-    let exe = warmup_exe_path()?;
-    spawn_warmup(&exe).map_err(|e| format!("{}: {e}", exe.display()))
-}
-
-/// True if a `warmup.exe` can be located (same resolution as launch). Used by the
-/// launch hotkey so it gives honest feedback instead of buzzing "success" when
-/// there's nothing to open.
-#[cfg(feature = "gamepad")]
-pub(crate) fn warmup_installed() -> bool {
-    warmup_exe_path().is_ok()
-}
-
-#[cfg(any(feature = "gamepad", windows))]
-pub(crate) fn warmup_exe_path() -> Result<std::path::PathBuf, String> {
-    if let Some(path) = std::env::var_os("WARMUP_EXE") {
-        let path = std::path::PathBuf::from(path);
-        if path.is_file() {
-            return Ok(path);
-        }
-        return Err(format!("WARMUP_EXE does not exist: {}", path.display()));
-    }
-
-    if let Ok(raw) = std::fs::read_to_string(crate::install::DEV_EXE_PATH) {
-        let path = std::path::PathBuf::from(raw.trim().trim_matches('"'));
-        if path.is_file() {
-            return Ok(path);
-        }
-        return Err(format!(
-            "{} points to missing exe: {}",
-            crate::install::DEV_EXE_PATH,
-            path.display()
-        ));
-    }
-
-    let current = std::env::current_exe().map_err(|e| format!("current exe: {e}"))?;
-    let dir = current
-        .parent()
-        .ok_or_else(|| format!("current exe has no parent: {}", current.display()))?;
-    let mut candidates = Vec::new();
-    candidates.push(dir.join("warmup.exe"));
-    if let Some(program_files) = std::env::var_os("ProgramFiles") {
-        candidates.push(std::path::PathBuf::from(program_files).join(r"warmUP\warmup.exe"));
-    }
-    if let Some(program_files_x86) = std::env::var_os("ProgramFiles(x86)") {
-        candidates.push(std::path::PathBuf::from(program_files_x86).join(r"warmUP\warmup.exe"));
-    }
-    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-        let local_app_data = std::path::PathBuf::from(local_app_data);
-        candidates.push(local_app_data.join(r"dev.warmup.console\warmup.exe"));
-        candidates.push(local_app_data.join(r"warmUP\warmup.exe"));
-        candidates.push(local_app_data.join(r"Programs\warmUP\warmup.exe"));
-    }
-    if let Some(user_profile) = std::env::var_os("USERPROFILE") {
-        candidates.push(
-            std::path::PathBuf::from(user_profile)
-                .join(r"warmUp\apps\desktop\src-tauri\target\debug\warmup.exe"),
-        );
-    }
-
-    candidates
-        .into_iter()
-        .find(|path| path.is_file())
-        .ok_or_else(|| {
-            format!(
-                "warmup.exe not found; set WARMUP_EXE or write the full path to {}",
-                crate::install::DEV_EXE_PATH
-            )
-        })
-}
-
-#[cfg(all(feature = "gamepad", windows))]
-fn spawn_warmup(exe: &std::path::Path) -> std::io::Result<()> {
-    if crate::config::service_mode() {
-        return spawn_warmup_as_active_user(exe);
-    }
-
-    use std::os::windows::process::CommandExt;
-    let mut cmd = std::process::Command::new(exe);
-    if let Some(parent) = exe.parent() {
-        cmd.current_dir(parent);
-    }
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-
-    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
-        .spawn()
-        .map(|_| ())
-}
-
-#[cfg(all(feature = "gamepad", windows))]
-fn spawn_warmup_as_active_user(exe: &std::path::Path) -> std::io::Result<()> {
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::{PCWSTR, PWSTR};
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
-    use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
-    use windows::Win32::System::Threading::{
-        CreateProcessAsUserW, CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT,
-        DETACHED_PROCESS, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW,
-    };
-
-    fn wide_os(s: &OsStr) -> Vec<u16> {
-        s.encode_wide().chain(std::iter::once(0)).collect()
-    }
-
-    fn wide(s: &str) -> Vec<u16> {
-        OsStr::new(s)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    }
-
-    unsafe {
-        let session_id = WTSGetActiveConsoleSessionId();
-        let mut token = Default::default();
-        WTSQueryUserToken(session_id, &mut token)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-
-        let exe_w = wide_os(exe.as_os_str());
-        let mut cmd_w = wide(&format!("\"{}\"", exe.display()));
-        let cwd_w = exe.parent().map(|parent| wide_os(parent.as_os_str()));
-        let mut desktop = wide("winsta0\\default");
-        let startup = STARTUPINFOW {
-            cb: std::mem::size_of::<STARTUPINFOW>() as u32,
-            lpDesktop: PWSTR(desktop.as_mut_ptr()),
-            ..Default::default()
-        };
-        let mut info = PROCESS_INFORMATION::default();
-        let mut env = std::ptr::null_mut();
-        if let Err(error) = CreateEnvironmentBlock(&mut env, token, false) {
-            let _ = CloseHandle(token);
-            return Err(std::io::Error::other(error.to_string()));
-        }
-        let cwd_arg = cwd_w
-            .as_ref()
-            .map(|cwd| PCWSTR(cwd.as_ptr()))
-            .unwrap_or_else(PCWSTR::null);
-        let flags = CREATE_UNICODE_ENVIRONMENT
-            | PROCESS_CREATION_FLAGS(DETACHED_PROCESS.0 | CREATE_NEW_PROCESS_GROUP.0);
-
-        let created = CreateProcessAsUserW(
-            token,
-            PCWSTR(exe_w.as_ptr()),
-            PWSTR(cmd_w.as_mut_ptr()),
-            None,
-            None,
-            false,
-            flags,
-            Some(env.cast_const().cast()),
-            cwd_arg,
-            &startup,
-            &mut info,
-        );
-        let _ = DestroyEnvironmentBlock(env);
-        let _ = CloseHandle(token);
-        created.map_err(|e| std::io::Error::other(e.to_string()))?;
-        let _ = CloseHandle(info.hThread);
-        let _ = CloseHandle(info.hProcess);
-    }
-    Ok(())
-}
-
-#[cfg(all(feature = "gamepad", not(windows)))]
-fn spawn_warmup(exe: &std::path::Path) -> std::io::Result<()> {
-    let mut cmd = std::process::Command::new(exe);
-    if let Some(parent) = exe.parent() {
-        cmd.current_dir(parent);
-    }
-    cmd.spawn().map(|_| ())
-}
-
-fn help_screen_rows(help: &str) -> u32 {
-    let cols = std::env::var("COLUMNS")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(120)
-        .max(40);
-    let mut rows = 0u32;
-    for line in help.split('\n') {
-        let w = line.chars().count() as u32;
-        rows = rows.saturating_add(if w == 0 { 1 } else { w.div_ceil(cols) });
-    }
-    // println! adds one '\n' after HELP → cursor sits on following row
-    rows.saturating_add(1)
-}
-
-fn print_help() {
-    const HELP: &str = r#"COMMANDS
-  normal              start normal user instance on default desktop
-  cfg winlogon on     set config.bin +0xd9
-  cfg winlogon off    clear config.bin +0xd9
-  boot                start -boot service path
-  fg normal           foreground normal user app
-  fg uac              foreground UAC consent, input desktop winlogon
-  fg logon            foreground LogonUI.exe, input desktop winlogon
-  fg lock             foreground LockApp.exe, input desktop winlogon
-  fg fullscreen       foreground fullscreen app, profile flag on
-  attach input        warmup_attach_input_desktop
-  press               mask 0x200 -> warmup_process_controller_input
-  release             warmup_on_controller_release
-  spiral on/off       g_app_feature_flags bit 9 -> Spiral vs Xbox path
-  block on/off        toggle state[0x2c] bit 4
-  mask on/off         toggle physical mask bit 0x200
-  slot good           slot 7 type 6 subtype 7 -> queue action 7
-  slot bad            slot 7 does not queue action 7
-  reset               reset state
-  quit                exit
-  --real              Win32 desktop + TabTip/WarmupXboxVkWindow (Windows)
-  pad                 (gamepad feature) SDL3 snapshot
-  --gamepad           (gamepad feature) sticks + L3 → VK
-
-SCENARIOS
-  normal -> fg uac -> press
-  cfg winlogon on -> boot -> fg logon -> press
-  cfg winlogon on -> boot -> fg uac -> press -> press
-"#;
-    repl_scroll::note_lines(help_screen_rows(HELP));
-    println!("{HELP}");
 }

@@ -48,6 +48,7 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
+use super::nimbus_orb::{NimbusMood, NimbusOrb};
 use crate::vk_nav::{KeyAction, KeyCell, KeyPos, KeyRow};
 
 /// GDI `COLORREF` (`0x00BBGGRR`) -> D2D color.
@@ -522,7 +523,10 @@ pub struct VkRenderer {
     height: u32,
     swapchain: IDXGISwapChain1,
     d2d_context: ID2D1DeviceContext,
-    d2d_target: ID2D1Bitmap1,
+    /// Owns the swapchain buffer. Must be dropped before `ResizeBuffers`, or the
+    /// resize fails and every later draw is left with no target (the last pill
+    /// frame stays on screen).
+    d2d_target: Option<ID2D1Bitmap1>,
     dwrite: IDWriteFactory,
     text_format: IDWriteTextFormat,
     glyph_format: IDWriteTextFormat,
@@ -533,8 +537,6 @@ pub struct VkRenderer {
     sublabel_format: IDWriteTextFormat,
     /// Fixed large font for the connect/keyboard prompt pills (10-foot UI).
     prompt_format: IDWriteTextFormat,
-    /// Secondary line on the dictation pill ("Stop" beside the R3 glyph).
-    voice_hint_format: IDWriteTextFormat,
     icon_cache: HashMap<IconCacheKey, ID2D1Bitmap1>,
     controller_art_cache: HashMap<ControllerArtCacheKey, (ID2D1Bitmap1, u32, u32)>,
     prompt_started: Instant,
@@ -551,7 +553,12 @@ pub struct VkRenderer {
     /// key orb and the dictation pill so both breathe the same way.
     level: f32,
     level_at: Option<Instant>,
-    _d3d: ID3D11Device,
+    /// shdr-21 cloud, created on the first transcription frame. `nimbus_failed`
+    /// sticks so a missing compiler doesn't retry every frame; the ellipse orb
+    /// stays as the fallback.
+    nimbus: Option<NimbusOrb>,
+    nimbus_failed: bool,
+    d3d: ID3D11Device,
     _d2d_device: ID2D1Device,
     _dcomp_device: IDCompositionDevice,
     // Keep the composition target + visual alive for the window's lifetime. Dropping
@@ -607,14 +614,6 @@ const HINT_TOP: f32 = CHIP_TOP + (CHIP_H - HINT_PILL_H) * 0.5;
 const HINT_GAP: f32 = 12.0;
 const KEY_HINT_BADGE_MAX: f32 = 38.0;
 const KEY_HINT_BADGE_INSET: f32 = 7.0;
-/// Dictation pill secondary text size (DIPs); the title reuses the 28px prompt font.
-const VOICE_HINT_PX: f32 = 18.0;
-/// Dictation pill: horizontal padding at the pill's rounded ends.
-const VOICE_PAD_X: f32 = 12.0;
-/// Gap between the orb slot and the text column, and between the R3 glyph and "Stop".
-const VOICE_GAP: f32 = 10.0;
-/// Height of the R3 glyph on the hint line.
-const VOICE_HINT_ICON: f32 = 30.0;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum VkIcon {
@@ -1227,20 +1226,6 @@ impl VkRenderer {
                 &locale,
             )
             .map_err(|e| format!("CreateTextFormat (prompt): {e}"))?;
-        let voice_hint_format = dwrite
-            .CreateTextFormat(
-                w!("Segoe UI"),
-                &fonts,
-                DWRITE_FONT_WEIGHT_NORMAL,
-                DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                VOICE_HINT_PX,
-                &locale,
-            )
-            .map_err(|e| format!("CreateTextFormat (voice hint): {e}"))?;
-        let _ = voice_hint_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        let _ = voice_hint_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        let _ = voice_hint_format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
 
         // Centre labels in their key rects (DWrite defaults to top-left).
         for f in [&text_format, &glyph_format] {
@@ -1260,7 +1245,7 @@ impl VkRenderer {
             height,
             swapchain,
             d2d_context,
-            d2d_target,
+            d2d_target: Some(d2d_target),
             dwrite,
             text_format,
             glyph_format,
@@ -1268,7 +1253,6 @@ impl VkRenderer {
             chip_format,
             sublabel_format,
             prompt_format,
-            voice_hint_format,
             icon_cache: HashMap::new(),
             controller_art_cache: HashMap::new(),
             prompt_started: Instant::now(),
@@ -1277,7 +1261,9 @@ impl VkRenderer {
             strip_shown_at: None,
             level: 0.0,
             level_at: None,
-            _d3d: d3d,
+            nimbus: None,
+            nimbus_failed: false,
+            d3d,
             _d2d_device: d2d_device,
             _dcomp_device: dcomp_device,
             _comp_target: comp_target,
@@ -1293,19 +1279,27 @@ impl VkRenderer {
         if width == self.width && height == self.height {
             return Ok(());
         }
+        // The bitmap is an extra ref on the back buffer. ResizeBuffers returns
+        // DXGI_ERROR_INVALID_CALL while any ref is alive, and SetTarget(None)
+        // alone does not drop this one.
         self.d2d_context.SetTarget(None);
-        self.swapchain
-            .ResizeBuffers(
-                0,
-                width,
-                height,
-                DXGI_FORMAT_B8G8R8A8_UNORM,
-                DXGI_SWAP_CHAIN_FLAG(0),
-            )
-            .map_err(|e| format!("ResizeBuffers: {e}"))?;
+        let _ = self.d2d_context.Flush(None, None);
+        self.d2d_target = None;
+        if let Err(e) = self.swapchain.ResizeBuffers(
+            0,
+            width,
+            height,
+            DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_SWAP_CHAIN_FLAG(0),
+        ) {
+            if let Ok(bmp) = bind_d2d_target(&self.d2d_context, &self.swapchain) {
+                self.d2d_target = Some(bmp);
+            }
+            return Err(format!("ResizeBuffers: {e}"));
+        }
         self.width = width;
         self.height = height;
-        self.d2d_target = bind_d2d_target(&self.d2d_context, &self.swapchain)?;
+        self.d2d_target = Some(bind_d2d_target(&self.d2d_context, &self.swapchain)?);
         Ok(())
     }
 
@@ -1643,6 +1637,17 @@ impl VkRenderer {
         let cw = self.width as f32;
         let ch = self.height as f32;
         let now = Instant::now();
+        // The cloud uses the immediate context, so it has to land before D2D
+        // opens its draw on that same context. Listening and transcription both
+        // use it; the ellipse orb is only the fallback if the shader never comes up.
+        let voice_level = if voice_active {
+            self.smoothed_level(voice_level, now)
+        } else {
+            0.0
+        };
+        if voice_active {
+            self.prepare_nimbus(now, nimbus_mood(voice_phase, voice_level), pal.accent);
+        }
 
         self.d2d_context.BeginDraw();
         // Per-key press transforms below are scoped; start every frame clean in
@@ -1821,24 +1826,33 @@ impl VkRenderer {
                 } else if voice_active {
                     let cx = (rect.rect.left + rect.rect.right) * 0.5;
                     let cy = (rect.rect.top + rect.rect.bottom) * 0.5;
-                    let unit = ((rect.rect.right - rect.rect.left)
+                    let side = (rect.rect.right - rect.rect.left)
                         .min(rect.rect.bottom - rect.rect.top)
-                        * 0.56)
                         .max(1.0);
-                    let level = self.smoothed_level(voice_level, now);
+                    let transcribing = matches!(voice_phase, VoicePhase::Transcribing);
                     self.d2d_context.PushAxisAlignedClip(
                         &rect.rect,
                         windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                     );
-                    self.draw_voice_orb(
-                        pal.accent,
-                        level,
-                        matches!(voice_phase, VoicePhase::Transcribing),
-                        cx,
-                        cy,
-                        unit,
-                        1.25,
-                    )?;
+                    // The cloud fills its square, so keep it inside the old blob's
+                    // footprint instead of edge to edge on the key. Talking
+                    // scales that square with the mic.
+                    let mut ball = side * 0.62;
+                    if matches!(voice_phase, VoicePhase::Listening) {
+                        ball *= voice_orb_scale(voice_level);
+                    }
+                    let drew_nimbus = self.draw_nimbus_at(&square_about(cx, cy, ball), 1.0);
+                    if !drew_nimbus {
+                        self.draw_voice_orb(
+                            pal.accent,
+                            voice_level,
+                            transcribing,
+                            cx,
+                            cy,
+                            (side * 0.56).max(1.0),
+                            1.25,
+                        )?;
+                    }
                     self.d2d_context.PopAxisAlignedClip();
                     let halo_alpha = match voice_phase {
                         VoicePhase::Starting => 0.18,
@@ -2351,10 +2365,87 @@ impl VkRenderer {
         Ok(())
     }
 
+    /// Compile (once) and draw the cloud into its bitmap.
+    fn prepare_nimbus(&mut self, now: Instant, mood: NimbusMood, accent: u32) {
+        if self.nimbus_failed {
+            return;
+        }
+        if self.nimbus.is_none() {
+            match unsafe { NimbusOrb::create(&self.d3d, &self.d2d_context) } {
+                Ok(orb) => self.nimbus = Some(orb),
+                Err(e) => {
+                    self.fail_nimbus(&e);
+                    return;
+                }
+            }
+        }
+        if let Some(orb) = self.nimbus.as_mut() {
+            if let Err(e) = unsafe { orb.render(now, mood, accent) } {
+                self.fail_nimbus(&e);
+            }
+        }
+    }
+
+    fn fail_nimbus(&mut self, err: &str) {
+        self.nimbus = None;
+        self.nimbus_failed = true;
+        if crate::config::service_mode() {
+            crate::install::log_line(&format!("vk renderer: nimbus orb unavailable: {err}"));
+        }
+    }
+
+    /// Blit the latest cloud. False when the shader never came up, so the caller
+    /// can fall back to the ellipse orb.
+    fn draw_nimbus_at(&self, dest: &D2D_RECT_F, opacity: f32) -> bool {
+        let Some(orb) = self.nimbus.as_ref() else {
+            return false;
+        };
+        if opacity <= 0.01 {
+            return true;
+        }
+        unsafe {
+            self.d2d_context.DrawBitmap(
+                orb.bitmap(),
+                Some(dest),
+                opacity.clamp(0.0, 1.0),
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                None,
+                None,
+            );
+        }
+        true
+    }
+
+    /// Accent line just inside the screen, with one narrow halo. Not a hard
+    /// frame and not a wide fog.
+    unsafe fn draw_display_border(&self, accent: u32, alpha: f32) -> Result<(), String> {
+        let cw = self.width as f32;
+        let ch = self.height as f32;
+        let scale = (ch / 1080.0).clamp(0.85, 2.0);
+        let inset = 5.0 * scale;
+        let rect = D2D_RECT_F {
+            left: inset,
+            top: inset,
+            right: (cw - inset).max(inset + 1.0),
+            bottom: (ch - inset).max(inset + 1.0),
+        };
+        let halo = solid_brush(&self.d2d_context, colorref_alpha(accent, 0.14 * alpha))?;
+        let line = solid_brush(&self.d2d_context, colorref_alpha(accent, 0.42 * alpha))?;
+        self.d2d_context
+            .DrawRectangle(&rect, &halo, 12.0 * scale, None);
+        self.d2d_context
+            .DrawRectangle(&rect, &line, 1.75 * scale, None);
+        Ok(())
+    }
+
     /// Dictation pill for the keyboard-closed case: the audio-reactive orb on the
     /// left, a phase title beside it, and — while listening — the controller's
     /// R3 glyph with "Stop" so the exit is always on screen. Every phase has a
     /// static cue (title, hint, orb brightness); motion is never the only signal.
+    ///
+    /// Transcription replaces the pill: only the nimbus cloud (when `show_orb`)
+    /// and a border around the whole window, which the overlay sizes to the
+    /// display. The border is the static cue; the cloud is the motion.
     pub unsafe fn draw_voice(&mut self, pill: &VoicePill) -> Result<(), String> {
         let VoicePill {
             bg,
@@ -2367,6 +2458,7 @@ impl VkRenderer {
             alpha,
             scale,
             label_alpha,
+            show_orb,
         } = *pill;
         let cw = self.width as f32;
         let ch = self.height as f32;
@@ -2374,151 +2466,50 @@ impl VkRenderer {
         let alpha = alpha.clamp(0.0, 1.0);
         let label_alpha = label_alpha.clamp(0.0, 1.0) * alpha;
         let level = self.smoothed_level(level, now);
-
-        self.d2d_context.BeginDraw();
-        self.d2d_context.Clear(Some(&D2D1_COLOR_F {
-            r: 0.0,
-            g: 0.0,
-            b: 0.0,
-            a: 0.0,
-        }));
-        // Entrance scale about the pill centre (modal-style: it is anchored to
-        // nothing on screen, so centre is the right origin).
-        self.d2d_context
-            .SetTransform(&scale_about(scale.clamp(0.5, 1.0), cw * 0.5, ch * 0.5));
-
-        // Fully rounded pill filling the window minus a hairline for the stroke.
-        let panel = D2D_RECT_F {
-            left: FLOATING_PANEL_INSET,
-            top: FLOATING_PANEL_INSET,
-            right: cw - FLOATING_PANEL_INSET,
-            bottom: ch - FLOATING_PANEL_INSET,
-        };
-        let radius = (panel.bottom - panel.top) * 0.5;
-        let rounded = D2D1_ROUNDED_RECT {
-            rect: panel,
-            radiusX: radius,
-            radiusY: radius,
-        };
-        draw_soft_shadow(&self.d2d_context, panel, radius, alpha)?;
-        let bg_brush = solid_brush(&self.d2d_context, colorref_alpha(bg, 0.94 * alpha))?;
-        let border_brush = solid_brush(
-            &self.d2d_context,
-            colorref_alpha(colorref_mix(0x00FFFFFF, border, 0.38), 0.9 * alpha),
-        )?;
-        self.d2d_context.FillRoundedRectangle(&rounded, &bg_brush);
-        self.d2d_context
-            .DrawRoundedRectangle(&rounded, &border_brush, 1.25, None);
-
-        // Orb in a square slot at the rounded left end. Starting: dim, no live
-        // level yet (mic isn't capturing), so the user waits a beat before talking.
-        let slot = ch;
-        let orb_cx = panel.left + slot * 0.5;
-        let orb_cy = ch * 0.5;
-        let (orb_alpha, transcribing) = match phase {
-            VoicePhase::Starting => (0.45, false),
-            VoicePhase::Listening => (1.0, false),
-            VoicePhase::Transcribing => (1.0, true),
-        };
-        self.d2d_context.PushAxisAlignedClip(
-            &D2D_RECT_F {
-                left: panel.left,
-                top: panel.top,
-                right: panel.left + slot,
-                bottom: panel.bottom,
-            },
-            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-        );
-        self.draw_voice_orb(
-            accent,
-            level,
-            transcribing,
-            orb_cx,
-            orb_cy,
-            slot * 0.42,
-            orb_alpha * alpha,
-        )?;
-        self.d2d_context.PopAxisAlignedClip();
-
-        // Text column: title, and a hint line only while there is something to do.
-        let (title, muted) = voice_phase_title(phase);
-        let title_alpha = if muted { 0.7 } else { 1.0 } * label_alpha;
-        let title_brush = solid_brush(&self.d2d_context, colorref_alpha(text, title_alpha))?;
-        let text_left = panel.left + slot + VOICE_GAP;
-        let text_right = panel.right - radius.max(VOICE_PAD_X);
-        let _ = self
-            .prompt_format
-            .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        let _ = self
-            .prompt_format
-            .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        let _ = self
-            .prompt_format
-            .SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-        let show_hint = matches!(phase, VoicePhase::Listening);
-        // Title is vertically centred alone; with a hint it moves up to share the
-        // height (title band on top, hint band below).
-        let title_h = 36.0;
-        let hint_h = VOICE_HINT_ICON.max(VOICE_HINT_PX + 6.0);
-        let stack_h = if show_hint { title_h + hint_h } else { title_h };
-        let stack_top = ch * 0.5 - stack_h * 0.5;
-        let title_w: Vec<u16> = title.encode_utf16().collect();
-        self.d2d_context.DrawText(
-            &title_w,
-            &self.prompt_format,
-            &D2D_RECT_F {
-                left: text_left,
-                top: stack_top,
-                right: text_right,
-                bottom: stack_top + title_h,
-            },
-            &title_brush,
-            D2D1_DRAW_TEXT_OPTIONS_CLIP,
-            DWRITE_MEASURING_MODE_NATURAL,
-        );
-        let _ = self
-            .prompt_format
-            .SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
-
-        if show_hint {
-            let hint_top = stack_top + title_h;
-            let icon_rect = D2D_RECT_F {
-                left: text_left,
-                top: hint_top + (hint_h - VOICE_HINT_ICON) * 0.5,
-                right: text_left + VOICE_HINT_ICON,
-                bottom: hint_top + (hint_h + VOICE_HINT_ICON) * 0.5,
-            };
-            let icon = ControllerIconFamily::from_label(controller_label)
-                .hint_icon("R3")
-                .unwrap_or(VkIcon::R3Xbox);
-            self.draw_svg_icon_alpha(icon, icon_rect, text, label_alpha)?;
-            let hint_brush =
-                solid_brush(&self.d2d_context, colorref_alpha(text, 0.72 * label_alpha))?;
-            let hint_w: Vec<u16> = VOICE_STOP_HINT.encode_utf16().collect();
-            self.d2d_context.DrawText(
-                &hint_w,
-                &self.voice_hint_format,
-                &D2D_RECT_F {
-                    left: icon_rect.right + VOICE_GAP * 0.6,
-                    top: hint_top,
-                    right: text_right,
-                    bottom: hint_top + hint_h,
-                },
-                &hint_brush,
-                D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
+        let _ = (bg, border, text, controller_label, scale, label_alpha);
+        // Same frame and the same cloud size. Talking speeds up with the mic;
+        // transcription keeps a steady orbit. The palette does not change.
+        if show_orb {
+            self.prepare_nimbus(now, nimbus_mood(phase, level), accent);
         }
 
-        self.d2d_context.SetTransform(&IDENTITY);
-        self.d2d_context
-            .EndDraw(None, None)
-            .map_err(|e| format!("EndDraw: {e}"))?;
-        self.swapchain
-            .Present(1, DXGI_PRESENT(0))
-            .ok()
-            .map_err(|e| format!("Present: {e}"))?;
-        Ok(())
+        {
+            self.d2d_context.BeginDraw();
+            self.d2d_context.Clear(Some(&D2D1_COLOR_F {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            }));
+            self.d2d_context.SetTransform(&IDENTITY);
+            self.draw_display_border(accent, alpha)?;
+            if show_orb {
+                let mut slot = nimbus_slot(cw, ch);
+                if matches!(phase, VoicePhase::Listening) {
+                    slot = scale_about_center(slot, voice_orb_scale(level));
+                }
+                if !self.draw_nimbus_at(&slot, alpha) {
+                    let unit = ((slot.right - slot.left) * 0.42).max(1.0);
+                    self.draw_voice_orb(
+                        accent,
+                        0.0,
+                        true,
+                        (slot.left + slot.right) * 0.5,
+                        (slot.top + slot.bottom) * 0.5,
+                        unit,
+                        alpha,
+                    )?;
+                }
+            }
+            self.d2d_context
+                .EndDraw(None, None)
+                .map_err(|e| format!("EndDraw: {e}"))?;
+            self.swapchain
+                .Present(1, DXGI_PRESENT(0))
+                .ok()
+                .map_err(|e| format!("Present: {e}"))?;
+            Ok(())
+        }
     }
 }
 
@@ -2558,18 +2549,61 @@ pub struct VoicePill<'a> {
     pub alpha: f32,
     pub scale: f32,
     pub label_alpha: f32,
+    /// Transcription only. False when the keyboard's mic key is already the
+    /// cloud, so the fullscreen overlay draws just the display border.
+    pub show_orb: bool,
 }
 
-/// Hint text beside the R3 glyph while listening.
-const VOICE_STOP_HINT: &str = "Stop";
-
-/// `(title, muted)` for a dictation phase. Muted phases are the ones the user is
-/// waiting on rather than driving.
-fn voice_phase_title(phase: VoicePhase) -> (&'static str, bool) {
+fn nimbus_mood(phase: VoicePhase, level: f32) -> NimbusMood {
     match phase {
-        VoicePhase::Starting => ("Starting\u{2026}", true),
-        VoicePhase::Listening => ("Listening", false),
-        VoicePhase::Transcribing => ("Transcribing\u{2026}", true),
+        VoicePhase::Starting => NimbusMood::Idle,
+        VoicePhase::Listening => NimbusMood::Speaking { level },
+        VoicePhase::Transcribing => NimbusMood::Thinking,
+    }
+}
+
+/// Quiet sits a little under the base size. Full voice is clearly larger.
+fn voice_orb_scale(level: f32) -> f32 {
+    0.78 + 0.42 * level.clamp(0.0, 1.0)
+}
+
+fn scale_about_center(rect: D2D_RECT_F, scale: f32) -> D2D_RECT_F {
+    let cx = (rect.left + rect.right) * 0.5;
+    let cy = (rect.top + rect.bottom) * 0.5;
+    let hw = (rect.right - rect.left) * 0.5 * scale;
+    let hh = (rect.bottom - rect.top) * 0.5 * scale;
+    D2D_RECT_F {
+        left: cx - hw,
+        top: cy - hh,
+        right: cx + hw,
+        bottom: cy + hh,
+    }
+}
+
+fn square_about(cx: f32, cy: f32, side: f32) -> D2D_RECT_F {
+    let h = side * 0.5;
+    D2D_RECT_F {
+        left: cx - h,
+        top: cy - h,
+        right: cx + h,
+        bottom: cy + h,
+    }
+}
+
+/// Square for the transcription cloud: right edge, vertically centred. The
+/// cloud fills this square, so 96px at 1080p matches the old pill indicator
+/// instead of the 240px first cut.
+fn nimbus_slot(cw: f32, ch: f32) -> D2D_RECT_F {
+    let scale = (ch / 1080.0).clamp(0.85, 2.0);
+    let size = (96.0 * scale).min(cw.min(ch) * 0.9).max(1.0);
+    let margin = (48.0 * scale).min((cw - size).max(0.0));
+    let left = (cw - margin - size).max(0.0);
+    let top = ((ch - size) * 0.5).max(0.0);
+    D2D_RECT_F {
+        left,
+        top,
+        right: left + size,
+        bottom: top + size,
     }
 }
 
@@ -2808,17 +2842,19 @@ mod tests {
     }
 
     #[test]
-    fn every_dictation_phase_has_a_static_cue() {
-        // Motion is never the only feedback channel: each phase names itself,
-        // and the phases the user merely waits on read as muted.
-        let (starting, m1) = voice_phase_title(VoicePhase::Starting);
-        let (listening, m2) = voice_phase_title(VoicePhase::Listening);
-        let (transcribing, m3) = voice_phase_title(VoicePhase::Transcribing);
-        assert!(starting.starts_with("Starting") && m1);
-        assert_eq!((listening, m2), ("Listening", false));
-        assert!(transcribing.starts_with("Transcribing") && m3);
-        assert_ne!(starting, listening);
-        assert_eq!(VOICE_STOP_HINT, "Stop");
+    fn transcription_cloud_sits_on_the_right_of_a_1080p_frame() {
+        let slot = nimbus_slot(1920.0, 1080.0);
+        let w = slot.right - slot.left;
+        let h = slot.bottom - slot.top;
+        assert!((w - 96.0).abs() < 1.0 && (h - w).abs() < 1.0);
+        assert!((slot.right - (1920.0 - 48.0)).abs() < 1.0);
+        assert!((slot.top - (1080.0 - 96.0) * 0.5).abs() < 1.0);
+        // A short window can't push the square off the top or the right.
+        assert!((voice_orb_scale(0.0) - 0.78).abs() < 1e-4);
+        assert!(voice_orb_scale(1.0) > voice_orb_scale(0.0));
+        let tiny = nimbus_slot(100.0, 80.0);
+        assert!(tiny.left >= 0.0 && tiny.top >= 0.0);
+        assert!(tiny.right <= 100.0 + 0.5 && tiny.bottom <= 80.0 + 0.5);
     }
 
     #[test]

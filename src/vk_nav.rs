@@ -148,6 +148,10 @@ static NAV: Mutex<NavState> = Mutex::new(NavState {
     last_press: None,
 });
 
+/// Serialize unit tests that mutate the shared `NAV` global across modules.
+#[cfg(test)]
+static NAV_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 /// Which held button drives the key auto-repeat.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RepeatKey {
@@ -1154,6 +1158,7 @@ mod press_feedback_tests {
 
     #[test]
     fn shortcut_buttons_light_up_the_key_they_stand_in_for() {
+        let _guard = NAV_TEST_LOCK.lock().unwrap();
         // Seed the grid directly (not via reset_selection) so this never touches
         // the shared vk_predict global.
         {
@@ -1177,6 +1182,7 @@ mod press_feedback_tests {
 
     #[test]
     fn unmatched_action_leaves_the_previous_press_alone() {
+        let _guard = NAV_TEST_LOCK.lock().unwrap();
         {
             let mut nav = NAV.lock().unwrap();
             nav.layer = Layer::Lower;
@@ -1199,6 +1205,7 @@ mod tests {
 
     #[test]
     fn move_reports_real_moves_not_edges() {
+        let _guard = NAV_TEST_LOCK.lock().unwrap();
         // The typing-loop haptic ticks only when the cursor actually moves. A
         // press into a row edge must report `false` so it stays silent — a
         // phantom buzz at every wall would be worse than no haptics.

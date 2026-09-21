@@ -6,6 +6,7 @@ pub mod desktop_window;
 pub mod game_detect;
 pub mod logon_focus;
 pub mod native_keyboard;
+mod nimbus_orb;
 pub mod prompt_overlay;
 pub mod speech_input;
 pub mod surface;

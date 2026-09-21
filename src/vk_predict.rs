@@ -1,10 +1,9 @@
 //! Local prefix prediction: VK-only context, userland only.
 
 use std::collections::HashSet;
-use std::fs;
-use std::path::PathBuf;
 use std::sync::Mutex;
 
+use crate::predict_dict;
 use crate::predict_ngram;
 
 const MIN_PREFIX_LEN: usize = 2;
@@ -59,48 +58,6 @@ fn words_with_prefix(prefix: &str) -> impl Iterator<Item = &str> {
         .take_while(move |w| w.starts_with(prefix))
 }
 
-fn personal_dict_path() -> Option<PathBuf> {
-    let base = std::env::var_os("LOCALAPPDATA")?;
-    Some(
-        PathBuf::from(base)
-            .join("WarmupKeyboard")
-            .join("personal.dict"),
-    )
-}
-
-fn load_personal(into: &mut HashSet<String>) {
-    into.clear();
-    let Some(path) = personal_dict_path() else {
-        return;
-    };
-    let Ok(data) = fs::read_to_string(&path) else {
-        return;
-    };
-    for line in data.lines() {
-        let w = line.trim().to_ascii_lowercase();
-        if w.len() >= 2 && w.chars().all(|c| c.is_ascii_alphabetic()) {
-            into.insert(w);
-        }
-    }
-}
-
-fn flush_personal(from: &HashSet<String>) {
-    let Some(path) = personal_dict_path() else {
-        return;
-    };
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let mut lines: Vec<&String> = from.iter().collect();
-    lines.sort();
-    let body = lines
-        .iter()
-        .map(|s| s.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let _ = fs::write(&path, body);
-}
-
 pub fn predictions_enabled() -> bool {
     #[cfg(test)]
     {
@@ -124,7 +81,7 @@ pub fn reset() {
     s.highlight = 0;
     s.candidate_engaged = false;
     s.enabled = predictions_enabled();
-    load_personal(&mut s.personal);
+    predict_dict::load_personal(&mut s.personal);
 }
 
 fn refresh_ranked(s: &mut PredictState) {
@@ -312,13 +269,21 @@ fn maybe_learn(s: &mut PredictState, word: &str) {
     if w.len() < 2 || !w.chars().all(|c| c.is_ascii_alphabetic()) {
         return;
     }
-    match crate::win::logon_focus::focused_is_password_field() {
-        Some(true) | None => return,
-        Some(false) => {}
+    // Password fields must not train the personal dict (CONTEXT.md "Secure field").
+    // The focus probe lives in logon_focus; treat unknown as unsafe.
+    if !safe_to_learn_from_focus() {
+        return;
     }
     if s.personal.insert(w) {
-        flush_personal(&s.personal);
+        predict_dict::flush_personal(&s.personal);
     }
+}
+
+fn safe_to_learn_from_focus() -> bool {
+    matches!(
+        crate::win::logon_focus::focused_is_password_field(),
+        Some(false)
+    )
 }
 
 /// Commit the highlighted candidate through `sink` (CONTEXT.md "Candidate
