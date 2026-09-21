@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.3.0
+
+Voice is now the Nimbus cloud (orbkit SHDR-21), drawn on the D3D11 device the
+keyboard already uses. Listening and transcription share one frame. The old
+ellipse blob and the labelled dictation pill are gone.
+
+- The cloud is a solid disc in the keyboard accent: lit wisps on a darker
+  shade of the same colour, so gaps are not transparent and the body is not
+  the grey border. Hue does not change between states.
+- A clock always steps the noise forward. Talking adds fold inside the shader
+  and grows the orb from the quiet size. It does not multiply the running
+  clock, which was spinning the field through whole turns. The light only
+  drifts.
+- Transcription rests at that same quiet size, then swells and settles. The
+  shader opens and closes with the swell. Starting sits at the quiet size.
+- Keyboard open: the same cloud on the mic key, and only the screen-edge glow
+  on the overlay. Keyboard closed: glow plus the cloud.
+- The screen edge is an accent glow on the bezel. The outside of the band is
+  the screen rectangle, so the corner wedges are filled; only the inner edge
+  has a small radius. The frame fades in over 560 ms instead of popping.
+- The fullscreen overlay is click-through. Resizing it drops the D2D bitmap
+  before `ResizeBuffers`, so a failed resize can no longer leave the last
+  frame stuck on screen.
+- Cleanup: `main`, the service, the pipe server, parental controls, and
+  playtime tracking are split into focused modules, and the XInput backend is
+  split into identity, raw HID, secure-desktop polling, and the XInput poll.
+
 ## v0.2.19
 
 - Sign-in / lock: keep the companion overlay keyboard. Windows' gamepad PIN
