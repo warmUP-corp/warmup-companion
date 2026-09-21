@@ -133,24 +133,33 @@ float phaseHG(float c, float g) {
     return (1.0 - g2) / pow(max(1.0 + g2 - 2.0 * g * c, 0.0001), 1.5);
 }
 
-float density(float3 p, float animTime, float nimbusDensity) {
+float density(float3 p, float nimbusDensity) {
     float shell = 1.0 - length(p) / uP_radius;
     if (shell <= 0.0) return 0.0;
 
-    float3 q = p * uP_scale;
+    // Voice (uP_churn) and the transcription pulse (uOutput) add fold on top
+    // of a wave that keeps moving even when nobody is talking.
+    float voice = saturate(uP_churn);
+    float pulse = saturate(uOutput);
+    float selfFold = 0.55 + 0.3 * sin(uP_speed * 2.2);
+    float amp = selfFold + 0.5 * voice + 0.95 * pulse;
+    float3 q = p * (uP_scale * (1.0 + 0.16 * voice + 0.5 * pulse));
     float f = 1.0;
     [unroll]
     for (int k = 0; k < DENSITY_OCT; k++) {
-        q += cos(q.yzx * f + animTime * uP_churn) / f;
+        // uP_speed is an integrated phase. Do not multiply it by voice.
+        q += cos(q.yzx * f + uP_speed) * amp / f;
         f *= 1.8;
     }
 
     float n = (sin(q.x) + sin(q.y) + sin(q.z)) / 3.0 * 0.5 + 0.5;
-    float clump = smoothstep(uP_threshold, 1.0, n);
+    // Transcription opens the clumps as it swells, then closes them again.
+    float thresh = lerp(uP_threshold, uP_threshold * 0.45, pulse);
+    float clump = smoothstep(thresh, 1.0, n);
     return clump * pow(shell, uP_edgeSoft) * nimbusDensity;
 }
 
-float4 nimbusRender(float2 fragCoord, float animTime, float nimbusPower, float nimbusDensity) {
+float4 nimbusRender(float2 fragCoord, float nimbusPower, float nimbusDensity) {
     float2 uRes = float2(uResX, uResY);
     // GL fragcoord is bottom-left; D3D is top-left. Flip so the light orbit matches.
     fragCoord.y = uRes.y - fragCoord.y;
@@ -159,10 +168,11 @@ float4 nimbusRender(float2 fragCoord, float animTime, float nimbusPower, float n
     float3 rd = normalize(float3(uv, uP_focal));
 
     // Positive z: the light sits behind the cloud, where forward scatter blooms.
+    // uP_lightSpin is also an integrated angle, advanced slowly every frame.
     float3 L = normalize(float3(
-        cos(animTime * uP_lightSpin) * 0.7,
+        cos(uP_lightSpin) * 0.7,
         0.45,
-        sin(animTime * uP_lightSpin) * 0.35 + 0.65
+        sin(uP_lightSpin) * 0.35 + 0.65
     ));
     float phase = phaseHG(dot(rd, L), uP_aniso);
 
@@ -176,14 +186,14 @@ float4 nimbusRender(float2 fragCoord, float animTime, float nimbusPower, float n
     for (int i = 0; i < STEPS; i++) {
         float t = tStart + (float(i) + 0.5) * dt;
         float3 p = ro + rd * t;
-        float dn = density(p, animTime, nimbusDensity);
+        float dn = density(p, nimbusDensity);
         if (dn > 0.001) {
             float shadow = 1.0;
             float lstep = uP_radius / float(LIGHT_STEPS);
             [loop]
             for (int s = 1; s <= LIGHT_STEPS; s++) {
                 float3 lp = p + L * (float(s) - 0.5) * lstep;
-                shadow *= exp(-density(lp, animTime, nimbusDensity) * lstep * uP_shadowAbsorb);
+                shadow *= exp(-density(lp, nimbusDensity) * lstep * uP_shadowAbsorb);
             }
             // Shadow once, inside the mix. A second multiply kills the cool colour.
             float3 lit = lerp(uC_shadow.rgb * uP_shadowLift, uC_light.rgb, shadow);
@@ -194,8 +204,15 @@ float4 nimbusRender(float2 fragCoord, float animTime, float nimbusPower, float n
     }
 
     float body = 1.0 - T;
-    scattered += uC_shadow.rgb * body * uP_ambient;
-    return float4(scattered, body);
+    scattered += uC_light.rgb * body * uP_ambient;
+
+    // The sphere is solid. Gaps in the nebula are a darker shade of the
+    // accent, not the grey border and not the desktop.
+    float rayDist = length(cross(rd, ro));
+    float rad = uP_radius;
+    float cover = smoothstep(rad + 0.05, rad - 0.14, rayDist);
+    float3 rgb = uC_shadow.rgb * cover + scattered;
+    return float4(rgb, cover);
 }
 
 struct VsOut { float4 pos : SV_Position; };
@@ -208,9 +225,9 @@ VsOut vs_main(uint id : SV_VertexID) {
 }
 
 float4 ps_main(float4 pos : SV_Position) : SV_Target {
-    float nimbusPower = uP_power * (0.7 + 0.9 * uOutput);
+    float nimbusPower = uP_power;
     float nimbusDensity = uP_density * (1.0 + 0.35 * uInput);
-    float4 acc = nimbusRender(pos.xy, uP_speed, nimbusPower, nimbusDensity);
+    float4 acc = nimbusRender(pos.xy, nimbusPower, nimbusDensity);
     float3 col = tanh3(acc.rgb * uP_exposure);
     float a = saturate(acc.a * uP_alphaGain);
     // Scattered light is already the premultiplied colour. Do not scale by alpha.
@@ -231,12 +248,13 @@ pub struct NimbusOrb {
     staging: ID3D11Texture2D,
     rtv: ID3D11RenderTargetView,
     bitmap: ID2D1Bitmap1,
-    anim_speed: f32,
-    churn: f32,
-    spin: f32,
-    clock: f32,
+    /// Noise phase. Always steps forward; voice adds a little to the step.
+    noise_phase: f32,
+    /// Light angle. Steps forward on its own and does not follow the mic.
+    light_phase: f32,
+    /// Seconds the orb has been alive, for the transcription pulse only.
+    age: f32,
     vol_in: f32,
-    vol_out: f32,
     last: Option<Instant>,
 }
 
@@ -341,8 +359,7 @@ impl NimbusOrb {
             )
             .map_err(|e| format!("CreateBitmap: {e}"))?;
 
-        let (vol_in, vol_out) = thinking_volumes(0.0);
-        let anim_speed = 0.1 + (1.0 - (vol_out - 1.0).powi(2)) * 0.9;
+        let (vol_in, _) = thinking_volumes(0.0);
         Ok(Self {
             ctx,
             vs,
@@ -353,18 +370,22 @@ impl NimbusOrb {
             staging,
             rtv,
             bitmap,
-            anim_speed,
-            churn: 0.16,
-            spin: 0.04,
-            clock: 0.0,
+            noise_phase: 0.0,
+            light_phase: 0.0,
+            age: 0.0,
             vol_in,
-            vol_out,
             last: None,
         })
     }
 
     pub fn bitmap(&self) -> &ID2D1Bitmap1 {
         &self.bitmap
+    }
+
+    /// 0 at the small resting size, 1 at the top of the transcription swell.
+    /// Same clock the shader uses, so the inside and the scale move together.
+    pub fn think_pulse(&self) -> f32 {
+        0.5 + 0.5 * (self.age * 2.4).sin()
     }
 
     /// Advance the clock and draw one frame into the bitmap.
@@ -381,54 +402,49 @@ impl NimbusOrb {
             .map(|t| now.saturating_duration_since(t).as_secs_f32().min(0.05))
             .unwrap_or(1.0 / 60.0);
         self.last = Some(now);
-        // Same body in every state. Voice and transcription change the
-        // motion, not the color and not the size.
+        self.age += dt;
+        // Same body in every state. The noise clock always steps forward.
+        // Talking adds a small extra step. It is not a rate times the whole
+        // clock, which is what made the field spin through turns.
         self.vol_in = NIMBUS_BODY;
-        self.vol_out = NIMBUS_BODY;
         let level = match mood {
             NimbusMood::Speaking { level } => level.clamp(0.0, 1.0),
             _ => 0.0,
         };
-        // The light only drifts. Voice stirs the noise field.
-        let (speed_t, churn_t, spin_t) = match mood {
-            NimbusMood::Idle => (0.14, 0.06, 0.02),
-            NimbusMood::Speaking { .. } => (
-                0.16 + 0.14 * level,
-                0.06 + 0.85 * level,
-                0.02 + 0.03 * level,
-            ),
-            NimbusMood::Thinking => {
-                let pulse = 0.5 + 0.5 * (self.clock * 0.22).sin();
-                (0.48 + 0.12 * pulse, 0.28, 0.055)
-            }
+        // Transcription pulse, 0 otherwise. The shader opens and closes the
+        // noise with this. It is not a colour flash.
+        let pulse = match mood {
+            NimbusMood::Thinking => self.think_pulse(),
+            _ => 0.0,
         };
-        let k = 1.0 - (-dt * 8.0).exp();
-        let k_noise = 1.0 - (-dt * 16.0).exp();
-        self.anim_speed += (speed_t - self.anim_speed) * k;
-        self.churn += (churn_t - self.churn) * k_noise;
-        self.spin += (spin_t - self.spin) * k;
-        self.clock += dt * self.anim_speed * 10.0;
+        let noise_rate = match mood {
+            NimbusMood::Idle => 0.22,
+            NimbusMood::Speaking { .. } => 0.22 + 0.2 * level,
+            NimbusMood::Thinking => 0.4 + 0.22 * pulse,
+        };
+        self.noise_phase += dt * noise_rate;
+        self.light_phase += dt * 0.08;
         let cb = NimbusCb {
             res_x: RT as f32,
             res_y: RT as f32,
             input: self.vol_in,
-            output: self.vol_out,
-            speed: self.clock,
+            output: pulse,
+            speed: self.noise_phase,
             cam_dist: 4.4,
             focal: 1.8,
             radius: 2.0,
             // Finer noise and a higher threshold so the sphere breaks into
             // wisps instead of filling in as one colour.
             scale: 1.15,
-            churn: self.churn,
+            churn: level,
             threshold: 0.32,
             edge_soft: 0.5,
             density: 2.2,
             absorb: 0.72,
             shadow_absorb: 1.5,
-            shadow_lift: 0.48,
+            shadow_lift: 0.7,
             aniso: 0.4,
-            light_spin: self.spin,
+            light_spin: self.light_phase,
             power: 1.15,
             ambient: 0.08,
             exposure: 0.68,
@@ -436,7 +452,7 @@ impl NimbusOrb {
             _pad0: 0.0,
             _pad1: 0.0,
             light: theme_light(accent),
-            shadow: theme_shadow(accent),
+            shadow: theme_shade(accent),
         };
         self.ctx
             .UpdateSubresource(&self.cb, 0, None, &cb as *const NimbusCb as *const _, 0, 0);
@@ -513,30 +529,30 @@ unsafe fn compile_shader(
     Ok(std::slice::from_raw_parts(ptr, len).to_vec())
 }
 
-/// Lit wisps stay the accent. Mixing toward white is what was blowing it out.
+/// Lit wisps: the theme accent, with the weaker channels pulled down so it
+/// stays the primary colour instead of a grey mix.
 fn theme_light(accent: u32) -> [f32; 4] {
-    [chan(accent, 0), chan(accent, 8), chan(accent, 16), 1.0]
+    let rgb = boost_chroma(accent, 1.4);
+    [rgb[0], rgb[1], rgb[2], 1.0]
 }
 
-/// Shade: the same accent, only a little deeper. A heavy black mix turned the
-/// cloud into one dark solid.
-fn theme_shadow(accent: u32) -> [f32; 4] {
-    let c = mix_byte(accent, 0, 0.38);
-    [chan(c, 0), chan(c, 8), chan(c, 16), 1.0]
+/// Body of the orb: the same accent, a little darker. Not the grey border.
+fn theme_shade(accent: u32) -> [f32; 4] {
+    let rgb = boost_chroma(accent, 1.25);
+    [rgb[0] * 0.7, rgb[1] * 0.7, rgb[2] * 0.7, 1.0]
+}
+
+fn boost_chroma(c: u32, sat: f32) -> [f32; 3] {
+    let r = chan(c, 0);
+    let g = chan(c, 8);
+    let b = chan(c, 16);
+    let max = r.max(g).max(b).max(1.0e-4);
+    let pull = |x: f32| (max + (x - max) * sat).clamp(0.0, 1.0);
+    [pull(r), pull(g), pull(b)]
 }
 
 fn chan(c: u32, shift: u32) -> f32 {
     ((c >> shift) & 0xff) as f32 / 255.0
-}
-
-fn mix_byte(fg: u32, bg: u32, toward_bg: f32) -> u32 {
-    let t = toward_bg.clamp(0.0, 1.0);
-    let blend = |shift: u32| {
-        let f = ((fg >> shift) & 0xff) as f32;
-        let b = ((bg >> shift) & 0xff) as f32;
-        (f + (b - f) * t).round() as u32
-    };
-    blend(0) | (blend(8) << 8) | (blend(16) << 16)
 }
 
 fn blob_text(blob: &ID3DBlob) -> String {
@@ -619,7 +635,11 @@ mod tests {
                 .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)
                 .expect("d2d context");
             let mut orb = NimbusOrb::create(&device, &d2d).expect("nimbus");
-            orb.render(Instant::now(), NimbusMood::Thinking, 0x00e5881e)
+            orb.render(
+                Instant::now(),
+                NimbusMood::Thinking,
+                0x00e5881e,
+            )
                 .expect("render");
 
             let desc = super::D3D11_TEXTURE2D_DESC {

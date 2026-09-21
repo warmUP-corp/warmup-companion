@@ -9,16 +9,18 @@ use windows::Foundation::Numerics::Matrix3x2;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_POINT_2F, D2D_RECT_F,
-    D2D_SIZE_U,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
+    D2D1_FILL_MODE_ALTERNATE, D2D1_PIXEL_FORMAT, D2D_POINT_2F, D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
-    ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-    D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
-    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
-    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
+    D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory, ID2D1Factory1,
+    ID2D1Resource, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT,
+    D2D1_ARC_SIZE_SMALL, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE,
+    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
+    D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_ROUNDED_RECT, D2D1_SWEEP_DIRECTION_CLOCKWISE,
+    D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_11_0,
@@ -1835,12 +1837,8 @@ impl VkRenderer {
                         windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                     );
                     // The cloud fills its square, so keep it inside the old blob's
-                    // footprint instead of edge to edge on the key. Talking
-                    // scales that square with the mic.
-                    let mut ball = side * 0.62;
-                    if matches!(voice_phase, VoicePhase::Listening) {
-                        ball *= voice_orb_scale(voice_level);
-                    }
+                    // footprint instead of edge to edge on the key.
+                    let ball = side * 0.62 * orb_scale(voice_phase, voice_level, self.think_pulse());
                     let drew_nimbus = self.draw_nimbus_at(&square_about(cx, cy, ball), 1.0);
                     if !drew_nimbus {
                         self.draw_voice_orb(
@@ -2396,6 +2394,10 @@ impl VkRenderer {
 
     /// Blit the latest cloud. False when the shader never came up, so the caller
     /// can fall back to the ellipse orb.
+    fn think_pulse(&self) -> f32 {
+        self.nimbus.as_ref().map(|orb| orb.think_pulse()).unwrap_or(0.0)
+    }
+
     fn draw_nimbus_at(&self, dest: &D2D_RECT_F, opacity: f32) -> bool {
         let Some(orb) = self.nimbus.as_ref() else {
             return false;
@@ -2416,25 +2418,32 @@ impl VkRenderer {
         true
     }
 
-    /// Accent line just inside the screen, with one narrow halo. Not a hard
-    /// frame and not a wide fog.
+    /// Glow sitting on the screen edge. The outside of the band is the screen
+    /// rectangle, so the corner wedges are filled. Only the inner edge has a
+    /// small radius.
     unsafe fn draw_display_border(&self, accent: u32, alpha: f32) -> Result<(), String> {
         let cw = self.width as f32;
         let ch = self.height as f32;
         let scale = (ch / 1080.0).clamp(0.85, 2.0);
-        let inset = 5.0 * scale;
-        let rect = D2D_RECT_F {
-            left: inset,
-            top: inset,
-            right: (cw - inset).max(inset + 1.0),
-            bottom: (ch - inset).max(inset + 1.0),
-        };
-        let halo = solid_brush(&self.d2d_context, colorref_alpha(accent, 0.14 * alpha))?;
-        let line = solid_brush(&self.d2d_context, colorref_alpha(accent, 0.42 * alpha))?;
-        self.d2d_context
-            .DrawRectangle(&rect, &halo, 12.0 * scale, None);
-        self.d2d_context
-            .DrawRectangle(&rect, &line, 1.75 * scale, None);
+        let radius = 8.0 * scale;
+        // How far the glow reaches in from the bezel, faintest first. Each band
+        // starts at the screen edge, so the corners stay filled.
+        let layers: [(f32, f32); 7] = [
+            (22.0, 0.02),
+            (14.0, 0.028),
+            (9.0, 0.038),
+            (5.5, 0.05),
+            (3.2, 0.065),
+            (1.8, 0.08),
+            (1.0, 0.07),
+        ];
+        for (depth, layer_alpha) in layers {
+            let brush = solid_brush(
+                &self.d2d_context,
+                colorref_alpha(accent, layer_alpha * alpha),
+            )?;
+            fill_edge_band(&self.d2d_context, cw, ch, depth * scale, radius, &brush)?;
+        }
         Ok(())
     }
 
@@ -2449,7 +2458,7 @@ impl VkRenderer {
     pub unsafe fn draw_voice(&mut self, pill: &VoicePill) -> Result<(), String> {
         let VoicePill {
             bg,
-            border,
+            border: _,
             accent,
             text,
             level,
@@ -2466,7 +2475,7 @@ impl VkRenderer {
         let alpha = alpha.clamp(0.0, 1.0);
         let label_alpha = label_alpha.clamp(0.0, 1.0) * alpha;
         let level = self.smoothed_level(level, now);
-        let _ = (bg, border, text, controller_label, scale, label_alpha);
+        let _ = (bg, text, controller_label, scale, label_alpha);
         // Same frame and the same cloud size. Talking speeds up with the mic;
         // transcription keeps a steady orbit. The palette does not change.
         if show_orb {
@@ -2484,10 +2493,10 @@ impl VkRenderer {
             self.d2d_context.SetTransform(&IDENTITY);
             self.draw_display_border(accent, alpha)?;
             if show_orb {
-                let mut slot = nimbus_slot(cw, ch);
-                if matches!(phase, VoicePhase::Listening) {
-                    slot = scale_about_center(slot, voice_orb_scale(level));
-                }
+                let slot = scale_about_center(
+                    nimbus_slot(cw, ch),
+                    orb_scale(phase, level, self.think_pulse()),
+                );
                 if !self.draw_nimbus_at(&slot, alpha) {
                     let unit = ((slot.right - slot.left) * 0.42).max(1.0);
                     self.draw_voice_orb(
@@ -2554,6 +2563,66 @@ pub struct VoicePill<'a> {
     pub show_orb: bool,
 }
 
+/// Screen rectangle with a rounded-rect hole. The hole's corner radius fills
+/// nothing at the bezel: the outer path is square, so the corner wedge is paint.
+unsafe fn fill_edge_band(
+    ctx: &ID2D1DeviceContext,
+    cw: f32,
+    ch: f32,
+    depth: f32,
+    radius: f32,
+    brush: &ID2D1SolidColorBrush,
+) -> Result<(), String> {
+    let depth = depth.max(1.0);
+    let radius = radius.min(depth).min(cw * 0.5).min(ch * 0.5).max(0.0);
+    let resource: ID2D1Resource = ctx
+        .cast()
+        .map_err(|e| format!("d2d resource: {e}"))?;
+    let factory: ID2D1Factory = resource
+        .GetFactory()
+        .map_err(|e| format!("d2d factory: {e}"))?;
+    let geometry = factory
+        .CreatePathGeometry()
+        .map_err(|e| format!("path: {e}"))?;
+    let sink = geometry.Open().map_err(|e| format!("path open: {e}"))?;
+    sink.SetFillMode(D2D1_FILL_MODE_ALTERNATE);
+    let p = |x: f32, y: f32| D2D_POINT_2F { x, y };
+    sink.BeginFigure(p(0.0, 0.0), D2D1_FIGURE_BEGIN_FILLED);
+    sink.AddLine(p(cw, 0.0));
+    sink.AddLine(p(cw, ch));
+    sink.AddLine(p(0.0, ch));
+    sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+
+    let left = depth;
+    let top = depth;
+    let right = (cw - depth).max(left + 1.0);
+    let bottom = (ch - depth).max(top + 1.0);
+    let r = radius;
+    sink.BeginFigure(p(left + r, top), D2D1_FIGURE_BEGIN_FILLED);
+    sink.AddLine(p(right - r, top));
+    let arc = |x: f32, y: f32| D2D1_ARC_SEGMENT {
+        point: p(x, y),
+        size: D2D_SIZE_F {
+            width: r,
+            height: r,
+        },
+        rotationAngle: 0.0,
+        sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+        arcSize: D2D1_ARC_SIZE_SMALL,
+    };
+    sink.AddArc(&arc(right, top + r));
+    sink.AddLine(p(right, bottom - r));
+    sink.AddArc(&arc(right - r, bottom));
+    sink.AddLine(p(left + r, bottom));
+    sink.AddArc(&arc(left, bottom - r));
+    sink.AddLine(p(left, top + r));
+    sink.AddArc(&arc(left + r, top));
+    sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+    sink.Close().map_err(|e| format!("path close: {e}"))?;
+    ctx.FillGeometry(&geometry, brush, None);
+    Ok(())
+}
+
 fn nimbus_mood(phase: VoicePhase, level: f32) -> NimbusMood {
     match phase {
         VoicePhase::Starting => NimbusMood::Idle,
@@ -2565,6 +2634,16 @@ fn nimbus_mood(phase: VoicePhase, level: f32) -> NimbusMood {
 /// Quiet sits a little under the base size. Full voice is clearly larger.
 fn voice_orb_scale(level: f32) -> f32 {
     0.78 + 0.42 * level.clamp(0.0, 1.0)
+}
+
+/// Transcription rests at the quiet talking size and swells up, then back.
+fn orb_scale(phase: VoicePhase, level: f32, think_pulse: f32) -> f32 {
+    let quiet = voice_orb_scale(0.0);
+    match phase {
+        VoicePhase::Listening => voice_orb_scale(level),
+        VoicePhase::Transcribing => quiet + 0.36 * think_pulse.clamp(0.0, 1.0),
+        VoicePhase::Starting => quiet,
+    }
 }
 
 fn scale_about_center(rect: D2D_RECT_F, scale: f32) -> D2D_RECT_F {
@@ -2852,6 +2931,9 @@ mod tests {
         // A short window can't push the square off the top or the right.
         assert!((voice_orb_scale(0.0) - 0.78).abs() < 1e-4);
         assert!(voice_orb_scale(1.0) > voice_orb_scale(0.0));
+        let quiet = voice_orb_scale(0.0);
+        assert!((orb_scale(VoicePhase::Transcribing, 0.0, 0.0) - quiet).abs() < 1e-4);
+        assert!(orb_scale(VoicePhase::Transcribing, 0.0, 1.0) > quiet);
         let tiny = nimbus_slot(100.0, 80.0);
         assert!(tiny.left >= 0.0 && tiny.top >= 0.0);
         assert!(tiny.right <= 100.0 + 0.5 && tiny.bottom <= 80.0 + 0.5);

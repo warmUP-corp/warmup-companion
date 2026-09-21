@@ -243,9 +243,13 @@ thread_local! {
 fn voice_transition(now: Instant) -> (f32, f32, f32) {
     let ms =
         |at: Option<Instant>| at.map(|t| now.saturating_duration_since(t).as_secs_f32() * 1000.0);
-    let (mut alpha, scale) = ms(VOICE_SHOWN_AT.with(|c| c.get()))
-        .map(crate::vk_motion::voice_enter)
-        .unwrap_or((1.0, 1.0));
+    let elapsed = ms(VOICE_SHOWN_AT.with(|c| c.get()));
+    let mut alpha = elapsed
+        .map(crate::vk_motion::voice_frame_enter)
+        .unwrap_or(1.0);
+    let scale = elapsed
+        .map(|ms| crate::vk_motion::voice_enter(ms).1)
+        .unwrap_or(1.0);
     if let Some(exit_ms) = ms(VOICE_EXIT_AT.with(|c| c.get())) {
         alpha *= crate::vk_motion::voice_exit(exit_ms);
     }
@@ -518,8 +522,9 @@ fn ui_show(visual: PromptVisual) {
     }
 
     VISUAL_MORPH.with(|state| state.set(None));
-    // Fresh pill: arm the entrance; the title rides the pill's own fade.
-    VOICE_SHOWN_AT.with(|c| c.set(visual_is_voice(visual).then_some(now)));
+    // The entrance clock starts at the first paint, not at window creation.
+    // Creating the device takes long enough that a clock started here would
+    // already be finished, and the frame would pop in.
     VOICE_LABEL_AT.with(|c| c.set(None));
     VOICE_EXIT_AT.with(|c| c.set(None));
     // Voice pill is userland-only and the thread is already on the user desktop
@@ -535,8 +540,7 @@ fn ui_show(visual: PromptVisual) {
         Ok(hwnd) => {
             HWND_STATE.with(|state| state.set(Some(hwnd)));
             unsafe {
-                place_overlay(hwnd, visual, true);
-                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                place_overlay(hwnd, visual, false);
                 match VkRenderer::create(hwnd) {
                     Ok(mut r) => {
                         // Decode the card artwork now so the first card frame
@@ -558,7 +562,11 @@ fn ui_show(visual: PromptVisual) {
                     Err(e) => service_log(&format!("prompt ui: renderer init failed: {e}")),
                 }
                 let _ = SetTimer(hwnd, REPAINT_TIMER_ID, REPAINT_TIMER_MS, None);
+                if visual_is_voice(visual) {
+                    VOICE_SHOWN_AT.with(|c| c.set(Some(Instant::now())));
+                }
                 render_prompt(hwnd);
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
         }
         Err(e) => service_log(&format!("prompt ui: create window failed: {e}")),

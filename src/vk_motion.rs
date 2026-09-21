@@ -72,6 +72,27 @@ pub const VOICE_EXIT_MS: f32 = 120.0;
 /// Phase label swap (Starting → Listening → Transcribing): new label fades in.
 pub const VOICE_LABEL_FADE_MS: f32 = 150.0;
 
+/// Fullscreen voice frame (border + orb). Longer than the old pill, and
+/// ease-in-out so the first frames are actually faint instead of popping.
+pub const VOICE_FRAME_ENTER_MS: f32 = 560.0;
+
+/// Opacity of the voice frame `elapsed_ms` after it appeared.
+pub fn voice_frame_enter(elapsed_ms: f32) -> f32 {
+    let t = progress(elapsed_ms, VOICE_FRAME_ENTER_MS);
+    ease_in_out_cubic(t)
+}
+
+/// Slow at both ends. Used when something should arrive instead of pop.
+pub fn ease_in_out_cubic(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    if t < 0.5 {
+        4.0 * t * t * t
+    } else {
+        let u = -2.0 * t + 2.0;
+        1.0 - (u * u * u) / 2.0
+    }
+}
+
 /// `(opacity, scale)` for the dictation pill `elapsed_ms` after it appeared.
 pub fn voice_enter(elapsed_ms: f32) -> (f32, f32) {
     let t = ease_out_cubic(progress(elapsed_ms, VOICE_ENTER_MS));
@@ -226,6 +247,9 @@ mod tests {
         assert_eq!(s0, VOICE_ENTER_SCALE);
         assert!(VOICE_ENTER_SCALE >= 0.9);
         assert_eq!(voice_enter(VOICE_ENTER_MS), (1.0, 1.0));
+        assert_eq!(voice_frame_enter(0.0), 0.0);
+        assert!(voice_frame_enter(40.0) < 0.08);
+        assert_eq!(voice_frame_enter(VOICE_FRAME_ENTER_MS), 1.0);
         assert_eq!(voice_exit(0.0), 1.0);
         assert_eq!(voice_exit(VOICE_EXIT_MS), 0.0);
         assert!(VOICE_EXIT_MS < VOICE_ENTER_MS);
