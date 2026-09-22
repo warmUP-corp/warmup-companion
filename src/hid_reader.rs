@@ -99,13 +99,11 @@ impl HidReader {
                 continue;
             }
             let hid = unsafe { info.Anonymous.hid };
-            // Generic-desktop joystick (0x04) / gamepad (0x05) only.
-            let is_pad = hid.usUsagePage == 0x01 && (hid.usUsage == 0x04 || hid.usUsage == 0x05);
-            if !is_pad {
-                continue;
-            }
-            // Xbox pads are read via the XUSB IOCTL bypass; don't double-drive them.
-            if hid.dwVendorId as u16 == 0x045e {
+            if !hid_gamepad::accept_direct_hid(
+                hid.dwVendorId as u16,
+                hid.usUsagePage,
+                hid.usUsage,
+            ) {
                 continue;
             }
             let Some(device) = hid_gamepad::open_device(item.hDevice.0 as isize) else {

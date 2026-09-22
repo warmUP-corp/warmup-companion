@@ -115,13 +115,12 @@ pub(crate) fn poll_xinput_tick(state: &mut PollState) {
     // (a pad streaming neutral frames shouldn't blank a just-pressed button from
     // another). `last_hid` then feeds the hid_authoritative slot-0 path below.
     let mut hid_sample: Option<PadSample> = None;
+    let mut hid_rank = (0u8, 0usize);
     for reader in state.hid_readers.iter_mut() {
         if let Some(sample) = reader.poll() {
-            let replace = match hid_sample {
-                None => true,
-                Some(prev) => prev.buttons == 0 && prev.lt == 0 && prev.rt == 0,
-            };
-            if replace {
+            let rank = crate::hid_gamepad::hid_source_rank(reader.last_report());
+            if hid_sample.is_none() || rank > hid_rank {
+                hid_rank = rank;
                 hid_sample = Some(sample);
             }
         }

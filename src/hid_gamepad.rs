@@ -158,6 +158,26 @@ pub fn open_device(hdevice: isize) -> Option<DeviceState> {
     })
 }
 
+pub fn accept_direct_hid(vid: u16, page: u16, usage: u16) -> bool {
+    if vid == 0x045e {
+        return false;
+    }
+    if page == 0x01 && (usage == 0x04 || usage == 0x05) {
+        return true;
+    }
+    vid == 0x054c && page >= 0xFF00
+}
+
+pub fn hid_source_rank(report: &[u8]) -> (u8, usize) {
+    let kind = match report.first().copied() {
+        Some(0x31) => 3,
+        Some(0x11) => 2,
+        Some(0x01) => 1,
+        _ => 0,
+    };
+    (kind, report.len())
+}
+
 pub fn profile_for_vid_pid(vid: u16, pid: u16, name: &str) -> HidProfile {
     for hint in gcdb_hints() {
         if hint.vid == vid && hint.pid == pid {
@@ -1013,6 +1033,33 @@ mod tests {
         assert_eq!(sample.buttons, XINPUT_GAMEPAD_X.0);
         assert!(sample.lx > 0.9);
         assert_eq!(sample.ly, 0.0);
+    }
+
+    #[test]
+    fn dualsense_bluetooth_l3_is_visible_on_the_usb_profile() {
+        let mut report = [0u8; 78];
+        report[0] = 0x31;
+        report[1] = 0x01;
+        report[2..6].copy_from_slice(&[128, 128, 128, 128]);
+        report[9] = 0x08;
+        report[10] = 0x40;
+        let (sample, src) = decode_report_logged(&mut sony_device(HidProfile::SonyDs5Usb), &report);
+        assert_eq!(src, "ds5-usb");
+        assert_eq!(sample.buttons, XINPUT_GAMEPAD_LEFT_THUMB.0);
+    }
+
+    #[test]
+    fn sony_vendor_collection_is_opened_for_the_full_report() {
+        assert!(accept_direct_hid(0x054c, 0x01, 0x05));
+        assert!(accept_direct_hid(0x054c, 0xFF00, 0x01));
+        assert!(!accept_direct_hid(0x054c, 0x01, 0x02));
+        assert!(!accept_direct_hid(0x045e, 0x01, 0x05));
+        assert!(!accept_direct_hid(0x054c, 0x01, 0x06));
+    }
+
+    #[test]
+    fn bluetooth_full_report_outranks_the_short_gamepad_report() {
+        assert!(hid_source_rank(&[0x31, 0x01, 0x80]) > hid_source_rank(&[0x01, 0x80, 0x80]));
     }
 
     #[test]
