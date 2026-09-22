@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.4.0
+
+The companion follows the monitor you are using, and the voice cloud follows the mic you are using.
+
+- The voice border, prompt, and keyboard sit on the monitor of the focused window. A window that covers every screen uses the monitor under the cursor, then the primary.
+- Voice glow scales to this mic's own noise floor. The old pad was sized for a DualSense floor around 0.1 and sat above a normal mic's speech, so the cloud barely moved. A quiet desktop mic and the controller mic both fill the orb. Room tone stays dark. If the first moment of speech is learned as the floor, the next word after a short gap lights it up.
+- The cloud gets denser, brighter, and larger with that level. Transcription keeps the glow: the cloud, the screen-edge border, and the mic-key halo all pulse while the engine works.
+- The installer skips the voice-engine page and the Parakeet download when the model is already under `C:\ProgramData\WarmupVk\speech\parakeet`.
+
 ## v0.3.0
 
 Voice is now the Nimbus cloud (orbkit SHDR-21), drawn on the D3D11 device the
