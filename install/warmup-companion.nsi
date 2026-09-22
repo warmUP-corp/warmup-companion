@@ -46,6 +46,7 @@ SetDatablockOptimize on
 !include "Sections.nsh"
 
 Var ModelChoice
+Var ParakeetPresent
 Var RbTiny
 Var RbBase
 Var RbSmall
@@ -91,6 +92,7 @@ VIAddVersionKey "LegalCopyright"  "${COMPANY}"
 !define MUI_UNWELCOMEFINISHPAGE_BITMAP "${SRCROOT}\assets\installer\welcome.bmp"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "${SRCROOT}\LICENSE"
+!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipComponentsIfParakeet
 !insertmacro MUI_PAGE_COMPONENTS
 Page custom ModelPageShow ModelPageLeave
 !insertmacro MUI_PAGE_INSTFILES
@@ -168,12 +170,16 @@ Section /o "Offline voice typing (recommended)" SEC_SPEECH
   ; The model page sets $ModelChoice to a whisper size or "parakeet".
   ; The app binary always includes Parakeet support; this only downloads data.
   ${If} $ModelChoice == "parakeet"
-    DetailPrint "Downloading offline voice typing (Parakeet, ~670 MB)..."
-    nsExec::ExecToLog '"powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$INSTDIR\Get-WarmupParakeet.ps1"'
-    Pop $0
-    ${If} $0 != 0
-      IfSilent +2
-      MessageBox MB_ICONEXCLAMATION "Parakeet voice typing could not be downloaded (exit $0). The app works fine without it. Add it later by running $INSTDIR\Get-WarmupParakeet.ps1."
+    ${If} $ParakeetPresent == "1"
+      DetailPrint "Parakeet voice typing is already installed."
+    ${Else}
+      DetailPrint "Downloading offline voice typing (Parakeet, ~670 MB)..."
+      nsExec::ExecToLog '"powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$INSTDIR\Get-WarmupParakeet.ps1"'
+      Pop $0
+      ${If} $0 != 0
+        IfSilent +2
+        MessageBox MB_ICONEXCLAMATION "Parakeet voice typing could not be downloaded (exit $0). The app works fine without it. Add it later by running $INSTDIR\Get-WarmupParakeet.ps1."
+      ${EndIf}
     ${EndIf}
   ${Else}
     ${If} $ModelChoice == ""
@@ -189,9 +195,27 @@ Section /o "Offline voice typing (recommended)" SEC_SPEECH
   ${EndIf}
 SectionEnd
 
+Function DetectParakeet
+  StrCpy $ParakeetPresent "0"
+  ${If} ${FileExists} "${DATADIR}\speech\parakeet\vocab.txt"
+  ${AndIf} ${FileExists} "${DATADIR}\speech\parakeet\onnxruntime.dll"
+    ${If} ${FileExists} "${DATADIR}\speech\parakeet\encoder-model.int8.onnx"
+    ${OrIf} ${FileExists} "${DATADIR}\speech\parakeet\encoder-model.onnx"
+      StrCpy $ParakeetPresent "1"
+    ${EndIf}
+  ${EndIf}
+FunctionEnd
+
+Function SkipComponentsIfParakeet
+  ${If} $ParakeetPresent == "1"
+    Abort
+  ${EndIf}
+FunctionEnd
+
 Function .onInit
   ; Keep the default consistent in interactive and silent installs. Silent mode
   ; skips the component and model pages, so it cannot rely on page selections.
+  Call DetectParakeet
   StrCpy $ModelChoice "parakeet"
   SectionSetFlags ${SEC_SPEECH} ${SF_SELECTED}
 FunctionEnd
@@ -205,6 +229,10 @@ LangString DESC_SPEECH ${LANG_ENGLISH} "Fully offline voice typing, selected by 
 
 ; Custom page: pick the whisper model — shown only if voice typing is selected.
 Function ModelPageShow
+  ${If} $ParakeetPresent == "1"
+    StrCpy $ModelChoice "parakeet"
+    Abort
+  ${EndIf}
   SectionGetFlags ${SEC_SPEECH} $0
   IntOp $0 $0 & ${SF_SELECTED}
   ${If} $0 == 0

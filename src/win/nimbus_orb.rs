@@ -417,6 +417,7 @@ impl NimbusOrb {
             NimbusMood::Thinking => self.think_pulse(),
             _ => 0.0,
         };
+        let glow = level.max(pulse);
         let noise_rate = match mood {
             NimbusMood::Idle => 0.22,
             NimbusMood::Speaking { .. } => 0.22 + 0.2 * level,
@@ -436,18 +437,18 @@ impl NimbusOrb {
             // Finer noise and a higher threshold so the sphere breaks into
             // wisps instead of filling in as one colour.
             scale: 1.15,
-            churn: level,
-            threshold: 0.32,
+            churn: glow,
+            threshold: 0.40 - 0.16 * glow,
             edge_soft: 0.5,
-            density: 2.2,
+            density: 1.35 + 2.6 * glow,
             absorb: 0.72,
             shadow_absorb: 1.5,
             shadow_lift: 0.7,
             aniso: 0.4,
             light_spin: self.light_phase,
-            power: 1.15,
-            ambient: 0.08,
-            exposure: 0.68,
+            power: 0.8 + 0.85 * glow,
+            ambient: 0.06 + 0.08 * glow,
+            exposure: 0.50 + 0.50 * glow,
             alpha_gain: 1.0,
             _pad0: 0.0,
             _pad1: 0.0,
