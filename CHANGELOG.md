@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.4.1
+
+- Windows sign-in: a Bluetooth PS5 controller's stick click opens the keyboard. The short gamepad report omits that click; the service now reads the fuller Sony report that includes it.
+
 ## v0.4.0
 
 The companion follows the monitor you are using, and the voice cloud follows the mic you are using.
