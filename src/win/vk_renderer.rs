@@ -1854,8 +1854,12 @@ impl VkRenderer {
                     self.d2d_context.PopAxisAlignedClip();
                     let halo_alpha = match voice_phase {
                         VoicePhase::Starting => 0.18,
-                        VoicePhase::Listening => 0.28,
-                        VoicePhase::Transcribing => 0.46,
+                        VoicePhase::Listening => 0.28 + 0.34 * voice_level.clamp(0.0, 1.0),
+                        VoicePhase::Transcribing => {
+                            let t = self.prompt_started.elapsed().as_secs_f32();
+                            let pulse = 0.5 + 0.5 * (t * 2.4).sin();
+                            0.28 + 0.42 * pulse
+                        }
                     };
                     let halo =
                         solid_brush(&self.d2d_context, colorref_alpha(pal.accent, halo_alpha))?;
@@ -2491,7 +2495,14 @@ impl VkRenderer {
                 a: 0.0,
             }));
             self.d2d_context.SetTransform(&IDENTITY);
-            self.draw_display_border(accent, alpha)?;
+            let border_alpha = if matches!(phase, VoicePhase::Transcribing) {
+                let t = self.prompt_started.elapsed().as_secs_f32();
+                let pulse = 0.5 + 0.5 * (t * 2.4).sin();
+                alpha * (0.8 + 0.7 * pulse)
+            } else {
+                alpha
+            };
+            self.draw_display_border(accent, border_alpha.min(1.0))?;
             if show_orb {
                 let slot = scale_about_center(
                     nimbus_slot(cw, ch),
