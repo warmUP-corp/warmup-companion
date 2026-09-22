@@ -15,9 +15,7 @@ use crate::vk_nav::{self, KeyAction, KeyCell};
 
 use windows::core::w;
 use windows::Win32::Foundation::{CloseHandle, HMODULE, HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromWindow, ValidateRect, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
-};
+use windows::Win32::Graphics::Gdi::ValidateRect;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows::Win32::System::Threading::{
@@ -25,11 +23,11 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClassNameW, GetClientRect, GetSystemMetrics,
-    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible, IsZoomed,
-    KillTimer, PostThreadMessageW, SetTimer, SetWindowPos, ShowWindow, EVENT_SYSTEM_DESKTOPSWITCH,
-    EVENT_SYSTEM_FOREGROUND, HMENU, HWND_NOTOPMOST, HWND_TOPMOST, MA_NOACTIVATE, SM_CXSCREEN,
-    SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_MAXIMIZE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClassNameW, GetClientRect, GetWindowRect,
+    GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible, IsZoomed, KillTimer,
+    PostThreadMessageW, SetTimer, SetWindowPos, ShowWindow, EVENT_SYSTEM_DESKTOPSWITCH,
+    EVENT_SYSTEM_FOREGROUND, HMENU, HWND_NOTOPMOST, HWND_TOPMOST, MA_NOACTIVATE, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_MAXIMIZE,
     SW_RESTORE, SW_SHOWNOACTIVATE, WINDOWPOS, WINEVENT_OUTOFCONTEXT, WM_DESTROY, WM_LBUTTONDOWN,
     WM_MOUSEACTIVATE, WM_PAINT, WM_TIMER, WM_WINDOWPOSCHANGING, WS_EX_NOACTIVATE,
     WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
@@ -798,27 +796,8 @@ fn window_ex_style() -> windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE
     WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP
 }
 
-/// Full bounds of the monitor that hosts the foreground window
-/// (`MonitorFromWindow` + `GetMonitorInfo`, full `rcMonitor`).
 unsafe fn target_monitor_rect() -> windows::Win32::Foundation::RECT {
-    let fg = windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
-    let mon = MonitorFromWindow(fg, MONITOR_DEFAULTTOPRIMARY);
-    let mut mi = MONITORINFO {
-        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-        ..Default::default()
-    };
-    if GetMonitorInfoW(mon, &mut mi).as_bool() {
-        return mi.rcMonitor;
-    }
-    let sw = GetSystemMetrics(SM_CXSCREEN);
-    let sh = GetSystemMetrics(SM_CYSCREEN);
-    vk_log::log(&format!("GetMonitorInfo failed; using screen {sw}x{sh}"));
-    windows::Win32::Foundation::RECT {
-        left: 0,
-        top: 0,
-        right: sw,
-        bottom: sh,
-    }
+    super::monitor::active_monitor_rect()
 }
 
 /// Keyboard geometry `(x, y, width, height)`. The suggestion band

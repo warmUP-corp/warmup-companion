@@ -2633,7 +2633,7 @@ fn nimbus_mood(phase: VoicePhase, level: f32) -> NimbusMood {
 
 /// Quiet sits a little under the base size. Full voice is clearly larger.
 fn voice_orb_scale(level: f32) -> f32 {
-    0.78 + 0.42 * level.clamp(0.0, 1.0)
+    0.70 + 0.62 * level.clamp(0.0, 1.0)
 }
 
 /// Transcription rests at the quiet talking size and swells up, then back.
@@ -2929,7 +2929,7 @@ mod tests {
         assert!((slot.right - (1920.0 - 48.0)).abs() < 1.0);
         assert!((slot.top - (1080.0 - 96.0) * 0.5).abs() < 1.0);
         // A short window can't push the square off the top or the right.
-        assert!((voice_orb_scale(0.0) - 0.78).abs() < 1e-4);
+        assert!((voice_orb_scale(0.0) - 0.70).abs() < 1e-4);
         assert!(voice_orb_scale(1.0) > voice_orb_scale(0.0));
         let quiet = voice_orb_scale(0.0);
         assert!((orb_scale(VoicePhase::Transcribing, 0.0, 0.0) - quiet).abs() < 1e-4);

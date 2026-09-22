@@ -1,3 +1,7 @@
+## Source comments
+
+Comments in source code are forbidden. Do not add `//`, `/* */`, `///`, or `//!` in any source file. Do not add a comment to explain a change, and do not reintroduce one. Markdown documentation is not source code.
+
 <!-- code-review-graph MCP tools -->
 ## MCP Tools: code-review-graph
 

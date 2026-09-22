@@ -115,36 +115,55 @@ pub fn voice_label_fade(elapsed_ms: f32) -> f32 {
 pub const LEVEL_ATTACK_MS: f32 = 40.0;
 pub const LEVEL_RELEASE_MS: f32 = 180.0;
 
-/// Visual gate as a multiple of the learned noise floor. Looser than the
-/// auto-stop gate (1.6×): DualSense self-noise is high (~0.1 RMS) and speech
-/// rides close to it, so a strict gate leaves the orb dead while the user talks.
+/// Visual gate as a multiple of this mic's own floor. Looser than the
+/// auto-stop gate (1.6×): a DualSense sits near 0.1 RMS and a headset near
+/// 0.001, and speech on either has to clear the floor without a fixed pad
+/// that is larger than the quiet mic's whole signal.
 const GLOW_GATE_MUL: f32 = 1.08;
-/// Extra absolute lift on the visual gate so floor jitter doesn't spark the orb.
-const GLOW_GATE_ADD: f32 = 0.004;
-/// Floor on the peak span before any speech arrives. Small so a quiet controller
-/// mic can still fill the orb; peak-tracking stretches this on the first syllable.
-const GLOW_MIN_SPAN: f32 = 0.012;
+const GLOW_GATE_ADD_FRAC: f32 = 0.25;
+const GLOW_GATE_ADD_MIN: f32 = 0.00015;
+const GLOW_GATE_ADD_MAX: f32 = 0.004;
+const GLOW_MIN_SPAN_FRAC: f32 = 0.5;
+const GLOW_MIN_SPAN_MIN: f32 = 0.0008;
+const GLOW_MIN_SPAN_MAX: f32 = 0.012;
 /// Peak-envelope time constant: a shout shouldn't lock the range for the rest of
 /// the utterance.
 const GLOW_PEAK_TAU_MS: f32 = 2200.0;
 /// Perceptual lift (sqrt): conversational speech, not only peaks, reads as hitting.
 const GLOW_GAMMA: f32 = 0.5;
+const GLOW_QUIET_DOWN_MS: f32 = 40.0;
+const GLOW_QUIET_UP_MS: f32 = 2500.0;
 
-/// Rolling AGC for the voice orb: maps RMS above a noise floor onto 0..1 by
-/// peak-normalizing, so a DualSense mic and a headset both fill the orb.
+/// Rolling AGC for the voice orb: maps RMS above this mic's own floor onto
+/// 0..1 by peak-normalizing, so a DualSense, a headset, and a quiet desktop
+/// mic all fill the orb.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VoiceGlow {
     peak: f32,
+    quiet: f32,
 }
 
 impl VoiceGlow {
     pub const fn new() -> Self {
-        Self { peak: 0.0 }
+        Self {
+            peak: 0.0,
+            quiet: 0.0,
+        }
     }
 
     /// `floor` is the learned noise RMS. `dt_ms` is the capture tick (≈50 ms).
     pub fn tick(&mut self, rms: f32, floor: f32, dt_ms: f32) -> f32 {
-        let gate = (floor * GLOW_GATE_MUL + GLOW_GATE_ADD).max(0.0);
+        let rms = rms.max(0.0);
+        let floor = floor.max(0.0);
+        let dt_ms = dt_ms.max(0.0);
+        self.track_quiet(rms, floor, dt_ms);
+        let base = if floor > 0.0 {
+            self.quiet.min(floor)
+        } else {
+            self.quiet
+        };
+        let add = (base * GLOW_GATE_ADD_FRAC).clamp(GLOW_GATE_ADD_MIN, GLOW_GATE_ADD_MAX);
+        let gate = (base * GLOW_GATE_MUL + add).max(0.0);
         let excess = (rms - gate).max(0.0);
         let decay = if dt_ms <= 0.0 {
             1.0
@@ -152,8 +171,31 @@ impl VoiceGlow {
             (-dt_ms / GLOW_PEAK_TAU_MS).exp()
         };
         self.peak = excess.max(self.peak * decay);
-        let span = self.peak.max(GLOW_MIN_SPAN);
+        let min_span = (base * GLOW_MIN_SPAN_FRAC).clamp(GLOW_MIN_SPAN_MIN, GLOW_MIN_SPAN_MAX);
+        let span = self.peak.max(min_span);
         (excess / span).clamp(0.0, 1.0).powf(GLOW_GAMMA)
+    }
+
+    fn track_quiet(&mut self, rms: f32, floor: f32, dt_ms: f32) {
+        if self.quiet <= 0.0 {
+            let seed = if floor > 0.0 { floor.min(rms) } else { rms };
+            self.quiet = if seed > 0.0 { seed } else { floor.max(rms) };
+            return;
+        }
+        let tau = if rms < self.quiet {
+            GLOW_QUIET_DOWN_MS
+        } else {
+            GLOW_QUIET_UP_MS
+        };
+        let k = if dt_ms <= 0.0 || tau <= 0.0 {
+            0.0
+        } else {
+            1.0 - (-dt_ms / tau).exp()
+        };
+        self.quiet += (rms - self.quiet) * k;
+        if self.quiet < 0.0 {
+            self.quiet = 0.0;
+        }
     }
 }
 
@@ -319,6 +361,36 @@ mod tests {
         assert!(
             half > 0.5 && half < 0.95,
             "conversational follow-up should stay visible, got {half}"
+        );
+    }
+
+    #[test]
+    fn quiet_desktop_mic_fills_the_orb() {
+        let mut g = VoiceGlow::new();
+        let glow = g.tick(0.006, 0.001, 50.0);
+        assert!(
+            glow > 0.7,
+            "speech a few thousandths above a quiet floor should hit the orb, got {glow}"
+        );
+    }
+
+    #[test]
+    fn quiet_room_stays_dark() {
+        let mut g = VoiceGlow::new();
+        let glow = g.tick(0.001, 0.001, 50.0);
+        assert!(glow < 0.05, "room tone should not light the orb, got {glow}");
+    }
+
+    #[test]
+    fn speech_shows_again_after_a_floor_learned_from_the_voice() {
+        let mut g = VoiceGlow::new();
+        let buried = g.tick(0.02, 0.02, 50.0);
+        assert!(buried < 0.05, "speech at the learned floor stays dark, got {buried}");
+        let _ = g.tick(0.002, 0.02, 50.0);
+        let glow = g.tick(0.02, 0.02, 50.0);
+        assert!(
+            glow > 0.7,
+            "the next word after a gap should hit the orb, got {glow}"
         );
     }
 }

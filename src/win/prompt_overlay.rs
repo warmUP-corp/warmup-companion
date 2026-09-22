@@ -18,9 +18,9 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::ValidateRect;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, GetWindowLongPtrW, KillTimer,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, KillTimer,
     SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, HMENU, HTTRANSPARENT,
-    HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW,
+    HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW,
     SW_HIDE, SW_SHOWNOACTIVATE, WM_DESTROY, WM_NCHITTEST, WM_PAINT, WM_TIMER, WS_EX_NOACTIVATE,
     WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
@@ -311,8 +311,8 @@ fn fullscreen_border(visual: PromptVisual) -> bool {
     visual_is_voice(visual)
 }
 
-/// Where the overlay sits. Transcription covers the primary display so the
-/// border can run along its edges; everything else stays a small panel.
+/// Where the overlay sits, relative to a monitor origin. Transcription covers
+/// that monitor so the border can run along its edges; everything else stays a small panel.
 fn overlay_rect(visual: PromptVisual, screen_w: i32, screen_h: i32) -> PromptRect {
     let screen_w = screen_w.max(1);
     let screen_h = screen_h.max(1);
@@ -340,11 +340,15 @@ fn overlay_rect(visual: PromptVisual, screen_w: i32, screen_h: i32) -> PromptRec
 }
 
 unsafe fn target_rect_for_visual(visual: PromptVisual) -> PromptRect {
-    overlay_rect(
+    let m = super::monitor::active_monitor_rect();
+    let mut rect = overlay_rect(
         visual,
-        GetSystemMetrics(SM_CXSCREEN),
-        GetSystemMetrics(SM_CYSCREEN),
-    )
+        (m.right - m.left).max(1),
+        (m.bottom - m.top).max(1),
+    );
+    rect.x += m.left;
+    rect.y += m.top;
+    rect
 }
 
 /// Move the overlay to `visual`'s rect. Transcription is click-through: the
