@@ -885,7 +885,11 @@ impl GamepadPoll {
                 vk_nav::repeat_released(vk_nav::RepeatKey::WordRight);
                 if !self.vk_select_chord_used {
                     // Web SELECT: jump into the suggestion strip when populated.
-                    if crate::vk_predict::cycle_next() {
+                    if crate::vk_predict::strip_engaged() {
+                        crate::vk_predict::disengage();
+                        self.backend.haptic_tick();
+                        vk_ui::request_repaint();
+                    } else if crate::vk_predict::engage() {
                         self.backend.haptic_tick();
                         vk_ui::request_repaint();
                     }
@@ -1181,7 +1185,7 @@ where
         println!("  B            → backspace");
         println!("  X            → language (QWERTY/QWERTZ)");
         println!("  Y            → space");
-        println!("  Select       → suggestion strip");
+        println!("  Select       → enter / leave suggestion strip");
         println!("  Select+X/Y/B → copy / paste / clear input");
         println!("  Select+LB/RB → jump caret by word");
         println!("  Start        → Enter");

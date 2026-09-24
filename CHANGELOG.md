@@ -6,6 +6,7 @@
 - Once Select engages the suggestion strip, L1 / R1 cycle the suggestions. The L1 / R1 hints on the strip show only in that mode.
 - Cursor moves also work on the Windows sign-in screen.
 - D-pad Up from the top row of keys moves into the suggestion chips. Left / Right pick a chip, A inserts it, Down returns to the keys.
+- Share (Select) jumps straight to the first suggestion chip, and pressing it again returns to the keys. Before, it skipped the first chip.
 - TV: word suggestions are 2.25× instead of 5×, and the extra space above the keys appears only while suggestions show. Controller badges no longer overlap key labels such as "&123", and the small "OPTIONS", "ENG" and sublabel text scales with the hints.
 - The on-screen `<` / `>` keys work like L1 / R1 and show their L1 / R1 badges again. Before, they only cycled suggestions and did nothing without them.
 - Moving the cursor clears the word suggestions, so they no longer refer to the word you moved away from. Letting go of Select stops a held word jump.
