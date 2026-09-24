@@ -379,6 +379,19 @@ unsafe fn draw_candidate_strip_above(
             hint_format,
             alpha,
         )?;
+    } else {
+        draw_shortcut_pill(
+            ctx,
+            "SELECT",
+            controller_icons.hint_icon("SELECT"),
+            pill.left - hint_w - hint_gap,
+            hint_top,
+            hint_w,
+            hint_h,
+            &hint,
+            hint_format,
+            alpha,
+        )?;
     }
 
     let inner_radius = pill_radius - highlight_inset;
@@ -513,6 +526,19 @@ unsafe fn draw_candidate_strip_beside(
             "RB",
             controller_icons.hint_icon("RB"),
             pill.left + hint_w + hint_gap,
+            pill.top - hint_h - hint_gap,
+            hint_w,
+            hint_h,
+            &hint,
+            hint_format,
+            alpha,
+        )?;
+    } else {
+        draw_shortcut_pill(
+            ctx,
+            "SELECT",
+            controller_icons.hint_icon("SELECT"),
+            pill.left,
             pill.top - hint_h - hint_gap,
             hint_w,
             hint_h,
