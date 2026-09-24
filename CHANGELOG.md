@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.5.1
+
+- L1 / R1 move the text cursor one character again, and repeat while held. Hold Select and press L1 / R1 to jump a whole word.
+- Once Select engages the suggestion strip, L1 / R1 cycle the suggestions. The L1 / R1 hints on the strip show only in that mode.
+- Cursor moves also work on the Windows sign-in screen.
+
 ## v0.5.0
 
 The keyboard is readable from the couch on a TV. Desk monitors look exactly as before.

@@ -8,8 +8,8 @@ use crate::gamepad_backend::Button;
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyboardLayout, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_END, VK_ESCAPE, VK_RETURN, VK_SPACE,
-    VK_TAB,
+    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_END, VK_ESCAPE, VK_LEFT, VK_RETURN,
+    VK_RIGHT, VK_SPACE, VK_TAB,
 };
 
 #[derive(Clone)]
@@ -161,6 +161,32 @@ pub enum RepeatKey {
     Backspace,
     /// Y held — space.
     Space,
+    /// LB held — caret left (char or word).
+    CaretLeft,
+    /// RB held — caret right (char or word).
+    CaretRight,
+    /// Select+LB held — word left.
+    WordLeft,
+    /// Select+RB held — word right.
+    WordRight,
+}
+
+/// What LB/RB should do given Select and suggestion-strip engagement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShoulderNav {
+    CycleSuggestions,
+    CaretChar,
+    CaretWord,
+}
+
+pub fn shoulder_nav(select_held: bool, strip_engaged: bool) -> ShoulderNav {
+    if select_held {
+        ShoulderNav::CaretWord
+    } else if strip_engaged {
+        ShoulderNav::CycleSuggestions
+    } else {
+        ShoulderNav::CaretChar
+    }
 }
 
 const HOLD_INITIAL: Duration = Duration::from_millis(250);
@@ -534,6 +560,10 @@ pub fn tick_key_repeat(now: Instant) -> bool {
         }
         RepeatKey::Backspace => backspace(),
         RepeatKey::Space => space(),
+        RepeatKey::CaretLeft => caret_left(),
+        RepeatKey::CaretRight => caret_right(),
+        RepeatKey::WordLeft => caret_word_left(),
+        RepeatKey::WordRight => caret_word_right(),
     }
     true
 }
@@ -1043,6 +1073,31 @@ fn inject_vk(vk: VIRTUAL_KEY) {
     suppress_native_keyboard_after_winlogon_inject(collapse);
 }
 
+pub fn caret_left() {
+    inject_nav_vk(VK_LEFT);
+}
+
+pub fn caret_right() {
+    inject_nav_vk(VK_RIGHT);
+}
+
+pub fn caret_word_left() {
+    inject_ctrl_key(VK_LEFT);
+}
+
+pub fn caret_word_right() {
+    inject_ctrl_key(VK_RIGHT);
+}
+
+fn inject_nav_vk(vk: VIRTUAL_KEY) {
+    let mut batch: Vec<INPUT> = Vec::with_capacity(2);
+    batch.push(vk_event(vk, false));
+    batch.push(vk_event(vk, true));
+    unsafe {
+        let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
 fn inject_ctrl_key(vk: VIRTUAL_KEY) {
     let mut batch = Vec::with_capacity(4);
     batch.push(vk_event(VK_CONTROL, false));
@@ -1202,6 +1257,26 @@ mod press_feedback_tests {
 mod tests {
     use super::*;
     use crate::gamepad_backend::Button;
+
+    #[test]
+    fn shoulder_nav_picks_char_word_or_chips() {
+        assert_eq!(
+            shoulder_nav(false, false),
+            ShoulderNav::CaretChar
+        );
+        assert_eq!(
+            shoulder_nav(true, false),
+            ShoulderNav::CaretWord
+        );
+        assert_eq!(
+            shoulder_nav(false, true),
+            ShoulderNav::CycleSuggestions
+        );
+        assert_eq!(
+            shoulder_nav(true, true),
+            ShoulderNav::CaretWord
+        );
+    }
 
     #[test]
     fn move_reports_real_moves_not_edges() {

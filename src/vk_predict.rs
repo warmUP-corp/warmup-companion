@@ -191,6 +191,13 @@ pub fn cycle_prev() -> bool {
     true
 }
 
+pub fn strip_engaged() -> bool {
+    let Ok(s) = STATE.lock() else {
+        return false;
+    };
+    s.candidate_engaged && strip_active_inner(&s)
+}
+
 pub fn on_char(c: char) {
     let Ok(mut s) = STATE.lock() else {
         return;

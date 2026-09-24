@@ -182,8 +182,6 @@ fn key_hint(key: &KeyCell) -> Option<&'static str> {
         KeyAction::Vk(vk) if *vk == VK_SPACE => Some("Y"),
         KeyAction::Shift => Some("RT"),
         KeyAction::Symbols => Some("LT"),
-        KeyAction::PredictPrev => Some("LB"),
-        KeyAction::PredictNext => Some("RB"),
         KeyAction::VoiceInput => Some("R3"),
         KeyAction::CloseVk => Some("L3"),
         _ => None,

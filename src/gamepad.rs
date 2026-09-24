@@ -781,11 +781,9 @@ impl GamepadPoll {
             return None;
         }
 
-        // Web VK shortcut map (L3/X swapped: L3 keeps the native open/close toggle,
-        // X takes the language flip): A/Touchpad=activate, B=backspace, Y=space,
-        // Select=engage suggestion strip, LB/RB=cycle chips, Start=Enter,
-        // LT=symbols, RT=shift, R3=voice, D-pad/L-stick axis=move focus.
-        // Select chords: Select+X=copy, Select+Y=paste, Select+B=clear focused input.
+        // Select=engage suggestion strip, LB/RB=caret (Select+LB/RB=word; chips when
+        // strip engaged), Start=Enter, LT=symbols, RT=shift, R3=voice, D-pad/L-stick
+        // axis=move focus. Select chords: Select+X=copy, Select+Y=paste, Select+B=clear.
         match (change.button, change.pressed) {
             (VK_BUTTON, true) => {
                 // Same press that opened the VK is still held — wait for release.
@@ -894,18 +892,63 @@ impl GamepadPoll {
                 None
             }
             (Button::Lb, true) => {
-                // Shoulders own the autocomplete chips (strip draws LB/RB pills).
-                if crate::vk_predict::cycle_prev() {
-                    self.backend.haptic_tick();
-                    vk_ui::request_repaint();
+                match vk_nav::shoulder_nav(
+                    self.vk_select_down,
+                    crate::vk_predict::strip_engaged(),
+                ) {
+                    vk_nav::ShoulderNav::CycleSuggestions => {
+                        if crate::vk_predict::cycle_prev() {
+                            self.backend.haptic_tick();
+                            vk_ui::request_repaint();
+                        }
+                    }
+                    vk_nav::ShoulderNav::CaretWord => {
+                        self.vk_select_chord_used = true;
+                        vk_nav::caret_word_left();
+                        vk_nav::repeat_pressed(vk_nav::RepeatKey::WordLeft);
+                        self.backend.haptic_tick();
+                    }
+                    vk_nav::ShoulderNav::CaretChar => {
+                        vk_nav::caret_left();
+                        vk_nav::repeat_pressed(vk_nav::RepeatKey::CaretLeft);
+                        self.backend.haptic_tick();
+                    }
                 }
                 None
             }
+            (Button::Lb, false) => {
+                vk_nav::repeat_released(vk_nav::RepeatKey::CaretLeft);
+                vk_nav::repeat_released(vk_nav::RepeatKey::WordLeft);
+                None
+            }
             (Button::Rb, true) => {
-                if crate::vk_predict::cycle_next() {
-                    self.backend.haptic_tick();
-                    vk_ui::request_repaint();
+                match vk_nav::shoulder_nav(
+                    self.vk_select_down,
+                    crate::vk_predict::strip_engaged(),
+                ) {
+                    vk_nav::ShoulderNav::CycleSuggestions => {
+                        if crate::vk_predict::cycle_next() {
+                            self.backend.haptic_tick();
+                            vk_ui::request_repaint();
+                        }
+                    }
+                    vk_nav::ShoulderNav::CaretWord => {
+                        self.vk_select_chord_used = true;
+                        vk_nav::caret_word_right();
+                        vk_nav::repeat_pressed(vk_nav::RepeatKey::WordRight);
+                        self.backend.haptic_tick();
+                    }
+                    vk_nav::ShoulderNav::CaretChar => {
+                        vk_nav::caret_right();
+                        vk_nav::repeat_pressed(vk_nav::RepeatKey::CaretRight);
+                        self.backend.haptic_tick();
+                    }
                 }
+                None
+            }
+            (Button::Rb, false) => {
+                vk_nav::repeat_released(vk_nav::RepeatKey::CaretRight);
+                vk_nav::repeat_released(vk_nav::RepeatKey::WordRight);
                 None
             }
             (Button::Lt, true) => {
@@ -1138,8 +1181,9 @@ where
         println!("  Y            → space");
         println!("  Select       → suggestion strip");
         println!("  Select+X/Y/B → copy / paste / clear input");
+        println!("  Select+LB/RB → jump caret by word");
         println!("  Start        → Enter");
-        println!("  LB / RB      → cycle autocomplete chips");
+        println!("  LB / RB      → move caret (cycle chips when strip engaged)");
         println!("  LT           → &123 symbols");
         println!("  RT           → shift");
         println!("  L3           → close keyboard");

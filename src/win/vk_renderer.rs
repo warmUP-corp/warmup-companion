@@ -354,30 +354,32 @@ unsafe fn draw_candidate_strip_above(
     ctx.FillRoundedRectangle(&rounded(pill), &surface);
     ctx.DrawRoundedRectangle(&rounded(pill), &border, 1.25, None);
 
-    draw_shortcut_pill(
-        ctx,
-        "LB",
-        controller_icons.hint_icon("LB"),
-        pill.left - hint_w - hint_gap,
-        hint_top,
-        hint_w,
-        hint_h,
-        &hint,
-        hint_format,
-        alpha,
-    )?;
-    draw_shortcut_pill(
-        ctx,
-        "RB",
-        controller_icons.hint_icon("RB"),
-        pill.right + hint_gap,
-        hint_top,
-        hint_w,
-        hint_h,
-        &hint,
-        hint_format,
-        alpha,
-    )?;
+    if strip.engaged {
+        draw_shortcut_pill(
+            ctx,
+            "LB",
+            controller_icons.hint_icon("LB"),
+            pill.left - hint_w - hint_gap,
+            hint_top,
+            hint_w,
+            hint_h,
+            &hint,
+            hint_format,
+            alpha,
+        )?;
+        draw_shortcut_pill(
+            ctx,
+            "RB",
+            controller_icons.hint_icon("RB"),
+            pill.right + hint_gap,
+            hint_top,
+            hint_w,
+            hint_h,
+            &hint,
+            hint_format,
+            alpha,
+        )?;
+    }
 
     let inner_radius = pill_radius - highlight_inset;
     let mut x = chips_left;
@@ -493,30 +495,32 @@ unsafe fn draw_candidate_strip_beside(
     ctx.FillRoundedRectangle(&rounded(pill), &surface);
     ctx.DrawRoundedRectangle(&rounded(pill), &border, 1.25, None);
 
-    draw_shortcut_pill(
-        ctx,
-        "LB",
-        controller_icons.hint_icon("LB"),
-        pill.left,
-        pill.top - hint_h - hint_gap,
-        hint_w,
-        hint_h,
-        &hint,
-        hint_format,
-        alpha,
-    )?;
-    draw_shortcut_pill(
-        ctx,
-        "RB",
-        controller_icons.hint_icon("RB"),
-        pill.left + hint_w + hint_gap,
-        pill.top - hint_h - hint_gap,
-        hint_w,
-        hint_h,
-        &hint,
-        hint_format,
-        alpha,
-    )?;
+    if strip.engaged {
+        draw_shortcut_pill(
+            ctx,
+            "LB",
+            controller_icons.hint_icon("LB"),
+            pill.left,
+            pill.top - hint_h - hint_gap,
+            hint_w,
+            hint_h,
+            &hint,
+            hint_format,
+            alpha,
+        )?;
+        draw_shortcut_pill(
+            ctx,
+            "RB",
+            controller_icons.hint_icon("RB"),
+            pill.left + hint_w + hint_gap,
+            pill.top - hint_h - hint_gap,
+            hint_w,
+            hint_h,
+            &hint,
+            hint_format,
+            alpha,
+        )?;
+    }
 
     let mut y = pill.top + highlight_inset;
     let x = pill.left + chip_pad_x;
