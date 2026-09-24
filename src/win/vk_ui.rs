@@ -800,6 +800,62 @@ unsafe fn target_monitor_rect() -> windows::Win32::Foundation::RECT {
     super::monitor::active_monitor_rect()
 }
 
+struct VkViewScale {
+    hint_scale: f32,
+    suggestion_scale: f32,
+    top_inset: f32,
+    right_inset: f32,
+    strip_beside: bool,
+}
+
+unsafe fn vk_view_scale_for_active(
+    monitor: windows::Win32::Foundation::RECT,
+    base_dock_h: i32,
+) -> VkViewScale {
+    let is_tv = super::monitor::is_active_monitor_tv();
+    let hint_scale = crate::vk_motion::viewing_hint_scale(is_tv);
+    let suggestion_scale = crate::vk_motion::viewing_suggestion_scale(is_tv);
+    let band = vk_renderer::strip_band_height(suggestion_scale);
+    if suggestion_scale <= 1.0 + f32::EPSILON {
+        return VkViewScale {
+            hint_scale,
+            suggestion_scale,
+            top_inset: vk_renderer::STRIP_BAND_H,
+            right_inset: 0.0,
+            strip_beside: false,
+        };
+    }
+    let extra = (band - vk_renderer::STRIP_BAND_H).round() as i32;
+    let tall_h = base_dock_h + extra.max(0);
+    let room_above = monitor.bottom - tall_h >= monitor.top;
+    if room_above {
+        VkViewScale {
+            hint_scale,
+            suggestion_scale,
+            top_inset: band,
+            right_inset: 0.0,
+            strip_beside: false,
+        }
+    } else {
+        VkViewScale {
+            hint_scale,
+            suggestion_scale,
+            top_inset: vk_renderer::STRIP_BAND_H,
+            right_inset: vk_renderer::suggestion_side_width(suggestion_scale),
+            strip_beside: true,
+        }
+    }
+}
+
+unsafe fn vk_view_scale() -> VkViewScale {
+    let m = target_monitor_rect();
+    let full_h = (m.bottom - m.top).max(1);
+    let bar_scale = crate::config::vk_bar_scale();
+    let base_h = (((full_h as f32) * VK_KB_REF_H / VK_REF_MONITOR_H * bar_scale).round() as i32)
+        .clamp(160, full_h);
+    vk_view_scale_for_active(m, base_h)
+}
+
 /// Keyboard geometry `(x, y, width, height)`. The suggestion band
 /// ([`vk_renderer::STRIP_BAND_H`]) is reserved above the keys (keys lay out below
 /// it via `top_inset`), so the layout is fixed and the keys never shift.
@@ -810,12 +866,21 @@ unsafe fn vk_dock_rect() -> (i32, i32, i32, i32) {
     let m = target_monitor_rect();
     let full_w = (m.right - m.left).max(1);
     let full_h = (m.bottom - m.top).max(1);
-    // `vk_bar_scale` lets the user pick a more compact docked bar (tray toggle).
     let bar_scale = crate::config::vk_bar_scale();
-    let h = (((full_h as f32) * VK_KB_REF_H / VK_REF_MONITOR_H * bar_scale).round() as i32)
+    let base_h = (((full_h as f32) * VK_KB_REF_H / VK_REF_MONITOR_H * bar_scale).round() as i32)
         .clamp(160, full_h);
+    let view = vk_view_scale();
+    let h = if view.strip_beside {
+        base_h
+    } else {
+        (base_h as f32 - vk_renderer::STRIP_BAND_H + view.top_inset)
+            .round()
+            .clamp(160.0, full_h as f32) as i32
+    };
     match crate::config::vk_layout_mode() {
-        crate::config::VkLayoutMode::Floating => floating_card_rect(vk_renderer::STRIP_BAND_H),
+        crate::config::VkLayoutMode::Floating => {
+            floating_card_rect(view.top_inset, view.right_inset)
+        }
         crate::config::VkLayoutMode::Docked => (m.left, m.bottom - h, full_w, h),
     }
 }
@@ -824,7 +889,7 @@ unsafe fn vk_dock_rect() -> (i32, i32, i32, i32) {
 /// the keys at docked scale; its height = `chrome + key block + 2 * pad`, so a
 /// smaller `chrome` (collapsed strip) makes a genuinely shorter card. Bottom edge
 /// stays put (y moves down as it shrinks) so the keys don't jump.
-unsafe fn floating_card_rect(chrome: f32) -> (i32, i32, i32, i32) {
+unsafe fn floating_card_rect(chrome: f32, right_inset: f32) -> (i32, i32, i32, i32) {
     let m = target_monitor_rect();
     let full_w = (m.right - m.left).max(1);
     let full_h = (m.bottom - m.top).max(1);
@@ -832,7 +897,7 @@ unsafe fn floating_card_rect(chrome: f32) -> (i32, i32, i32, i32) {
     let scale_w = full_w as f32;
     let (grid_w, block_h) = vk_renderer::grid_size(scale_w, &rows);
     let pad = vk_renderer::FLOATING_PAD;
-    let (w, card_h) = floating_card_size(grid_w, block_h, chrome, pad);
+    let (w, card_h) = floating_card_size(grid_w + right_inset, block_h, chrome, pad);
     let w = w.min(full_w);
     let card_h = card_h.clamp(100, full_h);
     let margin = (((full_h as f32) * 0.04).round() as i32).clamp(28, 80);
@@ -1022,11 +1087,8 @@ fn render_frame() {
             crate::config::VkLayoutMode::Floating
         );
         let candidates = crate::vk_predict::strip();
-        // The suggestion band is reserved above the keys at a fixed height, so the
-        // keys never shift and the pill draws above them. (Hiding the band when idle
-        // would need the window to grow on each toggle — that lost topmost on the
-        // live window: taskbar showed, the app re-covered the VK. Fixed window only.)
-        let top_inset = vk_renderer::STRIP_BAND_H;
+        let view = unsafe { vk_view_scale() };
+        let top_inset = view.top_inset;
 
         let Some(renderer) = state.renderer.as_mut() else {
             return;
@@ -1058,6 +1120,7 @@ fn render_frame() {
                 key_hint,
                 top_inset,
                 scale_w,
+                right_inset: view.right_inset,
                 candidates: candidates.as_ref(),
                 floating,
                 modifiers: vk_renderer::VkModifiers { shift, caps },
@@ -1077,6 +1140,9 @@ fn render_frame() {
                     _ => vk_renderer::VoicePhase::Listening,
                 },
                 voice_level: crate::win::speech_input::voice_level(),
+                hint_scale: view.hint_scale,
+                suggestion_scale: view.suggestion_scale,
+                strip_beside: view.strip_beside,
             };
             if let Err(e) = renderer.draw(&frame) {
                 vk_log::log(&format!("renderer draw: {e}"));
@@ -1118,16 +1184,18 @@ fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<(vk_nav::KeyPos, KeyCell)> {
     }
     let rows = vk_nav::rows_snapshot();
     let (xf, yf) = (x as f32, y as f32);
-    // Fixed band above the keys (same inset the renderer uses), so clicks match.
-    let top_inset = vk_renderer::STRIP_BAND_H;
+    let view = unsafe { vk_view_scale() };
+    let top_inset = view.top_inset;
     let scale_w = unsafe { vk_scale_w() };
-    for kr in vk_renderer::key_rects(
-        client.right as f32,
-        client.bottom as f32,
-        scale_w,
-        &rows,
-        top_inset,
-    ) {
+    let cw = client.right as f32;
+    let ch = client.bottom as f32;
+    let layout_w = (cw - view.right_inset.max(0.0)).max(1.0);
+    let layout_scale_w = if cw > 1.0 && view.right_inset > 0.0 {
+        scale_w * (layout_w / cw)
+    } else {
+        scale_w
+    };
+    for kr in vk_renderer::key_rects(layout_w, ch, layout_scale_w, &rows, top_inset) {
         if xf >= kr.left && xf < kr.right && yf >= kr.top && yf < kr.bottom {
             return rows
                 .get(kr.pos.row)

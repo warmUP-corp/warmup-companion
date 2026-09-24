@@ -149,9 +149,10 @@ fn configure_d2d_quality(ctx: &ID2D1DeviceContext) {
     unsafe { ctx.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
 }
 
-fn chip_width(word: &str) -> f32 {
+fn chip_width(word: &str, scale: f32) -> f32 {
+    let s = scale.max(1.0);
     let n = word.chars().count() as f32;
-    (n * 7.8 + CHIP_PAD_X * 2.0).clamp(CHIP_MIN_W, 200.0)
+    (n * 7.8 * s + CHIP_PAD_X * 2.0 * s).clamp(CHIP_MIN_W * s, 200.0 * s)
 }
 
 /// Identity transform for the D2D device context.
@@ -235,6 +236,11 @@ struct StripPaint<'a> {
     hint_format: &'a IDWriteTextFormat,
     pal: &'a VkPalette,
     icons: ControllerIconFamily,
+    scale: f32,
+    /// When set, chips stack vertically with this left edge (TV side placement).
+    beside_left: Option<f32>,
+    /// Vertical anchor (Enter key top) for side placement.
+    beside_top: f32,
 }
 
 /// Brushes for one LB/RB shortcut pill.
@@ -253,13 +259,14 @@ unsafe fn draw_candidate_strip(
     alpha: f32,
     dy: f32,
 ) -> Result<(), String> {
+    let scale = p.scale.max(1.0);
     let mut widths = [0.0f32; 3];
     let mut count = 0usize;
     for (i, word) in strip.visible.iter().enumerate() {
         if word.is_empty() {
             continue;
         }
-        widths[i] = chip_width(word);
+        widths[i] = chip_width(word, scale);
         count += 1;
     }
     if count == 0 {
@@ -275,7 +282,11 @@ unsafe fn draw_candidate_strip(
     for b in [p.accent, p.text, p.sel_text] {
         b.SetOpacity(alpha);
     }
-    let result = draw_candidate_strip_body(p, cw, strip, &widths, count, alpha);
+    let result = if p.beside_left.is_some() {
+        draw_candidate_strip_beside(p, strip, &widths, count, alpha, scale)
+    } else {
+        draw_candidate_strip_above(p, cw, strip, &widths, count, alpha, scale)
+    };
     for b in [p.accent, p.text, p.sel_text] {
         b.SetOpacity(1.0);
     }
@@ -283,13 +294,14 @@ unsafe fn draw_candidate_strip(
     result
 }
 
-unsafe fn draw_candidate_strip_body(
+unsafe fn draw_candidate_strip_above(
     p: &StripPaint,
     cw: f32,
     strip: &crate::vk_predict::StripState,
     widths: &[f32; 3],
     count: usize,
     alpha: f32,
+    scale: f32,
 ) -> Result<(), String> {
     let StripPaint {
         ctx,
@@ -300,8 +312,20 @@ unsafe fn draw_candidate_strip_body(
         hint_format,
         pal,
         icons: controller_icons,
+        ..
     } = *p;
-    let total_w: f32 = widths.iter().sum::<f32>() + CHIP_GAP * (count.saturating_sub(1) as f32);
+    let chip_h = CHIP_H * scale;
+    let chip_top = CHIP_TOP * scale;
+    let chip_gap = CHIP_GAP * scale;
+    let chip_pad_x = CHIP_PAD_X * scale;
+    let highlight_inset = CHIP_HIGHLIGHT_INSET * scale;
+    let label_inset_x = CHIP_LABEL_INSET_X * scale;
+    let label_inset_y = CHIP_LABEL_INSET_Y * scale;
+    let hint_w = HINT_PILL_W * scale;
+    let hint_h = HINT_PILL_H * scale;
+    let hint_gap = HINT_GAP * scale;
+    let hint_top = chip_top + (chip_h - hint_h) * 0.5;
+    let total_w: f32 = widths.iter().sum::<f32>() + chip_gap * (count.saturating_sub(1) as f32);
     let chips_left = (cw - total_w) / 2.0;
     let hint = HintBrushes {
         fill: solid_brush(ctx, colorref_alpha(pal.text, 0.10 * alpha))?,
@@ -309,14 +333,11 @@ unsafe fn draw_candidate_strip_body(
         text: solid_brush(ctx, colorref_alpha(pal.text, 0.72 * alpha))?,
     };
 
-    // One pill in the band reserved above the keys (the key layout leaves room, so
-    // the keyboard never shifts). Elevated surface + border + a soft layered
-    // shadow so it reads as a suggestion bar floating above the keys.
     let pill = D2D_RECT_F {
-        left: chips_left - CHIP_PAD_X,
-        top: CHIP_TOP,
-        right: chips_left + total_w + CHIP_PAD_X,
-        bottom: CHIP_TOP + CHIP_H,
+        left: chips_left - chip_pad_x,
+        top: chip_top,
+        right: chips_left + total_w + chip_pad_x,
+        bottom: chip_top + chip_h,
     };
     let pill_radius = (pill.bottom - pill.top) * 0.5;
     let rounded = |r: D2D_RECT_F| D2D1_ROUNDED_RECT {
@@ -333,12 +354,14 @@ unsafe fn draw_candidate_strip_body(
     ctx.FillRoundedRectangle(&rounded(pill), &surface);
     ctx.DrawRoundedRectangle(&rounded(pill), &border, 1.25, None);
 
-    // LB / RB cycle hints flank the pill.
     draw_shortcut_pill(
         ctx,
         "LB",
         controller_icons.hint_icon("LB"),
-        pill.left - HINT_PILL_W - HINT_GAP,
+        pill.left - hint_w - hint_gap,
+        hint_top,
+        hint_w,
+        hint_h,
         &hint,
         hint_format,
         alpha,
@@ -347,17 +370,16 @@ unsafe fn draw_candidate_strip_body(
         ctx,
         "RB",
         controller_icons.hint_icon("RB"),
-        pill.right + HINT_GAP,
+        pill.right + hint_gap,
+        hint_top,
+        hint_w,
+        hint_h,
         &hint,
         hint_format,
         alpha,
     )?;
 
-    // Words inside the pill; the highlighted one gets an accent inner fill that
-    // sits CHIP_HIGHLIGHT_INSET inside the pill. Concentric: outer = inner +
-    // padding, so the highlight's radius is the pill's minus that inset and the
-    // two curves run parallel instead of fighting at the ends.
-    let inner_radius = pill_radius - CHIP_HIGHLIGHT_INSET;
+    let inner_radius = pill_radius - highlight_inset;
     let mut x = chips_left;
     for (i, word) in strip.visible.iter().enumerate() {
         if word.is_empty() {
@@ -367,18 +389,18 @@ unsafe fn draw_candidate_strip_body(
         let selected = strip.engaged && i == strip.highlight_slot;
         let slot = D2D_RECT_F {
             left: x,
-            top: CHIP_TOP,
+            top: chip_top,
             right: x + w,
-            bottom: CHIP_TOP + CHIP_H,
+            bottom: chip_top + chip_h,
         };
         if selected {
             ctx.FillRoundedRectangle(
                 &D2D1_ROUNDED_RECT {
                     rect: D2D_RECT_F {
                         left: slot.left,
-                        top: slot.top + CHIP_HIGHLIGHT_INSET,
+                        top: slot.top + highlight_inset,
                         right: slot.right,
-                        bottom: slot.bottom - CHIP_HIGHLIGHT_INSET,
+                        bottom: slot.bottom - highlight_inset,
                     },
                     radiusX: inner_radius,
                     radiusY: inner_radius,
@@ -388,10 +410,10 @@ unsafe fn draw_candidate_strip_body(
         }
         let label = if selected { sel_text_brush } else { text_brush };
         let label_rect = D2D_RECT_F {
-            left: slot.left + CHIP_LABEL_INSET_X,
-            top: slot.top + CHIP_LABEL_INSET_Y,
-            right: slot.right - CHIP_LABEL_INSET_X,
-            bottom: slot.bottom - CHIP_LABEL_INSET_Y,
+            left: slot.left + label_inset_x,
+            top: slot.top + label_inset_y,
+            right: slot.right - label_inset_x,
+            bottom: slot.bottom - label_inset_y,
         };
         let wide: Vec<u16> = word.encode_utf16().collect();
         ctx.DrawText(
@@ -402,8 +424,149 @@ unsafe fn draw_candidate_strip_body(
             D2D1_DRAW_TEXT_OPTIONS_CLIP,
             DWRITE_MEASURING_MODE_NATURAL,
         );
-        x += w + CHIP_GAP;
+        x += w + chip_gap;
     }
+    Ok(())
+}
+
+unsafe fn draw_candidate_strip_beside(
+    p: &StripPaint,
+    strip: &crate::vk_predict::StripState,
+    widths: &[f32; 3],
+    count: usize,
+    alpha: f32,
+    scale: f32,
+) -> Result<(), String> {
+    let StripPaint {
+        ctx,
+        accent: accent_brush,
+        text: text_brush,
+        sel_text: sel_text_brush,
+        chip_format,
+        hint_format,
+        pal,
+        icons: controller_icons,
+        beside_left,
+        beside_top,
+        ..
+    } = *p;
+    let Some(left) = beside_left else {
+        return Ok(());
+    };
+    let chip_h = CHIP_H * scale;
+    let chip_gap = CHIP_GAP * scale;
+    let chip_pad_x = CHIP_PAD_X * scale;
+    let highlight_inset = CHIP_HIGHLIGHT_INSET * scale;
+    let label_inset_x = CHIP_LABEL_INSET_X * scale;
+    let label_inset_y = CHIP_LABEL_INSET_Y * scale;
+    let hint_w = HINT_PILL_W * scale;
+    let hint_h = HINT_PILL_H * scale;
+    let hint_gap = HINT_GAP * scale;
+    let col_w = widths.iter().copied().fold(0.0f32, f32::max);
+    let pill_left = left + hint_gap;
+    let pill = D2D_RECT_F {
+        left: pill_left,
+        top: beside_top,
+        right: pill_left + col_w + chip_pad_x * 2.0,
+        bottom: beside_top
+            + chip_h * count as f32
+            + chip_gap * count.saturating_sub(1) as f32
+            + highlight_inset * 2.0,
+    };
+    let pill_radius = (CHIP_H * scale) * 0.5;
+    let rounded = |r: D2D_RECT_F| D2D1_ROUNDED_RECT {
+        rect: r,
+        radiusX: pill_radius.min((r.bottom - r.top) * 0.5),
+        radiusY: pill_radius.min((r.bottom - r.top) * 0.5),
+    };
+    let hint = HintBrushes {
+        fill: solid_brush(ctx, colorref_alpha(pal.text, 0.10 * alpha))?,
+        outline: solid_brush(ctx, colorref_alpha(pal.text, 0.22 * alpha))?,
+        text: solid_brush(ctx, colorref_alpha(pal.text, 0.72 * alpha))?,
+    };
+    draw_soft_shadow(ctx, pill, pill_radius, alpha)?;
+    let surface = solid_brush(
+        ctx,
+        colorref_alpha(mix_color(0xFFFFFF, pal.key, 0.10), alpha),
+    )?;
+    let border = solid_brush(ctx, colorref_alpha(pal.border, alpha))?;
+    ctx.FillRoundedRectangle(&rounded(pill), &surface);
+    ctx.DrawRoundedRectangle(&rounded(pill), &border, 1.25, None);
+
+    draw_shortcut_pill(
+        ctx,
+        "LB",
+        controller_icons.hint_icon("LB"),
+        pill.left,
+        pill.top - hint_h - hint_gap,
+        hint_w,
+        hint_h,
+        &hint,
+        hint_format,
+        alpha,
+    )?;
+    draw_shortcut_pill(
+        ctx,
+        "RB",
+        controller_icons.hint_icon("RB"),
+        pill.left + hint_w + hint_gap,
+        pill.top - hint_h - hint_gap,
+        hint_w,
+        hint_h,
+        &hint,
+        hint_format,
+        alpha,
+    )?;
+
+    let mut y = pill.top + highlight_inset;
+    let x = pill.left + chip_pad_x;
+    for (i, word) in strip.visible.iter().enumerate() {
+        if word.is_empty() {
+            continue;
+        }
+        let w = widths[i];
+        let selected = strip.engaged && i == strip.highlight_slot;
+        let slot = D2D_RECT_F {
+            left: x,
+            top: y,
+            right: x + w,
+            bottom: y + chip_h,
+        };
+        if selected {
+            let inner_radius = pill_radius - highlight_inset;
+            ctx.FillRoundedRectangle(
+                &D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F {
+                        left: slot.left,
+                        top: slot.top + highlight_inset * 0.5,
+                        right: slot.right,
+                        bottom: slot.bottom - highlight_inset * 0.5,
+                    },
+                    radiusX: inner_radius.max(0.0),
+                    radiusY: inner_radius.max(0.0),
+                },
+                accent_brush,
+            );
+        }
+        let label = if selected { sel_text_brush } else { text_brush };
+        let label_rect = D2D_RECT_F {
+            left: slot.left + label_inset_x,
+            top: slot.top + label_inset_y,
+            right: slot.right - label_inset_x,
+            bottom: slot.bottom - label_inset_y,
+        };
+        let wide: Vec<u16> = word.encode_utf16().collect();
+        ctx.DrawText(
+            &wide,
+            chip_format,
+            &label_rect,
+            label,
+            D2D1_DRAW_TEXT_OPTIONS_CLIP,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
+        y += chip_h + chip_gap;
+    }
+    let _ = col_w;
     Ok(())
 }
 
@@ -412,22 +575,25 @@ unsafe fn draw_shortcut_pill(
     label: &str,
     icon: Option<VkIcon>,
     x: f32,
+    top: f32,
+    w: f32,
+    h: f32,
     brushes: &HintBrushes,
     format: &IDWriteTextFormat,
     alpha: f32,
 ) -> Result<(), String> {
-    if x < 0.0 {
+    if x < 0.0 || top < 0.0 {
         return Ok(());
     }
     let rect = D2D1_ROUNDED_RECT {
         rect: D2D_RECT_F {
             left: x,
-            top: HINT_TOP,
-            right: x + HINT_PILL_W,
-            bottom: HINT_TOP + HINT_PILL_H,
+            top,
+            right: x + w,
+            bottom: top + h,
         },
-        radiusX: HINT_PILL_H * 0.5,
-        radiusY: HINT_PILL_H * 0.5,
+        radiusX: h * 0.5,
+        radiusY: h * 0.5,
     };
     ctx.FillRoundedRectangle(&rect, &brushes.fill);
     ctx.DrawRoundedRectangle(&rect, &brushes.outline, 1.0, None);
@@ -536,6 +702,8 @@ pub struct VkRenderer {
     hint_format: IDWriteTextFormat,
     /// Fixed-size labels on prediction chips (not scaled with key height).
     chip_format: IDWriteTextFormat,
+    /// TV-scale chip labels (`CHIP_FONT_PX * TV_SUGGESTION_SCALE`).
+    chip_format_tv: IDWriteTextFormat,
     sublabel_format: IDWriteTextFormat,
     /// Fixed large font for the connect/keyboard prompt pills (10-foot UI).
     prompt_format: IDWriteTextFormat,
@@ -612,10 +780,20 @@ const CHIP_HIGHLIGHT_INSET: f32 = 4.0;
 const CHIP_FONT_PX: f32 = 14.0;
 const HINT_PILL_W: f32 = 40.0;
 const HINT_PILL_H: f32 = 32.0;
-const HINT_TOP: f32 = CHIP_TOP + (CHIP_H - HINT_PILL_H) * 0.5;
 const HINT_GAP: f32 = 12.0;
 const KEY_HINT_BADGE_MAX: f32 = 38.0;
 const KEY_HINT_BADGE_INSET: f32 = 7.0;
+
+/// Top chrome height for suggestion scale `s` (1.0 = desk monitor).
+pub fn strip_band_height(suggestion_scale: f32) -> f32 {
+    STRIP_BAND_H * suggestion_scale.max(1.0)
+}
+
+/// Right-column width when suggestions sit beside the key block (TV fallback).
+pub fn suggestion_side_width(suggestion_scale: f32) -> f32 {
+    let s = suggestion_scale.max(1.0);
+    200.0 * s + CHIP_PAD_X * 2.0 * s + HINT_GAP
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum VkIcon {
@@ -1042,6 +1220,8 @@ pub struct VkFrame<'a> {
     pub key_hint: fn(&KeyCell) -> Option<&'static str>,
     pub top_inset: f32,
     pub scale_w: f32,
+    /// Right margin reserved for TV side-placed suggestions (0 on desk monitors).
+    pub right_inset: f32,
     pub candidates: Option<&'a crate::vk_predict::StripState>,
     pub floating: bool,
     pub modifiers: VkModifiers,
@@ -1059,6 +1239,12 @@ pub struct VkFrame<'a> {
     pub voice_phase: VoicePhase,
     /// Live mic energy, 0..1, used by the mic-key voice glow.
     pub voice_level: f32,
+    /// Gamepad hint glyph scale (1.0 desk, ~2.25 TV).
+    pub hint_scale: f32,
+    /// Suggestion chip scale (1.0 desk, 5.0 TV).
+    pub suggestion_scale: f32,
+    /// When true, draw suggestions in the right column instead of above the keys.
+    pub strip_beside: bool,
 }
 
 /// Glyph for the Shift key (the Shift-action key reflects `shift`).
@@ -1203,6 +1389,17 @@ impl VkRenderer {
                 &locale,
             )
             .map_err(|e| format!("CreateTextFormat (chip): {e}"))?;
+        let chip_format_tv = dwrite
+            .CreateTextFormat(
+                w!("Segoe UI"),
+                &fonts,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                CHIP_FONT_PX * crate::vk_motion::TV_SUGGESTION_SCALE,
+                &locale,
+            )
+            .map_err(|e| format!("CreateTextFormat (chip tv): {e}"))?;
         let sublabel_format = dwrite
             .CreateTextFormat(
                 w!("Segoe UI"),
@@ -1239,6 +1436,8 @@ impl VkRenderer {
         let _ = hint_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
         let _ = chip_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         let _ = chip_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        let _ = chip_format_tv.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        let _ = chip_format_tv.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         let _ = sublabel_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         let _ = sublabel_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
 
@@ -1253,6 +1452,7 @@ impl VkRenderer {
             glyph_format,
             hint_format,
             chip_format,
+            chip_format_tv,
             sublabel_format,
             prompt_format,
             icon_cache: HashMap::new(),
@@ -1323,11 +1523,11 @@ impl VkRenderer {
     ) -> Result<(), String> {
         let h = rect.bottom - rect.top;
         let draw_px = match icon {
-            icon if icon.is_controller_tip() => (h * 0.98).round().clamp(24.0, 64.0),
+            icon if icon.is_controller_tip() => (h * 0.98).round().clamp(24.0, h.max(64.0)),
             _ => (h * 0.5).round().clamp(16.0, 96.0),
         };
         let raster_px = match icon {
-            icon if icon.is_controller_tip() => (draw_px * 3.0).round().clamp(54.0, 192.0),
+            icon if icon.is_controller_tip() => (draw_px * 3.0).round().clamp(54.0, (draw_px * 3.0).max(192.0)),
             _ => draw_px,
         } as u32;
         let key = IconCacheKey {
@@ -1625,6 +1825,7 @@ impl VkRenderer {
             key_hint,
             top_inset,
             scale_w,
+            right_inset,
             candidates,
             floating,
             modifiers,
@@ -1634,6 +1835,9 @@ impl VkRenderer {
             voice_active,
             voice_phase,
             voice_level,
+            hint_scale,
+            suggestion_scale,
+            strip_beside,
         } = *frame;
         let controller_icons = ControllerIconFamily::from_label(controller_label);
         let cw = self.width as f32;
@@ -1656,7 +1860,13 @@ impl VkRenderer {
         // case a previous frame bailed mid-key.
         self.d2d_context.SetTransform(&IDENTITY);
 
-        let rects = key_rects(cw, ch, scale_w, rows, top_inset);
+        let layout_w = (cw - right_inset.max(0.0)).max(1.0);
+        let layout_scale_w = if cw > 1.0 && right_inset > 0.0 {
+            scale_w * (layout_w / cw)
+        } else {
+            scale_w
+        };
+        let rects = key_rects(layout_w, ch, layout_scale_w, rows, top_inset);
 
         // Suggestion strip entrance clock: arm on hidden->shown, drop on hide.
         match (candidates.is_some(), self.strip_shown_at) {
@@ -1933,12 +2143,15 @@ impl VkRenderer {
             // footprint fixed so controller glyphs do not collide with key glyphs.
             if let Some(hint) = key_hint(key) {
                 let key_h = kr.bottom - kr.top;
-                let badge_size = (key_h * 0.48).clamp(30.0, KEY_HINT_BADGE_MAX);
+                let hs = hint_scale.max(1.0);
+                let badge_size =
+                    (key_h * 0.48 * hs).clamp(30.0 * hs, KEY_HINT_BADGE_MAX * hs);
+                let inset = KEY_HINT_BADGE_INSET * hs.min(1.5);
                 let badge = D2D_RECT_F {
-                    left: kr.left + KEY_HINT_BADGE_INSET,
-                    top: kr.top + KEY_HINT_BADGE_INSET,
-                    right: kr.left + KEY_HINT_BADGE_INSET + badge_size,
-                    bottom: kr.top + KEY_HINT_BADGE_INSET + badge_size,
+                    left: kr.left + inset,
+                    top: kr.top + inset,
+                    right: kr.left + inset + badge_size,
+                    bottom: kr.top + inset + badge_size,
                 };
                 if let Some(icon) = controller_icons.hint_icon(hint) {
                     self.draw_svg_icon(icon, badge, pal.text)?;
@@ -1993,17 +2206,47 @@ impl VkRenderer {
 
         // Suggestion pill last, so it floats on top of the keys (and the ring).
         if let Some(strip) = candidates {
+            let sug = suggestion_scale.max(1.0);
+            let chip_fmt = if sug >= crate::vk_motion::TV_SUGGESTION_SCALE - 0.01 {
+                &self.chip_format_tv
+            } else {
+                &self.chip_format
+            };
+            let (beside_left, beside_top) = if strip_beside {
+                let enter_top = rects
+                    .iter()
+                    .find(|kr| {
+                        rows
+                            .get(kr.pos.row)
+                            .and_then(|r| r.keys.get(kr.pos.col))
+                            .is_some_and(|k| {
+                                matches!(
+                                    k.action,
+                                    KeyAction::Vk(vk)
+                                        if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_RETURN
+                                )
+                            })
+                    })
+                    .map(|kr| kr.top)
+                    .unwrap_or(top_inset);
+                (Some(layout_w), enter_top)
+            } else {
+                (None, 0.0)
+            };
             let paint = StripPaint {
                 ctx: &self.d2d_context,
                 accent: &accent_brush,
                 text: &text_brush,
                 sel_text: &sel_text_brush,
-                chip_format: &self.chip_format,
+                chip_format: chip_fmt,
                 hint_format: &self.hint_format,
                 pal,
                 icons: controller_icons,
+                scale: sug,
+                beside_left,
+                beside_top,
             };
-            draw_candidate_strip(&paint, cw, strip, strip_alpha, strip_dy)?;
+            draw_candidate_strip(&paint, layout_w, strip, strip_alpha, strip_dy)?;
         }
 
         drop(key_brush);
