@@ -704,11 +704,13 @@ pub struct VkRenderer {
     glyph_format: IDWriteTextFormat,
     /// Small font for sublabels, badges, and the legend strip.
     hint_format: IDWriteTextFormat,
+    hint_format_tv: IDWriteTextFormat,
     /// Fixed-size labels on prediction chips (not scaled with key height).
     chip_format: IDWriteTextFormat,
     /// TV-scale chip labels (`CHIP_FONT_PX * TV_SUGGESTION_SCALE`).
     chip_format_tv: IDWriteTextFormat,
     sublabel_format: IDWriteTextFormat,
+    sublabel_format_tv: IDWriteTextFormat,
     /// Fixed large font for the connect/keyboard prompt pills (10-foot UI).
     prompt_format: IDWriteTextFormat,
     icon_cache: HashMap<IconCacheKey, ID2D1Bitmap1>,
@@ -787,6 +789,34 @@ const HINT_PILL_H: f32 = 32.0;
 const HINT_GAP: f32 = 12.0;
 const KEY_HINT_BADGE_MAX: f32 = 38.0;
 const KEY_HINT_BADGE_INSET: f32 = 7.0;
+
+fn hint_badge_metrics(key_h: f32, hint_scale: f32) -> (f32, f32) {
+    let hs = hint_scale.max(1.0);
+    let size = (key_h * 0.48 * hs).clamp(30.0 * hs, KEY_HINT_BADGE_MAX * hs);
+    let inset = KEY_HINT_BADGE_INSET * hs.min(1.5);
+    (size, inset)
+}
+
+fn content_rect_for_badge(kr: &KeyRect, hint_scale: f32, has_badge: bool) -> D2D_RECT_F {
+    let full = D2D_RECT_F {
+        left: kr.left,
+        top: kr.top,
+        right: kr.right,
+        bottom: kr.bottom,
+    };
+    if !has_badge || hint_scale <= 1.0 + f32::EPSILON {
+        return full;
+    }
+    let key_h = kr.bottom - kr.top;
+    let (size, inset) = hint_badge_metrics(key_h, hint_scale);
+    let clear = inset + size + 2.0;
+    D2D_RECT_F {
+        left: kr.left + clear,
+        top: kr.top + clear * 0.35,
+        right: kr.right - 2.0,
+        bottom: kr.bottom - 2.0,
+    }
+}
 
 /// Top chrome height for suggestion scale `s` (1.0 = desk monitor).
 pub fn strip_band_height(suggestion_scale: f32) -> f32 {
@@ -1382,6 +1412,18 @@ impl VkRenderer {
                 &locale,
             )
             .map_err(|e| format!("CreateTextFormat (hint): {e}"))?;
+        let hint_px = (label_px * 0.5).clamp(10.0, 20.0);
+        let hint_format_tv = dwrite
+            .CreateTextFormat(
+                w!("Segoe UI"),
+                &fonts,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                hint_px * crate::vk_motion::TV_HINT_GLYPH_SCALE,
+                &locale,
+            )
+            .map_err(|e| format!("CreateTextFormat (hint tv): {e}"))?;
         let chip_format = dwrite
             .CreateTextFormat(
                 w!("Segoe UI"),
@@ -1404,6 +1446,7 @@ impl VkRenderer {
                 &locale,
             )
             .map_err(|e| format!("CreateTextFormat (chip tv): {e}"))?;
+        let sublabel_px = (label_px * 0.55).clamp(10.0, 22.0);
         let sublabel_format = dwrite
             .CreateTextFormat(
                 w!("Segoe UI"),
@@ -1411,10 +1454,21 @@ impl VkRenderer {
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                (label_px * 0.55).clamp(10.0, 22.0),
+                sublabel_px,
                 &locale,
             )
             .map_err(|e| format!("CreateTextFormat (sublabel): {e}"))?;
+        let sublabel_format_tv = dwrite
+            .CreateTextFormat(
+                w!("Segoe UI"),
+                &fonts,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                sublabel_px * crate::vk_motion::TV_HINT_GLYPH_SCALE,
+                &locale,
+            )
+            .map_err(|e| format!("CreateTextFormat (sublabel tv): {e}"))?;
         // Fixed large font for the connect/keyboard prompt pills. The pill window
         // is short, so `label_px` floors at 14; this is ~2x that so the prompt
         // reads on a TV across the room (10-foot UI).
@@ -1438,12 +1492,16 @@ impl VkRenderer {
         // Badges/legend: horizontally centred, anchored to the top of their rect.
         let _ = hint_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         let _ = hint_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        let _ = hint_format_tv.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        let _ = hint_format_tv.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
         let _ = chip_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         let _ = chip_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         let _ = chip_format_tv.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         let _ = chip_format_tv.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         let _ = sublabel_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         let _ = sublabel_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        let _ = sublabel_format_tv.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        let _ = sublabel_format_tv.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
 
         Ok(Self {
             width,
@@ -1455,9 +1513,11 @@ impl VkRenderer {
             text_format,
             glyph_format,
             hint_format,
+            hint_format_tv,
             chip_format,
             chip_format_tv,
             sublabel_format,
+            sublabel_format_tv,
             prompt_format,
             icon_cache: HashMap::new(),
             controller_art_cache: HashMap::new(),
@@ -2012,18 +2072,37 @@ impl VkRenderer {
                     .DrawRoundedRectangle(&rect, &border_brush, 1.25, None);
             }
 
+            let has_badge = key_hint(key).is_some();
+            let content = content_rect_for_badge(kr, hint_scale, has_badge);
+            let tv_hints = hint_scale > 1.0 + f32::EPSILON;
+
             if let Some(sub) = &key.sublabel {
                 let kh = kr.bottom - kr.top;
+                let (badge_size, badge_inset) = if has_badge && tv_hints {
+                    hint_badge_metrics(kh, hint_scale)
+                } else {
+                    (0.0, 0.0)
+                };
+                let sub_left = if has_badge && tv_hints {
+                    kr.left + badge_inset + badge_size + 2.0
+                } else {
+                    kr.left + 2.0
+                };
                 let sub_rect = D2D_RECT_F {
-                    left: kr.left + 2.0,
+                    left: sub_left,
                     top: kr.top + 2.0,
                     right: kr.right - 2.0,
                     bottom: kr.top + kh * 0.45,
                 };
+                let sub_fmt = if tv_hints {
+                    &self.sublabel_format_tv
+                } else {
+                    &self.sublabel_format
+                };
                 let w: Vec<u16> = sub.encode_utf16().collect();
                 self.d2d_context.DrawText(
                     &w,
-                    &self.sublabel_format,
+                    sub_fmt,
                     &sub_rect,
                     label_brush,
                     D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -2038,16 +2117,16 @@ impl VkRenderer {
                 // it's actually listening.
                 if !voice_available {
                     let disabled_color = colorref_mix(label_color, pal.key, 0.42);
-                    self.draw_svg_icon(VkIcon::MicOff, rect.rect, disabled_color)?;
+                    self.draw_svg_icon(VkIcon::MicOff, content, disabled_color)?;
                 } else if voice_active {
-                    let cx = (rect.rect.left + rect.rect.right) * 0.5;
-                    let cy = (rect.rect.top + rect.rect.bottom) * 0.5;
-                    let side = (rect.rect.right - rect.rect.left)
-                        .min(rect.rect.bottom - rect.rect.top)
+                    let cx = (content.left + content.right) * 0.5;
+                    let cy = (content.top + content.bottom) * 0.5;
+                    let side = (content.right - content.left)
+                        .min(content.bottom - content.top)
                         .max(1.0);
                     let transcribing = matches!(voice_phase, VoicePhase::Transcribing);
                     self.d2d_context.PushAxisAlignedClip(
-                        &rect.rect,
+                        &content,
                         windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                     );
                     // The cloud fills its square, so keep it inside the old blob's
@@ -2080,38 +2159,38 @@ impl VkRenderer {
                     self.d2d_context
                         .DrawRoundedRectangle(&rect, &halo, 2.0, None);
                 } else {
-                    self.draw_svg_icon(VkIcon::Mic, rect.rect, label_color)?;
+                    self.draw_svg_icon(VkIcon::Mic, content, label_color)?;
                 }
             } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE)
             {
-                self.draw_svg_icon(VkIcon::Space, rect.rect, label_color)?;
+                self.draw_svg_icon(VkIcon::Space, content, label_color)?;
             } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_BACK)
             {
-                self.draw_svg_icon(VkIcon::Backspace, rect.rect, label_color)?;
+                self.draw_svg_icon(VkIcon::Backspace, content, label_color)?;
             } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_RETURN)
             {
-                self.draw_svg_icon(VkIcon::Enter, rect.rect, label_color)?;
+                self.draw_svg_icon(VkIcon::Enter, content, label_color)?;
             } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_LEFT)
             {
-                self.draw_svg_icon(VkIcon::ChevronLeft, rect.rect, label_color)?;
+                self.draw_svg_icon(VkIcon::ChevronLeft, content, label_color)?;
             } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_RIGHT)
             {
-                self.draw_svg_icon(VkIcon::ChevronRight, rect.rect, label_color)?;
+                self.draw_svg_icon(VkIcon::ChevronRight, content, label_color)?;
             } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_UP)
             {
-                self.draw_svg_icon(VkIcon::ChevronUp, rect.rect, label_color)?;
+                self.draw_svg_icon(VkIcon::ChevronUp, content, label_color)?;
             } else if matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_DOWN)
             {
-                self.draw_svg_icon(VkIcon::ChevronDown, rect.rect, label_color)?;
+                self.draw_svg_icon(VkIcon::ChevronDown, content, label_color)?;
             } else if matches!(key.action, KeyAction::PredictPrev) {
-                self.draw_svg_icon(VkIcon::ChevronLeft, rect.rect, label_color)?;
+                self.draw_svg_icon(VkIcon::ChevronLeft, content, label_color)?;
             } else if matches!(key.action, KeyAction::PredictNext) {
-                self.draw_svg_icon(VkIcon::ChevronRight, rect.rect, label_color)?;
+                self.draw_svg_icon(VkIcon::ChevronRight, content, label_color)?;
             } else if matches!(key.action, KeyAction::CloseVk) && key.label.is_empty() {
                 // The labeled close key ("Esc") falls through to the text path.
-                self.draw_svg_icon(VkIcon::Close, rect.rect, label_color)?;
+                self.draw_svg_icon(VkIcon::Close, content, label_color)?;
             } else if matches!(key.action, KeyAction::Shift) {
-                self.draw_svg_icon(shift_icon(modifiers.shift), rect.rect, label_color)?;
+                self.draw_svg_icon(shift_icon(modifiers.shift), content, label_color)?;
             } else {
                 let (glyph, symbol_font) = key_glyph(key);
                 if !glyph.is_empty() {
@@ -2123,13 +2202,13 @@ impl VkRenderer {
                     let kh = kr.bottom - kr.top;
                     let label_rect = if key.sublabel.is_some() {
                         D2D_RECT_F {
-                            left: rect.rect.left,
+                            left: content.left,
                             top: kr.top + kh * 0.35,
-                            right: rect.rect.right,
-                            bottom: rect.rect.bottom,
+                            right: content.right,
+                            bottom: content.bottom,
                         }
                     } else {
-                        rect.rect
+                        content
                     };
                     let wide: Vec<u16> = glyph.encode_utf16().collect();
                     self.d2d_context.DrawText(
@@ -2143,14 +2222,9 @@ impl VkRenderer {
                 }
             }
 
-            // Per-key controller-button badge in the top-left corner. Keep this
-            // footprint fixed so controller glyphs do not collide with key glyphs.
             if let Some(hint) = key_hint(key) {
                 let key_h = kr.bottom - kr.top;
-                let hs = hint_scale.max(1.0);
-                let badge_size =
-                    (key_h * 0.48 * hs).clamp(30.0 * hs, KEY_HINT_BADGE_MAX * hs);
-                let inset = KEY_HINT_BADGE_INSET * hs.min(1.5);
+                let (badge_size, inset) = hint_badge_metrics(key_h, hint_scale);
                 let badge = D2D_RECT_F {
                     left: kr.left + inset,
                     top: kr.top + inset,
@@ -2165,10 +2239,15 @@ impl VkRenderer {
                     } else {
                         &accent_brush
                     };
+                    let hint_fmt = if tv_hints {
+                        &self.hint_format_tv
+                    } else {
+                        &self.hint_format
+                    };
                     let w: Vec<u16> = hint.encode_utf16().collect();
                     self.d2d_context.DrawText(
                         &w,
-                        &self.hint_format,
+                        hint_fmt,
                         &badge,
                         badge_brush,
                         D2D1_DRAW_TEXT_OPTIONS_NONE,

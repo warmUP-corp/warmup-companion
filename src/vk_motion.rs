@@ -23,8 +23,8 @@ pub const STRIP_ENTER_RISE_PX: f32 = 4.0;
 
 /// Gamepad hint glyphs (L3 / R3 / face buttons) on a TV — mid of the 2–2.5× band.
 pub const TV_HINT_GLYPH_SCALE: f32 = 2.25;
-/// Word-suggestion chips on a TV (couch distance).
-pub const TV_SUGGESTION_SCALE: f32 = 5.0;
+/// Word-suggestion chips on a TV (same as hint glyphs).
+pub const TV_SUGGESTION_SCALE: f32 = 2.25;
 
 /// Hint-glyph scale for the current display class (1.0 on a desk monitor).
 pub fn viewing_hint_scale(is_tv: bool) -> f32 {
