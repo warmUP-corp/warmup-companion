@@ -704,11 +704,15 @@ pub fn activate_key(key: &KeyCell) {
         KeyAction::Shift => toggle_shift(),
         KeyAction::Symbols => toggle_symbols(),
         KeyAction::PredictPrev => {
-            let _ = crate::vk_predict::cycle_prev();
+            if !(crate::vk_predict::strip_engaged() && crate::vk_predict::cycle_prev()) {
+                caret_left();
+            }
             request_ui_repaint();
         }
         KeyAction::PredictNext => {
-            let _ = crate::vk_predict::cycle_next();
+            if !(crate::vk_predict::strip_engaged() && crate::vk_predict::cycle_next()) {
+                caret_right();
+            }
             request_ui_repaint();
         }
         KeyAction::VoiceInput => start_voice_input(),
