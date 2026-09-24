@@ -191,6 +191,23 @@ pub fn cycle_prev() -> bool {
     true
 }
 
+pub fn engage() -> bool {
+    let Ok(mut s) = STATE.lock() else {
+        return false;
+    };
+    if !strip_active_inner(&s) {
+        return false;
+    }
+    s.candidate_engaged = true;
+    true
+}
+
+pub fn disengage() {
+    if let Ok(mut s) = STATE.lock() {
+        s.candidate_engaged = false;
+    }
+}
+
 pub fn strip_engaged() -> bool {
     let Ok(s) = STATE.lock() else {
         return false;
@@ -383,6 +400,20 @@ mod tests {
         on_caret_move();
         assert!(strip().is_none());
         assert!(STATE.lock().unwrap().words.is_empty());
+    }
+
+    #[test]
+    fn engage_and_disengage_strip() {
+        let _g = TEST_LOCK.lock().unwrap();
+        reset();
+        assert!(!engage());
+        for c in "keyb".chars() {
+            on_char(c);
+        }
+        assert!(engage());
+        assert!(strip_engaged());
+        disengage();
+        assert!(!strip_engaged());
     }
 
     #[test]

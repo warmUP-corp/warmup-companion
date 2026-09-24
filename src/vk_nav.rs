@@ -487,6 +487,17 @@ pub fn tick_dpad_hold(now: Instant) -> bool {
 /// edge), so the caller can fire a haptic tick only on a real move.
 #[cfg(feature = "gamepad")]
 pub fn dpad_pressed(dir: Button) -> bool {
+    if crate::vk_predict::strip_engaged() {
+        return match dir {
+            Button::Left => crate::vk_predict::cycle_prev(),
+            Button::Right => crate::vk_predict::cycle_next(),
+            Button::Down => {
+                crate::vk_predict::disengage();
+                true
+            }
+            _ => false,
+        };
+    }
     let mut nav = match NAV.lock() {
         Ok(n) => n,
         Err(_) => return false,
@@ -497,7 +508,7 @@ pub fn dpad_pressed(dir: Button) -> bool {
     drop(nav);
     let moved = move_selection(dir);
     refocus_after_nav_move();
-    moved
+    moved || (dir == Button::Up && crate::vk_predict::engage())
 }
 
 /// Only character and virtual-key keys auto-repeat; toggles (Shift, &123,
