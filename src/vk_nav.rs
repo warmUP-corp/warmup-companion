@@ -1082,14 +1082,22 @@ pub fn caret_right() {
 }
 
 pub fn caret_word_left() {
+    after_caret_move();
     inject_ctrl_key(VK_LEFT);
 }
 
 pub fn caret_word_right() {
+    after_caret_move();
     inject_ctrl_key(VK_RIGHT);
 }
 
+fn after_caret_move() {
+    crate::vk_predict::on_caret_move();
+    request_ui_repaint();
+}
+
 fn inject_nav_vk(vk: VIRTUAL_KEY) {
+    after_caret_move();
     let mut batch: Vec<INPUT> = Vec::with_capacity(2);
     batch.push(vk_event(vk, false));
     batch.push(vk_event(vk, true));

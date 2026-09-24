@@ -881,6 +881,8 @@ impl GamepadPoll {
             }
             (Button::Select, false) => {
                 self.vk_select_down = false;
+                vk_nav::repeat_released(vk_nav::RepeatKey::WordLeft);
+                vk_nav::repeat_released(vk_nav::RepeatKey::WordRight);
                 if !self.vk_select_chord_used {
                     // Web SELECT: jump into the suggestion strip when populated.
                     if crate::vk_predict::cycle_next() {

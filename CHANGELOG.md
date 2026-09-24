@@ -5,6 +5,7 @@
 - L1 / R1 move the text cursor one character again, and repeat while held. Hold Select and press L1 / R1 to jump a whole word.
 - Once Select engages the suggestion strip, L1 / R1 cycle the suggestions. The L1 / R1 hints on the strip show only in that mode.
 - Cursor moves also work on the Windows sign-in screen.
+- Moving the cursor clears the word suggestions, so they no longer refer to the word you moved away from. Letting go of Select stops a held word jump.
 
 ## v0.5.0
 

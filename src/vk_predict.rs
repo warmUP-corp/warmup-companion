@@ -244,6 +244,15 @@ pub fn on_boundary() {
     finish_word(&mut s);
 }
 
+pub fn on_caret_move() {
+    let Ok(mut s) = STATE.lock() else {
+        return;
+    };
+    s.partial.clear();
+    s.words.clear();
+    clear_strip(&mut s);
+}
+
 fn finish_word(s: &mut PredictState) {
     if s.partial.len() >= 2 {
         let w = std::mem::take(&mut s.partial);
@@ -362,6 +371,18 @@ mod tests {
         let ranked = STATE.lock().unwrap().ranked.clone();
         assert!(!ranked.is_empty(), "ranked: {ranked:?}");
         assert_eq!(ranked[0], "in", "ranked: {ranked:?}");
+    }
+
+    #[test]
+    fn caret_move_drops_partial_word() {
+        let _g = TEST_LOCK.lock().unwrap();
+        reset();
+        for c in "keyb".chars() {
+            on_char(c);
+        }
+        on_caret_move();
+        assert!(strip().is_none());
+        assert!(STATE.lock().unwrap().words.is_empty());
     }
 
     #[test]
