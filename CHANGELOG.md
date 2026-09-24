@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.5.0
+
+The keyboard is readable from the couch on a TV. Desk monitors look exactly as before.
+
+- A display that reports a diagonal of 40" or more counts as a TV. On a TV the gamepad hints (L3, R3 voice, Triangle on Space) are 2.25× larger and word suggestions are 5× larger (#43, #44).
+- When there is no room above the keyboard, the suggestions stack in a column to the right, next to Enter.
+- If the display reports no size, it is treated as a desk monitor. Put `tv` or `desk` in `C:\ProgramData\WarmupVk\display.txt` to override detection, for example behind an AV receiver that reports the wrong size.
+
 ## v0.4.1
 
 - Windows sign-in: a Bluetooth PS5 controller's stick click opens the keyboard. The short gamepad report omits that click; the service now reads the fuller Sony report that includes it.
