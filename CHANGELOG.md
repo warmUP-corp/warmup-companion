@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.5.1
+## v0.5.2
 
 - L1 / R1 move the text cursor one character again, and repeat while held. Hold Select and press L1 / R1 to jump a whole word.
 - Once Select engages the suggestion strip, L1 / R1 cycle the suggestions. The L1 / R1 hints on the strip show only in that mode.
