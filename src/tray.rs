@@ -66,8 +66,8 @@ const MENU_ENGINE_PARAKEET: usize = 1015;
 /// turned the cursor off in warmUP can get it back while warmUP is not running.
 const MENU_CURSOR_ENABLED: usize = 1016;
 const MENU_CONTROLLER_CENTER: usize = 1017;
-const MENU_STYLE_REFINED: usize = 1018;
-const MENU_STYLE_APPLE: usize = 1019;
+const MENU_STYLE_NORMAL: usize = 1018;
+const MENU_STYLE_MONO: usize = 1019;
 /// Mic device i is `MENU_MIC_BASE + i` (capped at 32 devices in the menu).
 const MENU_MIC_BASE: usize = 1100;
 /// Global hotkey id for "toggle voice dictation" (Ctrl+Alt+V).
@@ -287,8 +287,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     crate::config::gamepad_settings().auto_stop_on_game,
                 ),
                 MENU_VK_FLOATING => toggle_vk_mode(),
-                MENU_STYLE_REFINED => set_vk_style("refined"),
-                MENU_STYLE_APPLE => set_vk_style("apple"),
+                MENU_STYLE_NORMAL => set_vk_style("normal"),
+                MENU_STYLE_MONO => set_vk_style("mono"),
                 MENU_EDIT_SETTINGS => edit_settings(),
                 MENU_ENGINE_WHISPER => crate::win::speech_input::set_engine("whisper"),
                 MENU_ENGINE_PARAKEET => crate::win::speech_input::set_engine("parakeet"),
@@ -378,15 +378,15 @@ unsafe fn show_menu(hwnd: HWND) {
             let style = crate::config::vk_style();
             let _ = AppendMenuW(
                 style_menu,
-                chk(style == crate::config::VkStyle::Refined),
-                MENU_STYLE_REFINED,
-                w!("Refined"),
+                chk(style == crate::config::VkStyle::Normal),
+                MENU_STYLE_NORMAL,
+                w!("Normal"),
             );
             let _ = AppendMenuW(
                 style_menu,
-                chk(style == crate::config::VkStyle::Apple),
-                MENU_STYLE_APPLE,
-                w!("Apple"),
+                chk(style == crate::config::VkStyle::Mono),
+                MENU_STYLE_MONO,
+                w!("Mono"),
             );
             let _ = AppendMenuW(kb, MF_POPUP, style_menu.0 as usize, w!("Keyboard style"));
         }

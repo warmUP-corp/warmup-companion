@@ -63,15 +63,15 @@ pub fn vk_layout_mode() -> VkLayoutMode {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum VkStyle {
     #[default]
-    Refined,
-    Apple,
+    Normal,
+    Mono,
 }
 
 #[cfg(feature = "gamepad")]
 pub fn parse_vk_style(raw: Option<&str>) -> VkStyle {
     match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-        Some("apple") => VkStyle::Apple,
-        _ => VkStyle::Refined,
+        Some("mono" | "apple") => VkStyle::Mono,
+        _ => VkStyle::Normal,
     }
 }
 
@@ -662,8 +662,8 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
             _ => Err("vk_mode must be docked or floating".to_string()),
         },
         "vk_style" => match value.trim().to_ascii_lowercase().as_str() {
-            "refined" | "apple" => Ok(()),
-            _ => Err("vk_style must be refined or apple".to_string()),
+            "normal" | "mono" | "refined" | "apple" => Ok(()),
+            _ => Err("vk_style must be normal or mono".to_string()),
         },
         "vk_bar_scale" => value
             .parse::<f32>()
@@ -719,13 +719,15 @@ mod tests {
 
     #[cfg(feature = "gamepad")]
     #[test]
-    fn vk_style_defaults_to_refined() {
-        assert_eq!(parse_vk_style(None), VkStyle::Refined);
-        assert_eq!(parse_vk_style(Some("refined")), VkStyle::Refined);
-        assert_eq!(parse_vk_style(Some(" Apple ")), VkStyle::Apple);
-        assert_eq!(parse_vk_style(Some("bogus")), VkStyle::Refined);
-        assert!(validate_gamepad_setting("vk_style", "apple").is_ok());
-        assert!(validate_gamepad_setting("vk_style", "Refined").is_ok());
+    fn vk_style_defaults_to_normal() {
+        assert_eq!(parse_vk_style(None), VkStyle::Normal);
+        assert_eq!(parse_vk_style(Some("normal")), VkStyle::Normal);
+        assert_eq!(parse_vk_style(Some(" Mono ")), VkStyle::Mono);
+        assert_eq!(parse_vk_style(Some("bogus")), VkStyle::Normal);
+        assert!(validate_gamepad_setting("vk_style", "mono").is_ok());
+        assert_eq!(parse_vk_style(Some("apple")), VkStyle::Mono);
+        assert!(validate_gamepad_setting("vk_style", "refined").is_ok());
+        assert!(validate_gamepad_setting("vk_style", "Normal").is_ok());
         assert!(validate_gamepad_setting("vk_style", "ios").is_err());
     }
 

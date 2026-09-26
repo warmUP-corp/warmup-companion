@@ -280,7 +280,7 @@ const fn rgb(v: u32) -> u32 {
 
 pub fn style_palette(style: VkStyle, dark: bool) -> VkPalette {
     match (style, dark) {
-        (VkStyle::Refined, true) => VkPalette {
+        (VkStyle::Normal, true) => VkPalette {
             bg: rgb(0x15161C),
             key: rgb(0x2A2B36),
             key_action: rgb(0x1F2029),
@@ -294,7 +294,7 @@ pub fn style_palette(style: VkStyle, dark: bool) -> VkPalette {
             panel_stroke_alpha: 0x12 as f32 / 255.0,
             chip_sel: rgb(0x3A3C4A),
         },
-        (VkStyle::Refined, false) => VkPalette {
+        (VkStyle::Normal, false) => VkPalette {
             bg: rgb(0xF3F4F7),
             key: rgb(0xFFFFFF),
             key_action: rgb(0xE3E5EB),
@@ -308,7 +308,7 @@ pub fn style_palette(style: VkStyle, dark: bool) -> VkPalette {
             panel_stroke_alpha: 0x12 as f32 / 255.0,
             chip_sel: rgb(0xDADDE5),
         },
-        (VkStyle::Apple, true) => VkPalette {
+        (VkStyle::Mono, true) => VkPalette {
             bg: rgb(0x1C1C1E),
             key: rgb(0x3A3A3C),
             key_action: rgb(0x2C2C2E),
@@ -322,7 +322,7 @@ pub fn style_palette(style: VkStyle, dark: bool) -> VkPalette {
             panel_stroke_alpha: 0x14 as f32 / 255.0,
             chip_sel: rgb(0x3A3A3C),
         },
-        (VkStyle::Apple, false) => VkPalette {
+        (VkStyle::Mono, false) => VkPalette {
             bg: rgb(0xD1D3D9),
             key: rgb(0xFFFFFF),
             key_action: rgb(0xABB0BA),
@@ -394,7 +394,7 @@ pub struct StyleSpec {
     separator_alpha: f32,
 }
 
-static REFINED_SPEC: StyleSpec = StyleSpec {
+static NORMAL_SPEC: StyleSpec = StyleSpec {
     design_kh: 102.0,
     key_aspect: 102.0 / 138.0,
     gap: 6.0,
@@ -443,7 +443,7 @@ static REFINED_SPEC: StyleSpec = StyleSpec {
     separator_alpha: 0.0,
 };
 
-static APPLE_SPEC: StyleSpec = StyleSpec {
+static MONO_SPEC: StyleSpec = StyleSpec {
     design_kh: 100.0,
     key_aspect: 100.0 / 137.0,
     gap: 8.0,
@@ -494,8 +494,8 @@ static APPLE_SPEC: StyleSpec = StyleSpec {
 
 pub fn style_spec(style: VkStyle) -> &'static StyleSpec {
     match style {
-        VkStyle::Refined => &REFINED_SPEC,
-        VkStyle::Apple => &APPLE_SPEC,
+        VkStyle::Normal => &NORMAL_SPEC,
+        VkStyle::Mono => &MONO_SPEC,
     }
 }
 
@@ -3126,7 +3126,7 @@ mod tests {
 
     #[test]
     fn strip_band_grows_with_the_same_factor_as_the_keys() {
-        for style in [VkStyle::Refined, VkStyle::Apple] {
+        for style in [VkStyle::Normal, VkStyle::Mono] {
             let one = strip_band_height(1.0, style);
             assert!((strip_band_height(2.0, style) - one * 2.0).abs() < 1e-3);
             assert!(strip_band_height(0.75, style) < one);
@@ -3199,8 +3199,8 @@ mod tests {
     }
 
     #[test]
-    fn refined_card_corners_are_concentric_with_the_keys() {
-        let spec = style_spec(VkStyle::Refined);
+    fn normal_card_corners_are_concentric_with_the_keys() {
+        let spec = style_spec(VkStyle::Normal);
         assert_eq!(
             crate::vk_motion::concentric_radius(spec.key_radius, spec.pad_x),
             spec.panel_radius
@@ -3214,7 +3214,7 @@ mod tests {
 
     #[test]
     fn design_frames_are_1468_wide() {
-        for style in [VkStyle::Refined, VkStyle::Apple] {
+        for style in [VkStyle::Normal, VkStyle::Mono] {
             let spec = style_spec(style);
             let key_w = spec.design_kh / spec.key_aspect;
             let frame = 10.0 * key_w + 9.0 * spec.gap + 2.0 * spec.pad_x;
@@ -3224,7 +3224,7 @@ mod tests {
 
     #[test]
     fn strip_bar_sits_in_the_band_above_the_floating_grid() {
-        for style in [VkStyle::Refined, VkStyle::Apple] {
+        for style in [VkStyle::Normal, VkStyle::Mono] {
             let spec = style_spec(style);
             let rows = crate::vk_nav::rows_for_test();
             let (grid_w, block_h) = grid_size(REF_MON_W, &rows, style);
@@ -3244,21 +3244,21 @@ mod tests {
     }
 
     #[test]
-    fn apple_style_relabels_keys_like_ios() {
-        let apple = style_spec(VkStyle::Apple);
-        let refined = style_spec(VkStyle::Refined);
-        assert_eq!(styled_glyph(apple, &KeyAction::Char('q'), "q".into()), "Q");
-        assert_eq!(styled_glyph(refined, &KeyAction::Char('q'), "q".into()), "q");
-        assert_eq!(styled_glyph(apple, &KeyAction::Symbols, "?123".into()), "123");
-        assert_eq!(styled_glyph(refined, &KeyAction::Symbols, "?123".into()), "?123");
-        assert_eq!(styled_glyph(apple, &KeyAction::Char(';'), ";".into()), ";");
+    fn mono_style_relabels_keys_like_ios() {
+        let mono = style_spec(VkStyle::Mono);
+        let normal = style_spec(VkStyle::Normal);
+        assert_eq!(styled_glyph(mono, &KeyAction::Char('q'), "q".into()), "Q");
+        assert_eq!(styled_glyph(normal, &KeyAction::Char('q'), "q".into()), "q");
+        assert_eq!(styled_glyph(mono, &KeyAction::Symbols, "?123".into()), "123");
+        assert_eq!(styled_glyph(normal, &KeyAction::Symbols, "?123".into()), "?123");
+        assert_eq!(styled_glyph(mono, &KeyAction::Char(';'), ";".into()), ";");
         assert!(is_action_key(&KeyAction::Shift));
         assert!(!is_action_key(&KeyAction::Char('a')));
         assert!(!is_action_key(&KeyAction::Vk(
             windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE
         )));
-        assert_eq!(strip_slots(VkStyle::Refined), 7);
-        assert_eq!(strip_slots(VkStyle::Apple), 3);
+        assert_eq!(strip_slots(VkStyle::Normal), 7);
+        assert_eq!(strip_slots(VkStyle::Mono), 3);
     }
 
     #[test]
