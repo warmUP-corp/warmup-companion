@@ -1024,7 +1024,7 @@ fn render_frame() {
             let pal = vk_palette(is_dark_theme(), style);
             let rows = vk_nav::rows_snapshot();
             let sel = vk_nav::selection();
-            let (shift, caps) = vk_nav::modifier_state();
+            let (shift, caps, symbol, symbol_locked) = vk_nav::modifier_state();
             let scale_w = vk_scale_w();
             // Press dip for the key that just fired; dropped once it has settled
             // so the steady state draws with no transform at all.
@@ -1046,7 +1046,12 @@ fn render_frame() {
                 scale_w,
                 candidates: candidates.as_ref(),
                 floating,
-                modifiers: vk_renderer::VkModifiers { shift, caps },
+                modifiers: vk_renderer::VkModifiers {
+                    shift,
+                    caps,
+                    symbol,
+                    symbol_locked,
+                },
                 pressed,
                 controller_label: controller_snapshot.name.trim(),
                 // Voice needs both a non-secure desktop (LocalSystem has no mic

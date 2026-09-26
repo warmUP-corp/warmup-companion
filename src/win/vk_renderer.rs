@@ -1070,6 +1070,8 @@ pub fn key_rects(
 pub struct VkModifiers {
     pub shift: bool,
     pub caps: bool,
+    pub symbol: bool,
+    pub symbol_locked: bool,
 }
 
 /// One immutable snapshot of everything the VK renderer needs for a frame.
@@ -1898,8 +1900,16 @@ impl VkRenderer {
                     &shadow_brush,
                 );
             }
+            let modifier_active = !selected
+                && ((matches!(key.action, KeyAction::Shift) && modifiers.shift)
+                    || (matches!(key.action, KeyAction::Symbols) && modifiers.symbol));
+            let modifier_tint_brush;
             let (fill, fill_color, label_brush, dim) = if selected {
                 (&accent_brush, pal.accent, &sel_text_brush, &sel_dim_brush)
+            } else if modifier_active {
+                let tint_color = colorref_mix(pal.accent, pal.key_action, 0.35);
+                modifier_tint_brush = solid_brush(&self.d2d_context, colorref(tint_color))?;
+                (&modifier_tint_brush, tint_color, &text_brush, &dim_brush)
             } else if action_key {
                 (&action_brush, pal.key_action, &text_brush, &dim_brush)
             } else {
@@ -1907,6 +1917,25 @@ impl VkRenderer {
             };
             let label_color = if selected { pal.sel_text } else { pal.text };
             self.d2d_context.FillRoundedRectangle(&rect, fill);
+
+            let locked = (matches!(key.action, KeyAction::Shift) && modifiers.caps)
+                || (matches!(key.action, KeyAction::Symbols) && modifiers.symbol_locked);
+            if locked {
+                let pill_w = ((key_rect.right - key_rect.left) * 0.28).min(24.0 * unit);
+                let pill_h = (3.0 * unit).max(2.0);
+                let cx = (key_rect.left + key_rect.right) * 0.5;
+                let bottom = key_rect.bottom - 5.0 * unit;
+                let pill_rect = D2D_RECT_F {
+                    left: cx - pill_w * 0.5,
+                    right: cx + pill_w * 0.5,
+                    top: bottom - pill_h,
+                    bottom,
+                };
+                let pill_color = if selected { pal.sel_text } else { pal.accent };
+                let pill_brush = solid_brush(&self.d2d_context, colorref(pill_color))?;
+                self.d2d_context
+                    .FillRoundedRectangle(&rounded(pill_rect, pill_h * 0.5), &pill_brush);
+            }
 
             let is_space = matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE);
             if let Some(sub) = key.sublabel.as_deref().filter(|_| !is_space) {
