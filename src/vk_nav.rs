@@ -686,7 +686,7 @@ pub fn toggle_language() {
 /// Layer reset after an insert (web `insertText`): one-shot layers revert to
 /// lower after one character or space; double-tap-promoted sticky layers
 /// (caps / sticky symbols) persist until toggled off.
-fn after_insert() {
+pub fn after_insert() {
     if let Ok(mut nav) = NAV.lock() {
         let reset = match nav.layer {
             Layer::Upper => nav.one_shot_shift,

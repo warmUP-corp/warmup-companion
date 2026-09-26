@@ -699,7 +699,13 @@ unsafe extern "system" fn vk_wndproc(
         WM_LBUTTONDOWN => {
             let x = (lparam.0 & 0xFFFF) as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i32;
-            if let Some((pos, key)) = hit_test(hwnd, x, y) {
+            if let Some(slot) = strip_hit_test(hwnd, x, y) {
+                let mut sink = vk_nav::SendInputSink;
+                if crate::vk_predict::commit_slot(slot, &mut sink).is_some() {
+                    vk_nav::after_insert();
+                }
+                request_repaint();
+            } else if let Some((pos, key)) = hit_test(hwnd, x, y) {
                 vk_nav::activate_at(pos, &key);
                 request_repaint();
             }
@@ -1102,6 +1108,27 @@ pub fn wait_until_visible(timeout: Duration) -> bool {
         std::thread::sleep(Duration::from_millis(16));
     }
     is_vk_visible()
+}
+
+fn strip_hit_test(hwnd: HWND, x: i32, y: i32) -> Option<usize> {
+    let style = crate::config::vk_style();
+    let strip = crate::vk_predict::strip(vk_renderer::strip_slots(style))?;
+    let mut client = windows::Win32::Foundation::RECT::default();
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut client);
+    }
+    let rows = vk_nav::rows_snapshot();
+    vk_renderer::strip_hit_slot(
+        client.right as f32,
+        client.bottom as f32,
+        unsafe { vk_scale_w() },
+        &rows,
+        unsafe { top_inset() },
+        style,
+        &strip.visible,
+        x as f32,
+        y as f32,
+    )
 }
 
 fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<(vk_nav::KeyPos, KeyCell)> {

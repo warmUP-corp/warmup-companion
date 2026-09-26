@@ -842,6 +842,7 @@ impl GamepadPoll {
                 // Fire on press (not release) so holding the button auto-repeats.
                 let mut sink = vk_nav::SendInputSink;
                 if crate::vk_predict::commit_if_engaged(&mut sink).is_some() {
+                    vk_nav::after_insert();
                     // A landed suggestion commit — a firmer confirm than a key tap.
                     self.backend.haptic_confirm();
                 } else {

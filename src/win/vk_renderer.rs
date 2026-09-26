@@ -478,10 +478,10 @@ static MONO_SPEC: StyleSpec = StyleSpec {
     chip_px: 22.0,
     chip_sel_weight: DWRITE_FONT_WEIGHT_NORMAL,
     chip_text_alpha: 0x99 as f32 / 255.0,
-    strip_button_w: 0.0,
+    strip_button_w: 40.0,
     strip_button_h: 0.0,
     strip_button_gap: 0.0,
-    strip_hint_px: 0.0,
+    strip_hint_px: 22.0,
     chips_h: 72.0,
     chips_pad: 0.0,
     chips_gap: 0.0,
@@ -988,6 +988,144 @@ impl StripGeom {
             unit,
         }
     }
+
+    fn cy(&self) -> f32 {
+        (self.top + self.bottom) * 0.5
+    }
+
+    fn pill_frame(&self, spec: &StyleSpec) -> PillFrame {
+        let u = self.unit;
+        let cy = self.cy();
+        let button_w = spec.strip_button_w * u;
+        let button_h = spec.strip_button_h * u;
+        let button_gap = spec.strip_button_gap * u;
+        let button = |left: f32| D2D_RECT_F {
+            left,
+            top: cy - button_h * 0.5,
+            right: left + button_w,
+            bottom: cy + button_h * 0.5,
+        };
+        let prev = button(self.left);
+        let next = button(self.right - button_w);
+        let chips_h = spec.chips_h * u;
+        let chips = D2D_RECT_F {
+            left: prev.right + button_gap,
+            top: cy - chips_h * 0.5,
+            right: next.left - button_gap,
+            bottom: cy + chips_h * 0.5,
+        };
+        let inner = deflate(chips, spec.chips_pad * u);
+        PillFrame {
+            prev,
+            next,
+            chips,
+            inner,
+            chip_r: ((inner.bottom - inner.top) * 0.5).max(0.0),
+        }
+    }
+
+    fn pill_slot_rects(&self, spec: &StyleSpec, visible: &[String]) -> Vec<(usize, D2D_RECT_F)> {
+        let frame = self.pill_frame(spec);
+        if frame.chips.right - frame.chips.left < 1.0 {
+            return Vec::new();
+        }
+        let inner = frame.inner;
+        let chip_gap = spec.chips_gap * self.unit;
+        let filled: Vec<usize> = visible
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| !w.is_empty())
+            .map(|(i, _)| i)
+            .collect();
+        let n = filled.len() as f32;
+        let chip_w = ((inner.right - inner.left) - chip_gap * (n - 1.0)) / n;
+        filled
+            .into_iter()
+            .enumerate()
+            .map(|(k, slot)| {
+                let left = inner.left + k as f32 * (chip_w + chip_gap);
+                (
+                    slot,
+                    D2D_RECT_F {
+                        left,
+                        top: inner.top,
+                        right: left + chip_w,
+                        bottom: inner.bottom,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn column_hints(&self, spec: &StyleSpec, engaged: bool) -> Vec<(&'static str, D2D_RECT_F)> {
+        let lane = spec.strip_button_w * self.unit;
+        let side = spec.strip_hint_px * self.unit;
+        let cy = self.cy();
+        let left = square_about(self.left + lane * 0.5, cy, side);
+        let right = square_about(self.right - lane * 0.5, cy, side);
+        if engaged {
+            vec![("LB", left), ("RB", right)]
+        } else {
+            vec![("SELECT", left)]
+        }
+    }
+
+    fn column_rects(&self, spec: &StyleSpec, slots: usize) -> Vec<D2D_RECT_F> {
+        let lane = spec.strip_button_w * self.unit;
+        let left = self.left + lane;
+        let right = (self.right - lane).max(left);
+        let slots = slots.max(1);
+        let col_w = (right - left) / slots as f32;
+        (0..slots)
+            .map(|i| D2D_RECT_F {
+                left: left + i as f32 * col_w,
+                top: self.top,
+                right: left + (i + 1) as f32 * col_w,
+                bottom: self.bottom,
+            })
+            .collect()
+    }
+
+    fn slot_rects(&self, spec: &StyleSpec, visible: &[String]) -> Vec<(usize, D2D_RECT_F)> {
+        match spec.strip {
+            StripLook::Pills => self.pill_slot_rects(spec, visible),
+            StripLook::Columns => self
+                .column_rects(spec, visible.len())
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| visible.get(*i).is_some_and(|w| !w.is_empty()))
+                .collect(),
+        }
+    }
+}
+
+struct PillFrame {
+    prev: D2D_RECT_F,
+    next: D2D_RECT_F,
+    chips: D2D_RECT_F,
+    inner: D2D_RECT_F,
+    chip_r: f32,
+}
+
+pub fn strip_hit_slot(
+    client_w: f32,
+    client_h: f32,
+    scale_w: f32,
+    rows: &[KeyRow],
+    top_inset: f32,
+    style: VkStyle,
+    visible: &[String],
+    x: f32,
+    y: f32,
+) -> Option<usize> {
+    let spec = style_spec(style);
+    let rects = key_rects(client_w, client_h, scale_w, rows, top_inset, style);
+    let key_h = rects.first().map(|kr| kr.bottom - kr.top)?;
+    let geom = StripGeom::above(&rects, spec, key_h / spec.design_kh);
+    geom.slot_rects(spec, visible)
+        .into_iter()
+        .find(|(_, r)| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+        .map(|(slot, _)| slot)
 }
 
 fn key_icon(action: &KeyAction, shift: bool) -> Option<(VkIcon, bool)> {
@@ -2168,7 +2306,9 @@ impl VkRenderer {
         }
         match spec.strip {
             StripLook::Pills => self.draw_strip_pills(spec, pal, fonts, strip, geom, alpha, icons),
-            StripLook::Columns => self.draw_strip_columns(spec, pal, fonts, strip, geom, alpha),
+            StripLook::Columns => {
+                self.draw_strip_columns(spec, pal, fonts, strip, geom, alpha, icons)
+            }
         }
     }
 
@@ -2183,24 +2323,15 @@ impl VkRenderer {
         icons: ControllerIconFamily,
     ) -> Result<(), String> {
         let u = geom.unit;
-        let cy = (geom.top + geom.bottom) * 0.5;
-        let button_w = spec.strip_button_w * u;
+        let cy = geom.cy();
         let button_h = spec.strip_button_h * u;
-        let button_gap = spec.strip_button_gap * u;
         let hint_px = spec.strip_hint_px * u;
         let fill = solid_brush(&self.d2d_context, colorref_alpha(pal.key_action, alpha))?;
         let stroke = solid_brush(&self.d2d_context, colorref_alpha(pal.border, alpha))?;
-        let button = |left: f32| D2D_RECT_F {
-            left,
-            top: cy - button_h * 0.5,
-            right: left + button_w,
-            bottom: cy + button_h * 0.5,
-        };
-        let prev = button(geom.left);
-        let next = button(geom.right - button_w);
-        let mut buttons = vec![(prev, if strip.engaged { "LB" } else { "SELECT" })];
+        let frame = geom.pill_frame(spec);
+        let mut buttons = vec![(frame.prev, if strip.engaged { "LB" } else { "SELECT" })];
         if strip.engaged {
-            buttons.push((next, "RB"));
+            buttons.push((frame.next, "RB"));
         }
         for (rect, hint) in buttons {
             let shape = rounded(rect, button_h * 0.5);
@@ -2217,18 +2348,11 @@ impl VkRenderer {
             }
         }
 
-        let chips_h = spec.chips_h * u;
-        let chips = D2D_RECT_F {
-            left: prev.right + button_gap,
-            top: cy - chips_h * 0.5,
-            right: next.left - button_gap,
-            bottom: cy + chips_h * 0.5,
-        };
+        let chips = frame.chips;
         if chips.right - chips.left < 1.0 {
             return Ok(());
         }
-        let inner = deflate(chips, spec.chips_pad * u);
-        let chip_r = ((inner.bottom - inner.top) * 0.5).max(0.0);
+        let chip_r = frame.chip_r;
         let chips_r = crate::vk_motion::concentric_radius(chip_r, spec.chips_pad * u);
         self.d2d_context
             .FillRoundedRectangle(&rounded(chips, chips_r), &fill);
@@ -2238,29 +2362,14 @@ impl VkRenderer {
             1.0,
             None,
         );
-        let chip_gap = spec.chips_gap * u;
-        let words: Vec<(usize, &String)> = strip
-            .visible
-            .iter()
-            .enumerate()
-            .filter(|(_, w)| !w.is_empty())
-            .collect();
-        let n = words.len() as f32;
-        let chip_w = ((inner.right - inner.left) - chip_gap * (n - 1.0)) / n;
         let sel_fill = solid_brush(&self.d2d_context, colorref_alpha(pal.chip_sel, alpha))?;
         let text = solid_brush(&self.d2d_context, colorref_alpha(pal.text, alpha))?;
         let dim = solid_brush(
             &self.d2d_context,
             colorref_alpha(pal.text, spec.chip_text_alpha * alpha),
         )?;
-        for (k, (slot_index, word)) in words.into_iter().enumerate() {
-            let left = inner.left + k as f32 * (chip_w + chip_gap);
-            let slot = D2D_RECT_F {
-                left,
-                top: inner.top,
-                right: left + chip_w,
-                bottom: inner.bottom,
-            };
+        for (slot_index, slot) in geom.pill_slot_rects(spec, &strip.visible) {
+            let word = &strip.visible[slot_index];
             let selected = strip.engaged && slot_index == strip.highlight_slot;
             if selected {
                 self.d2d_context
@@ -2291,11 +2400,10 @@ impl VkRenderer {
         strip: &crate::vk_predict::StripState,
         geom: StripGeom,
         alpha: f32,
+        icons: ControllerIconFamily,
     ) -> Result<(), String> {
         let u = geom.unit;
-        let cy = (geom.top + geom.bottom) * 0.5;
-        let slots = strip.visible.len().max(1);
-        let col_w = (geom.right - geom.left) / slots as f32;
+        let cy = geom.cy();
         let sep_h = spec.separator_h * u;
         let separator = solid_brush(
             &self.d2d_context,
@@ -2306,10 +2414,23 @@ impl VkRenderer {
             &self.d2d_context,
             colorref_alpha(pal.text_dim, spec.chip_text_alpha * alpha),
         )?;
-        for (i, word) in strip.visible.iter().enumerate() {
-            let left = geom.left + i as f32 * col_w;
+        let sel_fill = solid_brush(&self.d2d_context, colorref_alpha(pal.chip_sel, alpha))?;
+        for (hint, rect) in geom.column_hints(spec, strip.engaged) {
+            if let Some(icon) = icons.hint_icon(hint) {
+                self.draw_svg_icon_sized(
+                    icon,
+                    rect,
+                    pal.text_dim,
+                    spec.chip_text_alpha * alpha,
+                    rect.bottom - rect.top,
+                )?;
+            }
+        }
+        let columns = geom.column_rects(spec, strip.visible.len());
+        let sel_h = (sep_h * 1.6).min(geom.bottom - geom.top);
+        for (i, (word, col)) in strip.visible.iter().zip(columns).enumerate() {
             if i > 0 {
-                let x = left.round();
+                let x = col.left.round();
                 self.d2d_context.FillRectangle(
                     &D2D_RECT_F {
                         left: x - 0.5,
@@ -2325,14 +2446,23 @@ impl VkRenderer {
             }
             let selected = strip.engaged && i == strip.highlight_slot;
             let pad = 8.0 * u;
+            if selected {
+                let pill = D2D_RECT_F {
+                    left: col.left + pad * 0.5,
+                    top: cy - sel_h * 0.5,
+                    right: col.right - pad * 0.5,
+                    bottom: cy + sel_h * 0.5,
+                };
+                self.d2d_context
+                    .FillRoundedRectangle(&rounded(pill, sel_h * 0.5), &sel_fill);
+            }
             self.d2d_context.DrawText(
                 &wide(word),
                 if selected { &fonts.chip_sel } else { &fonts.chip },
                 &D2D_RECT_F {
-                    left: left + pad,
-                    top: geom.top,
-                    right: left + col_w - pad,
-                    bottom: geom.bottom,
+                    left: col.left + pad,
+                    right: col.right - pad,
+                    ..col
                 },
                 if selected { &text } else { &dim },
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
@@ -3148,6 +3278,43 @@ fn key_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn overlaps(a: &D2D_RECT_F, b: &D2D_RECT_F) -> bool {
+        a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
+    }
+
+    #[test]
+    fn mono_columns_never_overlap_the_hint_glyphs() {
+        let spec = style_spec(VkStyle::Mono);
+        for unit in [0.5_f32, 1.0, 1.75, 3.0] {
+            let geom = StripGeom {
+                left: 20.0,
+                top: 10.0,
+                right: 20.0 + 900.0 * unit,
+                bottom: 10.0 + spec.strip_bar_h * unit,
+                unit,
+            };
+            let cols = geom.column_rects(spec, 3);
+            let w0 = cols[0].right - cols[0].left;
+            assert!(cols.iter().all(|c| ((c.right - c.left) - w0).abs() < 1e-3));
+            for engaged in [false, true] {
+                let hints = geom.column_hints(spec, engaged);
+                assert_eq!(hints.len(), if engaged { 2 } else { 1 });
+                for (_, h) in &hints {
+                    assert!(h.right - h.left > 0.0);
+                    assert!(h.left >= geom.left && h.right <= geom.right);
+                    for c in &cols {
+                        assert!(!overlaps(h, c), "unit {unit} engaged {engaged}");
+                    }
+                }
+            }
+            let visible = vec!["a".to_string(), "b".to_string(), String::new()];
+            let hit = geom.slot_rects(spec, &visible);
+            assert_eq!(hit.len(), 2);
+            assert_eq!(hit[0].1, cols[0]);
+            assert_eq!(hit[1].1, cols[1]);
+        }
+    }
 
     #[test]
     fn strip_band_grows_with_the_same_factor_as_the_keys() {
