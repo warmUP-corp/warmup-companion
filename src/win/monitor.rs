@@ -1,26 +1,15 @@
-use windows::core::PCWSTR;
 use windows::Win32::Foundation::{BOOL, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
-    CreateDCW, DeleteDC, EnumDisplayMonitors, GetDeviceCaps, GetMonitorInfoW, MonitorFromPoint,
-    MonitorFromWindow, HDC, HMONITOR, HORZSIZE, MONITORINFO, MONITORINFOEXW,
-    MONITOR_DEFAULTTONEAREST, VERTSIZE,
+    EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, HDC, HMONITOR,
+    MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowRect, MONITORINFOF_PRIMARY,
     SM_CXSCREEN, SM_CYSCREEN,
 };
 
 const FIT_SLOP: i32 = 96;
-const DISPLAY_OVERRIDE: &str = r"C:\ProgramData\WarmupVk\display.txt";
-
-/// Diagonal inches at or above this ⇒ treat as a TV (10-foot UI).
-pub const TV_DIAGONAL_INCH_MIN: f32 = 40.0;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DisplayKind {
-    Tv,
-    Desk,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScreenRect {
@@ -108,75 +97,14 @@ pub unsafe fn active_monitor() -> (HMONITOR, RECT) {
     )
 }
 
-pub fn diagonal_inches_from_mm(width_mm: i32, height_mm: i32) -> f32 {
-    if width_mm <= 0 || height_mm <= 0 {
-        return 0.0;
-    }
-    let w = width_mm as f32;
-    let h = height_mm as f32;
-    (w * w + h * h).sqrt() / 25.4
-}
-
-pub fn is_tv_diagonal(diagonal_inches: f32) -> bool {
-    diagonal_inches >= TV_DIAGONAL_INCH_MIN
-}
-
-/// Parse `display.txt` contents: trimmed lowercase `tv` / `desk`, else auto.
-pub fn parse_display_override(raw: &str) -> Option<DisplayKind> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "tv" => Some(DisplayKind::Tv),
-        "desk" => Some(DisplayKind::Desk),
-        _ => None,
-    }
-}
-
-fn display_override() -> Option<DisplayKind> {
-    std::fs::read_to_string(DISPLAY_OVERRIDE)
-        .ok()
-        .and_then(|s| parse_display_override(&s))
-}
-
-pub unsafe fn is_tv_monitor(hmonitor: HMONITOR) -> bool {
-    physical_diagonal_inches(hmonitor).is_some_and(is_tv_diagonal)
-}
-
-pub unsafe fn is_active_monitor_tv() -> bool {
-    match display_override() {
-        Some(DisplayKind::Tv) => true,
-        Some(DisplayKind::Desk) => false,
-        None => is_tv_monitor(active_monitor().0),
-    }
-}
-
-unsafe fn physical_diagonal_inches(hmonitor: HMONITOR) -> Option<f32> {
-    diagonal_from_device_caps(hmonitor)
-}
-
-unsafe fn diagonal_from_device_caps(hmonitor: HMONITOR) -> Option<f32> {
-    let mut info = MONITORINFOEXW::default();
-    info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
-    if !GetMonitorInfoW(
-        hmonitor,
-        &mut info as *mut MONITORINFOEXW as *mut MONITORINFO,
-    )
-    .as_bool()
+pub unsafe fn dpi_scale(hmonitor: HMONITOR) -> f32 {
+    let mut dpi_x = 0u32;
+    let mut dpi_y = 0u32;
+    if GetDpiForMonitor(hmonitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y).is_err() || dpi_x == 0
     {
-        return None;
+        return 1.0;
     }
-    let hdc = CreateDCW(
-        PCWSTR::null(),
-        PCWSTR::from_raw(info.szDevice.as_ptr()),
-        PCWSTR::null(),
-        None,
-    );
-    if hdc.is_invalid() {
-        return None;
-    }
-    let w = GetDeviceCaps(hdc, HORZSIZE);
-    let h = GetDeviceCaps(hdc, VERTSIZE);
-    let _ = DeleteDC(hdc);
-    let d = diagonal_inches_from_mm(w, h);
-    (d > 0.0).then_some(d)
+    dpi_x as f32 / 96.0
 }
 
 fn intersection_area(a: ScreenRect, b: ScreenRect) -> i64 {
@@ -345,24 +273,5 @@ mod tests {
             bottom: 1088,
         };
         assert!(foreground_fits_monitor(window, mon));
-    }
-
-    #[test]
-    fn tv_threshold_is_forty_inch_diagonal() {
-        assert!(!is_tv_diagonal(39.9));
-        assert!(is_tv_diagonal(40.0));
-        assert!(is_tv_diagonal(65.0));
-        assert!(!is_tv_diagonal(27.0));
-        assert!(is_tv_diagonal(diagonal_inches_from_mm(914, 514)));
-        assert!(!is_tv_diagonal(diagonal_inches_from_mm(510, 287)));
-        assert_eq!(diagonal_inches_from_mm(0, 500), 0.0);
-
-        assert_eq!(parse_display_override("tv"), Some(DisplayKind::Tv));
-        assert_eq!(parse_display_override("  TV\n"), Some(DisplayKind::Tv));
-        assert_eq!(parse_display_override("desk"), Some(DisplayKind::Desk));
-        assert_eq!(parse_display_override(" Desk "), Some(DisplayKind::Desk));
-        assert_eq!(parse_display_override(""), None);
-        assert_eq!(parse_display_override("auto"), None);
-        assert_eq!(parse_display_override("monitor"), None);
     }
 }

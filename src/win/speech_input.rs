@@ -134,10 +134,7 @@ pub fn voice_ui_phase() -> Option<String> {
     helper_alive().then(|| current_phase().unwrap_or_else(|| "starting".to_string()))
 }
 
-/// Launch `<exe> <flag>` as the active console user on `winsta0\default` (used for
-/// `--speech-helper` and `--parakeet-server`). Mirrors `main::spawn_warmup_as_active_user`;
-/// returns the child process handle.
-fn spawn_as_user(exe: &std::path::Path, flag: &str) -> Result<HANDLE, String> {
+pub(crate) fn spawn_as_user(exe: &std::path::Path, args: &str) -> Result<HANDLE, String> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
 
@@ -167,7 +164,7 @@ fn spawn_as_user(exe: &std::path::Path, flag: &str) -> Result<HANDLE, String> {
         let spawn_token = elevated.unwrap_or(token);
 
         let exe_w = wide_os(exe.as_os_str());
-        let mut cmd_w = wide(&format!("\"{}\" {flag}", exe.display()));
+        let mut cmd_w = wide(&format!("\"{}\" {args}", exe.display()));
         let cwd_w = exe.parent().map(|parent| wide_os(parent.as_os_str()));
         let mut desktop = wide("winsta0\\default");
         let startup = STARTUPINFOW {

@@ -2,6 +2,12 @@
 
 #[cfg(windows)]
 pub fn dispatch_install_or_service(args: &[String]) {
+    if let Some(i) = args.iter().position(|a| a == "--toast-helper") {
+        let path = args.get(i + 1).map(String::as_str).unwrap_or_default();
+        let copied = args.iter().any(|a| a == "--copied");
+        crate::win::toast::show_screenshot_toast(path, copied);
+        std::process::exit(0);
+    }
     // Mic recognition runs here, as the real logged-in user (the worker spawns us
     // via CreateProcessAsUserW). Short-lived: recognize until silence, then exit.
     if args.iter().any(|a| a == "--speech-helper") {

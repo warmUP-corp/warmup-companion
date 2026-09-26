@@ -7,8 +7,7 @@ use crate::predict_dict;
 use crate::predict_ngram;
 
 const MIN_PREFIX_LEN: usize = 2;
-const MAX_CANDIDATES: usize = 5;
-const VISIBLE: usize = 3;
+const MAX_CANDIDATES: usize = 7;
 
 fn new_state() -> PredictState {
     PredictState {
@@ -40,7 +39,7 @@ struct PredictState {
 /// is highlighted, and whether the user engaged the strip with LB/RB (so A may
 /// commit). `strip()` returns this; `None` means no strip should show.
 pub struct StripState {
-    pub visible: [String; VISIBLE],
+    pub visible: Vec<String>,
     pub highlight_slot: usize,
     pub engaged: bool,
 }
@@ -126,18 +125,16 @@ fn refresh_ranked(s: &mut PredictState) {
 
 /// The current candidate strip, or `None` when no strip should show. The one
 /// query for both rendering and the LB/RB context-swap decision.
-pub fn strip() -> Option<StripState> {
+pub fn strip(slots: usize) -> Option<StripState> {
     let s = STATE.lock().ok()?;
     if !strip_active_inner(&s) {
         return None;
     }
-    let start = viewport_start(s.highlight, s.ranked.len());
-    let mut visible = [String::new(), String::new(), String::new()];
-    for (i, slot) in visible.iter_mut().enumerate() {
-        if let Some(w) = s.ranked.get(start + i) {
-            *slot = w.clone();
-        }
-    }
+    let slots = slots.max(1);
+    let start = viewport_start(s.highlight, s.ranked.len(), slots);
+    let visible = (0..slots)
+        .map(|i| s.ranked.get(start + i).cloned().unwrap_or_default())
+        .collect();
     let highlight_slot = s.highlight.saturating_sub(start);
     Some(StripState {
         visible,
@@ -150,17 +147,11 @@ fn strip_active_inner(s: &PredictState) -> bool {
     s.enabled && s.partial.len() >= MIN_PREFIX_LEN && !s.ranked.is_empty()
 }
 
-fn viewport_start(highlight: usize, total: usize) -> usize {
-    if total <= VISIBLE {
+fn viewport_start(highlight: usize, total: usize, slots: usize) -> usize {
+    if total <= slots {
         return 0;
     }
-    if highlight <= 1 {
-        0
-    } else if highlight >= total.saturating_sub(2) {
-        total - VISIBLE
-    } else {
-        highlight - 1
-    }
+    highlight.saturating_sub(slots / 2).min(total - slots)
 }
 
 pub fn cycle_next() -> bool {
@@ -373,7 +364,7 @@ mod tests {
         for c in "keyb".chars() {
             on_char(c);
         }
-        assert!(strip().is_some());
+        assert!(strip(3).is_some());
         let ranked = STATE.lock().unwrap().ranked.clone();
         assert!(ranked.iter().any(|w| w == "keyboard"));
     }
@@ -398,7 +389,7 @@ mod tests {
             on_char(c);
         }
         on_caret_move();
-        assert!(strip().is_none());
+        assert!(strip(3).is_none());
         assert!(STATE.lock().unwrap().words.is_empty());
     }
 
@@ -418,8 +409,13 @@ mod tests {
 
     #[test]
     fn viewport_at_end() {
-        assert_eq!(viewport_start(4, 5), 2);
-        assert_eq!(viewport_start(0, 5), 0);
+        assert_eq!(viewport_start(4, 5, 3), 2);
+        assert_eq!(viewport_start(0, 5, 3), 0);
+        assert_eq!(viewport_start(1, 5, 3), 0);
+        assert_eq!(viewport_start(2, 5, 3), 1);
+        assert_eq!(viewport_start(3, 5, 3), 2);
+        assert_eq!(viewport_start(6, 7, 7), 0);
+        assert_eq!(viewport_start(6, 7, 3), 4);
     }
 
     #[test]
@@ -429,13 +425,13 @@ mod tests {
         for c in "keyb".chars() {
             on_char(c);
         }
-        assert!(strip().is_some());
-        assert!(!strip().unwrap().engaged);
+        assert!(strip(3).is_some());
+        assert!(!strip(3).unwrap().engaged);
         let mut sink = crate::vk_commit::BufSink::new("keyb");
         assert!(commit_if_engaged(&mut sink).is_none());
         assert_eq!(sink.buf, "keyb"); // nothing injected
         assert!(cycle_next());
-        assert!(strip().unwrap().engaged);
+        assert!(strip(3).unwrap().engaged);
     }
 
     #[test]

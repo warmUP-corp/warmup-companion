@@ -9,7 +9,7 @@ use crate::gamepad_backend::Button;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyboardLayout, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
     KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_END, VK_ESCAPE, VK_LEFT, VK_RETURN,
-    VK_RIGHT, VK_SPACE, VK_TAB,
+    VK_RIGHT, VK_SPACE,
 };
 
 #[derive(Clone)]
@@ -27,8 +27,6 @@ pub enum KeyAction {
     PredictNext,
     /// Start background Windows speech recognition.
     VoiceInput,
-    /// Dismiss the on-screen keyboard.
-    CloseVk,
 }
 
 #[derive(Clone)]
@@ -195,10 +193,9 @@ const HOLD_REPEAT: Duration = Duration::from_millis(70);
 /// (web `DOUBLE_TAP_SHIFT_MS`).
 const DOUBLE_TAP_STICKY: Duration = Duration::from_millis(400);
 
-/// Edge action keys are 1.45 key-units wide, the space bar 5.15 — same flex
-/// ratios as the web layout (`LEFT_ACTION_KEY_WIDTH` / `action-space`).
-const SPAN_ACTION: f32 = 1.45;
-const SPAN_SPACE: f32 = 5.15;
+const SPAN_KEY: f32 = 1.0;
+const SPAN_SPACE: f32 = 3.0;
+const SPAN_ENTER: f32 = 2.0;
 
 const TOP_LETTERS_EN: [char; 10] = ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'];
 const TOP_LETTERS_DE: [char; 10] = ['q', 'w', 'e', 'r', 't', 'z', 'u', 'i', 'o', 'p'];
@@ -208,13 +205,8 @@ const BOTTOM_LETTERS_DE: [char; 7] = ['y', 'x', 'c', 'v', 'b', 'n', 'm'];
 
 const TOP_SYMBOLS: [char; 10] = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
 const MID_SYMBOLS: [char; 9] = ['@', '#', '$', '%', '&', '-', '+', '(', ')'];
-const BOTTOM_SYMBOLS: [char; 7] = ['!', '?', '.', ',', ':', ';', '_'];
+const BOTTOM_SYMBOLS: [char; 7] = ['!', '?', '\'', '"', ':', ';', '/'];
 
-/// Quick-insert chips (web `PROFILE_QUICK_INSERTS.text`) — insert the same
-/// character on every layer.
-const QUICK_INSERTS: [char; 4] = ['-', '\'', '.', ','];
-
-/// Four-row web VK card layout (`createVirtualKeyboardLayoutForLanguage`).
 fn build_web_layout(layer: Layer, lang_de: bool) -> Vec<KeyRow> {
     let t = |lower: char, symbol: char| {
         let upper = lower.to_uppercase().next().unwrap_or(lower);
@@ -231,50 +223,59 @@ fn build_web_layout(layer: Layer, lang_de: bool) -> Vec<KeyRow> {
         BOTTOM_LETTERS_EN
     };
 
-    let mut row_top = vec![KeyCell::named("Esc", KeyAction::CloseVk, SPAN_ACTION)];
-    row_top.extend(top.iter().zip(TOP_SYMBOLS).map(|(&l, s)| t(l, s)));
-    row_top.push(KeyCell::vk("Backspace", VK_BACK, SPAN_ACTION));
+    let row_top = top.iter().zip(TOP_SYMBOLS).map(|(&l, s)| t(l, s)).collect();
 
-    let mut row_mid = vec![KeyCell::vk("Tab", VK_TAB, SPAN_ACTION)];
-    row_mid.extend(MID_LETTERS.iter().zip(MID_SYMBOLS).map(|(&l, s)| t(l, s)));
-    row_mid.push(KeyCell::tri('\'', '"', '/', layer));
-    row_mid.push(KeyCell::vk("Enter", VK_RETURN, SPAN_ACTION));
+    let mut row_mid: Vec<KeyCell> = MID_LETTERS
+        .iter()
+        .zip(MID_SYMBOLS)
+        .map(|(&l, s)| t(l, s))
+        .collect();
+    row_mid.push(KeyCell::tri(',', ';', '*', layer));
 
-    let mut row_bottom = vec![KeyCell::named("Shift", KeyAction::Shift, SPAN_ACTION)];
+    let mut row_bottom = vec![KeyCell::named("Shift", KeyAction::Shift, SPAN_KEY)];
     row_bottom.extend(bottom.iter().zip(BOTTOM_SYMBOLS).map(|(&l, s)| t(l, s)));
-    row_bottom.push(KeyCell::tri(';', ':', '[', layer));
-    row_bottom.push(KeyCell::tri('.', '!', ']', layer));
-    // No dedicated close key: L3 toggles the keyboard open/closed, and the Esc
-    // key in the top row covers on-grid dismissal.
-    row_bottom.push(KeyCell::tri('?', '/', '\\', layer));
+    row_bottom.push(KeyCell::tri('.', ':', '=', layer));
+    row_bottom.push(KeyCell::vk("Backspace", VK_BACK, SPAN_KEY));
 
-    let mut space = KeyCell::vk("Space", VK_SPACE, SPAN_SPACE);
+    let mic = crate::win::speech_input::available();
+    let mut space = KeyCell::vk(
+        "Space",
+        VK_SPACE,
+        if mic { SPAN_SPACE - 1.0 } else { SPAN_SPACE },
+    );
     // Language badge on the space bar (web shows ENG/DE next to the L3 hint).
     space.sublabel = Some(if lang_de { "DE" } else { "ENG" }.to_string());
     let mut row_utility = vec![
-        KeyCell::named("&123", KeyAction::Symbols, SPAN_ACTION),
-        KeyCell::ch(QUICK_INSERTS[0]),
-        KeyCell::ch(QUICK_INSERTS[1]),
-        KeyCell::ch(QUICK_INSERTS[2]),
+        KeyCell::named("?123", KeyAction::Symbols, SPAN_KEY),
+        KeyCell::named("<", KeyAction::PredictPrev, SPAN_KEY),
+        KeyCell::named(">", KeyAction::PredictNext, SPAN_KEY),
         space,
     ];
-    // Mic key only when offline dictation is installed (whisper sidecar + model);
-    // otherwise it's hidden, so an install that skipped speech shows no dead key.
-    if crate::win::speech_input::available() {
-        row_utility.push(KeyCell::named("Mic", KeyAction::VoiceInput, SPAN_ACTION));
+    if mic {
+        row_utility.push(KeyCell::named("Mic", KeyAction::VoiceInput, SPAN_KEY));
     }
     row_utility.extend([
-        KeyCell::ch(QUICK_INSERTS[3]),
-        KeyCell::named("<", KeyAction::PredictPrev, SPAN_ACTION),
-        KeyCell::named(">", KeyAction::PredictNext, SPAN_ACTION),
+        KeyCell::ch('-'),
+        KeyCell::ch('_'),
+        KeyCell::vk("Enter", VK_RETURN, SPAN_ENTER),
     ]);
 
-    vec![
+    let mut rows = vec![
         KeyRow { keys: row_top },
         KeyRow { keys: row_mid },
         KeyRow { keys: row_bottom },
-        KeyRow { keys: row_utility },
-    ]
+    ];
+    for key in rows.iter_mut().flat_map(|r| r.keys.iter_mut()) {
+        if !key
+            .sublabel
+            .as_deref()
+            .is_some_and(|s| s.chars().all(|c| c.is_ascii_digit()))
+        {
+            key.sublabel = None;
+        }
+    }
+    rows.push(KeyRow { keys: row_utility });
+    rows
 }
 
 fn rebuild(nav: &mut NavState) {
@@ -363,6 +364,11 @@ fn is_vk(action: &KeyAction, vk: VIRTUAL_KEY) -> bool {
 
 pub fn rows_snapshot() -> Vec<KeyRow> {
     NAV.lock().map(|n| n.rows.clone()).unwrap_or_default()
+}
+
+#[cfg(test)]
+pub fn rows_for_test() -> Vec<KeyRow> {
+    build_web_layout(Layer::Lower, false)
 }
 
 pub fn selected_key() -> Option<KeyCell> {
@@ -727,7 +733,6 @@ pub fn activate_key(key: &KeyCell) {
             request_ui_repaint();
         }
         KeyAction::VoiceInput => start_voice_input(),
-        KeyAction::CloseVk => crate::win::vk_ui::request_hide(),
     }
 }
 
@@ -1259,6 +1264,27 @@ mod press_feedback_tests {
     }
 
     #[test]
+    fn only_top_row_shows_digit_hints() {
+        for layer in [Layer::Lower, Layer::Upper, Layer::Symbol] {
+            let rows = build_web_layout(layer, true);
+            let hints: Vec<&str> = rows[0]
+                .keys
+                .iter()
+                .filter_map(|k| k.sublabel.as_deref())
+                .collect();
+            let want: Vec<&str> = if layer == Layer::Symbol {
+                vec![]
+            } else {
+                "1234567890".split("").filter(|s| !s.is_empty()).collect()
+            };
+            assert_eq!(hints, want, "{layer:?}");
+            for row in &rows[1..3] {
+                assert!(row.keys.iter().all(|k| k.sublabel.is_none()), "{layer:?}");
+            }
+        }
+    }
+
+    #[test]
     fn unmatched_action_leaves_the_previous_press_alone() {
         let _guard = NAV_TEST_LOCK.lock().unwrap();
         {
@@ -1313,7 +1339,7 @@ mod tests {
         {
             let mut nav = NAV.lock().unwrap();
             nav.layer = Layer::Upper;
-            nav.pos = KeyPos { row: 1, col: 1 }; // 'a' in the middle row
+            nav.pos = KeyPos { row: 1, col: 1 };
             rebuild(&mut nav);
         }
         assert!(

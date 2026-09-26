@@ -66,6 +66,8 @@ const MENU_ENGINE_PARAKEET: usize = 1015;
 /// turned the cursor off in warmUP can get it back while warmUP is not running.
 const MENU_CURSOR_ENABLED: usize = 1016;
 const MENU_CONTROLLER_CENTER: usize = 1017;
+const MENU_STYLE_REFINED: usize = 1018;
+const MENU_STYLE_APPLE: usize = 1019;
 /// Mic device i is `MENU_MIC_BASE + i` (capped at 32 devices in the menu).
 const MENU_MIC_BASE: usize = 1100;
 /// Global hotkey id for "toggle voice dictation" (Ctrl+Alt+V).
@@ -285,6 +287,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     crate::config::gamepad_settings().auto_stop_on_game,
                 ),
                 MENU_VK_FLOATING => toggle_vk_mode(),
+                MENU_STYLE_REFINED => set_vk_style("refined"),
+                MENU_STYLE_APPLE => set_vk_style("apple"),
                 MENU_EDIT_SETTINGS => edit_settings(),
                 MENU_ENGINE_WHISPER => crate::win::speech_input::set_engine("whisper"),
                 MENU_ENGINE_PARAKEET => crate::win::speech_input::set_engine("parakeet"),
@@ -369,6 +373,23 @@ unsafe fn show_menu(hwnd: HWND) {
         );
         let floating = crate::config::vk_layout_mode() == crate::config::VkLayoutMode::Floating;
         let _ = AppendMenuW(kb, chk(floating), MENU_VK_FLOATING, w!("Floating layout"));
+        let style_menu = CreatePopupMenu().unwrap_or_default();
+        if !style_menu.0.is_null() {
+            let style = crate::config::vk_style();
+            let _ = AppendMenuW(
+                style_menu,
+                chk(style == crate::config::VkStyle::Refined),
+                MENU_STYLE_REFINED,
+                w!("Refined"),
+            );
+            let _ = AppendMenuW(
+                style_menu,
+                chk(style == crate::config::VkStyle::Apple),
+                MENU_STYLE_APPLE,
+                w!("Apple"),
+            );
+            let _ = AppendMenuW(kb, MF_POPUP, style_menu.0 as usize, w!("Keyboard style"));
+        }
         let _ = AppendMenuW(menu, MF_POPUP, kb.0 as usize, w!("Keyboard"));
     }
 
@@ -520,7 +541,6 @@ unsafe fn open_diagnostics() {
 
 /// Flip the docked keyboard between full and compact height. Written to
 /// settings.ini; the running keyboard reads `vk_bar_scale` live on next show.
-/// Compact is the default, so unchecking writes the explicit full-size 1.0.
 fn toggle_compact() {
     let new = if crate::config::vk_bar_scale() < 1.0 {
         "1.0".to_string()
@@ -546,6 +566,12 @@ fn toggle_vk_mode() {
     let next = if floating { "docked" } else { "floating" };
     if let Err(e) = crate::config::set_gamepad_setting("vk_mode", next) {
         crate::install::log_line(&format!("tray: set vk_mode failed: {e}"));
+    }
+}
+
+fn set_vk_style(style: &str) {
+    if let Err(e) = crate::config::set_gamepad_setting("vk_style", style) {
+        crate::install::log_line(&format!("tray: set vk_style failed: {e}"));
     }
 }
 
