@@ -366,7 +366,6 @@ pub struct StyleSpec {
     space_icon_cy: f32,
     space_label: Option<&'static str>,
     space_label_px: f32,
-    uppercase_letters: bool,
     trim_symbols_label: bool,
     icon_px: f32,
     icon_large_px: f32,
@@ -415,7 +414,6 @@ static NORMAL_SPEC: StyleSpec = StyleSpec {
     space_icon_cy: 62.5,
     space_label: None,
     space_label_px: 22.0,
-    uppercase_letters: false,
     trim_symbols_label: false,
     icon_px: 36.0,
     icon_large_px: 40.0,
@@ -464,7 +462,6 @@ static MONO_SPEC: StyleSpec = StyleSpec {
     space_icon_cy: 50.0,
     space_label: Some("space"),
     space_label_px: 22.0,
-    uppercase_letters: true,
     trim_symbols_label: true,
     icon_px: 34.0,
     icon_large_px: 34.0,
@@ -535,7 +532,6 @@ fn is_action_key(action: &KeyAction) -> bool {
 
 fn styled_glyph(spec: &StyleSpec, action: &KeyAction, glyph: String) -> String {
     match action {
-        KeyAction::Char(c) if spec.uppercase_letters && c.is_alphabetic() => glyph.to_uppercase(),
         KeyAction::Symbols if spec.trim_symbols_label => {
             glyph.trim_start_matches('?').to_string()
         }
@@ -3276,7 +3272,8 @@ mod tests {
     fn mono_style_relabels_keys_like_ios() {
         let mono = style_spec(VkStyle::Mono);
         let normal = style_spec(VkStyle::Normal);
-        assert_eq!(styled_glyph(mono, &KeyAction::Char('q'), "q".into()), "Q");
+        assert_eq!(styled_glyph(mono, &KeyAction::Char('q'), "q".into()), "q");
+        assert_eq!(styled_glyph(mono, &KeyAction::Char('Q'), "Q".into()), "Q");
         assert_eq!(styled_glyph(normal, &KeyAction::Char('q'), "q".into()), "q");
         assert_eq!(styled_glyph(mono, &KeyAction::Symbols, "?123".into()), "123");
         assert_eq!(styled_glyph(normal, &KeyAction::Symbols, "?123".into()), "?123");
