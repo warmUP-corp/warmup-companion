@@ -27,8 +27,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible, IsZoomed, KillTimer,
     PostThreadMessageW, SetTimer, SetWindowPos, ShowWindow, EVENT_SYSTEM_DESKTOPSWITCH,
     EVENT_SYSTEM_FOREGROUND, HMENU, HWND_NOTOPMOST, HWND_TOPMOST, MA_NOACTIVATE, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_MAXIMIZE,
-    SW_RESTORE, SW_SHOWNOACTIVATE, WINDOWPOS, WINEVENT_OUTOFCONTEXT, WM_DESTROY, WM_LBUTTONDOWN,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_MAXIMIZE, SW_RESTORE,
+    SW_SHOWNOACTIVATE, WINDOWPOS, WINEVENT_OUTOFCONTEXT, WM_DESTROY, WM_LBUTTONDOWN,
     WM_MOUSEACTIVATE, WM_PAINT, WM_TIMER, WM_WINDOWPOSCHANGING, WS_EX_NOACTIVATE,
     WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
@@ -52,7 +52,7 @@ const WINDOW_CLASS: windows::core::PCWSTR = w!("WarmupXboxVkWindow");
 /// `monitorHeight * 384/1080` (`_DAT_00494db8`=384 @ the 1080p reference monitor —
 /// see `warmup_create_xbox_vk_window` + `FUN_00467190`).
 const VK_REF_MONITOR_H: f32 = 1080.0;
-const VK_KB_REF_H: f32 = 384.0;
+const VK_KB_REF_H: f32 = 396.0;
 /// Re-assert topmost while visible (shell search/task UI also uses HWND_TOPMOST).
 const VK_ZORDER_TIMER_ID: usize = 1;
 const VK_ZORDER_TIMER_MS: u32 = 200;
@@ -171,8 +171,18 @@ fn key_glyph(key: &KeyCell) -> (String, bool) {
     }
 }
 
+fn shoulder_caret_hint(hint: &'static str) -> Option<&'static str> {
+    if crate::vk_predict::strip_engaged() {
+        None
+    } else {
+        Some(hint)
+    }
+}
+
 fn key_hint(key: &KeyCell) -> Option<&'static str> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_RETURN, VK_SPACE};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        VK_BACK, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE,
+    };
     match &key.action {
         // Badges mirror the web VK's controller hints
         // (`getIntegratedBadge` / `gamepad::handle_vk_open_button`). Select engages
@@ -180,6 +190,8 @@ fn key_hint(key: &KeyCell) -> Option<&'static str> {
         KeyAction::Vk(vk) if *vk == VK_BACK => Some("B"),
         KeyAction::Vk(vk) if *vk == VK_RETURN => Some("START"),
         KeyAction::Vk(vk) if *vk == VK_SPACE => Some("Y"),
+        KeyAction::Vk(vk) if *vk == VK_LEFT => shoulder_caret_hint("LB"),
+        KeyAction::Vk(vk) if *vk == VK_RIGHT => shoulder_caret_hint("RB"),
         KeyAction::Shift => Some("RT"),
         KeyAction::Symbols => Some("LT"),
         KeyAction::PredictPrev => Some("LB"),
@@ -1130,6 +1142,7 @@ fn render_frame() {
             let rows = vk_nav::rows_snapshot();
             let sel = vk_nav::selection();
             let (shift, caps) = vk_nav::modifier_state();
+            let symbol_locked = vk_nav::symbol_locked();
             let scale_w = vk_scale_w();
             // Press dip for the key that just fired; dropped once it has settled
             // so the steady state draws with no transform at all.
@@ -1152,7 +1165,11 @@ fn render_frame() {
                 right_inset: view.right_inset,
                 candidates: candidates.as_ref(),
                 floating,
-                modifiers: vk_renderer::VkModifiers { shift, caps },
+                modifiers: vk_renderer::VkModifiers {
+                    shift,
+                    caps,
+                    symbol_locked,
+                },
                 pressed,
                 controller_label: controller_snapshot.name.trim(),
                 // Voice needs both a non-secure desktop (LocalSystem has no mic
