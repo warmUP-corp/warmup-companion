@@ -9,7 +9,7 @@ use crate::gamepad_backend::Button;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyboardLayout, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
     KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_END, VK_ESCAPE, VK_LEFT, VK_RETURN,
-    VK_RIGHT, VK_SPACE, VK_TAB,
+    VK_RIGHT, VK_SPACE,
 };
 
 #[derive(Clone)]
@@ -19,15 +19,20 @@ pub enum KeyAction {
     /// Shift: RT or the on-screen Shift key (web `toggleShift`: one-shot,
     /// double-tap promotes to sticky caps).
     Shift,
-    /// Symbol layer: LT or the on-screen `&123` key (web `toggleSymbols`).
+    /// Symbol layer: LT or the on-screen `?123` / `ABC` key (web `toggleSymbols`).
     Symbols,
+    SymbolPage,
     /// Previous prediction-strip candidate (`<` key).
+    #[allow(dead_code)]
     PredictPrev,
     /// Next prediction-strip candidate (`>` key).
+    #[allow(dead_code)]
     PredictNext,
     /// Start background Windows speech recognition.
+    #[allow(dead_code)]
     VoiceInput,
     /// Dismiss the on-screen keyboard.
+    #[allow(dead_code)]
     CloseVk,
 }
 
@@ -46,22 +51,6 @@ impl KeyCell {
         KeyCell {
             label: c.to_string(),
             sublabel: None,
-            action: KeyAction::Char(c),
-            span: 1.0,
-        }
-    }
-    /// Character key with web semantics: `lower`/`upper`/`symbol` resolved by the
-    /// active layer; the corner accent shows the symbol (or, on the symbol layer,
-    /// the uppercase letter), matching `resolveVirtualKeyboardKeyAccent`.
-    fn tri(lower: char, upper: char, symbol: char, layer: Layer) -> Self {
-        let (c, accent) = match layer {
-            Layer::Lower => (lower, symbol),
-            Layer::Upper => (upper, symbol),
-            Layer::Symbol => (symbol, upper),
-        };
-        KeyCell {
-            label: c.to_string(),
-            sublabel: Some(accent.to_string()),
             action: KeyAction::Char(c),
             span: 1.0,
         }
@@ -112,8 +101,9 @@ struct NavState {
     one_shot_symbol: bool,
     last_shift_at: Option<Instant>,
     last_symbol_at: Option<Instant>,
-    /// QWERTZ letter rows (web `de-DE` language toggle on L3).
+    /// QWERTZ letter rows (web `de-DE` language toggle on X).
     lang_de: bool,
+    symbol_alt: bool,
     voice_input: bool,
     rows: Vec<KeyRow>,
     #[cfg(feature = "gamepad")]
@@ -137,6 +127,7 @@ static NAV: Mutex<NavState> = Mutex::new(NavState {
     last_shift_at: None,
     last_symbol_at: None,
     lang_de: false,
+    symbol_alt: false,
     voice_input: false,
     rows: Vec::new(),
     #[cfg(feature = "gamepad")]
@@ -195,31 +186,64 @@ const HOLD_REPEAT: Duration = Duration::from_millis(70);
 /// (web `DOUBLE_TAP_SHIFT_MS`).
 const DOUBLE_TAP_STICKY: Duration = Duration::from_millis(400);
 
-/// Edge action keys are 1.45 key-units wide, the space bar 5.15 — same flex
-/// ratios as the web layout (`LEFT_ACTION_KEY_WIDTH` / `action-space`).
-const SPAN_ACTION: f32 = 1.45;
-const SPAN_SPACE: f32 = 5.15;
+const SPAN_MODE: f32 = 1.45;
+const SPAN_SEARCH: f32 = 1.85;
+const SPAN_SPACE: f32 = 3.7;
 
 const TOP_LETTERS_EN: [char; 10] = ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'];
 const TOP_LETTERS_DE: [char; 10] = ['q', 'w', 'e', 'r', 't', 'z', 'u', 'i', 'o', 'p'];
 const MID_LETTERS: [char; 9] = ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'];
 const BOTTOM_LETTERS_EN: [char; 7] = ['z', 'x', 'c', 'v', 'b', 'n', 'm'];
 const BOTTOM_LETTERS_DE: [char; 7] = ['y', 'x', 'c', 'v', 'b', 'n', 'm'];
+const TOP_DIGITS: [char; 10] = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
 
-const TOP_SYMBOLS: [char; 10] = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
-const MID_SYMBOLS: [char; 9] = ['@', '#', '$', '%', '&', '-', '+', '(', ')'];
-const BOTTOM_SYMBOLS: [char; 7] = ['!', '?', '.', ',', ':', ';', '_'];
+const SYM_MID: [char; 10] = ['@', '#', '$', '_', '&', '-', '+', '(', ')', '/'];
+const SYM_LOW: [char; 8] = ['*', '"', '\'', ':', ';', '!', '?', '%'];
+const SYM_ALT_TOP: [char; 10] = ['=', '/', '<', '>', '[', ']', '{', '}', '\\', '|'];
+const SYM_ALT_MID: [char; 10] = ['~', '`', '^', '°', '€', '£', '¥', '•', '«', '»'];
+const SYM_ALT_LOW: [char; 8] = ['¡', '¿', '§', '™', '©', '®', '´', '·'];
 
-/// Quick-insert chips (web `PROFILE_QUICK_INSERTS.text`) — insert the same
-/// character on every layer.
-const QUICK_INSERTS: [char; 4] = ['-', '\'', '.', ','];
+fn shown_letter(c: char, layer: Layer) -> char {
+    if layer == Layer::Upper {
+        c.to_uppercase().next().unwrap_or(c)
+    } else {
+        c
+    }
+}
 
-/// Four-row web VK card layout (`createVirtualKeyboardLayoutForLanguage`).
-fn build_web_layout(layer: Layer, lang_de: bool) -> Vec<KeyRow> {
-    let t = |lower: char, symbol: char| {
-        let upper = lower.to_uppercase().next().unwrap_or(lower);
-        KeyCell::tri(lower, upper, symbol, layer)
-    };
+fn letter_key(c: char, layer: Layer, accent: Option<char>) -> KeyCell {
+    let shown = shown_letter(c, layer);
+    KeyCell {
+        label: shown.to_string(),
+        sublabel: accent.map(|ch| ch.to_string()),
+        action: KeyAction::Char(shown),
+        span: 1.0,
+    }
+}
+
+fn char_row(chars: &[char]) -> KeyRow {
+    KeyRow {
+        keys: chars.iter().copied().map(KeyCell::ch).collect(),
+    }
+}
+
+fn utility_row(mode_label: &str, punct: [char; 2], lang_de: bool) -> KeyRow {
+    let mut space = KeyCell::vk("Space", VK_SPACE, SPAN_SPACE);
+    space.sublabel = Some(if lang_de { "DE" } else { "ENG" }.to_string());
+    KeyRow {
+        keys: vec![
+            KeyCell::named(mode_label, KeyAction::Symbols, SPAN_MODE),
+            KeyCell::vk("Left", VK_LEFT, 1.0),
+            KeyCell::vk("Right", VK_RIGHT, 1.0),
+            space,
+            KeyCell::ch(punct[0]),
+            KeyCell::ch(punct[1]),
+            KeyCell::vk("Enter", VK_RETURN, SPAN_SEARCH),
+        ],
+    }
+}
+
+fn letter_layout(layer: Layer, lang_de: bool) -> Vec<KeyRow> {
     let top = if lang_de {
         TOP_LETTERS_DE
     } else {
@@ -230,55 +254,67 @@ fn build_web_layout(layer: Layer, lang_de: bool) -> Vec<KeyRow> {
     } else {
         BOTTOM_LETTERS_EN
     };
-
-    let mut row_top = vec![KeyCell::named("Esc", KeyAction::CloseVk, SPAN_ACTION)];
-    row_top.extend(top.iter().zip(TOP_SYMBOLS).map(|(&l, s)| t(l, s)));
-    row_top.push(KeyCell::vk("Backspace", VK_BACK, SPAN_ACTION));
-
-    let mut row_mid = vec![KeyCell::vk("Tab", VK_TAB, SPAN_ACTION)];
-    row_mid.extend(MID_LETTERS.iter().zip(MID_SYMBOLS).map(|(&l, s)| t(l, s)));
-    row_mid.push(KeyCell::tri('\'', '"', '/', layer));
-    row_mid.push(KeyCell::vk("Enter", VK_RETURN, SPAN_ACTION));
-
-    let mut row_bottom = vec![KeyCell::named("Shift", KeyAction::Shift, SPAN_ACTION)];
-    row_bottom.extend(bottom.iter().zip(BOTTOM_SYMBOLS).map(|(&l, s)| t(l, s)));
-    row_bottom.push(KeyCell::tri(';', ':', '[', layer));
-    row_bottom.push(KeyCell::tri('.', '!', ']', layer));
-    // No dedicated close key: L3 toggles the keyboard open/closed, and the Esc
-    // key in the top row covers on-grid dismissal.
-    row_bottom.push(KeyCell::tri('?', '/', '\\', layer));
-
-    let mut space = KeyCell::vk("Space", VK_SPACE, SPAN_SPACE);
-    // Language badge on the space bar (web shows ENG/DE next to the L3 hint).
-    space.sublabel = Some(if lang_de { "DE" } else { "ENG" }.to_string());
-    let mut row_utility = vec![
-        KeyCell::named("&123", KeyAction::Symbols, SPAN_ACTION),
-        KeyCell::ch(QUICK_INSERTS[0]),
-        KeyCell::ch(QUICK_INSERTS[1]),
-        KeyCell::ch(QUICK_INSERTS[2]),
-        space,
-    ];
-    // Mic key only when offline dictation is installed (whisper sidecar + model);
-    // otherwise it's hidden, so an install that skipped speech shows no dead key.
-    if crate::win::speech_input::available() {
-        row_utility.push(KeyCell::named("Mic", KeyAction::VoiceInput, SPAN_ACTION));
+    let home_tail = if lang_de { ',' } else { '\'' };
+    let mut row_top = Vec::with_capacity(10);
+    for (&c, digit) in top.iter().zip(TOP_DIGITS) {
+        row_top.push(letter_key(c, layer, Some(digit)));
     }
-    row_utility.extend([
-        KeyCell::ch(QUICK_INSERTS[3]),
-        KeyCell::named("<", KeyAction::PredictPrev, SPAN_ACTION),
-        KeyCell::named(">", KeyAction::PredictNext, SPAN_ACTION),
-    ]);
-
+    let mut row_mid: Vec<KeyCell> = MID_LETTERS
+        .iter()
+        .copied()
+        .map(|c| letter_key(c, layer, None))
+        .collect();
+    row_mid.push(KeyCell::ch(home_tail));
+    let mut row_low = Vec::with_capacity(10);
+    row_low.push(KeyCell::named("Shift", KeyAction::Shift, 1.0));
+    row_low.extend(bottom.iter().copied().map(|c| letter_key(c, layer, None)));
+    row_low.push(KeyCell::ch('.'));
+    row_low.push(KeyCell::vk("Backspace", VK_BACK, 1.0));
     vec![
         KeyRow { keys: row_top },
         KeyRow { keys: row_mid },
-        KeyRow { keys: row_bottom },
-        KeyRow { keys: row_utility },
+        KeyRow { keys: row_low },
+        utility_row("?123", ['-', '_'], lang_de),
     ]
 }
 
+fn symbol_low_row(page_label: &str, middle: &[char; 8]) -> KeyRow {
+    let mut keys = Vec::with_capacity(10);
+    keys.push(KeyCell::named(page_label, KeyAction::SymbolPage, 1.0));
+    keys.extend(middle.iter().copied().map(KeyCell::ch));
+    keys.push(KeyCell::vk("Backspace", VK_BACK, 1.0));
+    KeyRow { keys }
+}
+
+fn symbol_layout(alt: bool, lang_de: bool) -> Vec<KeyRow> {
+    let (top, mid, low_label, low) = if alt {
+        (
+            SYM_ALT_TOP.as_slice(),
+            SYM_ALT_MID.as_slice(),
+            "123",
+            &SYM_ALT_LOW,
+        )
+    } else {
+        (TOP_DIGITS.as_slice(), SYM_MID.as_slice(), "=/<", &SYM_LOW)
+    };
+    vec![
+        char_row(top),
+        char_row(mid),
+        symbol_low_row(low_label, low),
+        utility_row("ABC", ['.', ','], lang_de),
+    ]
+}
+
+fn build_web_layout(layer: Layer, lang_de: bool, symbol_alt: bool) -> Vec<KeyRow> {
+    if layer == Layer::Symbol {
+        symbol_layout(symbol_alt, lang_de)
+    } else {
+        letter_layout(layer, lang_de)
+    }
+}
+
 fn rebuild(nav: &mut NavState) {
-    nav.rows = build_web_layout(nav.layer, nav.lang_de);
+    nav.rows = build_web_layout(nav.layer, nav.lang_de, nav.symbol_alt);
     clamp_pos(nav);
 }
 
@@ -300,7 +336,7 @@ fn clamp_pos(nav: &mut NavState) {
 
 /// Reset focus when the keyboard opens. Web parity: text fields open on the
 /// upper layer (`resolveInitialVirtualKeyboardLayer`) with focus on the `a` key
-/// (`getInitialVirtualKeyboardSelection` -> rows[1].keys[1]).
+/// (`getInitialVirtualKeyboardSelection` -> rows[1].keys[0]).
 pub fn reset_selection() {
     if let Ok(mut nav) = NAV.lock() {
         nav.layer = Layer::Upper;
@@ -308,9 +344,10 @@ pub fn reset_selection() {
         // first character (sentence case), like a fresh shift tap.
         nav.one_shot_shift = true;
         nav.one_shot_symbol = false;
+        nav.symbol_alt = false;
         nav.last_shift_at = None;
         nav.last_symbol_at = None;
-        nav.pos = KeyPos { row: 1, col: 1 };
+        nav.pos = KeyPos { row: 1, col: 0 };
         #[cfg(feature = "gamepad")]
         {
             nav.hold_button = None;
@@ -390,6 +427,12 @@ pub fn modifier_state() -> (bool, bool) {
             (up, up && !n.one_shot_shift)
         })
         .unwrap_or_default()
+}
+
+pub fn symbol_locked() -> bool {
+    NAV.lock()
+        .map(|n| n.layer == Layer::Symbol && !n.one_shot_symbol)
+        .unwrap_or(false)
 }
 
 /// `(start, end)` of a key inside its row, normalized to `0.0..=1.0` of the row's
@@ -647,6 +690,7 @@ pub fn toggle_symbols() {
         let now = Instant::now();
         if nav.layer != Layer::Symbol {
             nav.layer = Layer::Symbol;
+            nav.symbol_alt = false;
             nav.one_shot_symbol = true;
             nav.one_shot_shift = false;
         } else if nav.one_shot_symbol
@@ -657,9 +701,26 @@ pub fn toggle_symbols() {
             nav.one_shot_symbol = false;
         } else {
             nav.layer = Layer::Lower;
+            nav.symbol_alt = false;
             nav.one_shot_symbol = false;
         }
         nav.last_symbol_at = Some(now);
+        rebuild(&mut nav);
+    }
+    request_ui_repaint();
+}
+
+fn toggle_symbol_page() {
+    if let Ok(mut nav) = NAV.lock() {
+        if nav.layer != Layer::Symbol {
+            nav.layer = Layer::Symbol;
+            nav.symbol_alt = true;
+            nav.one_shot_symbol = true;
+            nav.one_shot_shift = false;
+            nav.last_symbol_at = Some(Instant::now());
+        } else {
+            nav.symbol_alt = !nav.symbol_alt;
+        }
         rebuild(&mut nav);
     }
     request_ui_repaint();
@@ -714,6 +775,7 @@ pub fn activate_key(key: &KeyCell) {
         }
         KeyAction::Shift => toggle_shift(),
         KeyAction::Symbols => toggle_symbols(),
+        KeyAction::SymbolPage => toggle_symbol_page(),
         KeyAction::PredictPrev => {
             if !(crate::vk_predict::strip_engaged() && crate::vk_predict::cycle_prev()) {
                 caret_left();
@@ -1274,6 +1336,88 @@ mod press_feedback_tests {
             first.map(|(p, t)| (p.row, p.col, t))
         );
     }
+
+    fn labels(nav: &NavState, row: usize) -> Vec<String> {
+        nav.rows[row].keys.iter().map(|k| k.label.clone()).collect()
+    }
+
+    #[test]
+    fn letter_and_symbol_grids_follow_the_reference_rows() {
+        let _guard = NAV_TEST_LOCK.lock().unwrap();
+        let mut nav = NAV.lock().unwrap();
+        nav.lang_de = true;
+        nav.symbol_alt = false;
+        nav.layer = Layer::Lower;
+        rebuild(&mut nav);
+        assert_eq!(
+            labels(&nav, 0),
+            ["q", "w", "e", "r", "t", "z", "u", "i", "o", "p"]
+        );
+        assert_eq!(nav.rows[0].keys[0].sublabel.as_deref(), Some("1"));
+        assert_eq!(nav.rows[0].keys[5].sublabel.as_deref(), Some("6"));
+        assert_eq!(nav.rows[0].keys[9].sublabel.as_deref(), Some("0"));
+        assert!(nav.rows[1].keys[0].sublabel.is_none());
+        assert_eq!(
+            labels(&nav, 1),
+            ["a", "s", "d", "f", "g", "h", "j", "k", "l", ","]
+        );
+        assert_eq!(labels(&nav, 2)[0], "Shift");
+        assert_eq!(labels(&nav, 2)[1], "y");
+        assert_eq!(labels(&nav, 2)[8], ".");
+        assert_eq!(labels(&nav, 2)[9], "Backspace");
+        assert_eq!(labels(&nav, 3)[0], "?123");
+        assert_eq!(labels(&nav, 3)[1], "Left");
+        assert_eq!(labels(&nav, 3)[2], "Right");
+        assert_eq!(labels(&nav, 3)[4], "-");
+        assert_eq!(labels(&nav, 3)[5], "_");
+        assert_eq!(labels(&nav, 3)[6], "Enter");
+        assert_eq!(nav.rows[0].keys.len(), 10);
+        assert_eq!(nav.rows[1].keys.len(), 10);
+        assert_eq!(nav.rows[2].keys.len(), 10);
+
+        nav.layer = Layer::Upper;
+        rebuild(&mut nav);
+        assert_eq!(labels(&nav, 0)[0], "Q");
+        assert_eq!(nav.rows[0].keys[0].sublabel.as_deref(), Some("1"));
+
+        nav.layer = Layer::Symbol;
+        nav.symbol_alt = false;
+        rebuild(&mut nav);
+        assert_eq!(
+            labels(&nav, 0),
+            ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
+        );
+        assert_eq!(
+            labels(&nav, 1),
+            ["@", "#", "$", "_", "&", "-", "+", "(", ")", "/"]
+        );
+        assert_eq!(labels(&nav, 2)[0], "=/<");
+        assert_eq!(labels(&nav, 2)[1], "*");
+        assert_eq!(labels(&nav, 2)[9], "Backspace");
+        assert_eq!(labels(&nav, 3)[0], "ABC");
+        assert_eq!(labels(&nav, 3)[4], ".");
+        assert_eq!(labels(&nav, 3)[5], ",");
+
+        drop(nav);
+        toggle_symbol_page();
+        let nav = NAV.lock().unwrap();
+        assert!(nav.symbol_alt);
+        assert_eq!(labels(&nav, 0)[0], "=");
+        assert_eq!(labels(&nav, 0)[2], "<");
+        assert_eq!(labels(&nav, 2)[0], "123");
+        assert_eq!(nav.rows[2].keys.len(), 10);
+        drop(nav);
+        {
+            let mut nav = NAV.lock().unwrap();
+            nav.layer = Layer::Lower;
+            nav.lang_de = false;
+            nav.symbol_alt = false;
+            rebuild(&mut nav);
+            assert_eq!(labels(&nav, 0)[5], "y");
+            assert_eq!(labels(&nav, 1)[9], "'");
+            assert_eq!(labels(&nav, 2)[1], "z");
+        }
+    }
 }
 
 #[cfg(all(test, feature = "gamepad"))]
@@ -1283,22 +1427,10 @@ mod tests {
 
     #[test]
     fn shoulder_nav_picks_char_word_or_chips() {
-        assert_eq!(
-            shoulder_nav(false, false),
-            ShoulderNav::CaretChar
-        );
-        assert_eq!(
-            shoulder_nav(true, false),
-            ShoulderNav::CaretWord
-        );
-        assert_eq!(
-            shoulder_nav(false, true),
-            ShoulderNav::CycleSuggestions
-        );
-        assert_eq!(
-            shoulder_nav(true, true),
-            ShoulderNav::CaretWord
-        );
+        assert_eq!(shoulder_nav(false, false), ShoulderNav::CaretChar);
+        assert_eq!(shoulder_nav(true, false), ShoulderNav::CaretWord);
+        assert_eq!(shoulder_nav(false, true), ShoulderNav::CycleSuggestions);
+        assert_eq!(shoulder_nav(true, true), ShoulderNav::CaretWord);
     }
 
     #[test]

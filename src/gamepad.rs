@@ -898,10 +898,8 @@ impl GamepadPoll {
                 None
             }
             (Button::Lb, true) => {
-                match vk_nav::shoulder_nav(
-                    self.vk_select_down,
-                    crate::vk_predict::strip_engaged(),
-                ) {
+                match vk_nav::shoulder_nav(self.vk_select_down, crate::vk_predict::strip_engaged())
+                {
                     vk_nav::ShoulderNav::CycleSuggestions => {
                         if crate::vk_predict::cycle_prev() {
                             self.backend.haptic_tick();
@@ -928,10 +926,8 @@ impl GamepadPoll {
                 None
             }
             (Button::Rb, true) => {
-                match vk_nav::shoulder_nav(
-                    self.vk_select_down,
-                    crate::vk_predict::strip_engaged(),
-                ) {
+                match vk_nav::shoulder_nav(self.vk_select_down, crate::vk_predict::strip_engaged())
+                {
                     vk_nav::ShoulderNav::CycleSuggestions => {
                         if crate::vk_predict::cycle_next() {
                             self.backend.haptic_tick();
@@ -1190,7 +1186,7 @@ where
         println!("  Select+LB/RB → jump caret by word");
         println!("  Start        → Enter");
         println!("  LB / RB      → move caret (cycle chips when strip engaged)");
-        println!("  LT           → &123 symbols");
+        println!("  LT           → ?123 symbols");
         println!("  RT           → shift");
         println!("  L3           → close keyboard");
         println!("  R3           → voice input");
