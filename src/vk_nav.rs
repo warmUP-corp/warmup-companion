@@ -387,13 +387,12 @@ pub fn set_voice_input_active(active: bool) {
     request_ui_repaint();
 }
 
-/// `(shift, caps)` for the renderer: shift = upper layer active; caps = upper
-/// layer promoted to sticky (web `shiftEnabled && !oneShotShift`).
-pub fn modifier_state() -> (bool, bool) {
+pub fn modifier_state() -> (bool, bool, bool, bool) {
     NAV.lock()
         .map(|n| {
             let up = n.layer == Layer::Upper;
-            (up, up && !n.one_shot_shift)
+            let sym = n.layer == Layer::Symbol;
+            (up, up && !n.one_shot_shift, sym, sym && !n.one_shot_symbol)
         })
         .unwrap_or_default()
 }
