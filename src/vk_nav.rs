@@ -1271,6 +1271,27 @@ mod press_feedback_tests {
     }
 
     #[test]
+    fn only_top_row_shows_digit_hints() {
+        for layer in [Layer::Lower, Layer::Upper, Layer::Symbol] {
+            let rows = build_web_layout(layer, true);
+            let hints: Vec<&str> = rows[0]
+                .keys
+                .iter()
+                .filter_map(|k| k.sublabel.as_deref())
+                .collect();
+            let want: Vec<&str> = if layer == Layer::Symbol {
+                vec![]
+            } else {
+                "1234567890".split("").filter(|s| !s.is_empty()).collect()
+            };
+            assert_eq!(hints, want, "{layer:?}");
+            for row in &rows[1..3] {
+                assert!(row.keys.iter().all(|k| k.sublabel.is_none()), "{layer:?}");
+            }
+        }
+    }
+
+    #[test]
     fn unmatched_action_leaves_the_previous_press_alone() {
         let _guard = NAV_TEST_LOCK.lock().unwrap();
         {
