@@ -275,6 +275,10 @@ impl PcCursor {
         self.dispatch(Cmd::EnterTap);
     }
 
+    pub fn screenshot(&mut self, window_only: bool) {
+        self.dispatch(Cmd::Screenshot { window_only });
+    }
+
     /// Route a command. On Winlogon: inline on the calling (winlogon-attached) loop
     /// thread so `SendInput` reaches the secure desktop. Otherwise: the Default-
     /// desktop injector thread (service post-login), else inline Enigo.
@@ -323,6 +327,316 @@ fn apply_cmd(enigo: &mut Enigo, cmd: Cmd) {
         Cmd::EnterTap => {
             let _ = enigo.key(Key::Return, Direction::Click);
         }
+        Cmd::Screenshot { window_only } => {
+            #[cfg(windows)]
+            copy_screen_to_clipboard(window_only);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn copy_screen_to_clipboard(window_only: bool) {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
+    use windows::Win32::Graphics::Gdi::{
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
+        ReleaseDC, SelectObject, CAPTUREBLT, SRCCOPY,
+    };
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Diagnostics::Debug::MessageBeep;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetSystemMetrics, GetWindowRect, MB_OK, SM_CXVIRTUALSCREEN,
+        SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    };
+
+    let mut window_path: Option<std::path::PathBuf> = None;
+    let rect = if window_only {
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd.0.is_null() {
+            crate::install::log_line("screenshot clipboard: no foreground window");
+            return;
+        }
+        let mut r = RECT::default();
+        let ok = unsafe {
+            DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                &mut r as *mut _ as *mut _,
+                std::mem::size_of::<RECT>() as u32,
+            )
+        }
+        .is_ok();
+        if !ok && unsafe { GetWindowRect(hwnd, &mut r) }.is_err() {
+            crate::install::log_line("screenshot clipboard: GetWindowRect failed");
+            return;
+        }
+        r
+    } else {
+        unsafe {
+            RECT {
+                left: GetSystemMetrics(SM_XVIRTUALSCREEN),
+                top: GetSystemMetrics(SM_YVIRTUALSCREEN),
+                right: GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                bottom: GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            }
+        }
+    };
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    if width <= 0 || height <= 0 {
+        crate::install::log_line("screenshot clipboard: empty capture rect");
+        return;
+    }
+
+    unsafe {
+        let screen_dc = GetDC(None);
+        if screen_dc.is_invalid() {
+            crate::install::log_line("screenshot clipboard: GetDC failed");
+            return;
+        }
+        let mem_dc = CreateCompatibleDC(screen_dc);
+        let bitmap = CreateCompatibleBitmap(screen_dc, width, height);
+        if mem_dc.is_invalid() || bitmap.is_invalid() {
+            crate::install::log_line("screenshot clipboard: CreateCompatibleDC/Bitmap failed");
+            let _ = DeleteDC(mem_dc);
+            if !bitmap.is_invalid() {
+                let _ = DeleteObject(bitmap);
+            }
+            ReleaseDC(None, screen_dc);
+            return;
+        }
+        let old_obj = SelectObject(mem_dc, bitmap);
+        let blt_ok = BitBlt(
+            mem_dc,
+            0,
+            0,
+            width,
+            height,
+            screen_dc,
+            rect.left,
+            rect.top,
+            SRCCOPY | CAPTUREBLT,
+        )
+        .is_ok();
+        SelectObject(mem_dc, old_obj);
+
+        if blt_ok {
+            window_path = save_foreground_capture(screen_dc, bitmap, width, height, window_only);
+        }
+
+        let _ = DeleteDC(mem_dc);
+        ReleaseDC(None, screen_dc);
+
+        if !blt_ok {
+            crate::install::log_line("screenshot clipboard: BitBlt failed");
+            let _ = DeleteObject(bitmap);
+            return;
+        }
+
+        let mut opened = false;
+        for _ in 0..10 {
+            if OpenClipboard(None).is_ok() {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        let copied = opened && {
+            let _ = EmptyClipboard();
+            const CF_BITMAP: u32 = 2;
+            let ok = SetClipboardData(CF_BITMAP, windows::Win32::Foundation::HANDLE(bitmap.0))
+                .is_ok();
+            let _ = CloseClipboard();
+            ok
+        };
+        if !copied {
+            crate::install::log_line("screenshot clipboard: copy failed");
+            let _ = DeleteObject(bitmap);
+        }
+
+        if let Some(path) = window_path {
+            let _ = MessageBeep(MB_OK);
+            spawn_toast_helper(&path, copied);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn spawn_toast_helper(path: &std::path::Path, copied: bool) {
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            crate::install::log_line(&format!("screenshot toast: current_exe failed: {e}"));
+            return;
+        }
+    };
+    let args = format!(
+        "--toast-helper \"{}\"{}",
+        path.display(),
+        if copied { " --copied" } else { "" }
+    );
+    match crate::win::speech_input::spawn_as_user(&exe, &args) {
+        Ok(h) => unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(h);
+        },
+        Err(e) => crate::install::log_line(&format!("screenshot toast: spawn failed: {e}")),
+    }
+}
+
+#[cfg(windows)]
+fn save_foreground_capture(
+    hdc: windows::Win32::Graphics::Gdi::HDC,
+    bitmap: windows::Win32::Graphics::Gdi::HBITMAP,
+    width: i32,
+    height: i32,
+    window_only: bool,
+) -> Option<std::path::PathBuf> {
+    use windows::Win32::Graphics::Gdi::{
+        GetDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    };
+
+    let mut bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0 as u32,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let mut bgra = vec![0u8; width as usize * height as usize * 4];
+    let lines = unsafe {
+        GetDIBits(
+            hdc,
+            bitmap,
+            0,
+            height as u32,
+            Some(bgra.as_mut_ptr().cast()),
+            &mut bmi,
+            DIB_RGB_COLORS,
+        )
+    };
+    if lines != height {
+        crate::install::log_line("screenshot save: GetDIBits failed");
+        return None;
+    }
+
+    let mut rgba = vec![0u8; bgra.len()];
+    for (src, dst) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+        dst[0] = src[2];
+        dst[1] = src[1];
+        dst[2] = src[0];
+        dst[3] = 255;
+    }
+
+    save_window_png(width as u32, height as u32, &rgba, window_only)
+}
+
+#[cfg(windows)]
+fn save_window_png(width: u32, height: u32, rgba: &[u8], window_only: bool) -> Option<std::path::PathBuf> {
+    let Some(dir) = screenshots_dir() else {
+        crate::install::log_line("screenshot save: could not resolve Screenshots folder");
+        return None;
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        crate::install::log_line(&format!("screenshot save: create_dir_all failed: {e}"));
+        return None;
+    }
+
+    let st = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    let stem = format!(
+        "Screenshot {:04}-{:02}-{:02} {:02}{:02}{:02}{}",
+        st.wYear,
+        st.wMonth,
+        st.wDay,
+        st.wHour,
+        st.wMinute,
+        st.wSecond,
+        if window_only { " window" } else { "" }
+    );
+    let mut opened = None;
+    for n in 1..100 {
+        let name = if n == 1 {
+            format!("{stem}.png")
+        } else {
+            format!("{stem} ({n}).png")
+        };
+        let path = dir.join(name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(f) => {
+                opened = Some((f, path));
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                crate::install::log_line(&format!("screenshot save: create file failed: {e}"));
+                return None;
+            }
+        }
+    }
+    let Some((file, path)) = opened else {
+        crate::install::log_line("screenshot save: no free file name");
+        return None;
+    };
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = match encoder.write_header() {
+        Ok(w) => w,
+        Err(e) => {
+            crate::install::log_line(&format!("screenshot save: png header failed: {e}"));
+            return None;
+        }
+    };
+    if let Err(e) = writer.write_image_data(rgba) {
+        crate::install::log_line(&format!("screenshot save: png write failed: {e}"));
+        return None;
+    }
+    crate::install::log_line(&format!("screenshot saved: {}", path.display()));
+    Some(path)
+}
+
+#[cfg(windows)]
+fn screenshots_dir() -> Option<std::path::PathBuf> {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
+    use windows::Win32::UI::Shell::{FOLDERID_Screenshots, SHGetKnownFolderPath, KF_FLAG_CREATE};
+
+    unsafe {
+        let mut token = HANDLE::default();
+        let session_id = WTSGetActiveConsoleSessionId();
+        let have_token = WTSQueryUserToken(session_id, &mut token).is_ok();
+
+        let result = if have_token {
+            SHGetKnownFolderPath(&FOLDERID_Screenshots, KF_FLAG_CREATE, token)
+        } else {
+            SHGetKnownFolderPath(&FOLDERID_Screenshots, KF_FLAG_CREATE, None)
+        };
+
+        if have_token {
+            let _ = CloseHandle(token);
+        }
+
+        match result {
+            Ok(pwstr) => {
+                let path = pwstr.to_string().ok().map(std::path::PathBuf::from);
+                CoTaskMemFree(Some(pwstr.0.cast()));
+                path
+            }
+            Err(e) => {
+                crate::install::log_line(&format!(
+                    "screenshot save: SHGetKnownFolderPath failed: {e}"
+                ));
+                None
+            }
+        }
     }
 }
 
@@ -336,6 +650,7 @@ enum Cmd {
     RButtonDown,
     RButtonUp,
     EnterTap,
+    Screenshot { window_only: bool },
 }
 
 /// Dedicated cursor-injection thread. Owns its own Enigo and runs on whatever

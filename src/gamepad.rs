@@ -230,6 +230,8 @@ pub struct GamepadPoll {
     launch_select_down: bool,
     launch_lb_down: bool,
     launch_x_down: bool,
+    shot_lb_down: bool,
+    shot_rb_down: bool,
     launch_armed: bool,
     last_launch: Instant,
     last_desktop_log: Instant,
@@ -390,6 +392,8 @@ impl GamepadPoll {
             launch_select_down: false,
             launch_lb_down: false,
             launch_x_down: false,
+            shot_lb_down: false,
+            shot_rb_down: false,
             launch_armed: true,
             last_launch: crate::time_util::stale(WARMUP_LAUNCH_DEBOUNCE),
             last_desktop_log: crate::time_util::stale(DESKTOP_SYNC_LOG_INTERVAL),
@@ -455,6 +459,8 @@ impl GamepadPoll {
             self.backend.apply_device_commands();
             cursor.set_left_button(false);
             cursor.set_right_button(false);
+            self.shot_lb_down = false;
+            self.shot_rb_down = false;
             return Ok(Vec::new());
         }
 
@@ -497,6 +503,13 @@ impl GamepadPoll {
             axes,
             touchpad,
         } = self.backend.poll_frame()?;
+        for c in &changes {
+            match c.button {
+                Button::Lb => self.shot_lb_down = c.pressed,
+                Button::Rb => self.shot_rb_down = c.pressed,
+                _ => {}
+            }
+        }
         let game_owns_input =
             crate::pipe_server::game_active() && !crate::pipe_server::launcher_foreground_nav();
         let cursor_injection_enabled =
@@ -613,6 +626,21 @@ impl GamepadPoll {
                 crate::vk_nav::start_voice_input();
                 self.backend.haptic_alert();
                 continue;
+            }
+            #[cfg(windows)]
+            if matches!(change.button, Button::Lt | Button::Rt)
+                && !Self::service_signin_desktop()
+            {
+                let chord_held = self.shot_lb_down && self.shot_rb_down;
+                if chord_held && change.pressed {
+                    let window_only = change.button == Button::Lt;
+                    cursor.screenshot(window_only);
+                    self.backend.haptic_alert();
+                    crate::install::log_line(&format!(
+                        "LB+RB+{} screenshot: window_only={window_only}",
+                        change.button.as_str()
+                    ));
+                }
             }
             if change.button == Button::A || change.button == Button::Touchpad {
                 // Hold: button down -> mouse-left down, up -> up, so
