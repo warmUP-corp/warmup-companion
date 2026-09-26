@@ -72,10 +72,21 @@ static LAST_REFLOW_HWND: AtomicIsize = AtomicIsize::new(0);
 
 /// Class background brush colour (dark default; per-paint theme overrides it).
 const BG_FILL: u32 = 0x001f1f1f;
+const APPLE_ACCENT_TONE: f32 = 0.7;
 
 fn vk_palette(dark: bool, style: crate::config::VkStyle) -> VkPalette {
     let mut pal = vk_renderer::style_palette(style, dark);
     let theme = crate::config::keyboard_theme();
+    if style == crate::config::VkStyle::Apple {
+        if let Some(v) = theme.accent {
+            pal.accent = vk_renderer::mix_color(v, pal.key, APPLE_ACCENT_TONE);
+            pal.sel_ring = v;
+        }
+        if let Some(v) = theme.sel_text {
+            pal.sel_text = v;
+        }
+        return pal;
+    }
     if let Some(v) = theme.bg {
         pal.bg = v;
     }
