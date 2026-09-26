@@ -35,7 +35,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::desktop;
 use super::desktop_window::{
-    self, DesktopApp, DesktopWindowThread, WM_APP_HIDE, WM_APP_REPAINT, WM_APP_SHOW,
+    self, DesktopApp, DesktopWindowThread, WM_APP_REPAINT, WM_APP_SHOW,
 };
 use super::vk_log;
 pub use super::vk_renderer::VkPalette;
@@ -48,10 +48,6 @@ pub fn theme_palette() -> VkPalette {
 
 const WINDOW_CLASS: windows::core::PCWSTR = w!("WarmupXboxVkWindow");
 
-/// Dock the keyboard full-monitor-width at the screen bottom; its height is
-/// `monitorHeight * 384/1080` (`_DAT_00494db8`=384 @ the 1080p reference monitor —
-/// see `warmup_create_xbox_vk_window` + `FUN_00467190`).
-const VK_REF_MONITOR_H: f32 = 1080.0;
 const VK_KB_REF_H: f32 = 384.0;
 /// Re-assert topmost while visible (shell search/task UI also uses HWND_TOPMOST).
 const VK_ZORDER_TIMER_ID: usize = 1;
@@ -162,9 +158,6 @@ fn key_glyph(key: &KeyCell) -> (String, bool) {
     use windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE;
     match &key.action {
         KeyAction::Shift => (key.label.clone(), false),
-        // Labeled close ("Esc") renders text; the unlabeled side key gets the
-        // renderer's close icon.
-        KeyAction::CloseVk => (key.label.clone(), false),
         KeyAction::VoiceInput => (String::new(), false),
         KeyAction::Vk(vk) if *vk == VK_SPACE => (String::new(), false),
         _ => (key.label.clone(), false),
@@ -185,7 +178,6 @@ fn key_hint(key: &KeyCell) -> Option<&'static str> {
         KeyAction::PredictPrev => Some("LB"),
         KeyAction::PredictNext => Some("RB"),
         KeyAction::VoiceInput => Some("R3"),
-        KeyAction::CloseVk => Some("L3"),
         _ => None,
     }
 }
@@ -276,16 +268,6 @@ pub fn request_repaint() {
     }
     unsafe {
         let _ = PostThreadMessageW(tid, WM_APP_REPAINT, WPARAM(0), LPARAM(0));
-    }
-}
-
-pub fn request_hide() {
-    let tid = UI_THREAD_ID.load(Ordering::Acquire);
-    if tid == 0 {
-        return;
-    }
-    unsafe {
-        let _ = PostThreadMessageW(tid, WM_APP_HIDE, WPARAM(0), LPARAM(0));
     }
 }
 
@@ -800,96 +782,24 @@ unsafe fn target_monitor_rect() -> windows::Win32::Foundation::RECT {
     super::monitor::active_monitor_rect()
 }
 
-struct VkViewScale {
-    hint_scale: f32,
-    suggestion_scale: f32,
-    top_inset: f32,
-    right_inset: f32,
-    strip_beside: bool,
+unsafe fn ui_scale() -> f32 {
+    key_scale(target_monitor_dpi_scale(), crate::config::vk_bar_scale())
 }
 
-unsafe fn vk_view_scale_for_active(
-    monitor: windows::Win32::Foundation::RECT,
-    base_dock_h: i32,
-    strip_visible: bool,
-) -> VkViewScale {
-    let is_tv = super::monitor::is_active_monitor_tv();
-    let hint_scale = crate::vk_motion::viewing_hint_scale(is_tv);
-    let suggestion_scale = if strip_visible {
-        crate::vk_motion::viewing_suggestion_scale(is_tv)
-    } else {
-        1.0
-    };
-    let band = vk_renderer::strip_band_height(suggestion_scale);
-    if suggestion_scale <= 1.0 + f32::EPSILON {
-        return VkViewScale {
-            hint_scale,
-            suggestion_scale,
-            top_inset: vk_renderer::STRIP_BAND_H,
-            right_inset: 0.0,
-            strip_beside: false,
-        };
-    }
-    let extra = (band - vk_renderer::STRIP_BAND_H).round() as i32;
-    let tall_h = base_dock_h + extra.max(0);
-    let room_above = monitor.bottom - tall_h >= monitor.top;
-    if room_above {
-        VkViewScale {
-            hint_scale,
-            suggestion_scale,
-            top_inset: band,
-            right_inset: 0.0,
-            strip_beside: false,
-        }
-    } else {
-        VkViewScale {
-            hint_scale,
-            suggestion_scale,
-            top_inset: vk_renderer::STRIP_BAND_H,
-            right_inset: vk_renderer::suggestion_side_width(suggestion_scale),
-            strip_beside: true,
-        }
-    }
+unsafe fn top_inset() -> f32 {
+    vk_renderer::strip_band_height(ui_scale())
 }
 
-unsafe fn vk_view_scale(strip_visible: bool) -> VkViewScale {
-    let m = target_monitor_rect();
-    let full_h = (m.bottom - m.top).max(1);
-    let bar_scale = crate::config::vk_bar_scale();
-    let base_h = (((full_h as f32) * VK_KB_REF_H / VK_REF_MONITOR_H * bar_scale).round() as i32)
-        .clamp(160, full_h);
-    vk_view_scale_for_active(m, base_h, strip_visible)
-}
-
-/// Keyboard geometry `(x, y, width, height)`. The suggestion band
-/// ([`vk_renderer::STRIP_BAND_H`]) is reserved above the keys (keys lay out below
-/// it via `top_inset`), so the layout is fixed and the keys never shift.
 ///
 /// - **Docked**: full monitor width along the bottom edge.
 /// - **Floating**: a compact, horizontally-centred card; the band is the card's top chrome.
 unsafe fn vk_dock_rect() -> (i32, i32, i32, i32) {
-    vk_dock_rect_for(crate::vk_predict::strip().is_some())
-}
-
-unsafe fn vk_dock_rect_for(strip_visible: bool) -> (i32, i32, i32, i32) {
     let m = target_monitor_rect();
     let full_w = (m.right - m.left).max(1);
     let full_h = (m.bottom - m.top).max(1);
-    let bar_scale = crate::config::vk_bar_scale();
-    let base_h = (((full_h as f32) * VK_KB_REF_H / VK_REF_MONITOR_H * bar_scale).round() as i32)
-        .clamp(160, full_h);
-    let view = vk_view_scale(strip_visible);
-    let h = if view.strip_beside {
-        base_h
-    } else {
-        (base_h as f32 - vk_renderer::STRIP_BAND_H + view.top_inset)
-            .round()
-            .clamp(160.0, full_h as f32) as i32
-    };
+    let h = docked_base_h(full_h);
     match crate::config::vk_layout_mode() {
-        crate::config::VkLayoutMode::Floating => {
-            floating_card_rect(view.top_inset, view.right_inset)
-        }
+        crate::config::VkLayoutMode::Floating => floating_card_rect(top_inset()),
         crate::config::VkLayoutMode::Docked => (m.left, m.bottom - h, full_w, h),
     }
 }
@@ -898,15 +808,15 @@ unsafe fn vk_dock_rect_for(strip_visible: bool) -> (i32, i32, i32, i32) {
 /// the keys at docked scale; its height = `chrome + key block + 2 * pad`, so a
 /// smaller `chrome` (collapsed strip) makes a genuinely shorter card. Bottom edge
 /// stays put (y moves down as it shrinks) so the keys don't jump.
-unsafe fn floating_card_rect(chrome: f32, right_inset: f32) -> (i32, i32, i32, i32) {
+unsafe fn floating_card_rect(chrome: f32) -> (i32, i32, i32, i32) {
     let m = target_monitor_rect();
     let full_w = (m.right - m.left).max(1);
     let full_h = (m.bottom - m.top).max(1);
     let rows = vk_nav::rows_snapshot();
-    let scale_w = full_w as f32;
+    let scale_w = vk_scale_w();
     let (grid_w, block_h) = vk_renderer::grid_size(scale_w, &rows);
     let pad = vk_renderer::FLOATING_PAD;
-    let (w, card_h) = floating_card_size(grid_w + right_inset, block_h, chrome, pad);
+    let (w, card_h) = floating_card_size(grid_w, block_h, chrome, pad);
     let w = w.min(full_w);
     let card_h = card_h.clamp(100, full_h);
     let margin = (((full_h as f32) * 0.04).round() as i32).clamp(28, 80);
@@ -928,11 +838,22 @@ fn floating_card_size(grid_w: f32, block_h: f32, chrome: f32, pad: f32) -> (i32,
     )
 }
 
-/// Width used to scale key size (92px @ 1920 reference). Always the monitor
-/// width so the keyboard stays readable at TV distance.
+unsafe fn target_monitor_dpi_scale() -> f32 {
+    super::monitor::dpi_scale(super::monitor::active_monitor().0)
+}
+
+unsafe fn docked_base_h(full_h: i32) -> i32 {
+    let h = VK_KB_REF_H * target_monitor_dpi_scale() * crate::config::vk_bar_scale();
+    let extra = top_inset() - vk_renderer::STRIP_BAND_H;
+    ((h + extra).round() as i32).clamp(160, full_h)
+}
+
+fn key_scale(dpi_scale: f32, bar_scale: f32) -> f32 {
+    dpi_scale * bar_scale / crate::config::COMPACT_BAR_SCALE
+}
+
 unsafe fn vk_scale_w() -> f32 {
-    let m = target_monitor_rect();
-    ((m.right - m.left).max(1)) as f32
+    vk_renderer::REF_MON_W * ui_scale()
 }
 
 unsafe fn create_vk_window() -> Result<HWND, String> {
@@ -1096,33 +1017,13 @@ fn render_frame() {
             crate::config::VkLayoutMode::Floating
         );
         let candidates = crate::vk_predict::strip();
-        let strip_visible = candidates.is_some();
-        let view = unsafe { vk_view_scale(strip_visible) };
-        let top_inset = view.top_inset;
+        let scale = unsafe { ui_scale() };
+        let top_inset = vk_renderer::strip_band_height(scale);
 
         let Some(renderer) = state.renderer.as_mut() else {
             return;
         };
         unsafe {
-            let (x, y, outer_w, outer_h) = vk_dock_rect_for(strip_visible);
-            let mut cur = windows::Win32::Foundation::RECT::default();
-            let _ = GetWindowRect(hwnd, &mut cur);
-            if cur.left != x
-                || cur.top != y
-                || cur.right - cur.left != outer_w
-                || cur.bottom - cur.top != outer_h
-            {
-                let _ = SetWindowPos(
-                    hwnd,
-                    HWND_TOPMOST,
-                    x,
-                    y,
-                    outer_w,
-                    outer_h,
-                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
-                );
-                ensure_topmost(hwnd);
-            }
             if let Err(e) = renderer.resize(hwnd) {
                 vk_log::log(&format!("renderer resize: {e}"));
             }
@@ -1149,7 +1050,6 @@ fn render_frame() {
                 key_hint,
                 top_inset,
                 scale_w,
-                right_inset: view.right_inset,
                 candidates: candidates.as_ref(),
                 floating,
                 modifiers: vk_renderer::VkModifiers { shift, caps },
@@ -1169,9 +1069,7 @@ fn render_frame() {
                     _ => vk_renderer::VoicePhase::Listening,
                 },
                 voice_level: crate::win::speech_input::voice_level(),
-                hint_scale: view.hint_scale,
-                suggestion_scale: view.suggestion_scale,
-                strip_beside: view.strip_beside,
+                ui_scale: scale,
             };
             if let Err(e) = renderer.draw(&frame) {
                 vk_log::log(&format!("renderer draw: {e}"));
@@ -1213,18 +1111,11 @@ fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<(vk_nav::KeyPos, KeyCell)> {
     }
     let rows = vk_nav::rows_snapshot();
     let (xf, yf) = (x as f32, y as f32);
-    let view = unsafe { vk_view_scale(crate::vk_predict::strip().is_some()) };
-    let top_inset = view.top_inset;
+    let top_inset = unsafe { top_inset() };
     let scale_w = unsafe { vk_scale_w() };
     let cw = client.right as f32;
     let ch = client.bottom as f32;
-    let layout_w = (cw - view.right_inset.max(0.0)).max(1.0);
-    let layout_scale_w = if cw > 1.0 && view.right_inset > 0.0 {
-        scale_w * (layout_w / cw)
-    } else {
-        scale_w
-    };
-    for kr in vk_renderer::key_rects(layout_w, ch, layout_scale_w, &rows, top_inset) {
+    for kr in vk_renderer::key_rects(cw, ch, scale_w, &rows, top_inset) {
         if xf >= kr.left && xf < kr.right && yf >= kr.top && yf < kr.bottom {
             return rows
                 .get(kr.pos.row)
@@ -1239,6 +1130,14 @@ fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<(vk_nav::KeyPos, KeyCell)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_scale_follows_display_scaling_not_pixels() {
+        let d = crate::config::COMPACT_BAR_SCALE;
+        assert_eq!(key_scale(1.0, d), 1.0);
+        assert_eq!(key_scale(2.0, d), 2.0);
+        assert!(key_scale(1.0, 1.0) > key_scale(1.0, d));
+    }
 
     #[test]
     fn maximized_window_reservation_restores_zoom_after_reflow() {

@@ -520,7 +520,6 @@ unsafe fn open_diagnostics() {
 
 /// Flip the docked keyboard between full and compact height. Written to
 /// settings.ini; the running keyboard reads `vk_bar_scale` live on next show.
-/// Compact is the default, so unchecking writes the explicit full-size 1.0.
 fn toggle_compact() {
     let new = if crate::config::vk_bar_scale() < 1.0 {
         "1.0".to_string()

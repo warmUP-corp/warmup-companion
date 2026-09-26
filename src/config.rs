@@ -34,16 +34,16 @@ pub struct KeyboardTheme {
 /// (emulating the warmUP webview keyboard). Pushed from the desktop `config.vkMode`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum VkLayoutMode {
-    #[default]
     Docked,
+    #[default]
     Floating,
 }
 
 #[cfg(feature = "gamepad")]
 pub fn parse_vk_layout_mode(raw: Option<&str>) -> VkLayoutMode {
     match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-        Some("floating") => VkLayoutMode::Floating,
-        _ => VkLayoutMode::Docked,
+        Some("docked") => VkLayoutMode::Docked,
+        _ => VkLayoutMode::Floating,
     }
 }
 
@@ -60,14 +60,9 @@ pub fn vk_layout_mode() -> VkLayoutMode {
     parse_vk_layout_mode(raw.as_deref())
 }
 
-/// Compact docked bar (default). 1.0 = the full reference bar; the default keeps
-/// the keyboard out of the way at ~80% height. Tray "Compact size" toggles it.
 #[cfg(feature = "gamepad")]
 pub const COMPACT_BAR_SCALE: f32 = 0.8;
 
-/// Docked-keyboard height multiplier. Defaults to [`COMPACT_BAR_SCALE`]; a value
-/// of `1.0` is the full reference bar. Clamped to a usable range; only the docked
-/// layout uses it (floating already sizes to its content).
 #[cfg(feature = "gamepad")]
 pub fn vk_bar_scale() -> f32 {
     settings_path()
@@ -80,7 +75,7 @@ pub fn vk_bar_scale() -> f32 {
         })
         .and_then(|v| v.parse::<f32>().ok())
         .filter(|v| (0.6..=1.2).contains(v))
-        .unwrap_or(COMPACT_BAR_SCALE)
+        .unwrap_or(1.0)
 }
 
 #[cfg(feature = "gamepad")]
@@ -680,6 +675,14 @@ mod tests {
         assert_eq!(theme.accent, Some(0x00090807));
         assert_eq!(theme.text, Some(0x000c0b0a));
         assert_eq!(theme.sel_text, Some(0x000f0e0d));
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn vk_layout_defaults_to_floating() {
+        assert_eq!(parse_vk_layout_mode(None), VkLayoutMode::Floating);
+        assert_eq!(parse_vk_layout_mode(Some("docked")), VkLayoutMode::Docked);
+        assert_eq!(parse_vk_layout_mode(Some(" Floating ")), VkLayoutMode::Floating);
     }
 
     #[cfg(feature = "gamepad")]
