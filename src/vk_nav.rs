@@ -366,6 +366,11 @@ pub fn rows_snapshot() -> Vec<KeyRow> {
     NAV.lock().map(|n| n.rows.clone()).unwrap_or_default()
 }
 
+#[cfg(test)]
+pub fn rows_for_test() -> Vec<KeyRow> {
+    build_web_layout(Layer::Lower, false)
+}
+
 pub fn selected_key() -> Option<KeyCell> {
     let nav = NAV.lock().ok()?;
     nav.rows.get(nav.pos.row)?.keys.get(nav.pos.col).cloned()

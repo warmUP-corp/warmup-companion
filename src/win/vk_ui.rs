@@ -43,7 +43,7 @@ use super::vk_renderer::{self, VkRenderer};
 
 /// Live keyboard palette (OS dark/light defaults, then `settings.ini` overrides).
 pub fn theme_palette() -> VkPalette {
-    vk_palette(is_dark_theme())
+    vk_palette(is_dark_theme(), crate::config::vk_style())
 }
 
 const WINDOW_CLASS: windows::core::PCWSTR = w!("WarmupXboxVkWindow");
@@ -73,57 +73,32 @@ static LAST_REFLOW_HWND: AtomicIsize = AtomicIsize::new(0);
 /// Class background brush colour (dark default; per-paint theme overrides it).
 const BG_FILL: u32 = 0x001f1f1f;
 
-/// `0xRRGGBB` -> GDI `COLORREF` (`0x00BBGGRR`).
-const fn rgb(v: u32) -> u32 {
-    let r = (v >> 16) & 0xff;
-    let g = (v >> 8) & 0xff;
-    let b = v & 0xff;
-    (b << 16) | (g << 8) | r
-}
-
-/// Dark/light accent + greys from `FUN_00466970` (dark accent `0xff4c7b99`,
-/// light accent `0xff0e80c7`; the WinRT `UISettings` override is not applied).
-fn vk_palette(dark: bool) -> VkPalette {
-    let mut pal = if dark {
-        VkPalette {
-            bg: rgb(0x1f1f1f),
-            key: rgb(0x2b2b2b),
-            // Was 0x4c7b99 — a desaturated grey-blue that read as "off". A
-            // saturated azure makes the selected key obvious at a glance and
-            // still clears white-label contrast (~3.6:1 > the old ~3.4:1).
-            accent: rgb(0x1e88e5),
-            text: rgb(0xffffff),
-            sel_text: rgb(0xffffff),
-            border: rgb(0x34384a),
-        }
-    } else {
-        VkPalette {
-            bg: rgb(0xf3f3f3),
-            key: rgb(0xe9e9e9),
-            accent: rgb(0x0e80c7),
-            text: rgb(0x000000),
-            sel_text: rgb(0xffffff),
-            border: rgb(0xcfcfcf),
-        }
-    };
+fn vk_palette(dark: bool, style: crate::config::VkStyle) -> VkPalette {
+    let mut pal = vk_renderer::style_palette(style, dark);
     let theme = crate::config::keyboard_theme();
     if let Some(v) = theme.bg {
         pal.bg = v;
     }
     if let Some(v) = theme.key {
         pal.key = v;
+        pal.key_action = vk_renderer::mix_color(0x000000, v, 0.26);
+        pal.chip_sel = vk_renderer::mix_color(0xFFFFFF, v, 0.10);
     }
     if let Some(v) = theme.accent {
         pal.accent = v;
+        pal.sel_ring = vk_renderer::mix_color(0xFFFFFF, v, 0.5);
     }
     if let Some(v) = theme.text {
         pal.text = v;
+        pal.text_dim = v;
     }
     if let Some(v) = theme.sel_text {
         pal.sel_text = v;
     }
     if let Some(v) = theme.border {
         pal.border = v;
+        pal.panel_stroke = v;
+        pal.panel_stroke_alpha = 1.0;
     }
     pal
 }
@@ -787,7 +762,7 @@ unsafe fn ui_scale() -> f32 {
 }
 
 unsafe fn top_inset() -> f32 {
-    vk_renderer::strip_band_height(ui_scale())
+    vk_renderer::strip_band_height(ui_scale(), crate::config::vk_style())
 }
 
 ///
@@ -814,9 +789,10 @@ unsafe fn floating_card_rect(chrome: f32) -> (i32, i32, i32, i32) {
     let full_h = (m.bottom - m.top).max(1);
     let rows = vk_nav::rows_snapshot();
     let scale_w = vk_scale_w();
-    let (grid_w, block_h) = vk_renderer::grid_size(scale_w, &rows);
-    let pad = vk_renderer::FLOATING_PAD;
-    let (w, card_h) = floating_card_size(grid_w, block_h, chrome, pad);
+    let style = crate::config::vk_style();
+    let (grid_w, block_h) = vk_renderer::grid_size(scale_w, &rows, style);
+    let (pad_x, pad_y) = vk_renderer::floating_pad(ui_scale(), style);
+    let (w, card_h) = floating_card_size(grid_w, block_h, chrome, pad_x, pad_y);
     let w = w.min(full_w);
     let card_h = card_h.clamp(100, full_h);
     let margin = (((full_h as f32) * 0.04).round() as i32).clamp(28, 80);
@@ -831,10 +807,16 @@ unsafe fn floating_card_rect(chrome: f32) -> (i32, i32, i32, i32) {
 /// the same `pad` at the bottom edge as at the sides (the corner radius is
 /// derived from that padding, so an uneven inset would break the concentric
 /// corners).
-fn floating_card_size(grid_w: f32, block_h: f32, chrome: f32, pad: f32) -> (i32, i32) {
+fn floating_card_size(
+    grid_w: f32,
+    block_h: f32,
+    chrome: f32,
+    pad_x: f32,
+    pad_y: f32,
+) -> (i32, i32) {
     (
-        (grid_w + pad * 2.0).round() as i32,
-        (chrome + block_h + pad * 2.0).round() as i32,
+        (grid_w + pad_x * 2.0).round() as i32,
+        (chrome + block_h + pad_y * 2.0).ceil() as i32,
     )
 }
 
@@ -1016,9 +998,10 @@ fn render_frame() {
             crate::config::vk_layout_mode(),
             crate::config::VkLayoutMode::Floating
         );
-        let candidates = crate::vk_predict::strip();
+        let style = crate::config::vk_style();
+        let candidates = crate::vk_predict::strip(vk_renderer::strip_slots(style));
         let scale = unsafe { ui_scale() };
-        let top_inset = vk_renderer::strip_band_height(scale);
+        let top_inset = vk_renderer::strip_band_height(scale, style);
 
         let Some(renderer) = state.renderer.as_mut() else {
             return;
@@ -1027,7 +1010,7 @@ fn render_frame() {
             if let Err(e) = renderer.resize(hwnd) {
                 vk_log::log(&format!("renderer resize: {e}"));
             }
-            let pal = vk_palette(is_dark_theme());
+            let pal = vk_palette(is_dark_theme(), style);
             let rows = vk_nav::rows_snapshot();
             let sel = vk_nav::selection();
             let (shift, caps) = vk_nav::modifier_state();
@@ -1070,6 +1053,7 @@ fn render_frame() {
                 },
                 voice_level: crate::win::speech_input::voice_level(),
                 ui_scale: scale,
+                style,
             };
             if let Err(e) = renderer.draw(&frame) {
                 vk_log::log(&format!("renderer draw: {e}"));
@@ -1115,7 +1099,8 @@ fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<(vk_nav::KeyPos, KeyCell)> {
     let scale_w = unsafe { vk_scale_w() };
     let cw = client.right as f32;
     let ch = client.bottom as f32;
-    for kr in vk_renderer::key_rects(cw, ch, scale_w, &rows, top_inset) {
+    let style = crate::config::vk_style();
+    for kr in vk_renderer::key_rects(cw, ch, scale_w, &rows, top_inset, style) {
         if xf >= kr.left && xf < kr.right && yf >= kr.top && yf < kr.bottom {
             return rows
                 .get(kr.pos.row)
@@ -1155,7 +1140,7 @@ mod tests {
         // Key block 1000x300 under a 67px chrome band with 18px padding: the
         // renderer centres the block below the chrome, so the card must carry
         // 2*pad vertically to leave exactly `pad` at the bottom and both sides.
-        let (w, h) = floating_card_size(1000.0, 300.0, 67.0, 18.0);
+        let (w, h) = floating_card_size(1000.0, 300.0, 67.0, 18.0, 18.0);
         assert_eq!(w, 1036);
         assert_eq!(h, 67 + 300 + 36);
         let bottom_pad = (h as f32 - 67.0 - 300.0) / 2.0;

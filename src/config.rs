@@ -60,6 +60,34 @@ pub fn vk_layout_mode() -> VkLayoutMode {
     parse_vk_layout_mode(raw.as_deref())
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum VkStyle {
+    #[default]
+    Refined,
+    Apple,
+}
+
+#[cfg(feature = "gamepad")]
+pub fn parse_vk_style(raw: Option<&str>) -> VkStyle {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("apple") => VkStyle::Apple,
+        _ => VkStyle::Refined,
+    }
+}
+
+#[cfg(feature = "gamepad")]
+pub fn vk_style() -> VkStyle {
+    let raw = settings_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|text| {
+            text.lines().find_map(|line| {
+                let (k, v) = line.split_once('=')?;
+                (k.trim() == "vk_style").then(|| v.trim().to_string())
+            })
+        });
+    parse_vk_style(raw.as_deref())
+}
+
 #[cfg(feature = "gamepad")]
 pub const COMPACT_BAR_SCALE: f32 = 0.8;
 
@@ -633,6 +661,10 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
             "docked" | "floating" => Ok(()),
             _ => Err("vk_mode must be docked or floating".to_string()),
         },
+        "vk_style" => match value.trim().to_ascii_lowercase().as_str() {
+            "refined" | "apple" => Ok(()),
+            _ => Err("vk_style must be refined or apple".to_string()),
+        },
         "vk_bar_scale" => value
             .parse::<f32>()
             .ok()
@@ -683,6 +715,18 @@ mod tests {
         assert_eq!(parse_vk_layout_mode(None), VkLayoutMode::Floating);
         assert_eq!(parse_vk_layout_mode(Some("docked")), VkLayoutMode::Docked);
         assert_eq!(parse_vk_layout_mode(Some(" Floating ")), VkLayoutMode::Floating);
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn vk_style_defaults_to_refined() {
+        assert_eq!(parse_vk_style(None), VkStyle::Refined);
+        assert_eq!(parse_vk_style(Some("refined")), VkStyle::Refined);
+        assert_eq!(parse_vk_style(Some(" Apple ")), VkStyle::Apple);
+        assert_eq!(parse_vk_style(Some("bogus")), VkStyle::Refined);
+        assert!(validate_gamepad_setting("vk_style", "apple").is_ok());
+        assert!(validate_gamepad_setting("vk_style", "Refined").is_ok());
+        assert!(validate_gamepad_setting("vk_style", "ios").is_err());
     }
 
     #[cfg(feature = "gamepad")]
