@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.7.2
+
+- The keyboard opens on the sign-in and lock screen again. A false game detection there no longer swallows L3.
+
 ## v0.7.1
 
 - Visual fixes: bigger button icons in the shortcut legend, a shortcut sheet that fills the keyboard, and larger Create/Share hints.
