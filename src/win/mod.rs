@@ -10,6 +10,7 @@ mod monitor;
 pub mod native_keyboard;
 mod nimbus_orb;
 pub mod prompt_overlay;
+pub mod shortcut_sheet;
 pub mod speech_input;
 pub mod surface;
 pub mod toast;

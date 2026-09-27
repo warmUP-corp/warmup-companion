@@ -55,6 +55,7 @@ use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
 use super::nimbus_orb::{drive_scale, mood_drive, NimbusMood, NimbusOrb, ORB_FRAME_FILL};
 use super::controller_tips::TipToken;
+use super::shortcut_sheet::{self, Line};
 use crate::config::VkStyle;
 use crate::vk_nav::{KeyAction, KeyCell, KeyPos, KeyRow};
 
@@ -692,6 +693,8 @@ pub struct VkRenderer {
     /// stays as the fallback.
     nimbus: Option<NimbusOrb>,
     nimbus_failed: bool,
+    sheet_alpha: f32,
+    sheet_tick: Option<Instant>,
     d3d: ID3D11Device,
     _d2d_device: ID2D1Device,
     _dcomp_device: IDCompositionDevice,
@@ -1354,6 +1357,7 @@ pub struct VkFrame<'a> {
     pub voice_level: f32,
     pub ui_scale: f32,
     pub style: VkStyle,
+    pub shortcut_sheet: bool,
 }
 
 /// Glyph for the Shift key (the Shift-action key reflects `shift`).
@@ -1534,6 +1538,8 @@ impl VkRenderer {
             level_at: None,
             nimbus: None,
             nimbus_failed: false,
+            sheet_alpha: 0.0,
+            sheet_tick: None,
             d3d,
             _d2d_device: d2d_device,
             _dcomp_device: dcomp_device,
@@ -1967,6 +1973,7 @@ impl VkRenderer {
             voice_level,
             ui_scale,
             style,
+            shortcut_sheet: sheet_on,
         } = *frame;
         let spec = style_spec(style);
         let controller_icons = ControllerIconFamily::from_label(controller_label);
@@ -2383,6 +2390,25 @@ impl VkRenderer {
             result?;
         }
 
+        let sheet_dt = self
+            .sheet_tick
+            .map(|t| now.duration_since(t).as_secs_f32().min(0.1))
+            .unwrap_or(0.0);
+        self.sheet_tick = Some(now);
+        self.sheet_alpha = shortcut_sheet::fade_step(self.sheet_alpha, sheet_on, sheet_dt);
+        if self.sheet_alpha > 0.0 {
+            self.draw_shortcut_sheet(
+                spec,
+                pal,
+                &fonts,
+                &rects,
+                floating,
+                unit,
+                controller_icons,
+                self.sheet_alpha,
+            )?;
+        }
+
         if floating {
             self.d2d_context.PopAxisAlignedClip();
         }
@@ -2394,6 +2420,198 @@ impl VkRenderer {
             .Present(1, DXGI_PRESENT(0))
             .ok()
             .map_err(|e| format!("Present: {e}"))?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_shortcut_sheet(
+        &mut self,
+        spec: &StyleSpec,
+        pal: &VkPalette,
+        fonts: &StyleFonts,
+        rects: &[KeyRect],
+        floating: bool,
+        unit: f32,
+        family: ControllerIconFamily,
+        alpha: f32,
+    ) -> Result<(), String> {
+        let cw = self.width as f32;
+        let ch = self.height as f32;
+        let (panel, radius) = if floating {
+            (
+                D2D_RECT_F {
+                    left: FLOATING_PANEL_INSET,
+                    top: FLOATING_PANEL_INSET,
+                    right: cw - FLOATING_PANEL_INSET,
+                    bottom: ch - FLOATING_PANEL_INSET,
+                },
+                spec.panel_radius * unit,
+            )
+        } else {
+            (
+                D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: cw,
+                    bottom: ch,
+                },
+                0.0,
+            )
+        };
+        let fill = solid_brush(&self.d2d_context, colorref_alpha(pal.bg, alpha))?;
+        self.d2d_context
+            .FillRoundedRectangle(&rounded(panel, radius), &fill);
+        if floating {
+            let stroke = solid_brush(
+                &self.d2d_context,
+                colorref_alpha(pal.panel_stroke, pal.panel_stroke_alpha * alpha),
+            )?;
+            self.d2d_context.DrawRoundedRectangle(
+                &rounded(deflate(panel, 0.5), (radius - 0.5).max(0.0)),
+                &stroke,
+                1.0,
+                None,
+            );
+        }
+
+        let pad_x = spec.pad_x * unit;
+        let pad_y = spec.pad_y * unit;
+        let (left, right, bottom) = if rects.is_empty() {
+            (
+                panel.left + pad_x,
+                panel.right - pad_x,
+                panel.bottom - pad_y,
+            )
+        } else {
+            rects
+                .iter()
+                .fold((f32::MAX, f32::MIN, f32::MIN), |(l, r, b), kr| {
+                    (l.min(kr.left), r.max(kr.right), b.max(kr.bottom))
+                })
+        };
+        let top = panel.top + pad_y;
+        let lines = shortcut_sheet::max_lines() as f32;
+        let line_h = ((bottom - top) / lines).max(1.0);
+        let chip = (line_h * 0.7).min(spec.hint_badge * unit).max(12.0);
+        let gap = 6.0 * unit;
+        let label_gap = 14.0 * unit;
+        let col_gap = spec.gap * unit * 3.0;
+        let text_fmt = fonts.chip.clone();
+        let title_fmt = fonts.chip_sel.clone();
+
+        struct Col {
+            lines: Vec<(Line, Vec<(TipItem, f32)>, f32)>,
+            glyph_w: f32,
+            natural: f32,
+        }
+        let cols: Vec<Col> = shortcut_sheet::columns()
+            .into_iter()
+            .map(|col| {
+                let mut glyph_w = 0.0f32;
+                let mut label_w = 0.0f32;
+                let mut title_w = 0.0f32;
+                let lines = col
+                    .into_iter()
+                    .map(|line| match line {
+                        Line::Row(row) => {
+                            let (items, w) = self.tip_items(row.keys, family, &text_fmt, chip, gap);
+                            let lw = self.measure_text(row.label, &text_fmt);
+                            glyph_w = glyph_w.max(w);
+                            label_w = label_w.max(lw);
+                            (line, items, lw)
+                        }
+                        Line::Title(t) => {
+                            let tw = self.measure_text(t, &title_fmt);
+                            title_w = title_w.max(tw);
+                            (line, Vec::new(), tw)
+                        }
+                        Line::Blank => (line, Vec::new(), 0.0),
+                    })
+                    .collect();
+                Col {
+                    lines,
+                    glyph_w,
+                    natural: (glyph_w + label_gap + label_w).max(title_w),
+                }
+            })
+            .collect();
+        let n = cols.len().max(1) as f32;
+        let avail = (right - left - col_gap * (n - 1.0)).max(1.0);
+        let sum: f32 = cols.iter().map(|c| c.natural).sum::<f32>().max(1.0);
+        let extra = (avail - sum) / n;
+
+        let text_brush = solid_brush(&self.d2d_context, colorref_alpha(pal.text, alpha))?;
+        let title_brush = solid_brush(
+            &self.d2d_context,
+            colorref_alpha(pal.text_dim, spec.number_alpha * alpha),
+        )?;
+        let mut x = left;
+        for col in &cols {
+            let col_w = if extra >= 0.0 {
+                col.natural + extra
+            } else {
+                col.natural * avail / sum
+            };
+            let clip = D2D_RECT_F {
+                left: x,
+                top,
+                right: x + col_w,
+                bottom,
+            };
+            self.d2d_context.PushAxisAlignedClip(
+                &clip,
+                windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            );
+            for (i, (line, items, w)) in col.lines.iter().enumerate() {
+                let band = D2D_RECT_F {
+                    left: x,
+                    top: top + i as f32 * line_h,
+                    right: x + col_w,
+                    bottom: top + (i as f32 + 1.0) * line_h,
+                };
+                match line {
+                    Line::Title(t) => self.d2d_context.DrawText(
+                        &wide(t),
+                        &title_fmt,
+                        &D2D_RECT_F {
+                            right: x + w,
+                            ..band
+                        },
+                        &title_brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    ),
+                    Line::Row(row) => {
+                        self.draw_tip_row(
+                            items,
+                            x,
+                            band,
+                            gap,
+                            &text_fmt,
+                            pal.text,
+                            pal.text_dim,
+                            alpha,
+                        )?;
+                        let lx = x + col.glyph_w + label_gap;
+                        self.d2d_context.DrawText(
+                            &wide(row.label),
+                            &text_fmt,
+                            &D2D_RECT_F {
+                                left: lx,
+                                right: lx + w,
+                                ..band
+                            },
+                            &text_brush,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                            DWRITE_MEASURING_MODE_NATURAL,
+                        );
+                    }
+                    Line::Blank => {}
+                }
+            }
+            self.d2d_context.PopAxisAlignedClip();
+            x += col_w + col_gap;
+        }
         Ok(())
     }
 
@@ -4137,6 +4355,51 @@ mod tests {
                     assert!(xb.hint_icon(b).is_some(), "{b}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn shortcut_sheet_rows_use_the_pad_family_glyphs() {
+        let ps = ControllerIconFamily::from_label("DualShock 4 Wireless Controller");
+        let xb = ControllerIconFamily::from_label("Xbox Wireless Controller");
+        let icons = |family: ControllerIconFamily, label: &str| -> Vec<VkIcon> {
+            super::super::shortcut_sheet::GROUPS
+                .iter()
+                .flat_map(|g| g.rows.iter())
+                .find(|r| r.label == label)
+                .expect(label)
+                .keys
+                .iter()
+                .filter_map(|t| match t {
+                    TipToken::Button(b) => Some(family.hint_icon(b).expect(b)),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(icons(ps, "Copy"), [VkIcon::SelectPs5, VkIcon::Ps5Square]);
+        assert_eq!(icons(xb, "Copy"), [VkIcon::SelectXbox, VkIcon::XboxX]);
+        assert_eq!(
+            icons(ps, "Clear field"),
+            [VkIcon::SelectPs5, VkIcon::Ps5Circle]
+        );
+        assert_eq!(
+            icons(xb, "Clear field"),
+            [VkIcon::SelectXbox, VkIcon::XboxB]
+        );
+        assert_eq!(
+            icons(ps, "Screenshot"),
+            [VkIcon::Ps5L1, VkIcon::Ps5R1, VkIcon::Ps5R2]
+        );
+        assert_eq!(
+            icons(xb, "Screenshot"),
+            [VkIcon::XboxLb, VkIcon::XboxRb, VkIcon::XboxRt]
+        );
+        assert_eq!(icons(ps, "Close keyboard"), [VkIcon::L3Ps5]);
+        assert_eq!(icons(xb, "Dictate"), [VkIcon::R3Xbox]);
+        for b in super::super::shortcut_sheet::buttons() {
+            let (p, x) = (ps.hint_icon(b), xb.hint_icon(b));
+            assert!(p.is_some() && x.is_some(), "{b}");
+            assert_ne!(p, x, "{b}");
         }
     }
 

@@ -423,6 +423,7 @@ fn ui_hide() {
     }
     VK_HWND.store(0, Ordering::Release);
     VK_VISIBLE.store(false, Ordering::SeqCst);
+    super::shortcut_sheet::set_shown(false);
     vk_log::log("WarmupXboxVkWindow hidden");
 }
 
@@ -1079,6 +1080,7 @@ fn render_frame() {
                 voice_level: crate::win::speech_input::voice_level(),
                 ui_scale: scale,
                 style,
+                shortcut_sheet: super::shortcut_sheet::shown(),
             };
             if let Err(e) = renderer.draw(&frame) {
                 vk_log::log(&format!("renderer draw: {e}"));

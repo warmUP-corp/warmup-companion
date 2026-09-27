@@ -26,6 +26,7 @@ const WARMUP_LAUNCH_DEBOUNCE: Duration = Duration::from_secs(2);
 /// Ignore spurious X/dpad from misaligned HID for a moment after VK opens.
 const VK_NAV_INPUT_GRACE: Duration = Duration::from_millis(450);
 const SLEEP_SCREENSHOT_HOLD: Duration = Duration::from_millis(600);
+const VIEW_SHEET_HOLD: Duration = Duration::from_millis(500);
 const DESKTOP_SYNC_LOG_INTERVAL: Duration = Duration::from_secs(120);
 const HAPTIC_CONFIRM_MS: u32 = 14;
 const HAPTIC_ALERT_MS: u32 = 45;
@@ -88,6 +89,58 @@ fn view_chord_step(
             }
         }
         _ => ViewChordAction::None,
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ViewSheetHold {
+    since: Option<Instant>,
+    interrupted: bool,
+    shown: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ViewRelease {
+    tap: bool,
+    hide_sheet: bool,
+}
+
+impl ViewSheetHold {
+    fn press(&mut self, now: Instant) {
+        *self = Self {
+            since: Some(now),
+            ..Self::default()
+        };
+    }
+
+    fn other_press(&mut self) {
+        if self.since.is_some() {
+            self.interrupted = true;
+        }
+    }
+
+    fn tick(&mut self, now: Instant) -> bool {
+        let due = !self.shown
+            && !self.interrupted
+            && self
+                .since
+                .is_some_and(|since| now.duration_since(since) >= VIEW_SHEET_HOLD);
+        if due {
+            self.shown = true;
+        }
+        due
+    }
+
+    fn release(&mut self, now: Instant, chorded: bool) -> ViewRelease {
+        let quick = self
+            .since
+            .is_some_and(|since| now.duration_since(since) < VIEW_SHEET_HOLD);
+        let out = ViewRelease {
+            tap: quick && !chorded && !self.shown,
+            hide_sheet: self.shown,
+        };
+        *self = Self::default();
+        out
     }
 }
 
@@ -268,6 +321,7 @@ pub struct GamepadPoll {
     stick_nav: Option<Button>,
     vk_select_down: bool,
     vk_select_chord_used: bool,
+    view_sheet: ViewSheetHold,
     view_down: bool,
     view_chorded: bool,
     launch_select_down: bool,
@@ -435,6 +489,7 @@ impl GamepadPoll {
             stick_nav: None,
             vk_select_down: false,
             vk_select_chord_used: false,
+            view_sheet: ViewSheetHold::default(),
             view_down: false,
             view_chorded: false,
             launch_select_down: false,
@@ -466,11 +521,13 @@ impl GamepadPoll {
         self.stick_nav = None;
         self.vk_select_down = false;
         self.vk_select_chord_used = false;
+        self.view_sheet = ViewSheetHold::default();
         self.reset_view_hold();
         self.reset_launch_hotkey();
         self.last_vk_open = false;
         #[cfg(windows)]
         {
+            crate::win::shortcut_sheet::set_shown(false);
             crate::vk_nav::reset_selection();
             crate::win::logon_focus::clear_cache();
         }
@@ -608,6 +665,10 @@ impl GamepadPoll {
                 if let Some(edge) = self.handle_vk_open_button(change) {
                     edges.push(edge);
                 }
+            }
+            #[cfg(windows)]
+            if self.view_sheet.tick(Instant::now()) {
+                crate::win::shortcut_sheet::set_shown(true);
             }
             return Ok(edges);
         }
@@ -921,6 +982,10 @@ impl GamepadPoll {
             return None;
         }
 
+        if change.pressed && change.button != Button::Select {
+            self.view_sheet.other_press();
+        }
+
         // Select=engage suggestion strip, LB/RB=caret (Select+LB/RB=word; chips when
         // strip engaged), Start=Enter, LT=symbols, RT=shift, R3=voice, D-pad/L-stick
         // axis=move focus. Select chords: Select+X=copy, Select+Y=paste, Select+B=clear.
@@ -1018,13 +1083,20 @@ impl GamepadPoll {
             (Button::Select, true) => {
                 self.vk_select_down = true;
                 self.vk_select_chord_used = false;
+                self.view_sheet.press(Instant::now());
                 None
             }
             (Button::Select, false) => {
                 self.vk_select_down = false;
                 vk_nav::repeat_released(vk_nav::RepeatKey::WordLeft);
                 vk_nav::repeat_released(vk_nav::RepeatKey::WordRight);
-                if !self.vk_select_chord_used {
+                let release = self
+                    .view_sheet
+                    .release(Instant::now(), self.vk_select_chord_used);
+                if release.hide_sheet {
+                    crate::win::shortcut_sheet::set_shown(false);
+                }
+                if release.tap {
                     // Web SELECT: jump into the suggestion strip when populated.
                     if crate::vk_predict::strip_engaged() {
                         crate::vk_predict::disengage();
@@ -1344,7 +1416,8 @@ where
         println!("  B            → backspace");
         println!("  X            → language (QWERTY/QWERTZ)");
         println!("  Y            → space");
-        println!("  Select       → enter / leave suggestion strip");
+        println!("  Select (tap) → enter / leave suggestion strip");
+        println!("  Select (hold)→ shortcut cheat sheet");
         println!("  Select+X/Y/B → copy / paste / clear input");
         println!("  Select+LB/RB → jump caret by word");
         println!("  Start        → Enter");
@@ -1470,7 +1543,7 @@ mod tests {
     use super::{
         allows_cursor_injection, companion_owns_stick_click, forward_only_while_sleeping,
         is_standalone_guide_wake, sleep_screenshot_due, view_chord_step, Button, ButtonChange,
-        ViewChordAction, SLEEP_SCREENSHOT_HOLD,
+        ViewChordAction, ViewRelease, ViewSheetHold, SLEEP_SCREENSHOT_HOLD, VIEW_SHEET_HOLD,
     };
     use std::time::{Duration, Instant};
 
@@ -1587,5 +1660,76 @@ mod tests {
         );
         assert_eq!(run(&[(Button::Y, true), (Button::Start, true)]), [No, No]);
         assert_eq!(run(&[(Button::Select, false)]), [No]);
+    }
+
+    #[test]
+    fn view_tap_toggles_suggestions_and_hold_shows_the_sheet() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+
+        let mut h = ViewSheetHold::default();
+        h.press(t0);
+        assert!(!h.tick(ms(200)));
+        assert_eq!(
+            h.release(ms(300), false),
+            ViewRelease {
+                tap: true,
+                hide_sheet: false
+            }
+        );
+
+        let mut h = ViewSheetHold::default();
+        h.press(t0);
+        assert!(!h.tick(ms(499)));
+        assert!(h.tick(t0 + VIEW_SHEET_HOLD));
+        assert!(!h.tick(ms(900)));
+        assert_eq!(
+            h.release(ms(1000), false),
+            ViewRelease {
+                tap: false,
+                hide_sheet: true
+            }
+        );
+        assert!(!h.tick(ms(2000)));
+
+        let mut h = ViewSheetHold::default();
+        h.press(t0);
+        assert!(h.tick(ms(600)));
+        h.other_press();
+        assert!(!h.tick(ms(700)));
+        assert_eq!(
+            h.release(ms(800), true),
+            ViewRelease {
+                tap: false,
+                hide_sheet: true
+            }
+        );
+
+        let mut h = ViewSheetHold::default();
+        h.press(t0);
+        assert_eq!(h.release(ms(650), false), ViewRelease::default());
+    }
+
+    #[test]
+    fn view_chord_before_the_hold_skips_sheet_and_toggle() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+
+        let mut h = ViewSheetHold::default();
+        h.press(t0);
+        h.other_press();
+        assert!(!h.tick(ms(800)));
+        assert_eq!(h.release(ms(900), true), ViewRelease::default());
+
+        let mut h = ViewSheetHold::default();
+        h.press(t0);
+        h.other_press();
+        assert!(!h.tick(ms(200)));
+        assert_eq!(h.release(ms(250), true), ViewRelease::default());
+
+        let mut h = ViewSheetHold::default();
+        h.other_press();
+        assert!(!h.tick(ms(900)));
+        assert_eq!(h.release(ms(900), false), ViewRelease::default());
     }
 }
