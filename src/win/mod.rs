@@ -11,6 +11,7 @@ mod nimbus_orb;
 pub mod prompt_overlay;
 pub mod speech_input;
 pub mod surface;
+pub mod toast;
 pub mod vk_layouts;
 mod vk_log;
 mod vk_renderer;

@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.6.0
+
+- Controller screenshots: hold LB + RB and press RT for the full screen, or LT for the active window (L1 + R1 + R2 / L2 on PlayStation). Shots are saved to `Pictures\Screenshots`, copied to the clipboard, and confirmed with a sound and a Windows notification that opens the file.
+- In games, warmUP's record button works from the controller: tap Share, or hold View + RB together for about half a second. The companion now also watches Back, RB and Share while a game runs, only to pass them to warmUP; it still takes no action of its own in game, so pressing View never sends Enter to the game.
+- Share (Xbox Share, PS5 mic, Switch Capture, Steam Deck `…`) now reaches warmUP.
+- In games, hold View + LB together for about half a second to take a full-screen screenshot. It takes one shot per hold, and LB is not passed to warmUP while a game runs.
+- These in-game controls need the matching warmUP update. With an older warmUP, View, RB and Share can reach the hidden launcher during a game.
+- The keyboard size follows Windows display scaling. Keys, the suggestion strip, chips and controller badges scale together; the tray's "Compact size" makes it 80%. Automatic TV detection is gone.
+- Two keyboard styles, Normal and Mono, switchable from the tray. Mono uses its own greys with a toned-down accent from the warmUP theme, and the sign-in screen's connection prompts (Connect a controller, the connected card, Press L3) follow it too. Normal keys have rounder corners.
+- Shift and ?123 show when they are active or locked. In Mono, key labels follow Shift and caps lock.
+- iPhone-style word predictions: suggestions appear when the keyboard opens and after every word, capitalised at the start of a sentence. In Mono they sit in three columns with the best guess in the middle, and clicking a chip inserts it.
+- The voice orb's clouds swirl inside it, faster while you speak.
+- Dictation no longer hides the Windows taskbar, and you can click things on screen while it transcribes.
+- The "Press L3 for keyboard" prompt no longer appears on the shutdown and restart screen.
+
 ## v0.5.2
 
 - L1 / R1 move the text cursor one character again, and repeat while held. Hold Select and press L1 / R1 to jump a whole word.

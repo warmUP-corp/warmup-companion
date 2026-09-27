@@ -102,6 +102,10 @@ fn effective_userland_poll_mode() -> PollMode {
     mode
 }
 
+pub fn poll_mode_is_sleep() -> bool {
+    effective_userland_poll_mode() == PollMode::Sleep
+}
+
 fn should_sleep_for_game(
     desktop_connected: bool,
     game_active: bool,
@@ -282,7 +286,7 @@ impl GamepadBackend for SdlBackend {
     fn live_input_summary(&self) -> String {
         match effective_userland_poll_mode() {
             PollMode::Full => self.input.live_input_summary(),
-            PollMode::Sleep => "sleep (guide only)".to_string(),
+            PollMode::Sleep => "sleep (guide + record/screenshot chords)".to_string(),
         }
     }
 }
@@ -451,7 +455,7 @@ fn sdl_thread_main(
         if let Ok(mut s) = shared.summary.lock() {
             *s = match mode {
                 PollMode::Full => input.live_input_summary(),
-                PollMode::Sleep => "sleep (guide only)".to_string(),
+                PollMode::Sleep => "sleep (guide + record/screenshot chords)".to_string(),
             };
         }
         // Device-feature reads — only in Full mode (Sleep keeps the pad quiet).

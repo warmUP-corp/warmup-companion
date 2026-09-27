@@ -101,6 +101,7 @@ pub enum Button {
     Right,
     Guide,
     Touchpad,
+    Qam,
 }
 
 impl Button {
@@ -125,6 +126,7 @@ impl Button {
             Button::Right => "RIGHT",
             Button::Guide => "GUIDE",
             Button::Touchpad => "TOUCHPAD",
+            Button::Qam => "QAM",
         }
     }
 }
@@ -148,6 +150,15 @@ const TRACKED_BUTTONS: &[SdlButton] = &[
     SdlButton::DPadRight,
     SdlButton::Guide,
     SdlButton::Touchpad,
+    SdlButton::Misc1,
+];
+
+const SLEEP_TRACKED_BUTTONS: &[SdlButton] = &[
+    SdlButton::Guide,
+    SdlButton::Back,
+    SdlButton::LeftShoulder,
+    SdlButton::RightShoulder,
+    SdlButton::Misc1,
 ];
 
 /// Maps an SDL3 button to our canonical [`Button`]. Returns `None` for buttons
@@ -170,6 +181,7 @@ fn sdl_to_button(btn: SdlButton) -> Option<Button> {
         SdlButton::DPadRight => Button::Right,
         SdlButton::Guide => Button::Guide,
         SdlButton::Touchpad => Button::Touchpad,
+        SdlButton::Misc1 => Button::Qam,
         _ => return None,
     })
 }
@@ -335,7 +347,7 @@ impl GamepadInput {
         if let Some(ref gp) = self.active_gamepad {
             let tracked = match mode {
                 PollMode::Full => TRACKED_BUTTONS,
-                PollMode::Sleep => &[SdlButton::Guide][..],
+                PollMode::Sleep => SLEEP_TRACKED_BUTTONS,
             };
             for &btn in tracked {
                 let pressed = gp.button(btn);

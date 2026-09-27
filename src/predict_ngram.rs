@@ -58,6 +58,39 @@ pub fn trigram_score(w0: u16, w1: u16, next: u16) -> u32 {
         .unwrap_or(0)
 }
 
+pub fn bigram_row(prev: u16) -> &'static [u16] {
+    tables()
+        .bigram_next
+        .get(prev as usize)
+        .map(|r| r.as_slice())
+        .unwrap_or(&[])
+}
+
+pub fn trigram_row(w0: u16, w1: u16) -> &'static [u16] {
+    let t = tables();
+    t.trigram_pair
+        .binary_search_by_key(&(w0, w1), |p| *p)
+        .ok()
+        .and_then(|i| t.trigram_next.get(i))
+        .map(|r| r.as_slice())
+        .unwrap_or(&[])
+}
+
+pub fn top_unigrams() -> &'static [u16] {
+    static TOP: OnceLock<Vec<u16>> = OnceLock::new();
+    TOP.get_or_init(|| {
+        let t = tables();
+        let mut ids: Vec<u16> = (0..t.lexicon.len() as u16).collect();
+        ids.sort_by(|a, b| {
+            t.unigram[*b as usize]
+                .cmp(&t.unigram[*a as usize])
+                .then_with(|| a.cmp(b))
+        });
+        ids.truncate(64);
+        ids
+    })
+}
+
 pub fn rank_score(prev: Option<u16>, prev2: Option<u16>, next: u16, personal: bool) -> u32 {
     let mut score = unigram_score(next);
     if let Some(p) = prev {

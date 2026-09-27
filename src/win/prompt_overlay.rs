@@ -18,11 +18,12 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::ValidateRect;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, KillTimer,
-    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, HMENU, HTTRANSPARENT,
-    HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW,
-    SW_HIDE, SW_SHOWNOACTIVATE, WM_DESTROY, WM_NCHITTEST, WM_PAINT, WM_TIMER, WS_EX_NOACTIVATE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, GetWindowLongPtrW, KillTimer,
+    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
+    HMENU, HTTRANSPARENT, HWND_TOPMOST, LWA_ALPHA, SM_SHUTTINGDOWN, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, WM_DESTROY, WM_NCHITTEST, WM_PAINT,
+    WM_TIMER, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use super::desktop;
@@ -340,12 +341,12 @@ fn overlay_rect(visual: PromptVisual, screen_w: i32, screen_h: i32) -> PromptRec
 }
 
 unsafe fn target_rect_for_visual(visual: PromptVisual) -> PromptRect {
-    let m = super::monitor::active_monitor_rect();
-    let mut rect = overlay_rect(
-        visual,
-        (m.right - m.left).max(1),
-        (m.bottom - m.top).max(1),
-    );
+    let m = if fullscreen_border(visual) {
+        super::monitor::active_work_rect()
+    } else {
+        super::monitor::active_monitor_rect()
+    };
+    let mut rect = overlay_rect(visual, (m.right - m.left).max(1), (m.bottom - m.top).max(1));
     rect.x += m.left;
     rect.y += m.top;
     rect
@@ -403,7 +404,8 @@ pub fn tick(vk_open: bool) {
 
     let userland_debug = crate::config::prompt_userland_debug();
     let on_winlogon = super::surface::input().is_some_and(|s| s.is_winlogon())
-        && !super::native_keyboard::yield_logon_to_native();
+        && !super::native_keyboard::yield_logon_to_native()
+        && unsafe { GetSystemMetrics(SM_SHUTTINGDOWN) } == 0;
     let connected = crate::debug_state::snapshot().connected;
     c.update_connected_visual(connected, now);
     let connected_intro_active = c.connected_visual_until.is_some_and(|until| now < until);
@@ -628,8 +630,12 @@ fn panel_size_for_visual(visual: PromptVisual) -> (i32, i32) {
 unsafe fn create_prompt_window() -> Result<HWND, String> {
     let instance = GetModuleHandleW(None).map_err(|e| format!("GetModuleHandleW: {e}"))?;
     let rect = target_rect_for_visual(VISUAL_STATE.with(|state| state.get()));
-    CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
+    let hwnd = CreateWindowExW(
+        WS_EX_TOPMOST
+            | WS_EX_TOOLWINDOW
+            | WS_EX_NOACTIVATE
+            | WS_EX_NOREDIRECTIONBITMAP
+            | WS_EX_LAYERED,
         WINDOW_CLASS,
         w!("Warmup Prompt Overlay"),
         WS_POPUP,
@@ -642,7 +648,14 @@ unsafe fn create_prompt_window() -> Result<HWND, String> {
         windows::Win32::Foundation::HINSTANCE(instance.0),
         None,
     )
-    .map_err(|e| format!("CreateWindowExW: {e}"))
+    .map_err(|e| format!("CreateWindowExW: {e}"))?;
+    let _ = SetLayeredWindowAttributes(
+        hwnd,
+        windows::Win32::Foundation::COLORREF(0),
+        255,
+        LWA_ALPHA,
+    );
+    Ok(hwnd)
 }
 
 unsafe extern "system" fn prompt_wndproc(
@@ -715,6 +728,7 @@ fn render_prompt(hwnd: HWND) {
     let bg = theme.bg.unwrap_or(DEFAULT_BG);
     let border = theme.border.or(theme.accent).unwrap_or(DEFAULT_BORDER);
     let text = theme.text.unwrap_or(DEFAULT_TEXT);
+    let style = crate::config::vk_style();
     let visual = VISUAL_STATE.with(|state| state.get());
     let snapshot = crate::debug_state::snapshot();
     // Pill ⇄ card blend, and which pill (ready / no pad) sits under the card.
@@ -774,6 +788,7 @@ fn render_prompt(hwnd: HWND) {
                             title: &title,
                             controller_label,
                             card_t,
+                            style,
                         })
                     } else {
                         r.draw_prompt_card(&vk_renderer::PromptCard {
@@ -788,6 +803,7 @@ fn render_prompt(hwnd: HWND) {
                             title: &title,
                             controller_label,
                             card_t,
+                            style,
                         })
                     };
                     if let Err(e) = result {

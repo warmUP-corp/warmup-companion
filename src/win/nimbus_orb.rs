@@ -72,7 +72,7 @@ struct NimbusCb {
     ambient: f32,
     exposure: f32,
     alpha_gain: f32,
-    _pad0: f32,
+    swirl: f32,
     _pad1: f32,
     light: [f32; 4],
     shadow: [f32; 4],
@@ -112,7 +112,7 @@ cbuffer Nimbus : register(b0) {
     float uP_ambient;
     float uP_exposure;
     float uP_alphaGain;
-    float _pad0;
+    float uP_swirl;
     float _pad1;
     float4 uC_light;
     float4 uC_shadow;
@@ -133,6 +133,12 @@ float phaseHG(float c, float g) {
     return (1.0 - g2) / pow(max(1.0 + g2 - 2.0 * g * c, 0.0001), 1.5);
 }
 
+float3 rotateAxis(float3 p, float3 axis, float angle) {
+    float s = sin(angle);
+    float c = cos(angle);
+    return p * c + cross(axis, p) * s + axis * dot(axis, p) * (1.0 - c);
+}
+
 float density(float3 p, float nimbusDensity) {
     float shell = 1.0 - length(p) / uP_radius;
     if (shell <= 0.0) return 0.0;
@@ -143,7 +149,14 @@ float density(float3 p, float nimbusDensity) {
     float pulse = saturate(uOutput);
     float selfFold = 0.55 + 0.3 * sin(uP_speed * 2.2);
     float amp = selfFold + 0.5 * voice + 0.95 * pulse;
-    float3 q = p * (uP_scale * (1.0 + 0.16 * voice + 0.5 * pulse));
+    float3 axis = normalize(float3(0.35 * sin(uP_swirl), 1.0, 0.35 * cos(uP_swirl)));
+    float3 swirled = rotateAxis(p, axis, uP_swirl);
+    swirled += float3(
+        sin(uP_swirl + 1.7),
+        cos(uP_swirl * 2.0 + 0.4),
+        sin(uP_swirl + 2.9)
+    ) * 0.05;
+    float3 q = swirled * (uP_scale * (1.0 + 0.16 * voice + 0.5 * pulse));
     float f = 1.0;
     [unroll]
     for (int k = 0; k < DENSITY_OCT; k++) {
@@ -252,6 +265,7 @@ pub struct NimbusOrb {
     noise_phase: f32,
     /// Light angle. Steps forward on its own and does not follow the mic.
     light_phase: f32,
+    swirl_phase: f32,
     /// Seconds the orb has been alive, for the transcription pulse only.
     age: f32,
     vol_in: f32,
@@ -372,6 +386,7 @@ impl NimbusOrb {
             bitmap,
             noise_phase: 0.0,
             light_phase: 0.0,
+            swirl_phase: 0.0,
             age: 0.0,
             vol_in,
             last: None,
@@ -425,6 +440,12 @@ impl NimbusOrb {
         };
         self.noise_phase += dt * noise_rate;
         self.light_phase += dt * 0.08;
+        let swirl_rate = match mood {
+            NimbusMood::Idle => 0.15,
+            NimbusMood::Speaking { .. } => 0.15 + 0.4 * level,
+            NimbusMood::Thinking => 0.30,
+        };
+        self.swirl_phase = (self.swirl_phase + dt * swirl_rate).rem_euclid(std::f32::consts::TAU);
         let cb = NimbusCb {
             res_x: RT as f32,
             res_y: RT as f32,
@@ -450,7 +471,7 @@ impl NimbusOrb {
             ambient: 0.06 + 0.08 * glow,
             exposure: 0.50 + 0.50 * glow,
             alpha_gain: 1.0,
-            _pad0: 0.0,
+            swirl: self.swirl_phase,
             _pad1: 0.0,
             light: theme_light(accent),
             shadow: theme_shade(accent),

@@ -6,9 +6,10 @@ use std::sync::Mutex;
 use crate::predict_dict;
 use crate::predict_ngram;
 
-const MIN_PREFIX_LEN: usize = 2;
-const MAX_CANDIDATES: usize = 5;
-const VISIBLE: usize = 3;
+const MIN_PREFIX_LEN: usize = 1;
+const MAX_CANDIDATES: usize = 7;
+const MONO_SLOTS: usize = 3;
+const SENTENCE_STARTERS: &[&str] = &["I", "The", "I'm", "Thanks", "Hi", "It", "We"];
 
 fn new_state() -> PredictState {
     PredictState {
@@ -19,6 +20,9 @@ fn new_state() -> PredictState {
         highlight: 0,
         candidate_engaged: false,
         personal: HashSet::new(),
+        sentence_start: true,
+        context_known: true,
+        slots: MAX_CANDIDATES,
     }
 }
 
@@ -34,15 +38,39 @@ struct PredictState {
     /// True after LB/RB cycle while the strip is showing (A may commit).
     candidate_engaged: bool,
     personal: HashSet<String>,
+    sentence_start: bool,
+    context_known: bool,
+    slots: usize,
 }
 
 /// Single source of truth for the candidate strip: the visible chips, which slot
 /// is highlighted, and whether the user engaged the strip with LB/RB (so A may
 /// commit). `strip()` returns this; `None` means no strip should show.
 pub struct StripState {
-    pub visible: [String; VISIBLE],
+    pub visible: Vec<String>,
     pub highlight_slot: usize,
     pub engaged: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Choice {
+    label: String,
+    insert: String,
+    literal: bool,
+}
+
+impl Choice {
+    fn word(w: String) -> Self {
+        Choice {
+            label: w.clone(),
+            insert: w,
+            literal: false,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.label.is_empty()
+    }
 }
 
 fn lexicon() -> &'static [&'static str] {
@@ -80,23 +108,109 @@ pub fn reset() {
     s.ranked.clear();
     s.highlight = 0;
     s.candidate_engaged = false;
+    s.sentence_start = true;
+    s.context_known = true;
     s.enabled = predictions_enabled();
     predict_dict::load_personal(&mut s.personal);
+    refresh_ranked(&mut s);
+}
+
+fn is_mono(s: &PredictState) -> bool {
+    s.slots == MONO_SLOTS
+}
+
+fn capitalize(word: &str) -> String {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+fn wants_capital(s: &PredictState) -> bool {
+    s.sentence_start
+        || s
+            .partial
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase())
+}
+
+fn choices(s: &PredictState) -> Vec<Choice> {
+    let cap = wants_capital(s);
+    let cased = |w: &String| if cap { capitalize(w) } else { w.clone() };
+    if !is_mono(s) {
+        return s
+            .ranked
+            .iter()
+            .take(MAX_CANDIDATES)
+            .map(|w| Choice::word(cased(w)))
+            .collect();
+    }
+    let pick = |words: &[String], i: usize| {
+        words
+            .get(i)
+            .map(|w| Choice::word(cased(w)))
+            .unwrap_or_default()
+    };
+    if s.partial.is_empty() {
+        return vec![pick(&s.ranked, 1), pick(&s.ranked, 0), pick(&s.ranked, 2)];
+    }
+    let rest: Vec<String> = s
+        .ranked
+        .iter()
+        .filter(|w| !w.eq_ignore_ascii_case(&s.partial))
+        .cloned()
+        .collect();
+    let literal = Choice {
+        label: format!("\u{201C}{}\u{201D}", s.partial),
+        insert: s.partial.clone(),
+        literal: true,
+    };
+    vec![literal, pick(&rest, 0), pick(&rest, 1)]
+}
+
+fn default_highlight(s: &PredictState) -> usize {
+    let list = choices(s);
+    let preferred = if is_mono(s) { 1 } else { 0 };
+    if list.get(preferred).is_some_and(|c| !c.is_empty()) {
+        return preferred;
+    }
+    list.iter().position(|c| !c.is_empty()).unwrap_or(0)
 }
 
 fn refresh_ranked(s: &mut PredictState) {
     s.ranked.clear();
     s.highlight = 0;
     s.candidate_engaged = false;
-    if !s.enabled || s.partial.len() < MIN_PREFIX_LEN {
+    if !s.enabled {
         return;
     }
-    let prefix = s.partial.as_str();
+    if s.partial.is_empty() {
+        if s.context_known {
+            rank_next_words(s);
+        }
+    } else if s.partial.len() >= MIN_PREFIX_LEN {
+        rank_prefix(s);
+    }
+    s.highlight = default_highlight(s);
+}
+
+fn context_ids(s: &PredictState) -> (Option<u16>, Option<u16>) {
+    let n = s.words.len();
     let prev = s.words.last().and_then(|w| predict_ngram::word_id(w));
-    let prev2 = s
-        .words
-        .get(s.words.len().saturating_sub(2))
-        .and_then(|w| predict_ngram::word_id(w));
+    let prev2 = if n >= 2 {
+        predict_ngram::word_id(&s.words[n - 2])
+    } else {
+        None
+    };
+    (prev, prev2)
+}
+
+fn rank_prefix(s: &mut PredictState) {
+    let prefix = s.partial.to_ascii_lowercase();
+    let prefix = prefix.as_str();
+    let (prev, prev2) = context_ids(s);
 
     let mut scored: Vec<(u32, String)> = Vec::new();
     for word in words_with_prefix(prefix) {
@@ -124,20 +238,62 @@ fn refresh_ranked(s: &mut PredictState) {
     }
 }
 
+fn rank_next_words(s: &mut PredictState) {
+    if s.sentence_start {
+        s.ranked
+            .extend(SENTENCE_STARTERS.iter().map(|w| w.to_string()));
+        return;
+    }
+    let (prev, prev2) = context_ids(s);
+    let mut ids: Vec<u16> = Vec::new();
+    if let (Some(p0), Some(p1)) = (prev2, prev) {
+        ids.extend_from_slice(predict_ngram::trigram_row(p0, p1));
+    }
+    if let Some(p) = prev {
+        ids.extend_from_slice(predict_ngram::bigram_row(p));
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    let mut scored: Vec<(u32, u16)> = ids
+        .into_iter()
+        .map(|id| (predict_ngram::rank_score(prev, prev2, id, false), id))
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let lex = lexicon();
+    let fill = predict_ngram::top_unigrams().iter().map(|id| (0, *id));
+    for (_, id) in scored.into_iter().chain(fill) {
+        if s.ranked.len() >= MAX_CANDIDATES {
+            break;
+        }
+        if let Some(w) = lex.get(id as usize) {
+            if !s.ranked.iter().any(|r| r == w) {
+                s.ranked.push(w.to_string());
+            }
+        }
+    }
+}
+
 /// The current candidate strip, or `None` when no strip should show. The one
 /// query for both rendering and the LB/RB context-swap decision.
-pub fn strip() -> Option<StripState> {
-    let s = STATE.lock().ok()?;
+pub fn strip(slots: usize) -> Option<StripState> {
+    let mut s = STATE.lock().ok()?;
+    let slots = slots.max(1);
+    if s.slots != slots {
+        s.slots = slots;
+        s.highlight = default_highlight(&s);
+    }
     if !strip_active_inner(&s) {
         return None;
     }
-    let start = viewport_start(s.highlight, s.ranked.len());
-    let mut visible = [String::new(), String::new(), String::new()];
-    for (i, slot) in visible.iter_mut().enumerate() {
-        if let Some(w) = s.ranked.get(start + i) {
-            *slot = w.clone();
-        }
-    }
+    let list = choices(&s);
+    let start = viewport_start(s.highlight, list.len(), slots);
+    let visible = (0..slots)
+        .map(|i| {
+            list.get(start + i)
+                .map(|c| c.label.clone())
+                .unwrap_or_default()
+        })
+        .collect();
     let highlight_slot = s.highlight.saturating_sub(start);
     Some(StripState {
         visible,
@@ -147,48 +303,49 @@ pub fn strip() -> Option<StripState> {
 }
 
 fn strip_active_inner(s: &PredictState) -> bool {
-    s.enabled && s.partial.len() >= MIN_PREFIX_LEN && !s.ranked.is_empty()
+    s.enabled && !s.ranked.is_empty()
 }
 
-fn viewport_start(highlight: usize, total: usize) -> usize {
-    if total <= VISIBLE {
+fn viewport_start(highlight: usize, total: usize, slots: usize) -> usize {
+    if total <= slots {
         return 0;
     }
-    if highlight <= 1 {
-        0
-    } else if highlight >= total.saturating_sub(2) {
-        total - VISIBLE
-    } else {
-        highlight - 1
+    highlight.saturating_sub(slots / 2).min(total - slots)
+}
+
+fn step_highlight(s: &mut PredictState, forward: bool) -> bool {
+    if !strip_active_inner(s) {
+        return false;
     }
+    let list = choices(s);
+    let n = list.len();
+    if n == 0 {
+        return false;
+    }
+    let mut i = s.highlight.min(n - 1);
+    for _ in 0..n {
+        i = if forward { (i + 1) % n } else { (i + n - 1) % n };
+        if !list[i].is_empty() {
+            break;
+        }
+    }
+    s.highlight = i;
+    s.candidate_engaged = true;
+    true
 }
 
 pub fn cycle_next() -> bool {
     let Ok(mut s) = STATE.lock() else {
         return false;
     };
-    if s.ranked.is_empty() {
-        return false;
-    }
-    s.highlight = (s.highlight + 1) % s.ranked.len();
-    s.candidate_engaged = true;
-    true
+    step_highlight(&mut s, true)
 }
 
 pub fn cycle_prev() -> bool {
     let Ok(mut s) = STATE.lock() else {
         return false;
     };
-    if s.ranked.is_empty() {
-        return false;
-    }
-    s.highlight = if s.highlight == 0 {
-        s.ranked.len() - 1
-    } else {
-        s.highlight - 1
-    };
-    s.candidate_engaged = true;
-    true
+    step_highlight(&mut s, false)
 }
 
 pub fn engage() -> bool {
@@ -215,6 +372,10 @@ pub fn strip_engaged() -> bool {
     s.candidate_engaged && strip_active_inner(&s)
 }
 
+fn ends_sentence(c: char) -> bool {
+    matches!(c, '.' | '!' | '?' | '\n' | '\r')
+}
+
 pub fn on_char(c: char) {
     let Ok(mut s) = STATE.lock() else {
         return;
@@ -224,27 +385,30 @@ pub fn on_char(c: char) {
         return;
     }
     if c.is_ascii_alphabetic() {
-        s.partial.push(c.to_ascii_lowercase());
-        refresh_ranked(&mut s);
+        s.partial.push(c);
     } else if c.is_ascii_digit() || c == '_' {
         finish_word(&mut s);
         s.partial.push(c);
-        refresh_ranked(&mut s);
+    } else if ends_sentence(c) {
+        finish_word(&mut s);
+        start_sentence(&mut s);
     } else {
         finish_word(&mut s);
+        s.context_known = true;
     }
+    refresh_ranked(&mut s);
 }
 
 pub fn on_backspace() {
     let Ok(mut s) = STATE.lock() else {
         return;
     };
-    if !s.partial.is_empty() {
-        s.partial.pop();
-        refresh_ranked(&mut s);
-    } else if s.words.pop().is_some() {
-        refresh_ranked(&mut s);
+    if s.partial.pop().is_none() {
+        s.words.clear();
+        s.sentence_start = false;
+        s.context_known = false;
     }
+    refresh_ranked(&mut s);
 }
 
 pub fn on_space() {
@@ -252,6 +416,8 @@ pub fn on_space() {
         return;
     };
     finish_word(&mut s);
+    s.context_known = true;
+    refresh_ranked(&mut s);
 }
 
 pub fn on_boundary() {
@@ -259,6 +425,8 @@ pub fn on_boundary() {
         return;
     };
     finish_word(&mut s);
+    start_sentence(&mut s);
+    refresh_ranked(&mut s);
 }
 
 pub fn on_caret_move() {
@@ -267,12 +435,23 @@ pub fn on_caret_move() {
     };
     s.partial.clear();
     s.words.clear();
+    s.sentence_start = false;
+    s.context_known = false;
     clear_strip(&mut s);
 }
 
+fn start_sentence(s: &mut PredictState) {
+    s.words.clear();
+    s.sentence_start = true;
+    s.context_known = true;
+}
+
 fn finish_word(s: &mut PredictState) {
+    if !s.partial.is_empty() {
+        s.sentence_start = false;
+    }
     if s.partial.len() >= 2 {
-        let w = std::mem::take(&mut s.partial);
+        let w = std::mem::take(&mut s.partial).to_ascii_lowercase();
         record_completed(s, &w);
     }
     clear_strip(s);
@@ -328,26 +507,67 @@ fn safe_to_learn_from_focus() -> bool {
 pub fn commit_if_engaged(
     sink: &mut dyn crate::vk_commit::TextSink,
 ) -> Option<crate::vk_commit::Committed> {
-    let (word, del) = {
+    commit_choice(sink, |s| s.candidate_engaged.then_some(s.highlight))
+}
+
+pub fn commit_slot(
+    slot: usize,
+    sink: &mut dyn crate::vk_commit::TextSink,
+) -> Option<crate::vk_commit::Committed> {
+    commit_choice(sink, |s| {
+        let n = choices(s).len();
+        Some(viewport_start(s.highlight, n, s.slots.max(1)) + slot)
+    })
+}
+
+fn commit_choice(
+    sink: &mut dyn crate::vk_commit::TextSink,
+    pick: impl FnOnce(&PredictState) -> Option<usize>,
+) -> Option<crate::vk_commit::Committed> {
+    let (choice, del) = {
         let s = STATE.lock().ok()?;
-        if !(s.candidate_engaged && strip_active_inner(&s)) {
+        if !strip_active_inner(&s) {
             return None;
         }
-        let idx = s.highlight.min(s.ranked.len() - 1);
-        (s.ranked[idx].clone(), s.partial.chars().count())
-    };
-    let res = crate::vk_commit::commit(&word, del, sink);
-    if res.injected {
-        // After accepting a chip, append a space so the next word starts cleanly
-        // (as if the user typed the word then pressed space). Only the field text
-        // gets the space — the learned word / VK context buffer below stays clean.
-        let _ = sink.replace(0, " ");
-    }
-    if let Ok(mut s) = STATE.lock() {
-        if res.injected {
-            record_completed(&mut s, &word);
+        let idx = pick(&s)?;
+        let choice = choices(&s).into_iter().nth(idx)?;
+        if choice.is_empty() {
+            return None;
         }
+        let del = if choice.literal {
+            0
+        } else {
+            s.partial.chars().count()
+        };
+        (choice, del)
+    };
+    let res = if choice.literal {
+        crate::vk_commit::Committed {
+            word: choice.insert.clone(),
+            deleted: 0,
+            injected: sink.replace(0, " ").is_ok(),
+        }
+    } else {
+        let res = crate::vk_commit::commit(&choice.insert, del, sink);
+        if res.injected {
+            // After accepting a chip, append a space so the next word starts cleanly
+            // (as if the user typed the word then pressed space). Only the field text
+            // gets the space — the learned word / VK context buffer below stays clean.
+            let _ = sink.replace(0, " ");
+        }
+        res
+    };
+    if let Ok(mut s) = STATE.lock() {
         clear_strip(&mut s);
+        if res.injected {
+            let word = choice.insert.to_ascii_lowercase();
+            if !choice.literal || word.len() >= 2 {
+                record_completed(&mut s, &word);
+            }
+            s.sentence_start = false;
+            s.context_known = true;
+            refresh_ranked(&mut s);
+        }
     }
     Some(res)
 }
@@ -366,14 +586,28 @@ mod tests {
         on_space();
     }
 
+    fn type_chars(s: &str) {
+        for c in s.chars() {
+            on_char(c);
+        }
+    }
+
+    fn fresh(slots: usize) {
+        reset();
+        let _ = strip(slots);
+    }
+
+    fn highlighted_insert() -> String {
+        let s = STATE.lock().unwrap();
+        choices(&s)[s.highlight].insert.clone()
+    }
+
     #[test]
     fn prefix_finds_keyboard() {
         let _g = TEST_LOCK.lock().unwrap();
-        reset();
-        for c in "keyb".chars() {
-            on_char(c);
-        }
-        assert!(strip().is_some());
+        fresh(3);
+        type_chars("keyb");
+        assert!(strip(3).is_some());
         let ranked = STATE.lock().unwrap().ranked.clone();
         assert!(ranked.iter().any(|w| w == "keyboard"));
     }
@@ -381,7 +615,7 @@ mod tests {
     #[test]
     fn bigram_prefers_in_after_the() {
         let _g = TEST_LOCK.lock().unwrap();
-        reset();
+        fresh(7);
         type_word("the");
         on_char('i');
         on_char('n');
@@ -393,23 +627,20 @@ mod tests {
     #[test]
     fn caret_move_drops_partial_word() {
         let _g = TEST_LOCK.lock().unwrap();
-        reset();
-        for c in "keyb".chars() {
-            on_char(c);
-        }
+        fresh(3);
+        type_chars("keyb");
         on_caret_move();
-        assert!(strip().is_none());
+        assert!(strip(3).is_none());
         assert!(STATE.lock().unwrap().words.is_empty());
     }
 
     #[test]
     fn engage_and_disengage_strip() {
         let _g = TEST_LOCK.lock().unwrap();
-        reset();
+        fresh(7);
+        on_caret_move();
         assert!(!engage());
-        for c in "keyb".chars() {
-            on_char(c);
-        }
+        type_chars("keyb");
         assert!(engage());
         assert!(strip_engaged());
         disengage();
@@ -418,59 +649,154 @@ mod tests {
 
     #[test]
     fn viewport_at_end() {
-        assert_eq!(viewport_start(4, 5), 2);
-        assert_eq!(viewport_start(0, 5), 0);
+        assert_eq!(viewport_start(4, 5, 3), 2);
+        assert_eq!(viewport_start(0, 5, 3), 0);
+        assert_eq!(viewport_start(1, 5, 3), 0);
+        assert_eq!(viewport_start(2, 5, 3), 1);
+        assert_eq!(viewport_start(3, 5, 3), 2);
+        assert_eq!(viewport_start(6, 7, 7), 0);
+        assert_eq!(viewport_start(6, 7, 3), 4);
     }
 
     #[test]
     fn a_does_not_commit_until_shoulder_cycle() {
         let _g = TEST_LOCK.lock().unwrap();
-        reset();
-        for c in "keyb".chars() {
-            on_char(c);
-        }
-        assert!(strip().is_some());
-        assert!(!strip().unwrap().engaged);
+        fresh(3);
+        type_chars("keyb");
+        assert!(strip(3).is_some());
+        assert!(!strip(3).unwrap().engaged);
         let mut sink = crate::vk_commit::BufSink::new("keyb");
         assert!(commit_if_engaged(&mut sink).is_none());
-        assert_eq!(sink.buf, "keyb"); // nothing injected
+        assert_eq!(sink.buf, "keyb");
         assert!(cycle_next());
-        assert!(strip().unwrap().engaged);
+        assert!(strip(3).unwrap().engaged);
     }
 
     #[test]
     fn commit_replaces_prefix_with_word() {
         let _g = TEST_LOCK.lock().unwrap();
-        reset();
-        for c in "keyb".chars() {
-            on_char(c);
-        }
-        cycle_next(); // engage the strip with LB/RB
-        let highlighted = {
-            let s = STATE.lock().unwrap();
-            s.ranked[s.highlight].clone()
-        };
+        fresh(7);
+        type_word("the");
+        type_chars("keyb");
+        cycle_next();
+        let highlighted = highlighted_insert();
         let mut sink = crate::vk_commit::BufSink::new("keyb");
         let res = commit_if_engaged(&mut sink).expect("engaged commit");
         assert!(res.injected);
         assert_eq!(res.deleted, 4);
-        assert_eq!(sink.buf, format!("{highlighted} ")); // word + trailing space on accept
-                                                         // landed commit records the word (no trailing space) into the VK-only context buffer
+        assert_eq!(sink.buf, format!("{highlighted} "));
         assert_eq!(STATE.lock().unwrap().words.last().unwrap(), &highlighted);
     }
 
     #[test]
     fn failed_inject_does_not_record() {
         let _g = TEST_LOCK.lock().unwrap();
-        reset();
-        for c in "keyb".chars() {
-            on_char(c);
-        }
+        fresh(7);
+        on_caret_move();
+        type_chars("keyb");
         cycle_next();
         let mut sink = crate::vk_commit::BufSink::failing("keyb");
         let res = commit_if_engaged(&mut sink).expect("attempted commit");
         assert!(!res.injected);
-        assert_eq!(sink.buf, "keyb"); // untouched
-        assert!(STATE.lock().unwrap().words.is_empty()); // not recorded
+        assert_eq!(sink.buf, "keyb");
+        assert!(STATE.lock().unwrap().words.is_empty());
+    }
+
+    #[test]
+    fn opening_shows_capitalized_sentence_starters() {
+        let _g = TEST_LOCK.lock().unwrap();
+        fresh(7);
+        let strip = strip(7).expect("strip shows before typing");
+        assert!(strip.visible.iter().any(|w| w == "I"), "{:?}", strip.visible);
+        assert!(strip
+            .visible
+            .iter()
+            .filter(|w| !w.is_empty())
+            .all(|w| w.chars().next().unwrap().is_uppercase()));
+    }
+
+    #[test]
+    fn partial_at_sentence_start_is_capitalized() {
+        let _g = TEST_LOCK.lock().unwrap();
+        fresh(7);
+        type_chars("keyb");
+        let visible = strip(7).unwrap().visible;
+        assert!(visible.iter().any(|w| w == "Keyboard"), "{visible:?}");
+        type_word("");
+        on_char('.');
+        on_space();
+        let visible = strip(7).unwrap().visible;
+        assert!(visible.iter().any(|w| w == "The"), "{visible:?}");
+    }
+
+    #[test]
+    fn next_word_follows_thank() {
+        let _g = TEST_LOCK.lock().unwrap();
+        fresh(7);
+        type_word("thank");
+        let visible = strip(7).expect("next-word strip").visible;
+        assert!(visible.iter().any(|w| w == "you"), "{visible:?}");
+    }
+
+    #[test]
+    fn empty_partial_commit_inserts_word_and_space() {
+        let _g = TEST_LOCK.lock().unwrap();
+        fresh(7);
+        type_word("thank");
+        {
+            let mut s = STATE.lock().unwrap();
+            let idx = choices(&s).iter().position(|c| c.insert == "you").unwrap();
+            s.highlight = idx;
+            s.candidate_engaged = true;
+        }
+        let mut sink = crate::vk_commit::BufSink::new("thank ");
+        let res = commit_if_engaged(&mut sink).expect("engaged commit");
+        assert!(res.injected);
+        assert_eq!(res.deleted, 0);
+        assert_eq!(sink.buf, "thank you ");
+        assert!(strip(7).is_some(), "next-word strip after commit");
+        let words = STATE.lock().unwrap().words.clone();
+        assert_eq!(words, vec!["thank".to_string(), "you".to_string()]);
+    }
+
+    #[test]
+    fn mono_puts_best_prediction_in_the_middle() {
+        let _g = TEST_LOCK.lock().unwrap();
+        fresh(3);
+        type_word("thank");
+        let ranked = STATE.lock().unwrap().ranked.clone();
+        let strip = strip(3).unwrap();
+        assert_eq!(strip.visible, vec![ranked[1].clone(), ranked[0].clone(), ranked[2].clone()]);
+        assert_eq!(strip.highlight_slot, 1);
+    }
+
+    #[test]
+    fn mono_typing_shows_literal_left_and_commits_it() {
+        let _g = TEST_LOCK.lock().unwrap();
+        fresh(3);
+        type_word("the");
+        type_chars("keyb");
+        let strip = strip(3).unwrap();
+        assert_eq!(strip.visible[0], "\u{201C}keyb\u{201D}");
+        assert_eq!(strip.visible[1], "keyboard");
+        assert_eq!(strip.highlight_slot, 1);
+        let mut sink = crate::vk_commit::BufSink::new("the keyb");
+        let res = commit_slot(0, &mut sink).expect("literal commit");
+        assert!(res.injected);
+        assert_eq!(sink.buf, "the keyb ");
+        assert_eq!(STATE.lock().unwrap().words.last().unwrap(), "keyb");
+    }
+
+    #[test]
+    fn mono_cycle_wraps_across_three_columns() {
+        let _g = TEST_LOCK.lock().unwrap();
+        fresh(3);
+        type_word("thank");
+        assert!(cycle_next());
+        assert_eq!(strip(3).unwrap().highlight_slot, 2);
+        assert!(cycle_next());
+        assert_eq!(strip(3).unwrap().highlight_slot, 0);
+        assert!(cycle_prev());
+        assert_eq!(strip(3).unwrap().highlight_slot, 2);
     }
 }

@@ -34,16 +34,16 @@ pub struct KeyboardTheme {
 /// (emulating the warmUP webview keyboard). Pushed from the desktop `config.vkMode`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum VkLayoutMode {
-    #[default]
     Docked,
+    #[default]
     Floating,
 }
 
 #[cfg(feature = "gamepad")]
 pub fn parse_vk_layout_mode(raw: Option<&str>) -> VkLayoutMode {
     match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-        Some("floating") => VkLayoutMode::Floating,
-        _ => VkLayoutMode::Docked,
+        Some("docked") => VkLayoutMode::Docked,
+        _ => VkLayoutMode::Floating,
     }
 }
 
@@ -60,14 +60,37 @@ pub fn vk_layout_mode() -> VkLayoutMode {
     parse_vk_layout_mode(raw.as_deref())
 }
 
-/// Compact docked bar (default). 1.0 = the full reference bar; the default keeps
-/// the keyboard out of the way at ~80% height. Tray "Compact size" toggles it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum VkStyle {
+    #[default]
+    Normal,
+    Mono,
+}
+
+#[cfg(feature = "gamepad")]
+pub fn parse_vk_style(raw: Option<&str>) -> VkStyle {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("mono" | "apple") => VkStyle::Mono,
+        _ => VkStyle::Normal,
+    }
+}
+
+#[cfg(feature = "gamepad")]
+pub fn vk_style() -> VkStyle {
+    let raw = settings_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|text| {
+            text.lines().find_map(|line| {
+                let (k, v) = line.split_once('=')?;
+                (k.trim() == "vk_style").then(|| v.trim().to_string())
+            })
+        });
+    parse_vk_style(raw.as_deref())
+}
+
 #[cfg(feature = "gamepad")]
 pub const COMPACT_BAR_SCALE: f32 = 0.8;
 
-/// Docked-keyboard height multiplier. Defaults to [`COMPACT_BAR_SCALE`]; a value
-/// of `1.0` is the full reference bar. Clamped to a usable range; only the docked
-/// layout uses it (floating already sizes to its content).
 #[cfg(feature = "gamepad")]
 pub fn vk_bar_scale() -> f32 {
     settings_path()
@@ -80,7 +103,7 @@ pub fn vk_bar_scale() -> f32 {
         })
         .and_then(|v| v.parse::<f32>().ok())
         .filter(|v| (0.6..=1.2).contains(v))
-        .unwrap_or(COMPACT_BAR_SCALE)
+        .unwrap_or(1.0)
 }
 
 #[cfg(feature = "gamepad")]
@@ -638,6 +661,10 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
             "docked" | "floating" => Ok(()),
             _ => Err("vk_mode must be docked or floating".to_string()),
         },
+        "vk_style" => match value.trim().to_ascii_lowercase().as_str() {
+            "normal" | "mono" | "refined" | "apple" => Ok(()),
+            _ => Err("vk_style must be normal or mono".to_string()),
+        },
         "vk_bar_scale" => value
             .parse::<f32>()
             .ok()
@@ -680,6 +707,28 @@ mod tests {
         assert_eq!(theme.accent, Some(0x00090807));
         assert_eq!(theme.text, Some(0x000c0b0a));
         assert_eq!(theme.sel_text, Some(0x000f0e0d));
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn vk_layout_defaults_to_floating() {
+        assert_eq!(parse_vk_layout_mode(None), VkLayoutMode::Floating);
+        assert_eq!(parse_vk_layout_mode(Some("docked")), VkLayoutMode::Docked);
+        assert_eq!(parse_vk_layout_mode(Some(" Floating ")), VkLayoutMode::Floating);
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn vk_style_defaults_to_normal() {
+        assert_eq!(parse_vk_style(None), VkStyle::Normal);
+        assert_eq!(parse_vk_style(Some("normal")), VkStyle::Normal);
+        assert_eq!(parse_vk_style(Some(" Mono ")), VkStyle::Mono);
+        assert_eq!(parse_vk_style(Some("bogus")), VkStyle::Normal);
+        assert!(validate_gamepad_setting("vk_style", "mono").is_ok());
+        assert_eq!(parse_vk_style(Some("apple")), VkStyle::Mono);
+        assert!(validate_gamepad_setting("vk_style", "refined").is_ok());
+        assert!(validate_gamepad_setting("vk_style", "Normal").is_ok());
+        assert!(validate_gamepad_setting("vk_style", "ios").is_err());
     }
 
     #[cfg(feature = "gamepad")]
