@@ -589,11 +589,16 @@ impl GamepadPoll {
         }
 
         let changes = dedupe_consecutive_toggle_edges(changes);
+        let sleeping = crate::gamepad_backend::poll_mode_is_sleep();
         let mut edges = Vec::new();
         if let Some(edge) = desktop_reopen {
             edges.push(edge);
         }
         for change in changes {
+            if forward_only_while_sleeping(sleeping, change.button) {
+                crate::pipe_server::publish_button(change.button.as_str(), change.pressed);
+                continue;
+            }
             // Use one mode snapshot for forwarding and local handling. Sending L3 to warmUP
             // while also opening the native VK lets a delayed launcher event open/focus its dock
             // over the user's browser. Keep desktop VK/voice shortcuts local, just as in Browser.
@@ -1097,6 +1102,10 @@ fn is_standalone_guide_wake(
     change.button == Button::Guide && change.pressed && !desktop_connected && standalone_game_active
 }
 
+fn forward_only_while_sleeping(sleeping: bool, button: Button) -> bool {
+    sleeping && button != Button::Guide
+}
+
 fn allows_cursor_injection(game_owns_input: bool, clicks_enabled: bool) -> bool {
     !game_owns_input && clicks_enabled
 }
@@ -1338,9 +1347,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        allows_cursor_injection, companion_owns_stick_click, is_standalone_guide_wake, Button,
-        ButtonChange,
+        allows_cursor_injection, companion_owns_stick_click, forward_only_while_sleeping,
+        is_standalone_guide_wake, Button, ButtonChange,
     };
+
+    #[test]
+    fn sleeping_forwards_record_chord_without_local_actions() {
+        for button in [Button::Select, Button::Rb, Button::Qam] {
+            assert!(forward_only_while_sleeping(true, button));
+            assert!(!forward_only_while_sleeping(false, button));
+        }
+        assert!(!forward_only_while_sleeping(true, Button::Guide));
+    }
 
     #[test]
     fn desktop_keyboard_and_dictation_shortcuts_do_not_reach_launcher() {

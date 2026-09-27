@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- In games, warmUP's record button works from the controller: tap Share, or hold View + RB together for about half a second. The companion now also watches Back, RB and Share while a game runs, only to pass them to warmUP; it still takes no action of its own in game, so pressing View never sends Enter to the game.
+- Share (Xbox Share, PS5 mic, Switch Capture, Steam Deck `…`) now reaches warmUP.
+
 ## v0.5.2
 
 - L1 / R1 move the text cursor one character again, and repeat while held. Hold Select and press L1 / R1 to jump a whole word.
