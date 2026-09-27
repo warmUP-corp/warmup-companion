@@ -94,12 +94,11 @@ pub static GROUPS: [SheetGroup; 3] = [
     },
 ];
 
-pub static LEGEND: [SheetRow; 10] = [
+pub static LEGEND: [SheetRow; 9] = [
     row(&[Button("A")], "Type"),
     row(&[Button("B")], "Delete"),
     row(&[Button("LB"), SLASH, Button("RB")], "Move caret"),
     row(&[Button("RT")], "Shift"),
-    row(&[Button("LT")], "Symbols"),
     row(&[Button("R3")], "Dictate"),
     row(&[Button("SELECT"), Plus, Button("Y")], "Paste"),
     row(&[Text("Tap"), Button("SELECT")], "Suggestions"),
@@ -139,6 +138,10 @@ pub fn columns() -> [Vec<Line>; 3] {
         third.extend(group.rows.iter().copied().map(Line::Row));
     }
     [first, second, third]
+}
+
+pub fn hairline_below(col: &[Line], i: usize) -> bool {
+    matches!(col.get(i), Some(Line::Row(_))) && matches!(col.get(i + 1), Some(Line::Row(_)))
 }
 
 pub fn max_lines() -> usize {
@@ -208,7 +211,7 @@ mod tests {
     #[test]
     fn legend_rows_match_the_sheet_and_the_vk_bindings() {
         let sheet: Vec<&SheetRow> = GROUPS[0].rows.iter().collect();
-        for r in &LEGEND[2..9] {
+        for r in &LEGEND[2..8] {
             assert!(sheet.contains(&r), "{}", r.label);
         }
         assert_eq!(LEGEND[0].keys, &[Button("A")]);
@@ -216,6 +219,57 @@ mod tests {
         let last = LEGEND[LEGEND.len() - 1];
         assert_eq!(last.label, "All shortcuts");
         assert_eq!(last.keys, &[Text("Hold"), Button("SELECT")]);
+    }
+
+    #[test]
+    fn bar_drops_symbols_but_the_sheet_keeps_it() {
+        assert!(LEGEND.iter().all(|r| r.label != "Symbols"));
+        assert!(GROUPS[0].rows.iter().any(|r| r.label == "Symbols"));
+        let labels: Vec<&str> = LEGEND.iter().map(|r| r.label).collect();
+        assert_eq!(
+            labels,
+            [
+                "Type",
+                "Delete",
+                "Move caret",
+                "Shift",
+                "Dictate",
+                "Paste",
+                "Suggestions",
+                "Close keyboard",
+                "All shortcuts"
+            ]
+        );
+    }
+
+    #[test]
+    fn hairlines_skip_headers_and_the_last_row_of_each_group() {
+        let cols = columns();
+        let without: Vec<&str> = cols
+            .iter()
+            .flat_map(|c| {
+                (0..c.len()).filter_map(move |i| match c[i] {
+                    Line::Row(r) if !hairline_below(c, i) => Some(r.label),
+                    _ => None,
+                })
+            })
+            .collect();
+        assert_eq!(
+            without,
+            ["Clear field", "Switch layout", "Open warmUP", "Record (warmUP)"]
+        );
+        for c in &cols {
+            for (i, l) in c.iter().enumerate() {
+                if !matches!(l, Line::Row(_)) {
+                    assert!(!hairline_below(c, i));
+                }
+            }
+        }
+        let firsts: Vec<Line> = cols.iter().map(|c| c[0]).collect();
+        assert_eq!(
+            firsts,
+            [Line::Title("Keyboard"), Line::Blank, Line::Title("Keyboard closed")]
+        );
     }
 
     #[test]

@@ -1288,8 +1288,8 @@ mod tests {
         let dir = std::env::var_os("VK_LEGEND_PNG_DIR").map(std::path::PathBuf::from);
         for style in [crate::config::VkStyle::Mono, crate::config::VkStyle::Normal] {
             for sheet in [false, true] {
-                let (w, h, px) = render_card_png(style, sheet, 1512.0);
-                assert!((w as i32 - 1512).abs() <= 2, "{w}");
+                let (w, h, px) = render_card_png(style, sheet, 1600.0);
+                assert!((w as i32 - 1600).abs() <= 2, "{w}");
                 let lit = px.chunks_exact(4).filter(|p| p[3] > 0).count();
                 assert!(lit > (w * h / 2) as usize);
                 if let Some(dir) = &dir {
@@ -1298,6 +1298,21 @@ mod tests {
                         (crate::config::VkStyle::Mono, true) => "sheet.png",
                         (_, false) => "legend-normal.png",
                         (_, true) => "sheet-normal.png",
+                    };
+                    write_png(&dir.join(name), w, h, &px);
+                }
+                let (fw, fh) = if sheet { (1600, 546) } else { (1600, 60) };
+                let (w, h, px) = unsafe {
+                    let mut r = vk_renderer::VkRenderer::offscreen(fw, fh).expect("offscreen");
+                    r.render_design(style, sheet).expect("design frame")
+                };
+                assert_eq!((w, h), (fw, fh));
+                if let Some(dir) = &dir {
+                    let name = match (style, sheet) {
+                        (crate::config::VkStyle::Mono, false) => "legend-frame-mono.png",
+                        (crate::config::VkStyle::Mono, true) => "sheet-frame-mono.png",
+                        (_, false) => "legend-frame.png",
+                        (_, true) => "sheet-frame.png",
                     };
                     write_png(&dir.join(name), w, h, &px);
                 }
