@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.7.1
+
+- Visual fixes: bigger button icons in the shortcut legend, a shortcut sheet that fills the keyboard, and larger Create/Share hints.
+
 ## v0.7.0
 
 - The open keyboard always shows a slim shortcut legend along the bottom of its panel, drawn with your pad's own button icons: A Type, B Delete, LB / RB Move caret, RT Shift, R3 Dictate, View + Y Paste, tap View Suggestions, L3 Close keyboard, and hold View All shortcuts. The keyboard grows by the strip's height instead of shrinking its keys, and apps it pushes up make room for it. When the legend does not fit, items drop from the middle and "hold View All shortcuts" always stays. The hold-View cheat sheet covers it while shown, and the legend is hidden on the sign-in screen, where dictation is unavailable.
