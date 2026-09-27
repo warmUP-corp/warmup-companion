@@ -54,6 +54,8 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
 use super::nimbus_orb::{drive_scale, mood_drive, NimbusMood, NimbusOrb, ORB_FRAME_FILL};
+use super::controller_tips::TipToken;
+use super::shortcut_sheet::{self, Line};
 use crate::config::VkStyle;
 use crate::vk_nav::{KeyAction, KeyCell, KeyPos, KeyRow};
 
@@ -623,11 +625,8 @@ pub fn floating_pad(scale: f32, style: VkStyle) -> (f32, f32) {
 }
 
 fn is_action_key(action: &KeyAction) -> bool {
-    match action {
-        KeyAction::Char(_) => false,
-        KeyAction::Vk(vk) => *vk != windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE,
-        _ => true,
-    }
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_RETURN};
+    matches!(action, KeyAction::Vk(vk) if *vk == VK_BACK || *vk == VK_RETURN)
 }
 
 fn styled_glyph(spec: &StyleSpec, action: &KeyAction, glyph: String) -> String {
@@ -691,13 +690,16 @@ pub struct VkRenderer {
     /// stays as the fallback.
     nimbus: Option<NimbusOrb>,
     nimbus_failed: bool,
+    sheet_alpha: f32,
+    sheet_tick: Option<Instant>,
+    text_formats: std::cell::RefCell<HashMap<(VkStyle, i32), IDWriteTextFormat>>,
     d3d: ID3D11Device,
     _d2d_device: ID2D1Device,
     _dcomp_device: IDCompositionDevice,
     // Keep the composition target + visual alive for the window's lifetime. Dropping
     // them releases the HWND<->visual binding, so the window shows nothing.
-    _comp_target: IDCompositionTarget,
-    _visual: IDCompositionVisual,
+    _comp_target: Option<IDCompositionTarget>,
+    _visual: Option<IDCompositionVisual>,
 }
 
 pub const REF_MON_W: f32 = 1920.0;
@@ -711,6 +713,232 @@ const SEL_GLIDE_TAU: f32 = 0.045;
 const FLOATING_PANEL_INSET: f32 = 1.0;
 
 pub const STRIP_BAND_H: f32 = 67.0;
+
+const BAR_H: f32 = 60.0;
+const BAR_GLYPH: f32 = 24.0;
+const BAR_SHARE: f32 = 28.0;
+const BAR_GAP: f32 = 10.0;
+const BAR_LABEL_GAP: f32 = 6.0;
+const BAR_LABEL_PX: f32 = 15.0;
+const BAR_CONNECTOR_PX: f32 = 13.0;
+const BAR_PREFIX_PX: f32 = 15.0;
+const BAR_SEP_PX: f32 = 15.0;
+const SHEET_PAD_TOP: f32 = 24.0;
+const SHEET_PAD_X: f32 = 96.0;
+const SHEET_PAD_BOTTOM: f32 = 32.0;
+const SHEET_COL_GAP: f32 = 72.0;
+const SHEET_ROW_H: f32 = 70.0;
+const SHEET_HEADER_PX: f32 = 18.0;
+const SHEET_ACTION_PX: f32 = 19.0;
+const SHEET_TOKEN_PX: f32 = 17.0;
+const SHEET_GLYPH: f32 = 28.0;
+const SHEET_SHARE: f32 = 32.0;
+const SHEET_TOKEN_GAP: f32 = 8.0;
+const SHEET_ACTION_GAP: f32 = 24.0;
+const SHEET_TRAIL: f32 = 24.0;
+const LEGEND_MIN_TEXT_PX: f32 = 11.0;
+const LEGEND_SEP: &str = "\u{00B7}";
+const ALPHA_SECONDARY: f32 = 0xA6 as f32 / 255.0;
+const ALPHA_SEP: f32 = 0x66 as f32 / 255.0;
+const ALPHA_LINE: f32 = 0x14 as f32 / 255.0;
+
+fn text_px(design: f32, u: f32) -> f32 {
+    (design * u).max(LEGEND_MIN_TEXT_PX)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ComboStyle {
+    glyph: f32,
+    share: f32,
+    gap: f32,
+    prefix_px: f32,
+    connector_px: f32,
+}
+
+impl ComboStyle {
+    fn bar(u: f32) -> Self {
+        Self {
+            glyph: BAR_GLYPH * u,
+            share: BAR_SHARE * u,
+            gap: BAR_GAP * u,
+            prefix_px: text_px(BAR_PREFIX_PX, u),
+            connector_px: text_px(BAR_CONNECTOR_PX, u),
+        }
+    }
+
+    fn sheet(u: f32) -> Self {
+        Self {
+            glyph: SHEET_GLYPH * u,
+            share: SHEET_SHARE * u,
+            gap: SHEET_TOKEN_GAP * u,
+            prefix_px: text_px(SHEET_TOKEN_PX, u),
+            connector_px: text_px(SHEET_TOKEN_PX, u),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ComboPart {
+    Icon(VkIcon, bool),
+    Prefix(&'static str),
+    Connector(&'static str),
+}
+
+fn combo_parts(tokens: &[TipToken], family: ControllerIconFamily) -> Vec<ComboPart> {
+    tokens
+        .iter()
+        .filter_map(|&t| match t {
+            TipToken::Button(b) => family.hint_icon(b).map(|i| ComboPart::Icon(i, b == "SELECT")),
+            TipToken::Text(t) if t == "/" => Some(ComboPart::Connector(t)),
+            TipToken::Text(t) => Some(ComboPart::Prefix(t)),
+            TipToken::Plus => Some(ComboPart::Connector("+")),
+            TipToken::Dot => Some(ComboPart::Connector(LEGEND_SEP)),
+        })
+        .collect()
+}
+
+type Measure<'a> = &'a dyn Fn(&str, f32) -> f32;
+
+fn part_width(part: &ComboPart, cs: &ComboStyle, measure: Measure) -> f32 {
+    match *part {
+        ComboPart::Icon(_, true) => cs.share,
+        ComboPart::Icon(_, false) => cs.glyph,
+        ComboPart::Prefix(t) => measure(t, cs.prefix_px),
+        ComboPart::Connector(t) => measure(t, cs.connector_px),
+    }
+}
+
+fn combo_width(parts: &[ComboPart], cs: &ComboStyle, measure: Measure) -> f32 {
+    parts.iter().map(|p| part_width(p, cs, measure)).sum::<f32>()
+        + cs.gap * parts.len().saturating_sub(1) as f32
+}
+
+pub fn legend_band_height(scale: f32, style: VkStyle) -> f32 {
+    ((BAR_H - style_spec(style).pad_y) * ref_unit(scale, style)).max(0.0)
+}
+
+fn tip_item(token: TipToken, family: ControllerIconFamily) -> Option<TipItem> {
+    match token {
+        TipToken::Button(b) => family.hint_icon(b).map(TipItem::Icon),
+        TipToken::Text(t) => Some(TipItem::Text(t, false)),
+        TipToken::Plus => Some(TipItem::Text("+", true)),
+        TipToken::Dot => Some(TipItem::Text(LEGEND_SEP, true)),
+    }
+}
+
+fn bar_item_width(
+    row: &shortcut_sheet::SheetRow,
+    family: ControllerIconFamily,
+    u: f32,
+    measure: Measure,
+) -> f32 {
+    combo_width(&combo_parts(row.keys, family), &ComboStyle::bar(u), measure)
+        + BAR_LABEL_GAP * u
+        + measure(row.label, text_px(BAR_LABEL_PX, u))
+}
+
+fn bar_sep_width(u: f32, measure: Measure) -> f32 {
+    2.0 * BAR_GAP * u + measure(LEGEND_SEP, text_px(BAR_SEP_PX, u))
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct BarLayout {
+    items: Vec<(usize, f32, f32)>,
+    sep_w: f32,
+}
+
+fn bar_layout(widths: &[f32], sep_w: f32, left: f32, right: f32) -> BarLayout {
+    let kept = shortcut_sheet::fit_legend(widths, sep_w, right - left);
+    let total = kept.iter().map(|&i| widths[i]).sum::<f32>()
+        + sep_w * kept.len().saturating_sub(1) as f32;
+    let mut x = (left + right - total) * 0.5;
+    let items = kept
+        .into_iter()
+        .map(|i| {
+            let at = x;
+            x += widths[i] + sep_w;
+            (i, at, widths[i])
+        })
+        .collect();
+    BarLayout { items, sep_w }
+}
+
+fn legend_span(rects: &[KeyRect], client_w: f32) -> (f32, f32) {
+    let (l, r) = rects
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(l, r), kr| (l.min(kr.left), r.max(kr.right)));
+    if l > r {
+        (0.0, client_w)
+    } else {
+        (l.max(0.0), r.min(client_w))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SheetMetrics {
+    u: f32,
+    cs: ComboStyle,
+    row_h: f32,
+    header_px: f32,
+    action_px: f32,
+    action_gap: f32,
+    trail: f32,
+    col_gap: f32,
+}
+
+impl SheetMetrics {
+    fn at(u: f32) -> Self {
+        Self {
+            u,
+            cs: ComboStyle::sheet(u),
+            row_h: SHEET_ROW_H * u,
+            header_px: text_px(SHEET_HEADER_PX, u),
+            action_px: text_px(SHEET_ACTION_PX, u),
+            action_gap: SHEET_ACTION_GAP * u,
+            trail: SHEET_TRAIL * u,
+            col_gap: SHEET_COL_GAP * u,
+        }
+    }
+}
+
+struct SheetColumn {
+    lines: Vec<Line>,
+    combo_w: f32,
+    width: f32,
+}
+
+fn sheet_columns(family: ControllerIconFamily, m: &SheetMetrics, measure: Measure) -> Vec<SheetColumn> {
+    shortcut_sheet::columns()
+        .into_iter()
+        .map(|lines| {
+            let mut combo_w = 0.0f32;
+            let mut label_w = 0.0f32;
+            let mut header_w = 0.0f32;
+            for line in &lines {
+                match line {
+                    Line::Row(row) => {
+                        combo_w = combo_w.max(combo_width(&combo_parts(row.keys, family), &m.cs, measure));
+                        label_w = label_w.max(measure(row.label, m.action_px));
+                    }
+                    Line::Title(t) => header_w = header_w.max(measure(t, m.header_px)),
+                    Line::Blank => {}
+                }
+            }
+            let width = (combo_w + m.action_gap + label_w + m.trail).max(header_w);
+            SheetColumn {
+                lines,
+                combo_w,
+                width,
+            }
+        })
+        .collect()
+}
+
+fn sheet_total_width(cols: &[SheetColumn], m: &SheetMetrics) -> f32 {
+    let n = cols.len();
+    let divider = if n >= 2 { m.col_gap + 1.0 } else { 0.0 };
+    cols.iter().map(|c| c.width).sum::<f32>() + m.col_gap * n.saturating_sub(1) as f32 + divider
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum VkIcon {
@@ -1353,6 +1581,8 @@ pub struct VkFrame<'a> {
     pub voice_level: f32,
     pub ui_scale: f32,
     pub style: VkStyle,
+    pub shortcut_sheet: bool,
+    pub legend: bool,
 }
 
 /// Glyph for the Shift key (the Shift-action key reflects `shift`).
@@ -1381,14 +1611,22 @@ impl VkRenderer {
         GetClientRect(hwnd, &mut client).map_err(|e| format!("GetClientRect: {e}"))?;
         let width = (client.right - client.left).max(1) as u32;
         let height = (client.bottom - client.top).max(1) as u32;
+        let on_secure = crate::win::surface::thread().is_some_and(|s| s.is_winlogon());
+        Self::build(width, height, Some(hwnd), on_secure)
+    }
 
+    unsafe fn build(
+        width: u32,
+        height: u32,
+        hwnd: Option<HWND>,
+        prefer_warp: bool,
+    ) -> Result<Self, String> {
         // NVIDIA's D3D11 user-mode driver (nvwgf2umx.dll) faults with 0xC0000005
         // when driven on the Winlogon secure desktop — the GPU context there is
         // unreliable (confirmed via minidump). On the secure desktop, render with
         // the WARP software rasterizer, which never loads the vendor UMD. Userland
         // keeps hardware for perf. Either way, fall back to the other on failure.
-        let on_secure = crate::win::surface::thread().is_some_and(|s| s.is_winlogon());
-        let d3d = create_d3d_device(on_secure)?;
+        let d3d = create_d3d_device(prefer_warp)?;
         let dxgi_device: IDXGIDevice = d3d.cast().map_err(|e| format!("IDXGIDevice: {e}"))?;
 
         let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))
@@ -1426,21 +1664,27 @@ impl VkRenderer {
 
         let dcomp_device: IDCompositionDevice = DCompositionCreateDevice(&dxgi_device)
             .map_err(|e| format!("DCompositionCreateDevice: {e}"))?;
-        let comp_target = dcomp_device
-            .CreateTargetForHwnd(hwnd, true)
-            .map_err(|e| format!("CreateTargetForHwnd: {e}"))?;
-        let visual = dcomp_device
-            .CreateVisual()
-            .map_err(|e| format!("CreateVisual: {e}"))?;
-        visual
-            .SetContent(&swapchain)
-            .map_err(|e| format!("SetContent: {e}"))?;
-        comp_target
-            .SetRoot(&visual)
-            .map_err(|e| format!("SetRoot: {e}"))?;
-        dcomp_device
-            .Commit()
-            .map_err(|e| format!("DComp Commit: {e}"))?;
+        let (comp_target, visual) = match hwnd {
+            Some(hwnd) => {
+                let comp_target = dcomp_device
+                    .CreateTargetForHwnd(hwnd, true)
+                    .map_err(|e| format!("CreateTargetForHwnd: {e}"))?;
+                let visual = dcomp_device
+                    .CreateVisual()
+                    .map_err(|e| format!("CreateVisual: {e}"))?;
+                visual
+                    .SetContent(&swapchain)
+                    .map_err(|e| format!("SetContent: {e}"))?;
+                comp_target
+                    .SetRoot(&visual)
+                    .map_err(|e| format!("SetRoot: {e}"))?;
+                dcomp_device
+                    .Commit()
+                    .map_err(|e| format!("DComp Commit: {e}"))?;
+                (Some(comp_target), Some(visual))
+            }
+            None => (None, None),
+        };
 
         let dwrite = create_dwrite()?;
         let mut fonts: Option<IDWriteFontCollection> = None;
@@ -1533,6 +1777,9 @@ impl VkRenderer {
             level_at: None,
             nimbus: None,
             nimbus_failed: false,
+            sheet_alpha: 0.0,
+            sheet_tick: None,
+            text_formats: std::cell::RefCell::new(HashMap::new()),
             d3d,
             _d2d_device: d2d_device,
             _dcomp_device: dcomp_device,
@@ -1947,6 +2194,15 @@ impl VkRenderer {
     }
 
     pub unsafe fn draw(&mut self, frame: &VkFrame) -> Result<(), String> {
+        self.draw_frame(frame)?;
+        self.swapchain
+            .Present(1, DXGI_PRESENT(0))
+            .ok()
+            .map_err(|e| format!("Present: {e}"))?;
+        Ok(())
+    }
+
+    unsafe fn draw_frame(&mut self, frame: &VkFrame) -> Result<(), String> {
         let VkFrame {
             pal,
             rows,
@@ -1966,6 +2222,8 @@ impl VkRenderer {
             voice_level,
             ui_scale,
             style,
+            shortcut_sheet: sheet_on,
+            legend,
         } = *frame;
         let spec = style_spec(style);
         let controller_icons = ControllerIconFamily::from_label(controller_label);
@@ -1984,7 +2242,12 @@ impl VkRenderer {
             self.prepare_nimbus(now, nimbus_mood(voice_phase, voice_level), pal.accent);
         }
 
-        let rects = key_rects(cw, ch, scale_w, rows, top_inset, style);
+        let legend_h = if legend {
+            legend_band_height(ui_scale, style)
+        } else {
+            0.0
+        };
+        let rects = key_rects(cw, ch - legend_h, scale_w, rows, top_inset, style);
         let key_h = rects
             .first()
             .map(|kr| kr.bottom - kr.top)
@@ -2147,7 +2410,7 @@ impl VkRenderer {
             let (fill, fill_color, label_brush, dim) = if selected {
                 (&accent_brush, pal.accent, &sel_text_brush, &sel_dim_brush)
             } else if modifier_active {
-                let tint_color = colorref_mix(pal.accent, pal.key_action, 0.35);
+                let tint_color = colorref_mix(pal.accent, pal.key, 0.35);
                 modifier_tint_brush = solid_brush(&self.d2d_context, colorref(tint_color))?;
                 (&modifier_tint_brush, tint_color, &text_brush, &dim_brush)
             } else if action_key {
@@ -2359,6 +2622,12 @@ impl VkRenderer {
             }
         }
 
+        if legend {
+            let lu = ref_unit(ui_scale, style);
+            let (left, right) = legend_span(&rects, cw);
+            self.draw_legend(pal, style, controller_icons, lu, ch - BAR_H * lu, left, right, 1.0)?;
+        }
+
         drop(key_brush);
         drop(action_brush);
         drop(accent_brush);
@@ -2382,6 +2651,45 @@ impl VkRenderer {
             result?;
         }
 
+        let sheet_dt = self
+            .sheet_tick
+            .map(|t| now.duration_since(t).as_secs_f32().min(0.1))
+            .unwrap_or(0.0);
+        self.sheet_tick = Some(now);
+        self.sheet_alpha = shortcut_sheet::fade_step(self.sheet_alpha, sheet_on, sheet_dt);
+        if self.sheet_alpha > 0.0 {
+            let (panel, radius) = if floating {
+                (
+                    D2D_RECT_F {
+                        left: FLOATING_PANEL_INSET,
+                        top: FLOATING_PANEL_INSET,
+                        right: cw - FLOATING_PANEL_INSET,
+                        bottom: ch - FLOATING_PANEL_INSET,
+                    },
+                    Some(spec.panel_radius * unit),
+                )
+            } else {
+                (
+                    D2D_RECT_F {
+                        left: 0.0,
+                        top: 0.0,
+                        right: cw,
+                        bottom: ch,
+                    },
+                    None,
+                )
+            };
+            self.draw_shortcut_sheet(
+                pal,
+                style,
+                controller_icons,
+                unit,
+                panel,
+                radius,
+                self.sheet_alpha,
+            )?;
+        }
+
         if floating {
             self.d2d_context.PopAxisAlignedClip();
         }
@@ -2389,10 +2697,305 @@ impl VkRenderer {
         self.d2d_context
             .EndDraw(None, None)
             .map_err(|e| format!("EndDraw: {e}"))?;
-        self.swapchain
-            .Present(1, DXGI_PRESENT(0))
-            .ok()
-            .map_err(|e| format!("Present: {e}"))?;
+        Ok(())
+    }
+
+    unsafe fn text_format(&self, style: VkStyle, px: f32) -> Result<IDWriteTextFormat, String> {
+        let key = (style, (px * 4.0).round() as i32);
+        if let Some(f) = self.text_formats.borrow().get(&key) {
+            return Ok(f.clone());
+        }
+        let mut fonts: Option<IDWriteFontCollection> = None;
+        self.dwrite
+            .GetSystemFontCollection(&mut fonts, false)
+            .map_err(|e| format!("GetSystemFontCollection: {e}"))?;
+        let fonts = fonts.ok_or("GetSystemFontCollection returned null")?;
+        let family = resolve_family(&fonts, style_spec(style).families);
+        let f = self
+            .dwrite
+            .CreateTextFormat(
+                &family,
+                &fonts,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                px.max(1.0),
+                &user_locale_name(),
+            )
+            .map_err(|e| format!("CreateTextFormat ({family}): {e}"))?;
+        let _ = f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        let _ = f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        let _ = f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        self.text_formats.borrow_mut().insert(key, f.clone());
+        Ok(f)
+    }
+
+    unsafe fn measure_px(&self, style: VkStyle, text: &str, px: f32) -> f32 {
+        self.text_format(style, px)
+            .map(|f| self.measure_text(text, &f))
+            .unwrap_or(0.0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_text_px(
+        &mut self,
+        style: VkStyle,
+        text: &str,
+        px: f32,
+        left: f32,
+        band: D2D_RECT_F,
+        color: u32,
+        alpha: f32,
+    ) -> Result<f32, String> {
+        let format = self.text_format(style, px)?;
+        let w = self.measure_text(text, &format);
+        let brush = solid_brush(&self.d2d_context, colorref_alpha(color, alpha))?;
+        self.d2d_context.DrawText(
+            &wide(text),
+            &format,
+            &D2D_RECT_F {
+                left,
+                right: left + w,
+                ..band
+            },
+            &brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
+        Ok(w)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_combo(
+        &mut self,
+        style: VkStyle,
+        parts: &[ComboPart],
+        cs: &ComboStyle,
+        left: f32,
+        band: D2D_RECT_F,
+        text: u32,
+        alpha: f32,
+    ) -> Result<f32, String> {
+        let mut x = left;
+        for part in parts {
+            let w = match *part {
+                ComboPart::Icon(icon, share) => {
+                    let w = if share { cs.share } else { cs.glyph };
+                    let slot = D2D_RECT_F {
+                        left: x,
+                        right: x + w,
+                        ..band
+                    };
+                    self.draw_svg_icon_sized(icon, slot, text, alpha, w)?;
+                    w
+                }
+                ComboPart::Prefix(t) => {
+                    self.draw_text_px(style, t, cs.prefix_px, x, band, text, ALPHA_SECONDARY * alpha)?
+                }
+                ComboPart::Connector(t) => self.draw_text_px(
+                    style,
+                    t,
+                    cs.connector_px,
+                    x,
+                    band,
+                    text,
+                    ALPHA_SECONDARY * alpha,
+                )?,
+            };
+            x += w + cs.gap;
+        }
+        Ok((x - cs.gap - left).max(0.0))
+    }
+
+    unsafe fn bar_layout_for(
+        &self,
+        style: VkStyle,
+        family: ControllerIconFamily,
+        u: f32,
+        left: f32,
+        right: f32,
+    ) -> BarLayout {
+        let measure = |t: &str, px: f32| self.measure_px(style, t, px);
+        let widths: Vec<f32> = shortcut_sheet::LEGEND
+            .iter()
+            .map(|row| bar_item_width(row, family, u, &measure))
+            .collect();
+        bar_layout(&widths, bar_sep_width(u, &measure), left, right)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_legend(
+        &mut self,
+        pal: &VkPalette,
+        style: VkStyle,
+        family: ControllerIconFamily,
+        u: f32,
+        top: f32,
+        left: f32,
+        right: f32,
+        alpha: f32,
+    ) -> Result<(), String> {
+        let layout = self.bar_layout_for(style, family, u, left, right);
+        let band = D2D_RECT_F {
+            left,
+            top,
+            right,
+            bottom: top + BAR_H * u,
+        };
+        let cs = ComboStyle::bar(u);
+        for (n, &(i, start, _)) in layout.items.iter().enumerate() {
+            if n > 0 {
+                let sep_left = start - layout.sep_w + BAR_GAP * u;
+                self.draw_text_px(
+                    style,
+                    LEGEND_SEP,
+                    text_px(BAR_SEP_PX, u),
+                    sep_left,
+                    band,
+                    pal.text,
+                    ALPHA_SEP * alpha,
+                )?;
+            }
+            let row = &shortcut_sheet::LEGEND[i];
+            let parts = combo_parts(row.keys, family);
+            let w = self.draw_combo(style, &parts, &cs, start, band, pal.text, alpha)?;
+            self.draw_text_px(
+                style,
+                row.label,
+                text_px(BAR_LABEL_PX, u),
+                start + w + BAR_LABEL_GAP * u,
+                band,
+                pal.text,
+                alpha,
+            )?;
+        }
+        Ok(())
+    }
+
+    unsafe fn sheet_fit(
+        &self,
+        style: VkStyle,
+        family: ControllerIconFamily,
+        unit: f32,
+        panel: D2D_RECT_F,
+    ) -> (SheetMetrics, Vec<SheetColumn>, f32) {
+        let measure = |t: &str, px: f32| self.measure_px(style, t, px);
+        let base = SheetMetrics::at(unit);
+        let cols = sheet_columns(family, &base, &measure);
+        let total = sheet_total_width(&cols, &base).max(1.0);
+        let lines = shortcut_sheet::max_lines() as f32;
+        let fit_w = (panel.right - panel.left - 2.0 * SHEET_PAD_X * unit) / total;
+        let fit_h = (panel.bottom - panel.top - (SHEET_PAD_TOP + SHEET_PAD_BOTTOM) * unit)
+            / (lines * SHEET_ROW_H * unit).max(1.0);
+        let fit = fit_w.min(fit_h).min(1.0);
+        if fit >= 1.0 {
+            return (base, cols, total);
+        }
+        let m = SheetMetrics::at(unit * fit.max(0.1));
+        let cols = sheet_columns(family, &m, &measure);
+        let total = sheet_total_width(&cols, &m);
+        (m, cols, total)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_shortcut_sheet(
+        &mut self,
+        pal: &VkPalette,
+        style: VkStyle,
+        family: ControllerIconFamily,
+        unit: f32,
+        panel: D2D_RECT_F,
+        radius: Option<f32>,
+        alpha: f32,
+    ) -> Result<(), String> {
+        let r = radius.unwrap_or(0.0);
+        let fill = solid_brush(&self.d2d_context, colorref_alpha(pal.bg, alpha))?;
+        self.d2d_context.FillRoundedRectangle(&rounded(panel, r), &fill);
+        if radius.is_some() {
+            let stroke = solid_brush(
+                &self.d2d_context,
+                colorref_alpha(pal.panel_stroke, pal.panel_stroke_alpha * alpha),
+            )?;
+            self.d2d_context.DrawRoundedRectangle(
+                &rounded(deflate(panel, 0.5), (r - 0.5).max(0.0)),
+                &stroke,
+                1.0,
+                None,
+            );
+        }
+
+        let (m, cols, total) = self.sheet_fit(style, family, unit, panel);
+        let lines = shortcut_sheet::max_lines() as f32;
+        let block_h = (SHEET_PAD_TOP + SHEET_PAD_BOTTOM) * m.u + lines * m.row_h;
+        let top = panel.top
+            + ((panel.bottom - panel.top - block_h) * 0.5).max(0.0)
+            + SHEET_PAD_TOP * m.u;
+        let line_brush = solid_brush(&self.d2d_context, colorref_alpha(pal.text, ALPHA_LINE * alpha))?;
+        let mut x = (panel.left + panel.right - total) * 0.5;
+        let n = cols.len();
+        for (ci, col) in cols.iter().enumerate() {
+            for (i, line) in col.lines.iter().enumerate() {
+                let band = D2D_RECT_F {
+                    left: x,
+                    top: top + i as f32 * m.row_h,
+                    right: x + col.width,
+                    bottom: top + (i as f32 + 1.0) * m.row_h,
+                };
+                match line {
+                    Line::Title(t) => {
+                        self.draw_text_px(
+                            style,
+                            t,
+                            m.header_px,
+                            x,
+                            band,
+                            pal.text,
+                            ALPHA_SECONDARY * alpha,
+                        )?;
+                    }
+                    Line::Row(row) => {
+                        let parts = combo_parts(row.keys, family);
+                        self.draw_combo(style, &parts, &m.cs, x, band, pal.text, alpha)?;
+                        self.draw_text_px(
+                            style,
+                            row.label,
+                            m.action_px,
+                            x + col.combo_w + m.action_gap,
+                            band,
+                            pal.text,
+                            alpha,
+                        )?;
+                    }
+                    Line::Blank => {}
+                }
+                if shortcut_sheet::hairline_below(&col.lines, i) {
+                    let y = (band.bottom - 1.0).round();
+                    self.d2d_context.FillRectangle(
+                        &D2D_RECT_F {
+                            left: x.round(),
+                            top: y,
+                            right: (x + col.width).round(),
+                            bottom: y + 1.0,
+                        },
+                        &line_brush,
+                    );
+                }
+            }
+            x += col.width + m.col_gap;
+            if n >= 2 && ci == n - 2 {
+                let dx = x.round();
+                self.d2d_context.FillRectangle(
+                    &D2D_RECT_F {
+                        left: dx,
+                        top: top.round(),
+                        right: dx + 1.0,
+                        bottom: (top + lines * m.row_h).round(),
+                    },
+                    &line_brush,
+                );
+                x += 1.0 + m.col_gap;
+            }
+        }
         Ok(())
     }
 
@@ -2651,9 +3254,11 @@ impl VkRenderer {
         let wide: Vec<u16> = text.encode_utf16().collect();
         let layout: Option<IDWriteTextLayout> = self
             .dwrite
-            .CreateTextLayout(&wide, format, f32::MAX, f32::MAX)
+            .CreateTextLayout(&wide, format, 1.0e6, 1.0e6)
             .ok();
         let Some(layout) = layout else { return 0.0 };
+        let _ = layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        let _ = layout.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
         let mut m = DWRITE_TEXT_METRICS::default();
         if layout.GetMetrics(&mut m).is_err() {
             return 0.0;
@@ -2914,6 +3519,264 @@ impl VkRenderer {
         }
 
         self.d2d_context.SetTransform(&identity);
+        self.d2d_context
+            .EndDraw(None, None)
+            .map_err(|e| format!("EndDraw: {e}"))?;
+        self.swapchain
+            .Present(1, DXGI_PRESENT(0))
+            .ok()
+            .map_err(|e| format!("Present: {e}"))?;
+        Ok(())
+    }
+
+    unsafe fn tip_items(
+        &self,
+        tokens: &[TipToken],
+        family: ControllerIconFamily,
+        format: &IDWriteTextFormat,
+        chip_px: f32,
+        gap: f32,
+    ) -> (Vec<(TipItem, f32)>, f32) {
+        let items: Vec<(TipItem, f32)> = tokens
+            .iter()
+            .filter_map(|&token| tip_item(token, family))
+            .map(|item| {
+                let w = match item {
+                    TipItem::Icon(_) => chip_px,
+                    TipItem::Text(t, _) => self.measure_text(t, format),
+                };
+                (item, w)
+            })
+            .collect();
+        let w = items.iter().map(|i| i.1).sum::<f32>()
+            + gap * items.len().saturating_sub(1) as f32;
+        (items, w)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_tip_row(
+        &mut self,
+        items: &[(TipItem, f32)],
+        left: f32,
+        band: D2D_RECT_F,
+        gap: f32,
+        format: &IDWriteTextFormat,
+        text: u32,
+        dim: u32,
+        alpha: f32,
+    ) -> Result<(), String> {
+        if alpha <= 0.01 {
+            return Ok(());
+        }
+        let text_brush = solid_brush(&self.d2d_context, colorref_alpha(text, alpha))?;
+        let dim_brush = solid_brush(&self.d2d_context, colorref_alpha(dim, alpha * 0.6))?;
+        let mut x = left;
+        for (item, w) in items {
+            let slot = D2D_RECT_F {
+                left: x,
+                top: band.top,
+                right: x + w,
+                bottom: band.bottom,
+            };
+            match *item {
+                TipItem::Icon(icon) => self.draw_svg_icon_sized(icon, slot, text, alpha, *w)?,
+                TipItem::Text(t, faint) => self.d2d_context.DrawText(
+                    &wide(t),
+                    format,
+                    &slot,
+                    if faint { &dim_brush } else { &text_brush },
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                ),
+            }
+            x += w + gap;
+        }
+        Ok(())
+    }
+
+    pub unsafe fn draw_tips(&mut self, p: &TipsPill) -> Result<(), String> {
+        let cw = self.width as f32;
+        let ch = self.height as f32;
+        let spec = prompt_spec(p.style);
+        let family = ControllerIconFamily::from_label(p.controller_label);
+        let (label, counter_format) = match spec {
+            Some(spec) => {
+                let fonts = self.ensure_prompt_fonts(spec)?;
+                (fonts.label, fonts.status)
+            }
+            None => {
+                let _ = self
+                    .prompt_format
+                    .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                let _ = self
+                    .prompt_format
+                    .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                let _ = self
+                    .text_format
+                    .SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                (self.prompt_format.clone(), self.text_format.clone())
+            }
+        };
+        let (pill_h, pill_bottom, radius, chip, gap, pad_x) = match spec {
+            Some(s) => (
+                s.pill_h,
+                s.pill_bottom,
+                s.radius,
+                s.chip_px,
+                s.pill_gap,
+                s.pill_pad_x,
+            ),
+            None => (96.0, 6.0, 46.0, 56.0, 12.0, 36.0),
+        };
+        let (text, dim) = match spec {
+            Some(s) => (0x00FFFFFF, s.dim_text),
+            None => (p.text, mix_color(p.text, p.bg, 0.58)),
+        };
+
+        let counter = format!("{}/{}", p.index + 1, p.count.max(1));
+        let counter_w = self.measure_text(&counter, &counter_format);
+        let counter_gap = gap * 2.0;
+        let (items, content_w) = self.tip_items(p.cue, family, &label, chip, gap);
+        let prev = p
+            .prev_cue
+            .map(|tokens| self.tip_items(tokens, family, &label, chip, gap));
+        let morph_t = if prev.is_some() {
+            p.morph_t.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let pill_w_for = |w: f32| (w + counter_gap + counter_w + pad_x * 2.0).min(cw - 8.0);
+        let pill_w = match &prev {
+            Some((_, prev_w)) => lerp(pill_w_for(*prev_w), pill_w_for(content_w), morph_t),
+            None => pill_w_for(content_w),
+        };
+        let bottom = ch - pill_bottom;
+        let pill = D2D_RECT_F {
+            left: (cw - pill_w) * 0.5,
+            top: bottom - pill_h,
+            right: (cw + pill_w) * 0.5,
+            bottom,
+        };
+        let pill_cy = bottom - pill_h * 0.5;
+        let alpha = p.alpha.clamp(0.0, 1.0);
+
+        self.d2d_context
+            .SetTransform(&scale_about(p.scale, cw * 0.5, pill_cy));
+        self.d2d_context.BeginDraw();
+        self.d2d_context.Clear(Some(&D2D1_COLOR_F {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        }));
+
+        let shape = rounded(pill, radius);
+        match spec {
+            Some(s) => {
+                let (dy, blur, a) = s.pill_shadow;
+                self.draw_outer_shadow(&shape, (dy, blur, a * alpha))?;
+                let fill = solid_brush(
+                    &self.d2d_context,
+                    colorref_alpha(s.pill_fill, s.pill_fill_alpha * alpha),
+                )?;
+                self.d2d_context.FillRoundedRectangle(&shape, &fill);
+                let stroke = solid_brush(
+                    &self.d2d_context,
+                    colorref_alpha(0x00FFFFFF, s.ready_stroke_alpha * alpha),
+                )?;
+                self.d2d_context.DrawRoundedRectangle(
+                    &rounded(deflate(pill, 0.5), radius - 0.5),
+                    &stroke,
+                    1.0,
+                    None,
+                );
+            }
+            None => {
+                let t = self.prompt_started.elapsed().as_secs_f32();
+                let pulse = (t * 0.33).fract();
+                let pulse_alpha = (1.0 - pulse).powi(2);
+                let glow = colorref_mix(0x00FFFFFF, p.border, 0.38);
+                let bg = solid_brush(&self.d2d_context, colorref_alpha(p.bg, alpha))?;
+                let halo = solid_brush(
+                    &self.d2d_context,
+                    colorref_alpha(glow, 0.30 * pulse_alpha * alpha),
+                )?;
+                let edge = solid_brush(&self.d2d_context, colorref_alpha(glow, alpha))?;
+                self.d2d_context.FillRoundedRectangle(&shape, &bg);
+                self.d2d_context
+                    .DrawRoundedRectangle(&shape, &halo, 2.0 + 8.0 * pulse, None);
+                self.d2d_context.DrawRoundedRectangle(&shape, &edge, 1.5, None);
+            }
+        }
+
+        let counter_left = pill.right - pad_x - counter_w;
+        let row_right = counter_left - counter_gap;
+        let row_left = pill.left + pad_x;
+        let centred = |w: f32| row_left + ((row_right - row_left - w) * 0.5).max(0.0);
+        let old_alpha = 1.0 - (morph_t / 0.3).clamp(0.0, 1.0);
+        let new_alpha = ((morph_t - 0.35) / 0.65).clamp(0.0, 1.0);
+        let new_alpha = if prev.is_some() {
+            new_alpha * new_alpha * (3.0 - 2.0 * new_alpha)
+        } else {
+            1.0
+        };
+        if let Some((prev_items, prev_w)) = &prev {
+            self.draw_tip_row(
+                prev_items,
+                centred(*prev_w),
+                pill,
+                gap,
+                &label,
+                text,
+                dim,
+                old_alpha * alpha,
+            )?;
+        }
+        self.draw_tip_row(
+            &items,
+            centred(content_w),
+            pill,
+            gap,
+            &label,
+            text,
+            dim,
+            new_alpha * alpha,
+        )?;
+
+        let divider = solid_brush(&self.d2d_context, colorref_alpha(dim, 0.25 * alpha))?;
+        let divider_x = counter_left - counter_gap * 0.5;
+        self.d2d_context.DrawLine(
+            D2D_POINT_2F {
+                x: divider_x,
+                y: pill_cy - pill_h * 0.22,
+            },
+            D2D_POINT_2F {
+                x: divider_x,
+                y: pill_cy + pill_h * 0.22,
+            },
+            &divider,
+            1.0,
+            None,
+        );
+        let counter_brush = solid_brush(&self.d2d_context, colorref_alpha(dim, 0.8 * alpha))?;
+        self.d2d_context.DrawText(
+            &wide(&counter),
+            &counter_format,
+            &D2D_RECT_F {
+                left: counter_left,
+                top: pill.top,
+                right: counter_left + counter_w,
+                bottom: pill.bottom,
+            },
+            &counter_brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
+        if spec.is_none() {
+            let _ = self.text_format.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+        }
+
+        self.d2d_context.SetTransform(&IDENTITY);
         self.d2d_context
             .EndDraw(None, None)
             .map_err(|e| format!("EndDraw: {e}"))?;
@@ -3479,6 +4342,28 @@ pub struct PromptCard<'a> {
     pub style: VkStyle,
 }
 
+#[derive(Clone, Copy)]
+pub struct TipsPill<'a> {
+    pub bg: u32,
+    pub border: u32,
+    pub text: u32,
+    pub controller_label: &'a str,
+    pub cue: &'a [TipToken],
+    pub prev_cue: Option<&'a [TipToken]>,
+    pub morph_t: f32,
+    pub index: usize,
+    pub count: usize,
+    pub alpha: f32,
+    pub scale: f32,
+    pub style: VkStyle,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TipItem {
+    Icon(VkIcon),
+    Text(&'static str, bool),
+}
+
 /// Everything one frame of the dictation pill needs. `alpha`/`scale` carry the
 /// enter/exit transition; `label_alpha` fades a freshly swapped phase title in.
 pub struct VoicePill<'a> {
@@ -3742,11 +4627,118 @@ fn key_metrics(
 }
 
 #[cfg(test)]
+pub const FULL_SIZE_SCALE: f32 = 1.0 / crate::config::COMPACT_BAR_SCALE;
+
+#[cfg(test)]
+impl VkRenderer {
+    pub unsafe fn offscreen(width: u32, height: u32) -> Result<Self, String> {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        Self::build(width.max(1), height.max(1), None, true)
+    }
+
+    pub unsafe fn render_bgra(&mut self, frame: &VkFrame) -> Result<(u32, u32, Vec<u8>), String> {
+        if frame.shortcut_sheet {
+            self.sheet_alpha = 1.0;
+        }
+        if frame.candidates.is_some() {
+            self.strip_shown_at = Instant::now().checked_sub(std::time::Duration::from_secs(2));
+        }
+        self.draw_frame(frame)?;
+        self.readback()
+    }
+
+    pub unsafe fn render_design(
+        &mut self,
+        style: VkStyle,
+        sheet: bool,
+    ) -> Result<(u32, u32, Vec<u8>), String> {
+        let pal = style_palette(style, true);
+        let family = ControllerIconFamily::Ps5;
+        let (w, h) = (self.width as f32, self.height as f32);
+        self.d2d_context.BeginDraw();
+        self.d2d_context.SetTransform(&IDENTITY);
+        self.d2d_context.Clear(Some(&colorref(pal.bg)));
+        let drawn = if sheet {
+            let panel = D2D_RECT_F {
+                left: 0.0,
+                top: 0.0,
+                right: w,
+                bottom: h,
+            };
+            self.draw_shortcut_sheet(&pal, style, family, 1.0, panel, None, 1.0)
+        } else {
+            self.draw_legend(&pal, style, family, 1.0, 0.0, 0.0, w, 1.0)
+        };
+        self.d2d_context
+            .EndDraw(None, None)
+            .map_err(|e| format!("EndDraw: {e}"))?;
+        drawn?;
+        self.readback()
+    }
+
+    unsafe fn readback(&self) -> Result<(u32, u32, Vec<u8>), String> {
+        use windows::Win32::Graphics::Direct3D11::{
+            ID3D11Texture2D, D3D11_BIND_FLAG, D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE,
+            D3D11_MAP_READ, D3D11_RESOURCE_MISC_FLAG, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+        };
+        let tex: ID3D11Texture2D = self
+            .swapchain
+            .GetBuffer(0)
+            .map_err(|e| format!("GetBuffer: {e}"))?;
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        tex.GetDesc(&mut desc);
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+        desc.BindFlags = D3D11_BIND_FLAG(0).0 as u32;
+        desc.MiscFlags = D3D11_RESOURCE_MISC_FLAG(0).0 as u32;
+        let mut staging = None;
+        self.d3d
+            .CreateTexture2D(&desc, None, Some(&mut staging))
+            .map_err(|e| format!("staging: {e}"))?;
+        let staging = staging.ok_or("staging null")?;
+        let ctx = self
+            .d3d
+            .GetImmediateContext()
+            .map_err(|e| format!("context: {e}"))?;
+        ctx.CopyResource(&staging, &tex);
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        ctx.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+            .map_err(|e| format!("map: {e}"))?;
+        let (w, h) = (desc.Width, desc.Height);
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h as usize {
+            let row = (mapped.pData as *const u8).add(y * mapped.RowPitch as usize);
+            std::ptr::copy_nonoverlapping(row, px.as_mut_ptr().add(y * w as usize * 4), w as usize * 4);
+        }
+        ctx.Unmap(&staging, 0);
+        Ok((w, h, px))
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     fn overlaps(a: &D2D_RECT_F, b: &D2D_RECT_F) -> bool {
         a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
+    }
+
+    #[test]
+    fn legend_and_sheet_follow_display_scaling() {
+        for style in [VkStyle::Normal, VkStyle::Mono] {
+            for dpi in [1.25_f32, 1.5, 2.0] {
+                let base = legend_band_height(1.0, style);
+                assert!((legend_band_height(dpi, style) - base * dpi).abs() < 0.01);
+                let (u1, u2) = (ref_unit(1.0, style), ref_unit(dpi, style));
+                assert!((u2 - u1 * dpi).abs() < 1e-4);
+                let (b1, b2) = (ComboStyle::bar(u1), ComboStyle::bar(u2));
+                assert!((b2.glyph - b1.glyph * dpi).abs() < 0.01);
+                let (s1, s2) = (SheetMetrics::at(u1), SheetMetrics::at(u2));
+                assert!((s2.row_h - s1.row_h * dpi).abs() < 0.01);
+                assert!((s2.header_px - s1.header_px * dpi).abs() < 0.01);
+                assert!((s2.action_px - s1.action_px * dpi).abs() < 0.01);
+            }
+        }
     }
 
     #[test]
@@ -3779,6 +4771,210 @@ mod tests {
             assert_eq!(hit.len(), 2);
             assert_eq!(hit[0].1, cols[0]);
             assert_eq!(hit[1].1, cols[1]);
+        }
+    }
+
+    fn bar_check(scale: f32, style: VkStyle, client_w: f32, family: ControllerIconFamily) -> (Vec<&'static str>, BarLayout, f32, f32) {
+        let rows = crate::vk_nav::rows_for_test();
+        let (grid_w, block_h) = grid_size(REF_MON_W * scale, &rows, style);
+        let cw = client_w.min(grid_w + 40.0);
+        let rects = key_rects(cw, block_h + 200.0, REF_MON_W * scale, &rows, 0.0, style);
+        let (l, r) = legend_span(&rects, cw);
+        unsafe {
+            let rd = VkRenderer::offscreen(cw as u32, 100).expect("offscreen renderer");
+            let layout = rd.bar_layout_for(style, family, ref_unit(scale, style), l, r);
+            let labels = layout
+                .items
+                .iter()
+                .map(|&(i, _, _)| shortcut_sheet::LEGEND[i].label)
+                .collect();
+            (labels, layout, l, r)
+        }
+    }
+
+    fn assert_bar_clear(layout: &BarLayout, l: f32, r: f32, what: &str) {
+        for w in layout.items.windows(2) {
+            let (_, a, aw) = w[0];
+            let (_, b, _) = w[1];
+            assert!((b - (a + aw + layout.sep_w)).abs() < 0.01, "{what}: {:?}", layout.items);
+            assert!(b > a + aw, "{what}: overlap {:?}", layout.items);
+        }
+        if layout.items.len() > 1 {
+            let (_, first, _) = layout.items[0];
+            let &(_, last, lw) = layout.items.last().unwrap();
+            assert!(first >= l - 0.01 && last + lw <= r + 0.01, "{what}: outside {l}..{r}");
+            let mid = (first + last + lw) * 0.5;
+            assert!((mid - (l + r) * 0.5).abs() < 0.5, "{what}: not centred");
+        }
+    }
+
+    #[test]
+    fn bar_fits_whole_at_full_size_and_drops_the_middle_when_narrow() {
+        let all: Vec<&str> = shortcut_sheet::LEGEND.iter().map(|r| r.label).collect();
+        for family in [ControllerIconFamily::Ps5, ControllerIconFamily::Xbox] {
+            for style in [VkStyle::Normal, VkStyle::Mono] {
+                let what = format!("{style:?} {family:?}");
+                let (labels, layout, l, r) = bar_check(FULL_SIZE_SCALE, style, 1920.0, family);
+                assert_eq!(labels, all, "{what}");
+                assert_bar_clear(&layout, l, r, &what);
+                let (_, first, _) = layout.items[0];
+                assert!(first > l + 1.0, "{what}: the bar is a compact centred group");
+                for (scale, width, must_drop) in [(1.0, 1920.0, false), (FULL_SIZE_SCALE, 900.0, true)] {
+                    let (kept, layout, l, r) = bar_check(scale, style, width, family);
+                    assert_bar_clear(&layout, l, r, &what);
+                    if !must_drop && kept == all {
+                        continue;
+                    }
+                    assert!(kept.len() < all.len(), "{what} {kept:?}");
+                    assert_eq!(kept.first(), Some(&"Type"), "{what}");
+                    assert_eq!(kept.last(), Some(&"All shortcuts"), "{what}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bar_layout_centres_one_compact_group() {
+        let layout = bar_layout(&[10.0, 20.0, 30.0], 5.0, 0.0, 200.0);
+        assert_eq!(layout.items, vec![(0, 65.0, 10.0), (1, 80.0, 20.0), (2, 105.0, 30.0)]);
+        let tight = bar_layout(&[10.0, 20.0, 30.0], 5.0, 0.0, 50.0);
+        assert_eq!(tight.items.iter().map(|i| i.0).collect::<Vec<_>>(), vec![0, 2]);
+    }
+
+    #[test]
+    fn design_sizes_scale_with_the_unit_and_keep_the_text_floor() {
+        let bar = ComboStyle::bar(1.0);
+        assert_eq!((bar.glyph, bar.share, bar.gap), (24.0, 28.0, 10.0));
+        assert_eq!((bar.prefix_px, bar.connector_px), (15.0, 13.0));
+        let sheet = SheetMetrics::at(1.0);
+        assert_eq!((sheet.cs.glyph, sheet.cs.share, sheet.cs.gap), (28.0, 32.0, 8.0));
+        assert_eq!((sheet.header_px, sheet.action_px, sheet.cs.prefix_px), (18.0, 19.0, 17.0));
+        assert_eq!((sheet.row_h, sheet.col_gap, sheet.action_gap), (70.0, 72.0, 24.0));
+        for u in [0.3, 0.667, 1.0, 1.5] {
+            assert!(ComboStyle::bar(u).connector_px >= LEGEND_MIN_TEXT_PX);
+            assert!(SheetMetrics::at(u).header_px >= LEGEND_MIN_TEXT_PX);
+        }
+        for style in [VkStyle::Normal, VkStyle::Mono] {
+            let u = ref_unit(1.0, style);
+            let h = legend_band_height(1.0, style) + style_spec(style).pad_y * u;
+            assert!((h - BAR_H * u).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn sheet_columns_match_the_design_and_never_clip() {
+        let family = ControllerIconFamily::Ps5;
+        unsafe {
+            let rd = VkRenderer::offscreen(1600, 546).expect("offscreen");
+            let measure = |t: &str, px: f32| rd.measure_px(VkStyle::Normal, t, px);
+            let m = SheetMetrics::at(1.0);
+            let cols = sheet_columns(family, &m, &measure);
+            let combos: Vec<f32> = cols.iter().map(|c| c.combo_w).collect();
+            for (got, want) in combos.iter().zip([86.0, 183.0, 140.0]) {
+                assert!((got - want).abs() <= 8.0, "combo widths {combos:?}");
+            }
+            let total = sheet_total_width(&cols, &m);
+            assert!(total <= 1600.0 - 2.0 * SHEET_PAD_X, "{total}");
+            for col in &cols {
+                for line in &col.lines {
+                    if let Line::Row(row) = line {
+                        let w = combo_width(&combo_parts(row.keys, family), &m.cs, &measure);
+                        assert!(w <= col.combo_w + 0.01);
+                        let label = measure(row.label, m.action_px);
+                        assert!(col.combo_w + m.action_gap + label <= col.width + 0.01);
+                    }
+                }
+            }
+            for style in [VkStyle::Normal, VkStyle::Mono] {
+                let rows = crate::vk_nav::rows_for_test();
+                let (grid_w, block_h) = grid_size(REF_MON_W, &rows, style);
+                let (pad_x, pad_y) = floating_pad(1.0, style);
+                let panel = D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: grid_w + 2.0 * pad_x,
+                    bottom: strip_band_height(1.0, style) + block_h + 2.0 * pad_y + legend_band_height(1.0, style),
+                };
+                let (m, cols, total) = rd.sheet_fit(style, family, ref_unit(1.0, style), panel);
+                assert!(total <= panel.right - 2.0 * SHEET_PAD_X * ref_unit(1.0, style) + 1.0, "{style:?}");
+                let lines = shortcut_sheet::max_lines() as f32;
+                assert!(lines * m.row_h <= panel.bottom + 0.01, "{style:?}");
+                assert_eq!(cols.len(), 3);
+            }
+        }
+    }
+
+    #[test]
+    fn legend_uses_the_pad_family_svg_glyphs() {
+        let ps = ControllerIconFamily::from_label("DualSense Wireless Controller");
+        let xb = ControllerIconFamily::from_label("Xbox Wireless Controller");
+        let icons = |family: ControllerIconFamily, label: &str| -> Vec<VkIcon> {
+            let row = shortcut_sheet::LEGEND
+                .iter()
+                .find(|r| r.label == label)
+                .expect(label);
+            combo_parts(row.keys, family)
+                .into_iter()
+                .filter_map(|p| match p {
+                    ComboPart::Icon(i, _) => Some(i),
+                    _ => None,
+                })
+                .collect()
+        };
+        let expect: [(&str, &[VkIcon], &[VkIcon]); 9] = [
+            ("Type", &[VkIcon::Ps5Cross], &[VkIcon::XboxA]),
+            ("Delete", &[VkIcon::Ps5Circle], &[VkIcon::XboxB]),
+            (
+                "Move caret",
+                &[VkIcon::Ps5L1, VkIcon::Ps5R1],
+                &[VkIcon::XboxLb, VkIcon::XboxRb],
+            ),
+            ("Shift", &[VkIcon::Ps5R2], &[VkIcon::XboxRt]),
+            ("Dictate", &[VkIcon::R3Ps5], &[VkIcon::R3Xbox]),
+            (
+                "Paste",
+                &[VkIcon::SelectPs5, VkIcon::Ps5Triangle],
+                &[VkIcon::SelectXbox, VkIcon::XboxY],
+            ),
+            ("Suggestions", &[VkIcon::SelectPs5], &[VkIcon::SelectXbox]),
+            ("Close keyboard", &[VkIcon::L3Ps5], &[VkIcon::L3Xbox]),
+            ("All shortcuts", &[VkIcon::SelectPs5], &[VkIcon::SelectXbox]),
+        ];
+        for (label, p, x) in expect {
+            assert_eq!(icons(ps, label), p, "{label}");
+            assert_eq!(icons(xb, label), x, "{label}");
+        }
+        let paste = combo_parts(shortcut_sheet::LEGEND[5].keys, ps);
+        assert_eq!(
+            paste,
+            vec![
+                ComboPart::Icon(VkIcon::SelectPs5, true),
+                ComboPart::Connector("+"),
+                ComboPart::Icon(VkIcon::Ps5Triangle, false),
+            ]
+        );
+        let tap = combo_parts(shortcut_sheet::LEGEND[6].keys, xb);
+        assert_eq!(tap[0], ComboPart::Prefix("Tap"));
+    }
+
+    #[test]
+    fn every_legend_and_sheet_button_is_an_svg_icon_for_both_families() {
+        let families = [ControllerIconFamily::Ps5, ControllerIconFamily::Xbox];
+        let sheet = super::super::shortcut_sheet::GROUPS
+            .iter()
+            .flat_map(|g| g.rows.iter());
+        for row in sheet.chain(shortcut_sheet::LEGEND.iter()) {
+            for &token in row.keys {
+                if let TipToken::Button(b) = token {
+                    for family in families {
+                        let icon = family.hint_icon(b).expect(b);
+                        assert!(icon.is_controller_tip(), "{b} {family:?}");
+                        assert!(icon.svg().contains("<svg"), "{b} {family:?}");
+                        assert_eq!(tip_item(token, family), Some(TipItem::Icon(icon)));
+                        assert!(combo_parts(&[token], family) == vec![ComboPart::Icon(icon, b == "SELECT")]);
+                    }
+                }
+            }
         }
     }
 
@@ -3821,6 +5017,79 @@ mod tests {
             Some(ControllerArt::XboxOne)
         );
         assert_eq!(ControllerArt::from_label("none"), None);
+    }
+
+    #[test]
+    fn controller_tips_use_the_pad_family_glyphs() {
+        let ps = ControllerIconFamily::from_label("DualSense Wireless Controller");
+        let xb = ControllerIconFamily::from_label("Xbox Wireless Controller");
+        let expect = [
+            ("L3", VkIcon::L3Ps5, VkIcon::L3Xbox),
+            ("R3", VkIcon::R3Ps5, VkIcon::R3Xbox),
+            ("LB", VkIcon::Ps5L1, VkIcon::XboxLb),
+            ("RB", VkIcon::Ps5R1, VkIcon::XboxRb),
+            ("RT", VkIcon::Ps5R2, VkIcon::XboxRt),
+            ("LT", VkIcon::Ps5L2, VkIcon::XboxLt),
+            ("SELECT", VkIcon::SelectPs5, VkIcon::SelectXbox),
+            ("Y", VkIcon::Ps5Triangle, VkIcon::XboxY),
+        ];
+        for (button, ps_icon, xb_icon) in expect {
+            assert_eq!(ps.hint_icon(button), Some(ps_icon), "{button}");
+            assert_eq!(xb.hint_icon(button), Some(xb_icon), "{button}");
+        }
+        for cue in super::super::controller_tips::CUES.iter() {
+            for token in cue.iter() {
+                if let TipToken::Button(b) = token {
+                    assert!(ps.hint_icon(b).is_some(), "{b}");
+                    assert!(xb.hint_icon(b).is_some(), "{b}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shortcut_sheet_rows_use_the_pad_family_glyphs() {
+        let ps = ControllerIconFamily::from_label("DualShock 4 Wireless Controller");
+        let xb = ControllerIconFamily::from_label("Xbox Wireless Controller");
+        let icons = |family: ControllerIconFamily, label: &str| -> Vec<VkIcon> {
+            super::super::shortcut_sheet::GROUPS
+                .iter()
+                .flat_map(|g| g.rows.iter())
+                .find(|r| r.label == label)
+                .expect(label)
+                .keys
+                .iter()
+                .filter_map(|t| match t {
+                    TipToken::Button(b) => Some(family.hint_icon(b).expect(b)),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(icons(ps, "Copy"), [VkIcon::SelectPs5, VkIcon::Ps5Square]);
+        assert_eq!(icons(xb, "Copy"), [VkIcon::SelectXbox, VkIcon::XboxX]);
+        assert_eq!(
+            icons(ps, "Clear field"),
+            [VkIcon::SelectPs5, VkIcon::Ps5Circle]
+        );
+        assert_eq!(
+            icons(xb, "Clear field"),
+            [VkIcon::SelectXbox, VkIcon::XboxB]
+        );
+        assert_eq!(
+            icons(ps, "Screenshot"),
+            [VkIcon::Ps5L1, VkIcon::Ps5R1, VkIcon::Ps5R2]
+        );
+        assert_eq!(
+            icons(xb, "Screenshot"),
+            [VkIcon::XboxLb, VkIcon::XboxRb, VkIcon::XboxRt]
+        );
+        assert_eq!(icons(ps, "Close keyboard"), [VkIcon::L3Ps5]);
+        assert_eq!(icons(xb, "Dictate"), [VkIcon::R3Xbox]);
+        for b in super::super::shortcut_sheet::buttons() {
+            let (p, x) = (ps.hint_icon(b), xb.hint_icon(b));
+            assert!(p.is_some() && x.is_some(), "{b}");
+            assert_ne!(p, x, "{b}");
+        }
     }
 
     #[test]
@@ -3916,11 +5185,28 @@ mod tests {
         assert_eq!(styled_glyph(mono, &KeyAction::Symbols, "?123".into()), "123");
         assert_eq!(styled_glyph(normal, &KeyAction::Symbols, "?123".into()), "?123");
         assert_eq!(styled_glyph(mono, &KeyAction::Char(';'), ";".into()), ";");
-        assert!(is_action_key(&KeyAction::Shift));
-        assert!(!is_action_key(&KeyAction::Char('a')));
-        assert!(!is_action_key(&KeyAction::Vk(
-            windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE
-        )));
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_RETURN, VK_SPACE};
+        assert!(is_action_key(&KeyAction::Vk(VK_BACK)));
+        assert!(is_action_key(&KeyAction::Vk(VK_RETURN)));
+        for letter_fill in [
+            KeyAction::Shift,
+            KeyAction::Symbols,
+            KeyAction::PredictPrev,
+            KeyAction::PredictNext,
+            KeyAction::VoiceInput,
+            KeyAction::Char('a'),
+            KeyAction::Char(';'),
+            KeyAction::Vk(VK_SPACE),
+        ] {
+            assert!(!is_action_key(&letter_fill));
+        }
+        let rows = crate::vk_nav::rows_for_test();
+        let dark: usize = rows
+            .iter()
+            .flat_map(|r| r.keys.iter())
+            .filter(|k| is_action_key(&k.action))
+            .count();
+        assert_eq!(dark, 2);
         assert_eq!(strip_slots(VkStyle::Normal), 7);
         assert_eq!(strip_slots(VkStyle::Mono), 7);
     }

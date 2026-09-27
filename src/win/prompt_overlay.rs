@@ -8,6 +8,7 @@
 //! WinEvent reattach hooks: it is static and simply toggles visibility as the
 //! loop thread reports state via [`tick`].
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
+use super::controller_tips::{self, Gate, TipsState};
 use super::desktop;
 use super::desktop_window::{self, DesktopApp, DesktopWindowThread};
 use super::vk_renderer::{self, VkRenderer};
@@ -45,6 +47,8 @@ const MARGIN_BOTTOM: i32 = 72;
 const VOICE_W: i32 = 420;
 const VOICE_H: i32 = 104;
 const MARGIN_RIGHT: i32 = 40;
+const TIPS_W: i32 = 1240;
+const TIPS_H: i32 = 180;
 const REPAINT_TIMER_ID: usize = 12;
 /// ~60 fps so the reactive voice glow animates smoothly.
 const REPAINT_TIMER_MS: u32 = 16;
@@ -74,12 +78,20 @@ struct PromptOverlayController {
     connected_visual_until: Option<Instant>,
     connected_card_shown: bool,
     debug_epoch: Instant,
+    tips: TipsState,
+}
+
+static TIPS_REPLAY: AtomicBool = AtomicBool::new(false);
+
+pub fn request_controller_tips() {
+    TIPS_REPLAY.store(true, Ordering::SeqCst);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PromptThreadKind {
     Prompt,
     Voice,
+    Tips,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -108,6 +120,7 @@ impl Default for PromptOverlayController {
             connected_visual_until: None,
             connected_card_shown: false,
             debug_epoch: Instant::now(),
+            tips: TipsState::default(),
         }
     }
 }
@@ -151,7 +164,10 @@ enum PromptVisual {
     VoiceBorder,
     /// Voice helper launched but the mic isn't capturing yet.
     Starting,
+    Tips(u8),
 }
+
+const TIPS_LPARAM_BASE: isize = 100;
 
 impl PromptVisual {
     fn as_lparam(self) -> LPARAM {
@@ -163,6 +179,7 @@ impl PromptVisual {
             PromptVisual::Transcribing => 5,
             PromptVisual::Starting => 6,
             PromptVisual::VoiceBorder => 7,
+            PromptVisual::Tips(i) => TIPS_LPARAM_BASE + i as isize,
         })
     }
 
@@ -174,7 +191,17 @@ impl PromptVisual {
             5 => PromptVisual::Transcribing,
             6 => PromptVisual::Starting,
             7 => PromptVisual::VoiceBorder,
+            n if (TIPS_LPARAM_BASE..TIPS_LPARAM_BASE + 256).contains(&n) => {
+                PromptVisual::Tips((n - TIPS_LPARAM_BASE) as u8)
+            }
             _ => PromptVisual::Ready,
+        }
+    }
+
+    fn tip_index(self) -> Option<usize> {
+        match self {
+            PromptVisual::Tips(i) => Some(i as usize),
+            _ => None,
         }
     }
 
@@ -237,6 +264,43 @@ thread_local! {
     static VOICE_SHOWN_AT: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
     static VOICE_LABEL_AT: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
     static VOICE_EXIT_AT: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    static TIPS_MORPH: std::cell::Cell<Option<(usize, Instant)>> = const { std::cell::Cell::new(None) };
+}
+
+fn tips_transition(now: Instant) -> (f32, f32) {
+    let ms =
+        |at: Option<Instant>| at.map(|t| now.saturating_duration_since(t).as_secs_f32() * 1000.0);
+    let (mut alpha, scale) = ms(VOICE_SHOWN_AT.with(|c| c.get()))
+        .map(crate::vk_motion::voice_enter)
+        .unwrap_or((1.0, 1.0));
+    if let Some(exit_ms) = ms(VOICE_EXIT_AT.with(|c| c.get())) {
+        alpha *= crate::vk_motion::voice_exit(exit_ms);
+    }
+    (alpha, scale)
+}
+
+fn active_tips_morph(now: Instant) -> Option<(usize, f32)> {
+    TIPS_MORPH.with(|state| {
+        let (from, start) = state.get()?;
+        if raw_morph_progress(start, now) >= 1.0 {
+            state.set(None);
+            None
+        } else {
+            Some((from, eased_morph_progress(start, now)))
+        }
+    })
+}
+
+fn visual_is_tips(visual: PromptVisual) -> bool {
+    visual.tip_index().is_some()
+}
+
+fn click_through(visual: PromptVisual) -> bool {
+    fullscreen_border(visual) || visual_is_tips(visual)
+}
+
+fn userland_only(visual: PromptVisual) -> bool {
+    visual_is_voice(visual) || visual_is_tips(visual)
 }
 
 /// `(alpha, scale, label_alpha)` for the dictation pill at `now`: entrance
@@ -273,6 +337,8 @@ fn same_voice_pill(from: PromptVisual, to: PromptVisual) -> bool {
 fn thread_kind_for_visual(visual: PromptVisual) -> PromptThreadKind {
     if visual_is_voice(visual) {
         PromptThreadKind::Voice
+    } else if visual_is_tips(visual) {
+        PromptThreadKind::Tips
     } else {
         PromptThreadKind::Prompt
     }
@@ -326,6 +392,7 @@ fn overlay_rect(visual: PromptVisual, screen_w: i32, screen_h: i32) -> PromptRec
         };
     }
     let (w, h) = panel_size_for_visual(visual);
+    let w = w.min(screen_w);
     let (x, y) = if visual_is_voice(visual) {
         (
             (screen_w - w - MARGIN_RIGHT).max(0),
@@ -359,7 +426,7 @@ unsafe fn place_overlay(hwnd: HWND, visual: PromptVisual, show: bool) {
     let rect = target_rect_for_visual(visual);
     let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
     let bit = WS_EX_TRANSPARENT.0;
-    let ex = if fullscreen_border(visual) {
+    let ex = if click_through(visual) {
         ex | bit
     } else {
         ex & !bit
@@ -403,7 +470,13 @@ pub fn tick(vk_open: bool) {
     c.last_tick = now;
 
     let userland_debug = crate::config::prompt_userland_debug();
-    let on_winlogon = super::surface::input().is_some_and(|s| s.is_winlogon())
+    let input_name = desktop::input_desktop_name().ok();
+    let default_desktop = input_name
+        .as_deref()
+        .is_some_and(|n| n.eq_ignore_ascii_case("default"));
+    let on_winlogon = input_name
+        .as_deref()
+        .is_some_and(|n| super::surface::classify(n).is_winlogon())
         && !super::native_keyboard::yield_logon_to_native()
         && unsafe { GetSystemMetrics(SM_SHUTTINGDOWN) } == 0;
     let connected = crate::debug_state::snapshot().connected;
@@ -413,6 +486,14 @@ pub fn tick(vk_open: bool) {
     // mic key shows listening/starting, so the pill yields — transcription
     // still takes the screen, because that's the full-display border.
     let voice = crate::win::speech_input::voice_ui_phase();
+    let tip = step_tips(
+        &mut c.tips,
+        now,
+        connected,
+        default_desktop,
+        vk_open,
+        voice.is_some(),
+    );
     let visual = if voice.is_some() {
         voice_overlay_visual(voice.as_deref(), vk_open)
     } else if userland_debug {
@@ -428,7 +509,7 @@ pub fn tick(vk_open: bool) {
             Some(PromptVisual::NoPad)
         }
     } else {
-        None
+        tip.map(|i| PromptVisual::Tips(i as u8))
     };
 
     let desired_thread_kind = visual.map(thread_kind_for_visual);
@@ -476,6 +557,7 @@ pub fn tick(vk_open: bool) {
                 (PromptVisual::Transcribing, _) => "prompt ui: shown (voice transcribing)",
                 (PromptVisual::VoiceBorder, _) => "prompt ui: shown (voice, display border)",
                 (PromptVisual::Starting, _) => "prompt ui: shown (voice starting)",
+                (PromptVisual::Tips(_), _) => "prompt ui: shown (controller tips)",
             });
         } else {
             let _ = thread.hide();
@@ -485,18 +567,66 @@ pub fn tick(vk_open: bool) {
     c.last_visual = visual;
 }
 
+fn step_tips(
+    tips: &mut TipsState,
+    now: Instant,
+    connected: bool,
+    default_desktop: bool,
+    vk_open: bool,
+    voice: bool,
+) -> Option<usize> {
+    if TIPS_REPLAY.swap(false, Ordering::SeqCst) {
+        tips.request_replay();
+    }
+    let calm = default_desktop && !vk_open && !voice && !tips.idle(connected);
+    let game = calm
+        && (crate::pipe_server::game_active()
+            || super::game_detect::standalone_game_active_cached());
+    let gate = Gate {
+        default_desktop,
+        vk_open,
+        voice,
+        game,
+    };
+    let path = std::path::Path::new(controller_tips::STATE_FILE);
+    let current = env!("CARGO_PKG_VERSION");
+    let step = tips.step(now, connected, gate, || {
+        controller_tips::should_show(
+            controller_tips::read_stored_version(path).as_deref(),
+            current,
+        )
+    });
+    if step.started {
+        service_log("prompt ui: controller tips started");
+        if let Err(e) = controller_tips::write_stored_version(path, current) {
+            service_log(&format!(
+                "prompt ui: controller tips state write failed: {e}"
+            ));
+        }
+    }
+    step.cue
+}
+
 fn ui_show(visual: PromptVisual) {
     let previous = VISUAL_STATE.with(|state| state.get());
     let existing = HWND_STATE.with(|state| state.get());
     // Prompt visuals (ready / no pad / card) share one canvas and swap or morph in
     // place; only a voice <-> prompt change needs a different window.
-    if existing.is_some() && visual_is_voice(previous) != visual_is_voice(visual) {
+    if existing.is_some()
+        && (visual_is_voice(previous) != visual_is_voice(visual)
+            || visual_is_tips(previous) != visual_is_tips(visual))
+    {
         ui_hide();
     }
 
     VISUAL_STATE.with(|state| state.set(visual));
     let now = Instant::now();
     if let Some(hwnd) = HWND_STATE.with(|state| state.get()) {
+        if let (Some(from), Some(to)) = (previous.tip_index(), visual.tip_index()) {
+            if from != to {
+                TIPS_MORPH.with(|state| state.set(Some((from, now))));
+            }
+        }
         // Same window, new visual: either a voice phase swap or a pill ⇄ card
         // morph. Both keep the window where it is and animate on the surface.
         if previous != visual && same_voice_pill(previous, visual) {
@@ -528,6 +658,7 @@ fn ui_show(visual: PromptVisual) {
     }
 
     VISUAL_MORPH.with(|state| state.set(None));
+    TIPS_MORPH.with(|state| state.set(None));
     // The entrance clock starts at the first paint, not at window creation.
     // Creating the device takes long enough that a clock started here would
     // already be finished, and the frame would pop in.
@@ -536,7 +667,7 @@ fn ui_show(visual: PromptVisual) {
     // Voice pill is userland-only and the thread is already on the user desktop
     // (attached once in on_ready); re-attaching there fails with ERROR_BUSY and
     // mis-places the window. Only the Winlogon prompts re-attach per show.
-    let userland_only = visual_is_voice(visual);
+    let userland_only = userland_only(visual);
     if !userland_only {
         if let Err(e) = desktop::attach_input() {
             service_log(&format!("prompt ui: desktop attach failed: {e}"));
@@ -568,7 +699,7 @@ fn ui_show(visual: PromptVisual) {
                     Err(e) => service_log(&format!("prompt ui: renderer init failed: {e}")),
                 }
                 let _ = SetTimer(hwnd, REPAINT_TIMER_ID, REPAINT_TIMER_MS, None);
-                if visual_is_voice(visual) {
+                if userland_only {
                     VOICE_SHOWN_AT.with(|c| c.set(Some(Instant::now())));
                 }
                 render_prompt(hwnd);
@@ -582,7 +713,7 @@ fn ui_show(visual: PromptVisual) {
 fn ui_hide() {
     let hwnd = HWND_STATE.with(|state| state.get());
     if let Some(hwnd) = hwnd {
-        if visual_is_voice(VISUAL_STATE.with(|s| s.get())) {
+        if userland_only(VISUAL_STATE.with(|s| s.get())) {
             unsafe { fade_out_voice(hwnd) };
         }
     }
@@ -592,6 +723,7 @@ fn ui_hide() {
         // DestroyWindow, or releasing it against a dead HWND crashes.
         RENDERER.with(|c| *c.borrow_mut() = None);
         VISUAL_MORPH.with(|state| state.set(None));
+        TIPS_MORPH.with(|state| state.set(None));
         VOICE_SHOWN_AT.with(|c| c.set(None));
         VOICE_LABEL_AT.with(|c| c.set(None));
         VOICE_EXIT_AT.with(|c| c.set(None));
@@ -622,6 +754,8 @@ unsafe fn fade_out_voice(hwnd: HWND) {
 fn panel_size_for_visual(visual: PromptVisual) -> (i32, i32) {
     if visual_is_voice(visual) {
         (VOICE_W, VOICE_H)
+    } else if visual_is_tips(visual) {
+        (TIPS_W, TIPS_H)
     } else {
         (PANEL_W, PANEL_H)
     }
@@ -667,7 +801,7 @@ unsafe extern "system" fn prompt_wndproc(
     match msg {
         // Fullscreen transcription frame must not eat clicks meant for the
         // desktop or the keyboard underneath the border.
-        WM_NCHITTEST if fullscreen_border(VISUAL_STATE.with(|state| state.get())) => {
+        WM_NCHITTEST if click_through(VISUAL_STATE.with(|state| state.get())) => {
             LRESULT(HTTRANSPARENT as isize)
         }
         WM_PAINT => {
@@ -756,7 +890,24 @@ fn render_prompt(hwnd: HWND) {
                         name
                     };
                     let title = connected_card_title(controller_label);
-                    let result = if visual_is_voice(visual) {
+                    let result = if let Some(index) = visual.tip_index() {
+                        let (alpha, scale) = tips_transition(now);
+                        let morph = active_tips_morph(now);
+                        r.draw_tips(&vk_renderer::TipsPill {
+                            bg,
+                            border,
+                            text,
+                            controller_label,
+                            cue: controller_tips::cue(index),
+                            prev_cue: morph.map(|(from, _)| controller_tips::cue(from)),
+                            morph_t: morph.map(|(_, t)| t).unwrap_or(1.0),
+                            index,
+                            count: controller_tips::cue_count(),
+                            alpha,
+                            scale,
+                            style,
+                        })
+                    } else if visual_is_voice(visual) {
                         let accent = crate::win::vk_ui::theme_palette().accent;
                         let (alpha, scale, label_alpha) = voice_transition(now);
                         r.draw_voice(&vk_renderer::VoicePill {
@@ -914,6 +1065,22 @@ mod tests {
             Some(vk_renderer::VoicePhase::Starting)
         );
         assert_eq!(PromptVisual::Ready.voice_phase(), None);
+    }
+
+    #[test]
+    fn tips_visual_is_a_click_through_bottom_pill() {
+        for i in 0..controller_tips::cue_count() as u8 {
+            let visual = PromptVisual::Tips(i);
+            assert_eq!(PromptVisual::from_lparam(visual.as_lparam()), visual);
+            assert!(click_through(visual));
+            assert!(!fullscreen_border(visual));
+            assert_eq!(thread_kind_for_visual(visual), PromptThreadKind::Tips);
+        }
+        let rect = overlay_rect(PromptVisual::Tips(0), 1920, 1080);
+        assert_eq!(rect.w, TIPS_W);
+        assert_eq!(rect.y + rect.h, 1080 - MARGIN_BOTTOM);
+        assert_eq!(overlay_rect(PromptVisual::Tips(0), 1024, 768).w, 1024);
+        assert!(!click_through(PromptVisual::Ready));
     }
 
     #[test]

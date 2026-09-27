@@ -351,7 +351,7 @@ fn copy_screen_to_clipboard(window_only: bool) {
         SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
     };
 
-    let mut window_path: Option<std::path::PathBuf> = None;
+    let mut capture: Option<(Vec<u8>, String)> = None;
     let rect = if window_only {
         let hwnd = unsafe { GetForegroundWindow() };
         if hwnd.0.is_null() {
@@ -423,7 +423,10 @@ fn copy_screen_to_clipboard(window_only: bool) {
         SelectObject(mem_dc, old_obj);
 
         if blt_ok {
-            window_path = save_foreground_capture(screen_dc, bitmap, width, height, window_only);
+            capture = crate::image_paste::bitmap_rgba(screen_dc, bitmap, width, height).map(|rgba| {
+                let suffix = if window_only { " window" } else { "" };
+                (rgba, crate::image_paste::timestamp_stem("Screenshot", suffix))
+            });
         }
 
         let _ = DeleteDC(mem_dc);
@@ -455,10 +458,24 @@ fn copy_screen_to_clipboard(window_only: bool) {
             crate::install::log_line("screenshot clipboard: copy failed");
             let _ = DeleteObject(bitmap);
         }
-
-        if let Some(path) = window_path {
-            let _ = MessageBeep(MB_OK);
-            spawn_toast_helper(&path, copied);
+        let seq = copied.then(|| windows::Win32::System::DataExchange::GetClipboardSequenceNumber());
+        if let Some((rgba, stem)) = capture {
+            std::thread::spawn(move || {
+                let path = crate::image_paste::save_png(
+                    &stem,
+                    width as u32,
+                    height as u32,
+                    &rgba,
+                    "screenshot",
+                );
+                if let Some(path) = path {
+                    if let Some(seq) = seq {
+                        crate::image_paste::remember_screenshot(path.clone(), seq);
+                    }
+                    let _ = MessageBeep(MB_OK);
+                    spawn_toast_helper(&path, copied);
+                }
+            });
         }
     }
 }
@@ -482,161 +499,6 @@ fn spawn_toast_helper(path: &std::path::Path, copied: bool) {
             let _ = windows::Win32::Foundation::CloseHandle(h);
         },
         Err(e) => crate::install::log_line(&format!("screenshot toast: spawn failed: {e}")),
-    }
-}
-
-#[cfg(windows)]
-fn save_foreground_capture(
-    hdc: windows::Win32::Graphics::Gdi::HDC,
-    bitmap: windows::Win32::Graphics::Gdi::HBITMAP,
-    width: i32,
-    height: i32,
-    window_only: bool,
-) -> Option<std::path::PathBuf> {
-    use windows::Win32::Graphics::Gdi::{
-        GetDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
-    };
-
-    let mut bmi = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: width,
-            biHeight: -height,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0 as u32,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    let mut bgra = vec![0u8; width as usize * height as usize * 4];
-    let lines = unsafe {
-        GetDIBits(
-            hdc,
-            bitmap,
-            0,
-            height as u32,
-            Some(bgra.as_mut_ptr().cast()),
-            &mut bmi,
-            DIB_RGB_COLORS,
-        )
-    };
-    if lines != height {
-        crate::install::log_line("screenshot save: GetDIBits failed");
-        return None;
-    }
-
-    let mut rgba = vec![0u8; bgra.len()];
-    for (src, dst) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
-        dst[0] = src[2];
-        dst[1] = src[1];
-        dst[2] = src[0];
-        dst[3] = 255;
-    }
-
-    save_window_png(width as u32, height as u32, &rgba, window_only)
-}
-
-#[cfg(windows)]
-fn save_window_png(width: u32, height: u32, rgba: &[u8], window_only: bool) -> Option<std::path::PathBuf> {
-    let Some(dir) = screenshots_dir() else {
-        crate::install::log_line("screenshot save: could not resolve Screenshots folder");
-        return None;
-    };
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        crate::install::log_line(&format!("screenshot save: create_dir_all failed: {e}"));
-        return None;
-    }
-
-    let st = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
-    let stem = format!(
-        "Screenshot {:04}-{:02}-{:02} {:02}{:02}{:02}{}",
-        st.wYear,
-        st.wMonth,
-        st.wDay,
-        st.wHour,
-        st.wMinute,
-        st.wSecond,
-        if window_only { " window" } else { "" }
-    );
-    let mut opened = None;
-    for n in 1..100 {
-        let name = if n == 1 {
-            format!("{stem}.png")
-        } else {
-            format!("{stem} ({n}).png")
-        };
-        let path = dir.join(name);
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(f) => {
-                opened = Some((f, path));
-                break;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => {
-                crate::install::log_line(&format!("screenshot save: create file failed: {e}"));
-                return None;
-            }
-        }
-    }
-    let Some((file, path)) = opened else {
-        crate::install::log_line("screenshot save: no free file name");
-        return None;
-    };
-    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = match encoder.write_header() {
-        Ok(w) => w,
-        Err(e) => {
-            crate::install::log_line(&format!("screenshot save: png header failed: {e}"));
-            return None;
-        }
-    };
-    if let Err(e) = writer.write_image_data(rgba) {
-        crate::install::log_line(&format!("screenshot save: png write failed: {e}"));
-        return None;
-    }
-    crate::install::log_line(&format!("screenshot saved: {}", path.display()));
-    Some(path)
-}
-
-#[cfg(windows)]
-fn screenshots_dir() -> Option<std::path::PathBuf> {
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows::Win32::System::Com::CoTaskMemFree;
-    use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
-    use windows::Win32::UI::Shell::{FOLDERID_Screenshots, SHGetKnownFolderPath, KF_FLAG_CREATE};
-
-    unsafe {
-        let mut token = HANDLE::default();
-        let session_id = WTSGetActiveConsoleSessionId();
-        let have_token = WTSQueryUserToken(session_id, &mut token).is_ok();
-
-        let result = if have_token {
-            SHGetKnownFolderPath(&FOLDERID_Screenshots, KF_FLAG_CREATE, token)
-        } else {
-            SHGetKnownFolderPath(&FOLDERID_Screenshots, KF_FLAG_CREATE, None)
-        };
-
-        if have_token {
-            let _ = CloseHandle(token);
-        }
-
-        match result {
-            Ok(pwstr) => {
-                let path = pwstr.to_string().ok().map(std::path::PathBuf::from);
-                CoTaskMemFree(Some(pwstr.0.cast()));
-                path
-            }
-            Err(e) => {
-                crate::install::log_line(&format!(
-                    "screenshot save: SHGetKnownFolderPath failed: {e}"
-                ));
-                None
-            }
-        }
     }
 }
 

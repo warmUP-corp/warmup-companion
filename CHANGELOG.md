@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.7.0
+
+- The open keyboard always shows a slim shortcut legend along the bottom of its panel, drawn with your pad's own button icons: A Type, B Delete, LB / RB Move caret, RT Shift, R3 Dictate, View + Y Paste, tap View Suggestions, L3 Close keyboard, and hold View All shortcuts. The keyboard grows by the strip's height instead of shrinking its keys, and apps it pushes up make room for it. When the legend does not fit, items drop from the middle and "hold View All shortcuts" always stays. The hold-View cheat sheet covers it while shown, and the legend is hidden on the sign-in screen, where dictation is unavailable.
+- Only Backspace and Enter keep the darker function-key colour. Shift, ?123, the caret arrows and the mic key now match the letter keys, in both keyboard styles.
+- With the keyboard closed, hold View and press Y to paste (Ctrl+V) into the focused app. A plain View tap still sends Enter, but now on release, so View chords such as View+Y and the View+LB+X warmUP launch no longer send a stray Enter. Start still sends Enter on press.
+- First-run controller tips: the first time a controller connects on the desktop after an update, a short pill walks through the shortcuts (L3 keyboard, R3 dictation, screenshots, View + Y paste, View + LB in games) using your pad's own button glyphs. It waits while the keyboard, dictation or a game is up, and the tray's "Show controller tips" replays it.
+- Hold View (Create on DualSense, Share on DualShock 4) for half a second while the keyboard is open to see a shortcut cheat sheet with your pad's own button glyphs: keyboard controls, the keyboard-closed screenshot and warmUP chords, and the in-game screenshot and record holds. It fades in over the keyboard and goes away when you let go of View. View chords such as View + X, Y, B and View + L1/R1 still work while it is up. A quick View tap still toggles the suggestion bar, but now only on a short tap: holding View past half a second or using it in a chord no longer toggles it.
+- Pasting from the controller into a terminal (Windows Terminal, WezTerm, PowerShell, cmd and others) types the image's file path when the clipboard holds an image instead of text, so coding agents like Claude Code or Codex can open it. A controller screenshot pastes its saved file; an image copied from elsewhere is saved to `Pictures\Screenshots` as `Clipboard <date> <time>.png` first; files copied in Explorer paste their quoted paths.
+- Controller copy, paste and clear shortcuts now work in terminals such as WezTerm that read keys by scan code.
+- Controller screenshots no longer make the cursor stutter: the image is copied right away and saved in the background.
+
 ## v0.6.1
 
 - Dictation knows coding words. Whisper is primed with terms like git, npm, GitHub, Claude Code and Codex, and both engines fix common mishearings such as "get push" to "git push" and "and PM" to "npm" when you talk to a terminal or a coding agent.

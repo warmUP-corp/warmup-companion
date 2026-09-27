@@ -26,6 +26,7 @@ const WARMUP_LAUNCH_DEBOUNCE: Duration = Duration::from_secs(2);
 /// Ignore spurious X/dpad from misaligned HID for a moment after VK opens.
 const VK_NAV_INPUT_GRACE: Duration = Duration::from_millis(450);
 const SLEEP_SCREENSHOT_HOLD: Duration = Duration::from_millis(600);
+const VIEW_SHEET_HOLD: Duration = Duration::from_millis(500);
 const DESKTOP_SYNC_LOG_INTERVAL: Duration = Duration::from_secs(120);
 const HAPTIC_CONFIRM_MS: u32 = 14;
 const HAPTIC_ALERT_MS: u32 = 45;
@@ -49,6 +50,98 @@ pub enum VkLoopAction {
     Close,
     Reopen,
     LaunchWarmup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewChordAction {
+    None,
+    Paste,
+    Enter,
+}
+
+fn view_chord_step(
+    view_down: &mut bool,
+    chorded: &mut bool,
+    change: ButtonChange,
+) -> ViewChordAction {
+    match (change.button, change.pressed) {
+        (Button::Select, true) => {
+            *view_down = true;
+            *chorded = false;
+            ViewChordAction::None
+        }
+        (Button::Select, false) => {
+            let tap = *view_down && !*chorded;
+            *view_down = false;
+            *chorded = false;
+            if tap {
+                ViewChordAction::Enter
+            } else {
+                ViewChordAction::None
+            }
+        }
+        (button, true) if *view_down => {
+            *chorded = true;
+            if button == Button::Y {
+                ViewChordAction::Paste
+            } else {
+                ViewChordAction::None
+            }
+        }
+        _ => ViewChordAction::None,
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ViewSheetHold {
+    since: Option<Instant>,
+    interrupted: bool,
+    shown: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ViewRelease {
+    tap: bool,
+    hide_sheet: bool,
+}
+
+impl ViewSheetHold {
+    fn press(&mut self, now: Instant) {
+        *self = Self {
+            since: Some(now),
+            ..Self::default()
+        };
+    }
+
+    fn other_press(&mut self) {
+        if self.since.is_some() {
+            self.interrupted = true;
+        }
+    }
+
+    fn tick(&mut self, now: Instant) -> bool {
+        let due = !self.shown
+            && !self.interrupted
+            && self
+                .since
+                .is_some_and(|since| now.duration_since(since) >= VIEW_SHEET_HOLD);
+        if due {
+            self.shown = true;
+        }
+        due
+    }
+
+    fn release(&mut self, now: Instant, chorded: bool) -> ViewRelease {
+        let quick = self
+            .since
+            .is_some_and(|since| now.duration_since(since) < VIEW_SHEET_HOLD);
+        let out = ViewRelease {
+            tap: quick && !chorded && !self.shown,
+            hide_sheet: self.shown,
+        };
+        *self = Self::default();
+        out
+    }
 }
 
 enum Backend {
@@ -228,6 +321,9 @@ pub struct GamepadPoll {
     stick_nav: Option<Button>,
     vk_select_down: bool,
     vk_select_chord_used: bool,
+    view_sheet: ViewSheetHold,
+    view_down: bool,
+    view_chorded: bool,
     launch_select_down: bool,
     launch_lb_down: bool,
     launch_x_down: bool,
@@ -393,6 +489,9 @@ impl GamepadPoll {
             stick_nav: None,
             vk_select_down: false,
             vk_select_chord_used: false,
+            view_sheet: ViewSheetHold::default(),
+            view_down: false,
+            view_chorded: false,
             launch_select_down: false,
             launch_lb_down: false,
             launch_x_down: false,
@@ -422,10 +521,13 @@ impl GamepadPoll {
         self.stick_nav = None;
         self.vk_select_down = false;
         self.vk_select_chord_used = false;
+        self.view_sheet = ViewSheetHold::default();
+        self.reset_view_hold();
         self.reset_launch_hotkey();
         self.last_vk_open = false;
         #[cfg(windows)]
         {
+            crate::win::shortcut_sheet::set_shown(false);
             crate::vk_nav::reset_selection();
             crate::win::logon_focus::clear_cache();
         }
@@ -469,11 +571,13 @@ impl GamepadPoll {
             self.shot_lb_down = false;
             self.shot_rb_down = false;
             self.shot_select_down = false;
+            self.reset_view_hold();
             return Ok(Vec::new());
         }
 
         if vk_open && !self.last_vk_open {
             self.on_vk_opened();
+            self.reset_view_hold();
             self.backend.haptic_confirm();
             self.a_cursor_down = false;
             self.touchpad_cursor_down = false;
@@ -562,11 +666,16 @@ impl GamepadPoll {
                     edges.push(edge);
                 }
             }
+            #[cfg(windows)]
+            if self.view_sheet.tick(Instant::now()) {
+                crate::win::shortcut_sheet::set_shown(true);
+            }
             return Ok(edges);
         }
 
         #[cfg(windows)]
         if Self::service_signin_desktop() && crate::win::native_keyboard::yield_logon_to_native() {
+            self.reset_view_hold();
             cursor.set_left_button(false);
             cursor.set_right_button(false);
             self.a_cursor_down = false;
@@ -630,6 +739,7 @@ impl GamepadPoll {
                 }
                 continue;
             }
+            let view_action = view_chord_step(&mut self.view_down, &mut self.view_chorded, change);
             // Use one mode snapshot for forwarding and local handling. Sending L3 to warmUP
             // while also opening the native VK lets a delayed launcher event open/focus its dock
             // over the user's browser. Keep desktop VK/voice shortcuts local, just as in Browser.
@@ -706,13 +816,7 @@ impl GamepadPoll {
                         && crate::config::gamepad_settings().cursor_enabled,
                 );
             }
-            // Share (SELECT) / Start → Enter into the focused app even with the VK
-            // closed, so submit/confirm is one tap. NOT gated by clicks_enabled
-            // (that's OS-cursor mode); only suppressed when warmUP owns text input
-            // or a game is active.
-            // ponytail: also fires on the SELECT edge of the SELECT+LB+X launch combo —
-            // one stray Enter during that 3-finger hold; split to release-edge if it bites.
-            if matches!(change.button, Button::Select | Button::Start) && change.pressed {
+            if change.button == Button::Start && change.pressed {
                 let suppressed = native_vk_suppressed;
                 crate::install::log_line(&format!(
                     "{} press, vk closed: suppressed={suppressed} clicks_enabled={} -> {}",
@@ -722,6 +826,31 @@ impl GamepadPoll {
                 ));
                 if !suppressed {
                     cursor.tap_enter();
+                    self.backend.haptic_confirm();
+                }
+            }
+            if view_action == ViewChordAction::Enter {
+                let suppressed = native_vk_suppressed;
+                crate::install::log_line(&format!(
+                    "{} release, vk closed: suppressed={suppressed} clicks_enabled={} -> {}",
+                    change.button.as_str(),
+                    crate::pipe_server::clicks_enabled(),
+                    if suppressed { "skip" } else { "Enter" }
+                ));
+                if !suppressed {
+                    cursor.tap_enter();
+                    self.backend.haptic_confirm();
+                }
+            }
+            #[cfg(windows)]
+            if view_action == ViewChordAction::Paste {
+                let skip = native_vk_suppressed || Self::service_signin_desktop();
+                crate::install::log_line(&format!(
+                    "View+Y, vk closed: suppressed={native_vk_suppressed} -> {}",
+                    if skip { "skip" } else { "paste" }
+                ));
+                if !skip {
+                    crate::vk_nav::paste_clipboard();
                     self.backend.haptic_confirm();
                 }
             }
@@ -791,6 +920,11 @@ impl GamepadPoll {
         true
     }
 
+    fn reset_view_hold(&mut self) {
+        self.view_down = false;
+        self.view_chorded = false;
+    }
+
     fn reset_launch_hotkey(&mut self) {
         self.launch_select_down = false;
         self.launch_lb_down = false;
@@ -811,6 +945,9 @@ impl GamepadPoll {
             .as_ref()
             .is_some_and(|old| old != &input);
         self.last_input_desktop = Some(input.clone());
+        if changed {
+            self.reset_view_hold();
+        }
         if !vk_open || !changed {
             return None;
         }
@@ -843,6 +980,10 @@ impl GamepadPoll {
                 .is_some_and(|until| Instant::now() < until)
         {
             return None;
+        }
+
+        if change.pressed && change.button != Button::Select {
+            self.view_sheet.other_press();
         }
 
         // Select=engage suggestion strip, LB/RB=caret (Select+LB/RB=word; chips when
@@ -942,13 +1083,20 @@ impl GamepadPoll {
             (Button::Select, true) => {
                 self.vk_select_down = true;
                 self.vk_select_chord_used = false;
+                self.view_sheet.press(Instant::now());
                 None
             }
             (Button::Select, false) => {
                 self.vk_select_down = false;
                 vk_nav::repeat_released(vk_nav::RepeatKey::WordLeft);
                 vk_nav::repeat_released(vk_nav::RepeatKey::WordRight);
-                if !self.vk_select_chord_used {
+                let release = self
+                    .view_sheet
+                    .release(Instant::now(), self.vk_select_chord_used);
+                if release.hide_sheet {
+                    crate::win::shortcut_sheet::set_shown(false);
+                }
+                if release.tap {
                     // Web SELECT: jump into the suggestion strip when populated.
                     if crate::vk_predict::strip_engaged() {
                         crate::vk_predict::disengage();
@@ -1259,13 +1407,17 @@ where
         println!("  right stick  → scroll");
         println!("  A            → click");
         println!("  L3 (stick click) → open keyboard");
+        println!("  View (tap)   → Enter (on release)");
+        println!("  View+Y       → paste");
+        println!("  Start        → Enter");
         println!("Controls (VK open):");
         println!("  D-pad/L-stick → move key focus");
         println!("  A / Touchpad → type selected key");
         println!("  B            → backspace");
         println!("  X            → language (QWERTY/QWERTZ)");
         println!("  Y            → space");
-        println!("  Select       → enter / leave suggestion strip");
+        println!("  Select (tap) → enter / leave suggestion strip");
+        println!("  Select (hold)→ shortcut cheat sheet");
         println!("  Select+X/Y/B → copy / paste / clear input");
         println!("  Select+LB/RB → jump caret by word");
         println!("  Start        → Enter");
@@ -1390,8 +1542,8 @@ where
 mod tests {
     use super::{
         allows_cursor_injection, companion_owns_stick_click, forward_only_while_sleeping,
-        is_standalone_guide_wake, sleep_screenshot_due, Button, ButtonChange,
-        SLEEP_SCREENSHOT_HOLD,
+        is_standalone_guide_wake, sleep_screenshot_due, view_chord_step, Button, ButtonChange,
+        ViewChordAction, ViewRelease, ViewSheetHold, SLEEP_SCREENSHOT_HOLD, VIEW_SHEET_HOLD,
     };
     use std::time::{Duration, Instant};
 
@@ -1469,5 +1621,115 @@ mod tests {
         assert!(allows_cursor_injection(false, true));
         assert!(!allows_cursor_injection(false, false));
         assert!(!allows_cursor_injection(true, true));
+    }
+
+    #[test]
+    fn view_chords_decide_enter_on_release_or_paste() {
+        let run = |seq: &[(Button, bool)]| {
+            let (mut down, mut chorded) = (false, false);
+            seq.iter()
+                .map(|&(button, pressed)| {
+                    view_chord_step(&mut down, &mut chorded, ButtonChange { button, pressed })
+                })
+                .collect::<Vec<_>>()
+        };
+        use ViewChordAction::{Enter, None as No, Paste};
+        assert_eq!(
+            run(&[(Button::Select, true), (Button::Select, false)]),
+            [No, Enter]
+        );
+        assert_eq!(
+            run(&[
+                (Button::Select, true),
+                (Button::Y, true),
+                (Button::Y, false),
+                (Button::Select, false),
+            ]),
+            [No, Paste, No, No]
+        );
+        assert_eq!(
+            run(&[
+                (Button::Select, true),
+                (Button::Lb, true),
+                (Button::X, true),
+                (Button::X, false),
+                (Button::Lb, false),
+                (Button::Select, false),
+            ]),
+            [No, No, No, No, No, No]
+        );
+        assert_eq!(run(&[(Button::Y, true), (Button::Start, true)]), [No, No]);
+        assert_eq!(run(&[(Button::Select, false)]), [No]);
+    }
+
+    #[test]
+    fn view_tap_toggles_suggestions_and_hold_shows_the_sheet() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+
+        let mut h = ViewSheetHold::default();
+        h.press(t0);
+        assert!(!h.tick(ms(200)));
+        assert_eq!(
+            h.release(ms(300), false),
+            ViewRelease {
+                tap: true,
+                hide_sheet: false
+            }
+        );
+
+        let mut h = ViewSheetHold::default();
+        h.press(t0);
+        assert!(!h.tick(ms(499)));
+        assert!(h.tick(t0 + VIEW_SHEET_HOLD));
+        assert!(!h.tick(ms(900)));
+        assert_eq!(
+            h.release(ms(1000), false),
+            ViewRelease {
+                tap: false,
+                hide_sheet: true
+            }
+        );
+        assert!(!h.tick(ms(2000)));
+
+        let mut h = ViewSheetHold::default();
+        h.press(t0);
+        assert!(h.tick(ms(600)));
+        h.other_press();
+        assert!(!h.tick(ms(700)));
+        assert_eq!(
+            h.release(ms(800), true),
+            ViewRelease {
+                tap: false,
+                hide_sheet: true
+            }
+        );
+
+        let mut h = ViewSheetHold::default();
+        h.press(t0);
+        assert_eq!(h.release(ms(650), false), ViewRelease::default());
+    }
+
+    #[test]
+    fn view_chord_before_the_hold_skips_sheet_and_toggle() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+
+        let mut h = ViewSheetHold::default();
+        h.press(t0);
+        h.other_press();
+        assert!(!h.tick(ms(800)));
+        assert_eq!(h.release(ms(900), true), ViewRelease::default());
+
+        let mut h = ViewSheetHold::default();
+        h.press(t0);
+        h.other_press();
+        assert!(!h.tick(ms(200)));
+        assert_eq!(h.release(ms(250), true), ViewRelease::default());
+
+        let mut h = ViewSheetHold::default();
+        h.other_press();
+        assert!(!h.tick(ms(900)));
+        assert_eq!(h.release(ms(900), false), ViewRelease::default());
     }
 }

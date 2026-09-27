@@ -423,6 +423,7 @@ fn ui_hide() {
     }
     VK_HWND.store(0, Ordering::Release);
     VK_VISIBLE.store(false, Ordering::SeqCst);
+    super::shortcut_sheet::set_shown(false);
     vk_log::log("WarmupXboxVkWindow hidden");
 }
 
@@ -782,6 +783,18 @@ unsafe fn top_inset() -> f32 {
     vk_renderer::strip_band_height(ui_scale(), crate::config::vk_style())
 }
 
+fn legend_shown() -> bool {
+    !crate::win::logon_focus::is_active()
+}
+
+unsafe fn bottom_inset() -> f32 {
+    if legend_shown() {
+        vk_renderer::legend_band_height(ui_scale(), crate::config::vk_style())
+    } else {
+        0.0
+    }
+}
+
 ///
 /// - **Docked**: full monitor width along the bottom edge.
 /// - **Floating**: a compact, horizontally-centred card; the band is the card's top chrome.
@@ -809,7 +822,7 @@ unsafe fn floating_card_rect(chrome: f32) -> (i32, i32, i32, i32) {
     let style = crate::config::vk_style();
     let (grid_w, block_h) = vk_renderer::grid_size(scale_w, &rows, style);
     let (pad_x, pad_y) = vk_renderer::floating_pad(ui_scale(), style);
-    let (w, card_h) = floating_card_size(grid_w, block_h, chrome, pad_x, pad_y);
+    let (w, card_h) = floating_card_size(grid_w, block_h, chrome, bottom_inset(), pad_x, pad_y);
     let w = w.min(full_w);
     let card_h = card_h.clamp(100, full_h);
     let margin = (((full_h as f32) * 0.04).round() as i32).clamp(28, 80);
@@ -828,12 +841,13 @@ fn floating_card_size(
     grid_w: f32,
     block_h: f32,
     chrome: f32,
+    legend: f32,
     pad_x: f32,
     pad_y: f32,
 ) -> (i32, i32) {
     (
         (grid_w + pad_x * 2.0).round() as i32,
-        (chrome + block_h + pad_y * 2.0).ceil() as i32,
+        (chrome + block_h + pad_y * 2.0 + legend).ceil() as i32,
     )
 }
 
@@ -843,7 +857,7 @@ unsafe fn target_monitor_dpi_scale() -> f32 {
 
 unsafe fn docked_base_h(full_h: i32) -> i32 {
     let h = VK_KB_REF_H * target_monitor_dpi_scale() * crate::config::vk_bar_scale();
-    let extra = top_inset() - vk_renderer::STRIP_BAND_H;
+    let extra = top_inset() - vk_renderer::STRIP_BAND_H + bottom_inset();
     ((h + extra).round() as i32).clamp(160, full_h)
 }
 
@@ -1079,6 +1093,8 @@ fn render_frame() {
                 voice_level: crate::win::speech_input::voice_level(),
                 ui_scale: scale,
                 style,
+                shortcut_sheet: super::shortcut_sheet::shown(),
+                legend: legend_shown(),
             };
             if let Err(e) = renderer.draw(&frame) {
                 vk_log::log(&format!("renderer draw: {e}"));
@@ -1126,7 +1142,7 @@ fn strip_hit_test(hwnd: HWND, x: i32, y: i32) -> Option<usize> {
     let rows = vk_nav::rows_snapshot();
     vk_renderer::strip_hit_slot(
         client.right as f32,
-        client.bottom as f32,
+        client.bottom as f32 - unsafe { bottom_inset() },
         unsafe { vk_scale_w() },
         &rows,
         unsafe { top_inset() },
@@ -1147,7 +1163,7 @@ fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<(vk_nav::KeyPos, KeyCell)> {
     let top_inset = unsafe { top_inset() };
     let scale_w = unsafe { vk_scale_w() };
     let cw = client.right as f32;
-    let ch = client.bottom as f32;
+    let ch = client.bottom as f32 - unsafe { bottom_inset() };
     let style = crate::config::vk_style();
     for kr in vk_renderer::key_rects(cw, ch, scale_w, &rows, top_inset, style) {
         if xf >= kr.left && xf < kr.right && yf >= kr.top && yf < kr.bottom {
@@ -1189,12 +1205,119 @@ mod tests {
         // Key block 1000x300 under a 67px chrome band with 18px padding: the
         // renderer centres the block below the chrome, so the card must carry
         // 2*pad vertically to leave exactly `pad` at the bottom and both sides.
-        let (w, h) = floating_card_size(1000.0, 300.0, 67.0, 18.0, 18.0);
+        let (w, h) = floating_card_size(1000.0, 300.0, 67.0, 0.0, 18.0, 18.0);
         assert_eq!(w, 1036);
         assert_eq!(h, 67 + 300 + 36);
+        let (w2, h2) = floating_card_size(1000.0, 300.0, 67.0, 40.0, 18.0, 18.0);
+        assert_eq!((w2, h2), (w, h + 40));
         let bottom_pad = (h as f32 - 67.0 - 300.0) / 2.0;
         let side_pad = (w as f32 - 1000.0) / 2.0;
         assert_eq!(bottom_pad, side_pad);
+    }
+
+    fn render_card_png(style: crate::config::VkStyle, sheet: bool, target_w: f32) -> (u32, u32, Vec<u8>) {
+        let rows = vk_nav::rows_for_test();
+        let (w1, _) = vk_renderer::grid_size(vk_renderer::REF_MON_W, &rows, style);
+        let (p1, _) = vk_renderer::floating_pad(1.0, style);
+        let scale = target_w / (w1 + p1 * 2.0);
+        let scale_w = vk_renderer::REF_MON_W * scale;
+        let (grid_w, block_h) = vk_renderer::grid_size(scale_w, &rows, style);
+        let (pad_x, pad_y) = vk_renderer::floating_pad(scale, style);
+        let chrome = vk_renderer::strip_band_height(scale, style);
+        let legend = vk_renderer::legend_band_height(scale, style);
+        let (w, h) = floating_card_size(grid_w, block_h, chrome, legend, pad_x, pad_y);
+        let pal = vk_renderer::style_palette(style, true);
+        let strip = crate::vk_predict::StripState {
+            visible: ["I", "The", "I'm", "Thanks", "Hi", "It", "We"]
+                .iter()
+                .map(|w| w.to_string())
+                .collect(),
+            highlight_slot: 3,
+            engaged: false,
+        };
+        let frame = vk_renderer::VkFrame {
+            pal: &pal,
+            rows: &rows,
+            sel: vk_nav::KeyPos { row: 1, col: 1 },
+            key_glyph,
+            key_hint,
+            top_inset: chrome,
+            scale_w,
+            candidates: Some(&strip),
+            floating: true,
+            modifiers: vk_renderer::VkModifiers::default(),
+            pressed: None,
+            controller_label: "DualSense Wireless Controller",
+            voice_available: true,
+            voice_active: false,
+            voice_phase: vk_renderer::VoicePhase::Listening,
+            voice_level: 0.0,
+            ui_scale: scale,
+            style,
+            shortcut_sheet: sheet,
+            legend: true,
+        };
+        unsafe {
+            let mut r = vk_renderer::VkRenderer::offscreen(w as u32, h as u32).expect("offscreen");
+            r.render_bgra(&frame).expect("render")
+        }
+    }
+
+    fn write_png(path: &std::path::Path, w: u32, h: u32, bgra: &[u8]) {
+        let bg = [0x20u8, 0x1c, 0x1a];
+        let rgba: Vec<u8> = bgra
+            .chunks_exact(4)
+            .flat_map(|p| {
+                let a = p[3] as u32;
+                let over = |c: u8, b: u8| (c as u32 + b as u32 * (255 - a) / 255).min(255) as u8;
+                [over(p[2], bg[0]), over(p[1], bg[1]), over(p[0], bg[2]), 255]
+            })
+            .collect();
+        let file = std::fs::File::create(path).expect("png file");
+        let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header()
+            .expect("png header")
+            .write_image_data(&rgba)
+            .expect("png data");
+    }
+
+    #[test]
+    fn floating_card_renders_the_legend_and_the_sheet() {
+        let dir = std::env::var_os("VK_LEGEND_PNG_DIR").map(std::path::PathBuf::from);
+        for style in [crate::config::VkStyle::Mono, crate::config::VkStyle::Normal] {
+            for sheet in [false, true] {
+                let (w, h, px) = render_card_png(style, sheet, 1600.0);
+                assert!((w as i32 - 1600).abs() <= 2, "{w}");
+                let lit = px.chunks_exact(4).filter(|p| p[3] > 0).count();
+                assert!(lit > (w * h / 2) as usize);
+                if let Some(dir) = &dir {
+                    let name = match (style, sheet) {
+                        (crate::config::VkStyle::Mono, false) => "legend.png",
+                        (crate::config::VkStyle::Mono, true) => "sheet.png",
+                        (_, false) => "legend-normal.png",
+                        (_, true) => "sheet-normal.png",
+                    };
+                    write_png(&dir.join(name), w, h, &px);
+                }
+                let (fw, fh) = if sheet { (1600, 546) } else { (1600, 60) };
+                let (w, h, px) = unsafe {
+                    let mut r = vk_renderer::VkRenderer::offscreen(fw, fh).expect("offscreen");
+                    r.render_design(style, sheet).expect("design frame")
+                };
+                assert_eq!((w, h), (fw, fh));
+                if let Some(dir) = &dir {
+                    let name = match (style, sheet) {
+                        (crate::config::VkStyle::Mono, false) => "legend-frame-mono.png",
+                        (crate::config::VkStyle::Mono, true) => "sheet-frame-mono.png",
+                        (_, false) => "legend-frame.png",
+                        (_, true) => "sheet-frame.png",
+                    };
+                    write_png(&dir.join(name), w, h, &px);
+                }
+            }
+        }
     }
 
     #[test]
