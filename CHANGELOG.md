@@ -1,8 +1,10 @@
 # Changelog
 
-## Unreleased
+## v0.6.1
 
 - Dictation knows coding words. Whisper is primed with terms like git, npm, GitHub, Claude Code and Codex, and both engines fix common mishearings such as "get push" to "git push" and "and PM" to "npm" when you talk to a terminal or a coding agent.
+- The voice orb looks the same in every phase: starting, talking, transcribing and the fullscreen dictation orb all use one cloud style and the keyboard's accent colour. It pulses while transcribing and grows and brightens with your voice while you talk. The orb on the mic key is larger.
+- Mono's suggestion bar shows 7 suggestions instead of 3: your typed word first in quotes, then the highlighted best guess, then the rest.
 
 ## v0.6.0
 
