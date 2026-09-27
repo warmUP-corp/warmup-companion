@@ -339,8 +339,180 @@ pub fn available_cached() -> bool {
     available()
 }
 
+#[cfg_attr(not(feature = "speech"), allow(dead_code))]
+mod coding_vocab {
+    #[cfg(test)]
+    pub const VOCAB: &[&str] = &[
+        "git",
+        "GitHub",
+        "commit",
+        "push",
+        "pull request",
+        "PR",
+        "merge",
+        "rebase",
+        "branch",
+        "npm",
+        "pnpm",
+        "npx",
+        "yarn",
+        "cargo",
+        "rustc",
+        "Rust",
+        "TypeScript",
+        "JavaScript",
+        "Python",
+        "pip",
+        "README",
+        "JSON",
+        "YAML",
+        "API",
+        "CLI",
+        "localhost",
+        "env",
+        "config",
+        "repo",
+        "diff",
+        "lint",
+        "refactor",
+        "Claude",
+        "Claude Code",
+        "Codex",
+        "Cursor",
+        "VS Code",
+        "PowerShell",
+        "terminal",
+        "directory",
+        "sudo",
+        "cd",
+        "ls",
+        "mkdir",
+    ];
+
+    pub const WHISPER_PROMPT: &str = "In the terminal I cd into the repo directory, run ls and mkdir, \
+        use git to commit, push, diff, merge and rebase a branch, and open a pull request (PR) on GitHub. \
+        I run npm, pnpm, npx, yarn, pip, sudo, cargo and rustc, lint and refactor Rust, TypeScript, \
+        JavaScript and Python, edit the README, JSON, YAML, env and config files, call an API or CLI on \
+        localhost, and work with Claude, Claude Code, Codex, Cursor, VS Code and PowerShell.";
+
+    const CORRECTIONS: &[(&str, &str)] = &[
+        ("get push", "git push"),
+        ("get pull", "git pull"),
+        ("get commit", "git commit"),
+        ("get status", "git status"),
+        ("get checkout", "git checkout"),
+        ("get rebase", "git rebase"),
+        ("get hub", "GitHub"),
+        ("p n p m", "pnpm"),
+        ("P NPM", "pnpm"),
+        ("pee npm", "pnpm"),
+        ("n p m", "npm"),
+        ("N PM", "npm"),
+        ("and PM", "npm"),
+        ("car go run", "cargo run"),
+        ("car go build", "cargo build"),
+        ("car go test", "cargo test"),
+        ("read me file", "README file"),
+        ("read me dot md", "README.md"),
+        ("Jason file", "JSON file"),
+        ("clod code", "Claude Code"),
+        ("cloud code", "Claude Code"),
+        ("claude coat", "Claude Code"),
+        ("clawed code", "Claude Code"),
+        ("codecs", "Codex"),
+        ("vs. code", "VS Code"),
+        ("VS code", "VS Code"),
+        ("local host", "localhost"),
+    ];
+
+    fn is_word_char(c: char) -> bool {
+        c.is_alphanumeric() || c == '\'' || c == '_' || c == '-'
+    }
+
+    fn replace_phrase(s: &str, from: &str, to: &str) -> String {
+        let lower = s.to_ascii_lowercase();
+        let pat = from.to_ascii_lowercase();
+        let mut out = String::with_capacity(s.len());
+        let mut i = 0;
+        while let Some(off) = lower[i..].find(&pat) {
+            let start = i + off;
+            let end = start + pat.len();
+            let before_ok = s[..start].chars().next_back().map_or(true, |c| !is_word_char(c));
+            let after_ok = s[end..].chars().next().map_or(true, |c| !is_word_char(c));
+            if before_ok && after_ok {
+                out.push_str(&s[i..start]);
+                out.push_str(to);
+                i = end;
+            } else {
+                let step = start + s[start..].chars().next().map_or(1, char::len_utf8);
+                out.push_str(&s[i..step]);
+                i = step;
+            }
+        }
+        out.push_str(&s[i..]);
+        out
+    }
+
+    pub fn fix_coding_terms(text: &str) -> String {
+        CORRECTIONS
+            .iter()
+            .fold(text.to_string(), |s, (from, to)| replace_phrase(&s, from, to))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn fixes_coding_mishearings_and_leaves_speech_alone() {
+            let cases = [
+                ("get push to main", "git push to main"),
+                ("Get status.", "git status."),
+                ("then get commit and get pull", "then git commit and git pull"),
+                ("open it on get hub", "open it on GitHub"),
+                ("run and PM install", "run npm install"),
+                ("run N PM install", "run npm install"),
+                ("run n p m test", "run npm test"),
+                ("P NPM install", "pnpm install"),
+                ("car go build please", "cargo build please"),
+                ("open the read me file", "open the README file"),
+                ("save a Jason file", "save a JSON file"),
+                ("ask cloud code to fix it", "ask Claude Code to fix it"),
+                ("clod code", "Claude Code"),
+                ("start codecs", "start Codex"),
+                ("open vs. code", "open VS Code"),
+                ("serve on local host 3000", "serve on localhost 3000"),
+            ];
+            for (input, want) in cases {
+                assert_eq!(fix_coding_terms(input), want, "input: {input}");
+            }
+            let untouched = [
+                "I want to get pushed back",
+                "let's get lunch",
+                "we did it together",
+                "can you read me the story",
+                "watch the car go by",
+                "get pulled over",
+                "the standard PMs",
+                "at 5 PM",
+            ];
+            for s in untouched {
+                assert_eq!(fix_coding_terms(s), s, "input: {s}");
+            }
+        }
+
+        #[test]
+        fn whisper_prompt_fits_and_covers_vocab() {
+            assert!(WHISPER_PROMPT.len() <= 600, "prompt is {} chars", WHISPER_PROMPT.len());
+            for w in VOCAB {
+                assert!(WHISPER_PROMPT.contains(w), "prompt misses {w}");
+            }
+        }
+    }
+}
+
 #[cfg(not(feature = "speech"))]
-pub fn run_blocking() -> Result<(), String> {
+pub fn run_blocking()-> Result<(), String> {
     Err("speech feature not built into this binary".into())
 }
 
@@ -678,8 +850,10 @@ mod engine {
         body.extend_from_slice(
             format!(
                 "--{boundary}\r\nContent-Disposition: form-data; name=\"language\"\r\n\r\n{lang}\r\n\
+                 --{boundary}\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\n{prompt}\r\n\
                  --{boundary}\r\nContent-Disposition: form-data; \
-                 name=\"response_format\"\r\n\r\njson\r\n--{boundary}--\r\n"
+                 name=\"response_format\"\r\n\r\njson\r\n--{boundary}--\r\n",
+                prompt = super::coding_vocab::WHISPER_PROMPT
             )
             .as_bytes(),
         );
@@ -734,7 +908,8 @@ mod engine {
                 _ => {}
             }
         }
-        out.split_whitespace().collect::<Vec<_>>().join(" ")
+        let collapsed = out.split_whitespace().collect::<Vec<_>>().join(" ");
+        super::coding_vocab::fix_coding_terms(&collapsed)
     }
 
     /// Average interleaved frames of any sample type down to mono f32.

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Dictation knows coding words. Whisper is primed with terms like git, npm, GitHub, Claude Code and Codex, and both engines fix common mishearings such as "get push" to "git push" and "and PM" to "npm" when you talk to a terminal or a coding agent.
+
 ## v0.6.0
 
 - Controller screenshots: hold LB + RB and press RT for the full screen, or LT for the active window (L1 + R1 + R2 / L2 on PlayStation). Shots are saved to `Pictures\Screenshots`, copied to the clipboard, and confirmed with a sound and a Windows notification that opens the file.
