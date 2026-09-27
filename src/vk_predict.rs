@@ -8,7 +8,6 @@ use crate::predict_ngram;
 
 const MIN_PREFIX_LEN: usize = 1;
 const MAX_CANDIDATES: usize = 7;
-const MONO_SLOTS: usize = 3;
 const SENTENCE_STARTERS: &[&str] = &["I", "The", "I'm", "Thanks", "Hi", "It", "We"];
 
 fn new_state() -> PredictState {
@@ -23,6 +22,7 @@ fn new_state() -> PredictState {
         sentence_start: true,
         context_known: true,
         slots: MAX_CANDIDATES,
+        mono: false,
     }
 }
 
@@ -41,6 +41,7 @@ struct PredictState {
     sentence_start: bool,
     context_known: bool,
     slots: usize,
+    mono: bool,
 }
 
 /// Single source of truth for the candidate strip: the visible chips, which slot
@@ -115,10 +116,6 @@ pub fn reset() {
     refresh_ranked(&mut s);
 }
 
-fn is_mono(s: &PredictState) -> bool {
-    s.slots == MONO_SLOTS
-}
-
 fn capitalize(word: &str) -> String {
     let mut chars = word.chars();
     match chars.next() {
@@ -138,41 +135,33 @@ fn wants_capital(s: &PredictState) -> bool {
 
 fn choices(s: &PredictState) -> Vec<Choice> {
     let cap = wants_capital(s);
-    let cased = |w: &String| if cap { capitalize(w) } else { w.clone() };
-    if !is_mono(s) {
-        return s
-            .ranked
-            .iter()
-            .take(MAX_CANDIDATES)
-            .map(|w| Choice::word(cased(w)))
-            .collect();
+    let cased = |w: &String| Choice::word(if cap { capitalize(w) } else { w.clone() });
+    if !s.mono {
+        return s.ranked.iter().take(MAX_CANDIDATES).map(cased).collect();
     }
-    let pick = |words: &[String], i: usize| {
-        words
-            .get(i)
-            .map(|w| Choice::word(cased(w)))
-            .unwrap_or_default()
-    };
+    let slots = s.slots.max(1);
     if s.partial.is_empty() {
-        return vec![pick(&s.ranked, 1), pick(&s.ranked, 0), pick(&s.ranked, 2)];
+        return s.ranked.iter().take(slots).map(cased).collect();
     }
-    let rest: Vec<String> = s
-        .ranked
-        .iter()
-        .filter(|w| !w.eq_ignore_ascii_case(&s.partial))
-        .cloned()
-        .collect();
     let literal = Choice {
         label: format!("\u{201C}{}\u{201D}", s.partial),
         insert: s.partial.clone(),
         literal: true,
     };
-    vec![literal, pick(&rest, 0), pick(&rest, 1)]
+    std::iter::once(literal)
+        .chain(
+            s.ranked
+                .iter()
+                .filter(|w| !w.eq_ignore_ascii_case(&s.partial))
+                .take(slots - 1)
+                .map(cased),
+        )
+        .collect()
 }
 
 fn default_highlight(s: &PredictState) -> usize {
     let list = choices(s);
-    let preferred = if is_mono(s) { 1 } else { 0 };
+    let preferred = usize::from(list.first().is_some_and(|c| c.literal));
     if list.get(preferred).is_some_and(|c| !c.is_empty()) {
         return preferred;
     }
@@ -275,11 +264,12 @@ fn rank_next_words(s: &mut PredictState) {
 
 /// The current candidate strip, or `None` when no strip should show. The one
 /// query for both rendering and the LB/RB context-swap decision.
-pub fn strip(slots: usize) -> Option<StripState> {
+pub fn strip(slots: usize, mono: bool) -> Option<StripState> {
     let mut s = STATE.lock().ok()?;
     let slots = slots.max(1);
-    if s.slots != slots {
+    if s.slots != slots || s.mono != mono {
         s.slots = slots;
+        s.mono = mono;
         s.highlight = default_highlight(&s);
     }
     if !strip_active_inner(&s) {
@@ -594,7 +584,12 @@ mod tests {
 
     fn fresh(slots: usize) {
         reset();
-        let _ = strip(slots);
+        let _ = strip(slots, false);
+    }
+
+    fn fresh_mono() {
+        reset();
+        let _ = strip(7, true);
     }
 
     fn highlighted_insert() -> String {
@@ -607,7 +602,7 @@ mod tests {
         let _g = TEST_LOCK.lock().unwrap();
         fresh(3);
         type_chars("keyb");
-        assert!(strip(3).is_some());
+        assert!(strip(3, false).is_some());
         let ranked = STATE.lock().unwrap().ranked.clone();
         assert!(ranked.iter().any(|w| w == "keyboard"));
     }
@@ -630,7 +625,7 @@ mod tests {
         fresh(3);
         type_chars("keyb");
         on_caret_move();
-        assert!(strip(3).is_none());
+        assert!(strip(3, false).is_none());
         assert!(STATE.lock().unwrap().words.is_empty());
     }
 
@@ -663,13 +658,13 @@ mod tests {
         let _g = TEST_LOCK.lock().unwrap();
         fresh(3);
         type_chars("keyb");
-        assert!(strip(3).is_some());
-        assert!(!strip(3).unwrap().engaged);
+        assert!(strip(3, false).is_some());
+        assert!(!strip(3, false).unwrap().engaged);
         let mut sink = crate::vk_commit::BufSink::new("keyb");
         assert!(commit_if_engaged(&mut sink).is_none());
         assert_eq!(sink.buf, "keyb");
         assert!(cycle_next());
-        assert!(strip(3).unwrap().engaged);
+        assert!(strip(3, false).unwrap().engaged);
     }
 
     #[test]
@@ -706,7 +701,7 @@ mod tests {
     fn opening_shows_capitalized_sentence_starters() {
         let _g = TEST_LOCK.lock().unwrap();
         fresh(7);
-        let strip = strip(7).expect("strip shows before typing");
+        let strip = strip(7, false).expect("strip shows before typing");
         assert!(strip.visible.iter().any(|w| w == "I"), "{:?}", strip.visible);
         assert!(strip
             .visible
@@ -720,12 +715,12 @@ mod tests {
         let _g = TEST_LOCK.lock().unwrap();
         fresh(7);
         type_chars("keyb");
-        let visible = strip(7).unwrap().visible;
+        let visible = strip(7, false).unwrap().visible;
         assert!(visible.iter().any(|w| w == "Keyboard"), "{visible:?}");
         type_word("");
         on_char('.');
         on_space();
-        let visible = strip(7).unwrap().visible;
+        let visible = strip(7, false).unwrap().visible;
         assert!(visible.iter().any(|w| w == "The"), "{visible:?}");
     }
 
@@ -734,7 +729,7 @@ mod tests {
         let _g = TEST_LOCK.lock().unwrap();
         fresh(7);
         type_word("thank");
-        let visible = strip(7).expect("next-word strip").visible;
+        let visible = strip(7, false).expect("next-word strip").visible;
         assert!(visible.iter().any(|w| w == "you"), "{visible:?}");
     }
 
@@ -754,32 +749,40 @@ mod tests {
         assert!(res.injected);
         assert_eq!(res.deleted, 0);
         assert_eq!(sink.buf, "thank you ");
-        assert!(strip(7).is_some(), "next-word strip after commit");
+        assert!(strip(7, false).is_some(), "next-word strip after commit");
         let words = STATE.lock().unwrap().words.clone();
         assert_eq!(words, vec!["thank".to_string(), "you".to_string()]);
     }
 
     #[test]
-    fn mono_puts_best_prediction_in_the_middle() {
+    fn mono_puts_best_prediction_first_and_highlights_it() {
         let _g = TEST_LOCK.lock().unwrap();
-        fresh(3);
+        fresh_mono();
         type_word("thank");
         let ranked = STATE.lock().unwrap().ranked.clone();
-        let strip = strip(3).unwrap();
-        assert_eq!(strip.visible, vec![ranked[1].clone(), ranked[0].clone(), ranked[2].clone()]);
-        assert_eq!(strip.highlight_slot, 1);
+        let strip = strip(7, true).unwrap();
+        assert_eq!(strip.visible.len(), 7);
+        let n = ranked.len().min(7);
+        assert_eq!(strip.visible[..n], ranked[..n]);
+        assert_eq!(strip.highlight_slot, 0);
     }
 
     #[test]
     fn mono_typing_shows_literal_left_and_commits_it() {
         let _g = TEST_LOCK.lock().unwrap();
-        fresh(3);
+        fresh_mono();
         type_word("the");
         type_chars("keyb");
-        let strip = strip(3).unwrap();
+        let ranked = STATE.lock().unwrap().ranked.clone();
+        let strip = strip(7, true).unwrap();
+        assert_eq!(strip.visible.len(), 7);
         assert_eq!(strip.visible[0], "\u{201C}keyb\u{201D}");
+        assert_eq!(strip.visible[1], ranked[0]);
         assert_eq!(strip.visible[1], "keyboard");
         assert_eq!(strip.highlight_slot, 1);
+        assert!(strip.visible[2..]
+            .iter()
+            .all(|w| w != "\u{201C}keyb\u{201D}"));
         let mut sink = crate::vk_commit::BufSink::new("the keyb");
         let res = commit_slot(0, &mut sink).expect("literal commit");
         assert!(res.injected);
@@ -788,15 +791,39 @@ mod tests {
     }
 
     #[test]
-    fn mono_cycle_wraps_across_three_columns() {
+    fn mono_commit_slot_picks_a_later_chip() {
         let _g = TEST_LOCK.lock().unwrap();
-        fresh(3);
+        fresh_mono();
+        type_word("the");
+        type_chars("th");
+        let visible = strip(7, true).unwrap().visible;
+        assert!(visible.iter().all(|w| !w.is_empty()), "{visible:?}");
+        let word = visible[6].clone();
+        let mut sink = crate::vk_commit::BufSink::new("the th");
+        let res = commit_slot(6, &mut sink).expect("chip commit");
+        assert!(res.injected);
+        assert_eq!(sink.buf, format!("the {word} "));
+    }
+
+    #[test]
+    fn mono_cycle_wraps_across_all_slots() {
+        let _g = TEST_LOCK.lock().unwrap();
+        fresh_mono();
         type_word("thank");
+        let n = strip(7, true)
+            .unwrap()
+            .visible
+            .iter()
+            .filter(|w| !w.is_empty())
+            .count();
+        assert_eq!(n, 7);
+        for expected in 1..n {
+            assert!(cycle_next());
+            assert_eq!(strip(7, true).unwrap().highlight_slot, expected);
+        }
         assert!(cycle_next());
-        assert_eq!(strip(3).unwrap().highlight_slot, 2);
-        assert!(cycle_next());
-        assert_eq!(strip(3).unwrap().highlight_slot, 0);
+        assert_eq!(strip(7, true).unwrap().highlight_slot, 0);
         assert!(cycle_prev());
-        assert_eq!(strip(3).unwrap().highlight_slot, 2);
+        assert_eq!(strip(7, true).unwrap().highlight_slot, n - 1);
     }
 }

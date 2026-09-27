@@ -1016,7 +1016,10 @@ fn render_frame() {
             crate::config::VkLayoutMode::Floating
         );
         let style = crate::config::vk_style();
-        let candidates = crate::vk_predict::strip(vk_renderer::strip_slots(style));
+        let candidates = crate::vk_predict::strip(
+            vk_renderer::strip_slots(style),
+            style == crate::config::VkStyle::Mono,
+        );
         let scale = unsafe { ui_scale() };
         let top_inset = vk_renderer::strip_band_height(scale, style);
 
@@ -1112,7 +1115,10 @@ pub fn wait_until_visible(timeout: Duration) -> bool {
 
 fn strip_hit_test(hwnd: HWND, x: i32, y: i32) -> Option<usize> {
     let style = crate::config::vk_style();
-    let strip = crate::vk_predict::strip(vk_renderer::strip_slots(style))?;
+    let strip = crate::vk_predict::strip(
+        vk_renderer::strip_slots(style),
+        style == crate::config::VkStyle::Mono,
+    )?;
     let mut client = windows::Win32::Foundation::RECT::default();
     unsafe {
         let _ = GetClientRect(hwnd, &mut client);

@@ -757,7 +757,7 @@ fn render_prompt(hwnd: HWND) {
                     };
                     let title = connected_card_title(controller_label);
                     let result = if visual_is_voice(visual) {
-                        let accent = theme.accent.or(theme.border).unwrap_or(DEFAULT_BORDER);
+                        let accent = crate::win::vk_ui::theme_palette().accent;
                         let (alpha, scale, label_alpha) = voice_transition(now);
                         r.draw_voice(&vk_renderer::VoicePill {
                             bg,
