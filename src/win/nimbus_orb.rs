@@ -33,6 +33,7 @@ const RT: u32 = 160;
 
 /// Orb state. The body stays the same size and the same theme color.
 /// State shows up as how the cloud moves.
+#[derive(Clone, Copy)]
 pub enum NimbusMood {
     /// Helper is up, mic not capturing yet. Slow drift.
     Idle,
@@ -88,6 +89,20 @@ pub fn thinking_volumes(t: f32) -> (f32, f32) {
     (input, output)
 }
 
+pub fn mood_drive(mood: &NimbusMood, think_pulse: f32) -> f32 {
+    match mood {
+        NimbusMood::Idle => 0.5,
+        NimbusMood::Speaking { level } => 0.5 + 0.5 * level.clamp(0.0, 1.0),
+        NimbusMood::Thinking => think_pulse.clamp(0.0, 1.0),
+    }
+}
+
+pub fn drive_scale(drive: f32) -> f32 {
+    0.70 + 0.36 * drive.clamp(0.0, 1.0)
+}
+
+pub const ORB_FRAME_FILL: f32 = 0.94;
+
 const SHADER: &str = r#"
 cbuffer Nimbus : register(b0) {
     float uResX;
@@ -121,11 +136,19 @@ cbuffer Nimbus : register(b0) {
 #define STEPS 56
 #define LIGHT_STEPS 4
 #define DENSITY_OCT 4
+#define WHITE_LIFT 0.35
+#define HUE_SPREAD 0.6
 
 float3 tanh3(float3 x) {
     x = clamp(x, -10.0, 10.0);
     float3 e = exp(2.0 * x);
     return (e - 1.0) / (e + 1.0);
+}
+
+float3 hueRotate(float3 c, float a) {
+    const float3 k = float3(0.57735, 0.57735, 0.57735);
+    float ca = cos(a);
+    return c * ca + cross(k, c) * sin(a) + k * dot(k, c) * (1.0 - ca);
 }
 
 float phaseHG(float c, float g) {
@@ -143,8 +166,6 @@ float density(float3 p, float nimbusDensity) {
     float shell = 1.0 - length(p) / uP_radius;
     if (shell <= 0.0) return 0.0;
 
-    // Voice (uP_churn) and the transcription pulse (uOutput) add fold on top
-    // of a wave that keeps moving even when nobody is talking.
     float voice = saturate(uP_churn);
     float pulse = saturate(uOutput);
     float selfFold = 0.55 + 0.3 * sin(uP_speed * 2.2);
@@ -160,13 +181,11 @@ float density(float3 p, float nimbusDensity) {
     float f = 1.0;
     [unroll]
     for (int k = 0; k < DENSITY_OCT; k++) {
-        // uP_speed is an integrated phase. Do not multiply it by voice.
         q += cos(q.yzx * f + uP_speed) * amp / f;
         f *= 1.8;
     }
 
     float n = (sin(q.x) + sin(q.y) + sin(q.z)) / 3.0 * 0.5 + 0.5;
-    // Transcription opens the clumps as it swells, then closes them again.
     float thresh = lerp(uP_threshold, uP_threshold * 0.45, pulse);
     float clump = smoothstep(thresh, 1.0, n);
     return clump * pow(shell, uP_edgeSoft) * nimbusDensity;
@@ -174,14 +193,11 @@ float density(float3 p, float nimbusDensity) {
 
 float4 nimbusRender(float2 fragCoord, float nimbusPower, float nimbusDensity) {
     float2 uRes = float2(uResX, uResY);
-    // GL fragcoord is bottom-left; D3D is top-left. Flip so the light orbit matches.
     fragCoord.y = uRes.y - fragCoord.y;
     float2 uv = (2.0 * fragCoord - uRes) / min(uRes.x, uRes.y);
     float3 ro = float3(0.0, 0.0, -uP_camDist);
     float3 rd = normalize(float3(uv, uP_focal));
 
-    // Positive z: the light sits behind the cloud, where forward scatter blooms.
-    // uP_lightSpin is also an integrated angle, advanced slowly every frame.
     float3 L = normalize(float3(
         cos(uP_lightSpin) * 0.7,
         0.45,
@@ -208,8 +224,9 @@ float4 nimbusRender(float2 fragCoord, float nimbusPower, float nimbusDensity) {
                 float3 lp = p + L * (float(s) - 0.5) * lstep;
                 shadow *= exp(-density(lp, nimbusDensity) * lstep * uP_shadowAbsorb);
             }
-            // Shadow once, inside the mix. A second multiply kills the cool colour.
-            float3 lit = lerp(uC_shadow.rgb * uP_shadowLift, uC_light.rgb, shadow);
+            float hue = HUE_SPREAD * sin(dot(p, float3(0.8, 0.5, -0.3)) * 1.4 + uP_swirl);
+            float3 light = saturate(hueRotate(uC_light.rgb, hue));
+            float3 lit = lerp(uC_shadow.rgb * uP_shadowLift, light, shadow);
             scattered += T * dn * dt * lit * phase * nimbusPower;
             T *= exp(-dn * dt * uP_absorb);
             if (T < 0.01) break;
@@ -219,8 +236,6 @@ float4 nimbusRender(float2 fragCoord, float nimbusPower, float nimbusDensity) {
     float body = 1.0 - T;
     scattered += uC_light.rgb * body * uP_ambient;
 
-    // The sphere is solid. Gaps in the nebula are a darker shade of the
-    // accent, not the grey border and not the desktop.
     float rayDist = length(cross(rd, ro));
     float rad = uP_radius;
     float cover = smoothstep(rad + 0.05, rad - 0.14, rayDist);
@@ -241,9 +256,11 @@ float4 ps_main(float4 pos : SV_Position) : SV_Target {
     float nimbusPower = uP_power;
     float nimbusDensity = uP_density * (1.0 + 0.35 * uInput);
     float4 acc = nimbusRender(pos.xy, nimbusPower, nimbusDensity);
-    float3 col = tanh3(acc.rgb * uP_exposure);
+    float3 raw = acc.rgb * uP_exposure;
+    float peak = max(max(raw.r, raw.g), max(raw.b, 0.0001));
+    float3 hue = raw / peak * tanh3(float3(peak, peak, peak)).x;
+    float3 col = lerp(hue, tanh3(raw), WHITE_LIFT * saturate(uP_churn));
     float a = saturate(acc.a * uP_alphaGain);
-    // Scattered light is already the premultiplied colour. Do not scale by alpha.
     return float4(col, a);
 }
 "#;
@@ -426,13 +443,8 @@ impl NimbusOrb {
             NimbusMood::Speaking { level } => level.clamp(0.0, 1.0),
             _ => 0.0,
         };
-        // Transcription pulse, 0 otherwise. The shader opens and closes the
-        // noise with this. It is not a colour flash.
-        let pulse = match mood {
-            NimbusMood::Thinking => self.think_pulse(),
-            _ => 0.0,
-        };
-        let glow = level.max(pulse);
+        let pulse = mood_drive(&mood, self.think_pulse());
+        let glow = pulse;
         let noise_rate = match mood {
             NimbusMood::Idle => 0.22,
             NimbusMood::Speaking { .. } => 0.22 + 0.2 * level,
@@ -467,9 +479,9 @@ impl NimbusOrb {
             shadow_lift: 0.7,
             aniso: 0.4,
             light_spin: self.light_phase,
-            power: 0.8 + 0.85 * glow,
+            power: 0.8 + 0.45 * glow,
             ambient: 0.06 + 0.08 * glow,
-            exposure: 0.50 + 0.50 * glow,
+            exposure: 0.50 + 0.20 * glow,
             alpha_gain: 1.0,
             swirl: self.swirl_phase,
             _pad1: 0.0,
@@ -554,7 +566,7 @@ unsafe fn compile_shader(
 /// Lit wisps: the theme accent, with the weaker channels pulled down so it
 /// stays the primary colour instead of a grey mix.
 fn theme_light(accent: u32) -> [f32; 4] {
-    let rgb = boost_chroma(accent, 1.4);
+    let rgb = boost_chroma(accent, 1.6);
     [rgb[0], rgb[1], rgb[2], 1.0]
 }
 
@@ -618,8 +630,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn warp_frame_is_a_soft_cloud() {
+    unsafe fn warp_frame(mood: NimbusMood) -> (Vec<u8>, f32) {
         use windows::core::Interface;
         use windows::Win32::Graphics::Direct2D::{
             D2D1CreateFactory, ID2D1Factory1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
@@ -627,93 +638,188 @@ mod tests {
         };
         use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_11_0};
         use windows::Win32::Graphics::Direct3D11::{
-            D3D11CreateDevice, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_USAGE_STAGING,
+            D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
         };
         use windows::Win32::Graphics::Dxgi::IDXGIDevice;
         use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-            let mut device = None;
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_WARP,
-                None,
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&[D3D_FEATURE_LEVEL_11_0]),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                None,
-            )
-            .expect("warp device");
-            let device = device.expect("warp device null");
-            let dxgi: IDXGIDevice = device.cast().expect("dxgi");
-            let factory: ID2D1Factory1 =
-                D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).expect("d2d factory");
-            let d2d_device = factory.CreateDevice(&dxgi).expect("d2d device");
-            let d2d = d2d_device
-                .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)
-                .expect("d2d context");
-            let mut orb = NimbusOrb::create(&device, &d2d).expect("nimbus");
-            orb.render(
-                Instant::now(),
-                NimbusMood::Thinking,
-                0x00e5881e,
-            )
-                .expect("render");
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let mut device = None;
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_WARP,
+            None,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            Some(&[D3D_FEATURE_LEVEL_11_0]),
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            None,
+        )
+        .expect("warp device");
+        let device = device.expect("warp device null");
+        let dxgi: IDXGIDevice = device.cast().expect("dxgi");
+        let factory: ID2D1Factory1 =
+            D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).expect("d2d factory");
+        let d2d_device = factory.CreateDevice(&dxgi).expect("d2d device");
+        let d2d = d2d_device
+            .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)
+            .expect("d2d context");
+        let mut orb = NimbusOrb::create(&device, &d2d).expect("nimbus");
+        orb.render(Instant::now(), mood, 0x00ffd1a6).expect("render");
+        let drive = mood_drive(&mood, orb.think_pulse());
 
-            let desc = super::D3D11_TEXTURE2D_DESC {
-                Width: RT,
-                Height: RT,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: super::DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: super::DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
-                Usage: D3D11_USAGE_STAGING,
-                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-                ..Default::default()
-            };
-            let mut staging = None;
-            device
-                .CreateTexture2D(&desc, None, Some(&mut staging))
-                .expect("staging");
-            let staging = staging.expect("staging null");
-            orb.ctx.CopyResource(&staging, &orb.tex);
-            let mut mapped = D3D11_MAPPED_SUBRESOURCE {
-                pData: std::ptr::null_mut(),
-                RowPitch: 0,
-                DepthPitch: 0,
-            };
-            orb.ctx
-                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
-                .expect("map");
-            let sample = |x: u32, y: u32| -> u8 {
-                let row = mapped.pData.add(y as usize * mapped.RowPitch as usize) as *const u8;
-                *row.add(x as usize * 4 + 3)
-            };
-            let mut lit = 0u32;
-            for y in 0..RT {
-                for x in 0..RT {
-                    if sample(x, y) > 16 {
-                        lit += 1;
-                    }
-                }
-            }
-            let corner = sample(0, 0);
-            let centre = sample(RT / 2, RT / 2);
-            orb.ctx.Unmap(&staging, 0);
-            let frac = lit as f32 / (RT * RT) as f32;
-            assert!(corner < 16, "corner should be empty, alpha {corner}");
-            assert!(centre > 20, "centre should be the cloud, alpha {centre}");
-            assert!(
-                frac > 0.02 && frac < 0.9,
-                "cloud coverage {frac} (lit {lit})"
-            );
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: RT,
+            Height: RT,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_STAGING,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            ..Default::default()
+        };
+        let mut staging = None;
+        device
+            .CreateTexture2D(&desc, None, Some(&mut staging))
+            .expect("staging");
+        let staging = staging.expect("staging null");
+        orb.ctx.CopyResource(&staging, &orb.tex);
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE {
+            pData: std::ptr::null_mut(),
+            RowPitch: 0,
+            DepthPitch: 0,
+        };
+        orb.ctx
+            .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+            .expect("map");
+        let mut px = vec![0u8; (RT * RT * 4) as usize];
+        for y in 0..RT as usize {
+            let row = mapped.pData.add(y * mapped.RowPitch as usize) as *const u8;
+            std::ptr::copy_nonoverlapping(row, px.as_mut_ptr().add(y * RT as usize * 4), RT as usize * 4);
         }
+        orb.ctx.Unmap(&staging, 0);
+        (px, drive)
+    }
+
+    fn assert_design_look(name: &str, px: &[u8]) -> [f32; 3] {
+        let at = |x: u32, y: u32| -> [u8; 4] {
+            let i = ((y * RT + x) * 4) as usize;
+            [px[i], px[i + 1], px[i + 2], px[i + 3]]
+        };
+        let lit = px.chunks_exact(4).filter(|p| p[3] > 16).count();
+        let frac = lit as f32 / (RT * RT) as f32;
+        let corner = at(0, 0);
+        let centre = at(RT / 2, RT / 2);
+        assert!(corner[3] < 16, "{name}: corner should be empty, alpha {}", corner[3]);
+        assert!(centre[3] > 240, "{name}: centre should be the solid disc, alpha {}", centre[3]);
+        assert!(frac > 0.3 && frac < 0.9, "{name}: cloud coverage {frac} (lit {lit})");
+        assert!(
+            centre[0] > centre[2],
+            "{name}: centre should read as the blue accent, bgra {centre:?}"
+        );
+        for p in px.chunks_exact(4).filter(|p| p[3] < 4) {
+            let peak = p[0].max(p[1]).max(p[2]);
+            assert!(peak < 8, "{name}: outside the disc should be clear: {p:?}");
+        }
+        let ramp = (0..RT / 2)
+            .filter(|&x| (9..=246).contains(&at(x, RT / 2)[3]))
+            .count();
+        assert!(
+            (3..24).contains(&ramp),
+            "{name}: edge should fade over a few pixels, ramp {ramp}"
+        );
+        let solid: Vec<&[u8]> = px.chunks_exact(4).filter(|p| p[3] > 240).collect();
+        let n = solid.len().max(1) as f32;
+        let mean = |c: usize| solid.iter().map(|p| p[c] as f32).sum::<f32>() / n;
+        let bgr = [mean(0), mean(1), mean(2)];
+        assert!(
+            bgr[0] > bgr[1] && bgr[1] > bgr[2],
+            "{name}: mean colour should be blue over green over red, bgr {bgr:?}"
+        );
+        bgr
+    }
+
+    #[test]
+    fn warp_frame_is_a_soft_cloud() {
+        unsafe {
+            let (think, think_drive) = warp_frame(NimbusMood::Thinking);
+            let (speak, speak_drive) = warp_frame(NimbusMood::Speaking { level: 0.5 });
+            let think_mean = assert_design_look("transcribing", &think);
+            let speak_mean = assert_design_look("speaking", &speak);
+            for c in 0..3 {
+                assert!(
+                    (think_mean[c] - speak_mean[c]).abs() < 40.0,
+                    "phases drifted apart: transcribing {think_mean:?} speaking {speak_mean:?}"
+                );
+            }
+            if let Ok(path) = std::env::var("NIMBUS_PORT_PNG") {
+                write_design_frame(&path, &think, think_drive);
+                let speaking = std::path::Path::new(&path).with_file_name("nimbus-speaking.png");
+                write_design_frame(speaking.to_str().expect("png path"), &speak, speak_drive);
+            }
+        }
+    }
+
+    fn write_design_frame(path: &str, px: &[u8], drive: f32) {
+        let frame = 320usize;
+        let radius = 24.0f32;
+        let bg = [0x1f as f32, 0x20 as f32, 0x29 as f32];
+        let ball = frame as f32 * ORB_FRAME_FILL * drive_scale(drive);
+        let origin = (frame as f32 - ball) * 0.5;
+        let rt = RT as usize;
+        let tap = |x: isize, y: isize, c: usize| -> f32 {
+            if x < 0 || y < 0 || x >= rt as isize || y >= rt as isize {
+                return 0.0;
+            }
+            px[(y as usize * rt + x as usize) * 4 + c] as f32
+        };
+        let mut out = vec![0u8; frame * frame * 4];
+        for y in 0..frame {
+            for x in 0..frame {
+                let fx = x as f32 + 0.5;
+                let fy = y as f32 + 0.5;
+                let qx = (fx - frame as f32 * 0.5).abs() - (frame as f32 * 0.5 - radius);
+                let qy = (fy - frame as f32 * 0.5).abs() - (frame as f32 * 0.5 - radius);
+                let d = qx.max(0.0).hypot(qy.max(0.0)) - radius;
+                let mask = (0.5 - d).clamp(0.0, 1.0);
+                let sx = (fx - origin) / ball * RT as f32 - 0.5;
+                let sy = (fy - origin) / ball * RT as f32 - 0.5;
+                let x0 = sx.floor();
+                let y0 = sy.floor();
+                let tx = sx - x0;
+                let ty = sy - y0;
+                let (x0, y0) = (x0 as isize, y0 as isize);
+                let sample = |c: usize| {
+                    let top = tap(x0, y0, c) * (1.0 - tx) + tap(x0 + 1, y0, c) * tx;
+                    let bot = tap(x0, y0 + 1, c) * (1.0 - tx) + tap(x0 + 1, y0 + 1, c) * tx;
+                    top * (1.0 - ty) + bot * ty
+                };
+                let a = sample(3) / 255.0;
+                let i = (y * frame + x) * 4;
+                for (k, c) in [2usize, 1, 0].into_iter().enumerate() {
+                    out[i + k] = ((sample(c) + bg[k] * (1.0 - a)) * mask).round().clamp(0.0, 255.0) as u8;
+                }
+                out[i + 3] = (mask * 255.0).round() as u8;
+            }
+        }
+        let file = std::fs::File::create(path).expect("png file");
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), frame as u32, frame as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        let straight: Vec<u8> = out
+            .chunks_exact(4)
+            .flat_map(|p| {
+                let a = p[3] as f32 / 255.0;
+                let un = |c: u8| if a > 0.0 { (c as f32 / a).round().min(255.0) as u8 } else { 0 };
+                [un(p[0]), un(p[1]), un(p[2]), p[3]]
+            })
+            .collect();
+        writer.write_image_data(&straight).expect("png data");
     }
 }

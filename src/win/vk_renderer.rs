@@ -53,7 +53,7 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
-use super::nimbus_orb::{NimbusMood, NimbusOrb};
+use super::nimbus_orb::{drive_scale, mood_drive, NimbusMood, NimbusOrb, ORB_FRAME_FILL};
 use crate::config::VkStyle;
 use crate::vk_nav::{KeyAction, KeyCell, KeyPos, KeyRow};
 
@@ -2211,7 +2211,7 @@ impl VkRenderer {
                     );
                     // The cloud fills its square, so keep it inside the old blob's
                     // footprint instead of edge to edge on the key.
-                    let ball = side * 0.62 * orb_scale(voice_phase, voice_level, self.think_pulse());
+                    let ball = side * ORB_FRAME_FILL * orb_scale(voice_phase, voice_level, self.think_pulse());
                     let drew_nimbus = self.draw_nimbus_at(&square_about(cx, cy, ball), 1.0);
                     if !drew_nimbus {
                         self.draw_voice_orb(
@@ -3429,7 +3429,7 @@ impl VkRenderer {
             if show_orb {
                 let slot = scale_about_center(
                     nimbus_slot(cw, ch),
-                    orb_scale(phase, level, self.think_pulse()),
+                    ORB_FRAME_FILL * orb_scale(phase, level, self.think_pulse()),
                 );
                 if !self.draw_nimbus_at(&slot, alpha) {
                     let unit = ((slot.right - slot.left) * 0.42).max(1.0);
@@ -3566,19 +3566,8 @@ fn nimbus_mood(phase: VoicePhase, level: f32) -> NimbusMood {
     }
 }
 
-/// Quiet sits a little under the base size. Full voice is clearly larger.
-fn voice_orb_scale(level: f32) -> f32 {
-    0.70 + 0.62 * level.clamp(0.0, 1.0)
-}
-
-/// Transcription rests at the quiet talking size and swells up, then back.
 fn orb_scale(phase: VoicePhase, level: f32, think_pulse: f32) -> f32 {
-    let quiet = voice_orb_scale(0.0);
-    match phase {
-        VoicePhase::Listening => voice_orb_scale(level),
-        VoicePhase::Transcribing => quiet + 0.36 * think_pulse.clamp(0.0, 1.0),
-        VoicePhase::Starting => quiet,
-    }
+    drive_scale(mood_drive(&nimbus_mood(phase, level), think_pulse))
 }
 
 fn scale_about_center(rect: D2D_RECT_F, scale: f32) -> D2D_RECT_F {
@@ -3994,11 +3983,15 @@ mod tests {
         assert!((slot.right - (1920.0 - 48.0)).abs() < 1.0);
         assert!((slot.top - (1080.0 - 96.0) * 0.5).abs() < 1.0);
         // A short window can't push the square off the top or the right.
-        assert!((voice_orb_scale(0.0) - 0.70).abs() < 1e-4);
-        assert!(voice_orb_scale(1.0) > voice_orb_scale(0.0));
-        let quiet = voice_orb_scale(0.0);
-        assert!((orb_scale(VoicePhase::Transcribing, 0.0, 0.0) - quiet).abs() < 1e-4);
-        assert!(orb_scale(VoicePhase::Transcribing, 0.0, 1.0) > quiet);
+        let rest = orb_scale(VoicePhase::Starting, 0.0, 0.0);
+        assert!((rest - 0.88).abs() < 1e-4);
+        assert!((orb_scale(VoicePhase::Listening, 0.0, 0.0) - rest).abs() < 1e-4);
+        assert!(orb_scale(VoicePhase::Listening, 1.0, 0.0) > rest);
+        assert!((orb_scale(VoicePhase::Transcribing, 0.0, 0.5) - rest).abs() < 1e-4);
+        assert!(orb_scale(VoicePhase::Transcribing, 0.0, 1.0) > rest);
+        let peak = orb_scale(VoicePhase::Listening, 1.0, 0.0);
+        assert!((peak - orb_scale(VoicePhase::Transcribing, 0.0, 1.0)).abs() < 1e-4);
+        assert!(ORB_FRAME_FILL * peak <= 1.0);
         let tiny = nimbus_slot(100.0, 80.0);
         assert!(tiny.left >= 0.0 && tiny.top >= 0.0);
         assert!(tiny.right <= 100.0 + 0.5 && tiny.bottom <= 80.0 + 0.5);
