@@ -19,10 +19,11 @@ use windows::Win32::Graphics::Gdi::ValidateRect;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, GetWindowLongPtrW, KillTimer,
-    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, HMENU, HTTRANSPARENT,
-    HWND_TOPMOST, SM_SHUTTINGDOWN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW,
-    SW_HIDE, SW_SHOWNOACTIVATE, WM_DESTROY, WM_NCHITTEST, WM_PAINT, WM_TIMER, WS_EX_NOACTIVATE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
+    HMENU, HTTRANSPARENT, HWND_TOPMOST, LWA_ALPHA, SM_SHUTTINGDOWN, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, WM_DESTROY, WM_NCHITTEST, WM_PAINT,
+    WM_TIMER, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use super::desktop;
@@ -340,12 +341,12 @@ fn overlay_rect(visual: PromptVisual, screen_w: i32, screen_h: i32) -> PromptRec
 }
 
 unsafe fn target_rect_for_visual(visual: PromptVisual) -> PromptRect {
-    let m = super::monitor::active_monitor_rect();
-    let mut rect = overlay_rect(
-        visual,
-        (m.right - m.left).max(1),
-        (m.bottom - m.top).max(1),
-    );
+    let m = if fullscreen_border(visual) {
+        super::monitor::active_work_rect()
+    } else {
+        super::monitor::active_monitor_rect()
+    };
+    let mut rect = overlay_rect(visual, (m.right - m.left).max(1), (m.bottom - m.top).max(1));
     rect.x += m.left;
     rect.y += m.top;
     rect
@@ -629,8 +630,12 @@ fn panel_size_for_visual(visual: PromptVisual) -> (i32, i32) {
 unsafe fn create_prompt_window() -> Result<HWND, String> {
     let instance = GetModuleHandleW(None).map_err(|e| format!("GetModuleHandleW: {e}"))?;
     let rect = target_rect_for_visual(VISUAL_STATE.with(|state| state.get()));
-    CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
+    let hwnd = CreateWindowExW(
+        WS_EX_TOPMOST
+            | WS_EX_TOOLWINDOW
+            | WS_EX_NOACTIVATE
+            | WS_EX_NOREDIRECTIONBITMAP
+            | WS_EX_LAYERED,
         WINDOW_CLASS,
         w!("Warmup Prompt Overlay"),
         WS_POPUP,
@@ -643,7 +648,14 @@ unsafe fn create_prompt_window() -> Result<HWND, String> {
         windows::Win32::Foundation::HINSTANCE(instance.0),
         None,
     )
-    .map_err(|e| format!("CreateWindowExW: {e}"))
+    .map_err(|e| format!("CreateWindowExW: {e}"))?;
+    let _ = SetLayeredWindowAttributes(
+        hwnd,
+        windows::Win32::Foundation::COLORREF(0),
+        255,
+        LWA_ALPHA,
+    );
+    Ok(hwnd)
 }
 
 unsafe extern "system" fn prompt_wndproc(

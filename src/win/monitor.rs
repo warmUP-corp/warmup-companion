@@ -52,6 +52,19 @@ pub unsafe fn active_monitor_rect() -> RECT {
     active_monitor().1
 }
 
+pub unsafe fn active_work_rect() -> RECT {
+    let (hmon, rect) = active_monitor();
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if GetMonitorInfoW(hmon, &mut info).as_bool() {
+        info.rcWork
+    } else {
+        rect
+    }
+}
+
 /// Handle + rect for the same monitor [`active_monitor_rect`] would pick.
 pub unsafe fn active_monitor() -> (HMONITOR, RECT) {
     let (fg_win, fg_mon, fg_hmon) = foreground_triple();
