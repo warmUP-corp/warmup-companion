@@ -399,7 +399,7 @@ static NORMAL_SPEC: StyleSpec = StyleSpec {
     design_kh: 102.0,
     key_aspect: 102.0 / 138.0,
     gap: 6.0,
-    key_radius: 8.0,
+    key_radius: 12.0,
     pad_x: 17.0,
     pad_y: 18.0,
     panel_radius: 25.0,
@@ -3868,12 +3868,17 @@ mod tests {
     }
 
     #[test]
-    fn normal_card_corners_are_concentric_with_the_keys() {
+    fn normal_key_radius_matches_the_design() {
         let spec = style_spec(VkStyle::Normal);
-        assert_eq!(
-            crate::vk_motion::concentric_radius(spec.key_radius, spec.pad_x),
-            spec.panel_radius
-        );
+        assert_eq!(spec.key_radius, 12.0);
+        let unit = ref_unit(1.0, VkStyle::Normal);
+        let kh = ref_key_h(1.0, VkStyle::Normal);
+        assert!((spec.key_radius * unit - 12.0 * kh / 102.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn normal_strip_chips_are_concentric_with_their_track() {
+        let spec = style_spec(VkStyle::Normal);
         let chip_r = (spec.chips_h - spec.chips_pad * 2.0) * 0.5;
         assert_eq!(
             crate::vk_motion::concentric_radius(chip_r, spec.chips_pad),
