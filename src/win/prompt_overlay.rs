@@ -18,9 +18,9 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::ValidateRect;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, KillTimer,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, GetWindowLongPtrW, KillTimer,
     SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, HMENU, HTTRANSPARENT,
-    HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW,
+    HWND_TOPMOST, SM_SHUTTINGDOWN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW,
     SW_HIDE, SW_SHOWNOACTIVATE, WM_DESTROY, WM_NCHITTEST, WM_PAINT, WM_TIMER, WS_EX_NOACTIVATE,
     WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
@@ -403,7 +403,8 @@ pub fn tick(vk_open: bool) {
 
     let userland_debug = crate::config::prompt_userland_debug();
     let on_winlogon = super::surface::input().is_some_and(|s| s.is_winlogon())
-        && !super::native_keyboard::yield_logon_to_native();
+        && !super::native_keyboard::yield_logon_to_native()
+        && unsafe { GetSystemMetrics(SM_SHUTTINGDOWN) } == 0;
     let connected = crate::debug_state::snapshot().connected;
     c.update_connected_visual(connected, now);
     let connected_intro_active = c.connected_visual_until.is_some_and(|until| now < until);
