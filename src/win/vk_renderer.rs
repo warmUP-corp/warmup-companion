@@ -717,16 +717,16 @@ pub const STRIP_BAND_H: f32 = 67.0;
 const BAR_H: f32 = 80.0;
 const BAR_GLYPH: f32 = 38.0;
 const BAR_SHARE: f32 = 44.0;
-const BAR_GAP: f32 = 10.0;
+const BAR_GAP: f32 = 6.0;
 const BAR_LABEL_GAP: f32 = 6.0;
-const BAR_LABEL_PX: f32 = 20.0;
+const BAR_LABEL_PX: f32 = 19.0;
 const BAR_CONNECTOR_PX: f32 = 17.0;
 const BAR_PREFIX_PX: f32 = 20.0;
 const BAR_SEP_PX: f32 = 18.0;
-const SHEET_PAD_TOP: f32 = 24.0;
-const SHEET_PAD_X: f32 = 96.0;
-const SHEET_PAD_BOTTOM: f32 = 32.0;
-const SHEET_COL_GAP: f32 = 72.0;
+const SHEET_PAD_TOP: f32 = 16.0;
+const SHEET_PAD_X: f32 = 24.0;
+const SHEET_PAD_BOTTOM: f32 = 16.0;
+const SHEET_COL_GAP: f32 = 40.0;
 const SHEET_ROW_H: f32 = 70.0;
 const SHEET_HEADER_PX: f32 = 18.0;
 const SHEET_ACTION_PX: f32 = 19.0;
@@ -863,10 +863,10 @@ fn bar_layout(widths: &[f32], sep_w: f32, left: f32, right: f32) -> BarLayout {
     BarLayout { items, sep_w }
 }
 
-fn legend_span(rects: &[KeyRect], client_w: f32) -> (f32, f32) {
+fn legend_span(rects: &[KeyRect], client_w: f32, pad_x: f32) -> (f32, f32) {
     let (l, r) = rects
         .iter()
-        .fold((f32::MAX, f32::MIN), |(l, r), kr| (l.min(kr.left), r.max(kr.right)));
+        .fold((pad_x, client_w - pad_x), |(l, r), kr| (l.min(kr.left), r.max(kr.right)));
     if l > r {
         (0.0, client_w)
     } else {
@@ -2632,7 +2632,7 @@ impl VkRenderer {
 
         if legend {
             let lu = ref_unit(ui_scale, style);
-            let (left, right) = legend_span(&rects, cw);
+            let (left, right) = legend_span(&rects, cw, floating_pad(ui_scale, style).0);
             self.draw_legend(pal, style, controller_icons, lu, ch - BAR_H * lu, left, right, 1.0)?;
         }
 
@@ -4798,9 +4798,10 @@ mod tests {
     fn bar_check(scale: f32, style: VkStyle, client_w: f32, family: ControllerIconFamily) -> (Vec<&'static str>, BarLayout, f32, f32) {
         let rows = crate::vk_nav::rows_for_test();
         let (grid_w, block_h) = grid_size(REF_MON_W * scale, &rows, style);
-        let cw = client_w.min(grid_w + 40.0);
+        let pad_x = floating_pad(scale, style).0;
+        let cw = client_w.min(grid_w + 2.0 * pad_x);
         let rects = key_rects(cw, block_h + 200.0, REF_MON_W * scale, &rows, 0.0, style);
-        let (l, r) = legend_span(&rects, cw);
+        let (l, r) = legend_span(&rects, cw, pad_x);
         unsafe {
             let rd = VkRenderer::offscreen(cw as u32, 100).expect("offscreen renderer");
             let layout = rd.bar_layout_for(style, family, ref_unit(scale, style), l, r);
@@ -4836,9 +4837,7 @@ mod tests {
             for style in [VkStyle::Normal, VkStyle::Mono] {
                 let what = format!("{style:?} {family:?}");
                 let (labels, layout, l, r) = bar_check(FULL_SIZE_SCALE, style, 1920.0, family);
-                assert!(labels.len() + 1 >= all.len(), "{what}: {labels:?}");
-                assert_eq!(labels.first(), all.first(), "{what}");
-                assert_eq!(labels.last(), all.last(), "{what}");
+                assert_eq!(labels, all, "{what}");
                 assert_bar_clear(&layout, l, r, &what);
                 let (_, first, _) = layout.items[0];
                 assert!(first > l + 1.0, "{what}: the bar is a compact centred group");
@@ -4867,13 +4866,13 @@ mod tests {
     #[test]
     fn design_sizes_scale_with_the_unit_and_keep_the_text_floor() {
         let bar = ComboStyle::bar(1.0);
-        assert_eq!((bar.glyph, bar.share, bar.gap), (38.0, 44.0, 10.0));
+        assert_eq!((bar.glyph, bar.share, bar.gap), (38.0, 44.0, 6.0));
         assert_eq!((bar.prefix_px, bar.connector_px), (20.0, 17.0));
-        assert_eq!((text_px(BAR_LABEL_PX, 1.0), text_px(BAR_SEP_PX, 1.0), BAR_H), (20.0, 18.0, 80.0));
+        assert_eq!((text_px(BAR_LABEL_PX, 1.0), text_px(BAR_SEP_PX, 1.0), BAR_H), (19.0, 18.0, 80.0));
         let sheet = SheetMetrics::at(1.0);
         assert_eq!((sheet.cs.glyph, sheet.cs.share, sheet.cs.gap), (28.0, 32.0, 8.0));
         assert_eq!((sheet.header_px, sheet.action_px, sheet.cs.prefix_px), (18.0, 19.0, 17.0));
-        assert_eq!((sheet.row_h, sheet.col_gap, sheet.action_gap), (70.0, 72.0, 24.0));
+        assert_eq!((sheet.row_h, sheet.col_gap, sheet.action_gap), (70.0, 40.0, 24.0));
         for u in [0.3, 0.667, 1.0, 1.5] {
             assert!(ComboStyle::bar(u).connector_px >= LEGEND_MIN_TEXT_PX);
             assert!(SheetMetrics::at(u).header_px >= LEGEND_MIN_TEXT_PX);
@@ -4923,7 +4922,11 @@ mod tests {
                 let (bw, bh) = sheet_block_size(total, &m);
                 assert!(bw <= panel.right + 1.0 && bh <= panel.bottom + 1.0, "{style:?} {bw}x{bh}");
                 let fill = (bw / panel.right).max(bh / panel.bottom);
-                assert!(fill >= 0.9, "{style:?} fills only {fill}");
+                assert!(fill >= 0.99, "{style:?} fills only {fill}");
+                let lines = shortcut_sheet::max_lines() as f32;
+                let content = (total / panel.right).max(lines * m.row_h / panel.bottom);
+                assert!(content >= 0.92, "{style:?} content fills only {content}");
+                assert!(m.u >= ref_unit(1.0, style) * 1.1, "{style:?} scale {}", m.u);
                 assert!(m.u > ref_unit(1.0, style), "{style:?} sheet grows past the design size");
                 assert_eq!(cols.len(), 3);
                 let (m2, _, total2) = rd.sheet_fit(

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- The bottom shortcut legend is clearly bigger: button icons grow from 28 to 38 (the Create/Share icon to 44, since its drawn pill is small), labels and the Tap/Hold words to 20, in a taller bar. When the keyboard is too narrow for every item, middle items are dropped as before. The hold-View shortcut sheet now scales to fill the whole keyboard panel instead of staying at its fixed design size, with its icons and text growing with it. The PlayStation Create and Options icons keep their original art (cropped to the drawn button), and the suggestion strip's button hint is larger and no longer dimmed.
+- The bottom shortcut legend is clearly bigger: button icons grow from 28 to 38 (the Create/Share icon to 44, since its drawn pill is small), labels to 19 and the Tap/Hold words to 20, in a taller bar that spans the full panel width, so all nine shortcuts fit at full size. Middle items are dropped only when the keyboard is genuinely too narrow. The hold-View shortcut sheet now scales to fill the whole keyboard panel instead of staying at its fixed design size, with tighter margins and column gaps, so its rows, icons and text grow noticeably. The PlayStation Create and Options icons keep their original art (cropped to the drawn button), and the suggestion strip's button hint is larger and no longer dimmed.
 
 ## v0.7.0
 
