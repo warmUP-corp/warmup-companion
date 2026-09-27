@@ -707,6 +707,10 @@ impl GamepadPoll {
         }
 
         let changes = dedupe_consecutive_toggle_edges(changes);
+        #[cfg(windows)]
+        let sleeping =
+            crate::gamepad_backend::poll_mode_is_sleep() && !Self::service_signin_desktop();
+        #[cfg(not(windows))]
         let sleeping = crate::gamepad_backend::poll_mode_is_sleep();
         #[cfg(windows)]
         {
