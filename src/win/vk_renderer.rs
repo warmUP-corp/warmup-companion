@@ -4724,6 +4724,24 @@ mod tests {
     }
 
     #[test]
+    fn legend_and_sheet_follow_display_scaling() {
+        for style in [VkStyle::Normal, VkStyle::Mono] {
+            for dpi in [1.25_f32, 1.5, 2.0] {
+                let base = legend_band_height(1.0, style);
+                assert!((legend_band_height(dpi, style) - base * dpi).abs() < 0.01);
+                let (u1, u2) = (ref_unit(1.0, style), ref_unit(dpi, style));
+                assert!((u2 - u1 * dpi).abs() < 1e-4);
+                let (b1, b2) = (ComboStyle::bar(u1), ComboStyle::bar(u2));
+                assert!((b2.glyph - b1.glyph * dpi).abs() < 0.01);
+                let (s1, s2) = (SheetMetrics::at(u1), SheetMetrics::at(u2));
+                assert!((s2.row_h - s1.row_h * dpi).abs() < 0.01);
+                assert!((s2.header_px - s1.header_px * dpi).abs() < 0.01);
+                assert!((s2.action_px - s1.action_px * dpi).abs() < 0.01);
+            }
+        }
+    }
+
+    #[test]
     fn mono_columns_never_overlap_the_hint_glyphs() {
         let spec = style_spec(VkStyle::Mono);
         for unit in [0.5_f32, 1.0, 1.75, 3.0] {
