@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- With the keyboard closed, hold View and press Y to paste (Ctrl+V) into the focused app. A plain View tap still sends Enter, but now on release, so View chords such as View+Y and the View+LB+X warmUP launch no longer send a stray Enter. Start still sends Enter on press.
+
 ## v0.6.1
 
 - Dictation knows coding words. Whisper is primed with terms like git, npm, GitHub, Claude Code and Codex, and both engines fix common mishearings such as "get push" to "git push" and "and PM" to "npm" when you talk to a terminal or a coding agent.

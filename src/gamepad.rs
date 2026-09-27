@@ -51,6 +51,46 @@ pub enum VkLoopAction {
     LaunchWarmup,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewChordAction {
+    None,
+    Paste,
+    Enter,
+}
+
+fn view_chord_step(
+    view_down: &mut bool,
+    chorded: &mut bool,
+    change: ButtonChange,
+) -> ViewChordAction {
+    match (change.button, change.pressed) {
+        (Button::Select, true) => {
+            *view_down = true;
+            *chorded = false;
+            ViewChordAction::None
+        }
+        (Button::Select, false) => {
+            let tap = *view_down && !*chorded;
+            *view_down = false;
+            *chorded = false;
+            if tap {
+                ViewChordAction::Enter
+            } else {
+                ViewChordAction::None
+            }
+        }
+        (button, true) if *view_down => {
+            *chorded = true;
+            if button == Button::Y {
+                ViewChordAction::Paste
+            } else {
+                ViewChordAction::None
+            }
+        }
+        _ => ViewChordAction::None,
+    }
+}
+
 enum Backend {
     /// Boxed so it can hold either the on-thread `SdlBackend` (interactive
     /// `--gamepad`) or the off-thread `SdlThreadBackend` (service worker, where
@@ -228,6 +268,8 @@ pub struct GamepadPoll {
     stick_nav: Option<Button>,
     vk_select_down: bool,
     vk_select_chord_used: bool,
+    view_down: bool,
+    view_chorded: bool,
     launch_select_down: bool,
     launch_lb_down: bool,
     launch_x_down: bool,
@@ -393,6 +435,8 @@ impl GamepadPoll {
             stick_nav: None,
             vk_select_down: false,
             vk_select_chord_used: false,
+            view_down: false,
+            view_chorded: false,
             launch_select_down: false,
             launch_lb_down: false,
             launch_x_down: false,
@@ -422,6 +466,7 @@ impl GamepadPoll {
         self.stick_nav = None;
         self.vk_select_down = false;
         self.vk_select_chord_used = false;
+        self.reset_view_hold();
         self.reset_launch_hotkey();
         self.last_vk_open = false;
         #[cfg(windows)]
@@ -469,11 +514,13 @@ impl GamepadPoll {
             self.shot_lb_down = false;
             self.shot_rb_down = false;
             self.shot_select_down = false;
+            self.reset_view_hold();
             return Ok(Vec::new());
         }
 
         if vk_open && !self.last_vk_open {
             self.on_vk_opened();
+            self.reset_view_hold();
             self.backend.haptic_confirm();
             self.a_cursor_down = false;
             self.touchpad_cursor_down = false;
@@ -567,6 +614,7 @@ impl GamepadPoll {
 
         #[cfg(windows)]
         if Self::service_signin_desktop() && crate::win::native_keyboard::yield_logon_to_native() {
+            self.reset_view_hold();
             cursor.set_left_button(false);
             cursor.set_right_button(false);
             self.a_cursor_down = false;
@@ -630,6 +678,7 @@ impl GamepadPoll {
                 }
                 continue;
             }
+            let view_action = view_chord_step(&mut self.view_down, &mut self.view_chorded, change);
             // Use one mode snapshot for forwarding and local handling. Sending L3 to warmUP
             // while also opening the native VK lets a delayed launcher event open/focus its dock
             // over the user's browser. Keep desktop VK/voice shortcuts local, just as in Browser.
@@ -706,13 +755,7 @@ impl GamepadPoll {
                         && crate::config::gamepad_settings().cursor_enabled,
                 );
             }
-            // Share (SELECT) / Start → Enter into the focused app even with the VK
-            // closed, so submit/confirm is one tap. NOT gated by clicks_enabled
-            // (that's OS-cursor mode); only suppressed when warmUP owns text input
-            // or a game is active.
-            // ponytail: also fires on the SELECT edge of the SELECT+LB+X launch combo —
-            // one stray Enter during that 3-finger hold; split to release-edge if it bites.
-            if matches!(change.button, Button::Select | Button::Start) && change.pressed {
+            if change.button == Button::Start && change.pressed {
                 let suppressed = native_vk_suppressed;
                 crate::install::log_line(&format!(
                     "{} press, vk closed: suppressed={suppressed} clicks_enabled={} -> {}",
@@ -722,6 +765,31 @@ impl GamepadPoll {
                 ));
                 if !suppressed {
                     cursor.tap_enter();
+                    self.backend.haptic_confirm();
+                }
+            }
+            if view_action == ViewChordAction::Enter {
+                let suppressed = native_vk_suppressed;
+                crate::install::log_line(&format!(
+                    "{} release, vk closed: suppressed={suppressed} clicks_enabled={} -> {}",
+                    change.button.as_str(),
+                    crate::pipe_server::clicks_enabled(),
+                    if suppressed { "skip" } else { "Enter" }
+                ));
+                if !suppressed {
+                    cursor.tap_enter();
+                    self.backend.haptic_confirm();
+                }
+            }
+            #[cfg(windows)]
+            if view_action == ViewChordAction::Paste {
+                let skip = native_vk_suppressed || Self::service_signin_desktop();
+                crate::install::log_line(&format!(
+                    "View+Y, vk closed: suppressed={native_vk_suppressed} -> {}",
+                    if skip { "skip" } else { "paste" }
+                ));
+                if !skip {
+                    crate::vk_nav::paste_clipboard();
                     self.backend.haptic_confirm();
                 }
             }
@@ -791,6 +859,11 @@ impl GamepadPoll {
         true
     }
 
+    fn reset_view_hold(&mut self) {
+        self.view_down = false;
+        self.view_chorded = false;
+    }
+
     fn reset_launch_hotkey(&mut self) {
         self.launch_select_down = false;
         self.launch_lb_down = false;
@@ -811,6 +884,9 @@ impl GamepadPoll {
             .as_ref()
             .is_some_and(|old| old != &input);
         self.last_input_desktop = Some(input.clone());
+        if changed {
+            self.reset_view_hold();
+        }
         if !vk_open || !changed {
             return None;
         }
@@ -1259,6 +1335,9 @@ where
         println!("  right stick  → scroll");
         println!("  A            → click");
         println!("  L3 (stick click) → open keyboard");
+        println!("  View (tap)   → Enter (on release)");
+        println!("  View+Y       → paste");
+        println!("  Start        → Enter");
         println!("Controls (VK open):");
         println!("  D-pad/L-stick → move key focus");
         println!("  A / Touchpad → type selected key");
@@ -1390,8 +1469,8 @@ where
 mod tests {
     use super::{
         allows_cursor_injection, companion_owns_stick_click, forward_only_while_sleeping,
-        is_standalone_guide_wake, sleep_screenshot_due, Button, ButtonChange,
-        SLEEP_SCREENSHOT_HOLD,
+        is_standalone_guide_wake, sleep_screenshot_due, view_chord_step, Button, ButtonChange,
+        ViewChordAction, SLEEP_SCREENSHOT_HOLD,
     };
     use std::time::{Duration, Instant};
 
@@ -1469,5 +1548,44 @@ mod tests {
         assert!(allows_cursor_injection(false, true));
         assert!(!allows_cursor_injection(false, false));
         assert!(!allows_cursor_injection(true, true));
+    }
+
+    #[test]
+    fn view_chords_decide_enter_on_release_or_paste() {
+        let run = |seq: &[(Button, bool)]| {
+            let (mut down, mut chorded) = (false, false);
+            seq.iter()
+                .map(|&(button, pressed)| {
+                    view_chord_step(&mut down, &mut chorded, ButtonChange { button, pressed })
+                })
+                .collect::<Vec<_>>()
+        };
+        use ViewChordAction::{Enter, None as No, Paste};
+        assert_eq!(
+            run(&[(Button::Select, true), (Button::Select, false)]),
+            [No, Enter]
+        );
+        assert_eq!(
+            run(&[
+                (Button::Select, true),
+                (Button::Y, true),
+                (Button::Y, false),
+                (Button::Select, false),
+            ]),
+            [No, Paste, No, No]
+        );
+        assert_eq!(
+            run(&[
+                (Button::Select, true),
+                (Button::Lb, true),
+                (Button::X, true),
+                (Button::X, false),
+                (Button::Lb, false),
+                (Button::Select, false),
+            ]),
+            [No, No, No, No, No, No]
+        );
+        assert_eq!(run(&[(Button::Y, true), (Button::Start, true)]), [No, No]);
+        assert_eq!(run(&[(Button::Select, false)]), [No]);
     }
 }
