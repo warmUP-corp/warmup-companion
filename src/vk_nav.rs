@@ -614,6 +614,13 @@ pub fn copy_selection() {
 }
 
 pub fn paste_clipboard() {
+    let (_, exe, class, _) = foreground_info();
+    if crate::image_paste::is_terminal(&exe, &class) {
+        if let Some(text) = crate::image_paste::terminal_paste_text(&exe) {
+            send_text_direct(&text);
+            return;
+        }
+    }
     inject_ctrl_key(VIRTUAL_KEY(b'V' as u16));
 }
 
