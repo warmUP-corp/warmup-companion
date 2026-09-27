@@ -68,6 +68,7 @@ const MENU_CURSOR_ENABLED: usize = 1016;
 const MENU_CONTROLLER_CENTER: usize = 1017;
 const MENU_STYLE_NORMAL: usize = 1018;
 const MENU_STYLE_MONO: usize = 1019;
+const MENU_CONTROLLER_TIPS: usize = 1020;
 /// Mic device i is `MENU_MIC_BASE + i` (capped at 32 devices in the menu).
 const MENU_MIC_BASE: usize = 1100;
 /// Global hotkey id for "toggle voice dictation" (Ctrl+Alt+V).
@@ -277,6 +278,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     crate::config::gamepad_settings().cursor_enabled,
                 ),
                 MENU_CONTROLLER_CENTER => crate::win::controller_center::show(),
+                MENU_CONTROLLER_TIPS => crate::win::prompt_overlay::request_controller_tips(),
                 MENU_COMPACT => toggle_compact(),
                 MENU_SLEEP_ON_GAME => toggle_setting_bool(
                     "sleep_on_game",
@@ -360,6 +362,12 @@ unsafe fn show_menu(hwnd: HWND) {
         MF_STRING,
         MENU_CONTROLLER_CENTER,
         w!("Controller Center..."),
+    );
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_CONTROLLER_TIPS,
+        w!("Show controller tips"),
     );
 
     // Keyboard.

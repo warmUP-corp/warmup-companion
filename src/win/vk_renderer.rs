@@ -54,6 +54,7 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
 use super::nimbus_orb::{drive_scale, mood_drive, NimbusMood, NimbusOrb, ORB_FRAME_FILL};
+use super::controller_tips::TipToken;
 use crate::config::VkStyle;
 use crate::vk_nav::{KeyAction, KeyCell, KeyPos, KeyRow};
 
@@ -2924,6 +2925,272 @@ impl VkRenderer {
         Ok(())
     }
 
+    unsafe fn tip_items(
+        &self,
+        tokens: &[TipToken],
+        family: ControllerIconFamily,
+        format: &IDWriteTextFormat,
+        chip_px: f32,
+        gap: f32,
+    ) -> (Vec<(TipItem, f32)>, f32) {
+        let items: Vec<(TipItem, f32)> = tokens
+            .iter()
+            .map(|token| {
+                let item = match *token {
+                    TipToken::Button(b) => match family.hint_icon(b) {
+                        Some(icon) => TipItem::Icon(icon),
+                        None => TipItem::Text(b, false),
+                    },
+                    TipToken::Text(t) => TipItem::Text(t, false),
+                    TipToken::Plus => TipItem::Text("+", true),
+                    TipToken::Dot => TipItem::Text("\u{00B7}", true),
+                };
+                let w = match item {
+                    TipItem::Icon(_) => chip_px,
+                    TipItem::Text(t, _) => self.measure_text(t, format),
+                };
+                (item, w)
+            })
+            .collect();
+        let w = items.iter().map(|i| i.1).sum::<f32>()
+            + gap * items.len().saturating_sub(1) as f32;
+        (items, w)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_tip_row(
+        &mut self,
+        items: &[(TipItem, f32)],
+        left: f32,
+        band: D2D_RECT_F,
+        gap: f32,
+        format: &IDWriteTextFormat,
+        text: u32,
+        dim: u32,
+        alpha: f32,
+    ) -> Result<(), String> {
+        if alpha <= 0.01 {
+            return Ok(());
+        }
+        let text_brush = solid_brush(&self.d2d_context, colorref_alpha(text, alpha))?;
+        let dim_brush = solid_brush(&self.d2d_context, colorref_alpha(dim, alpha * 0.6))?;
+        let mut x = left;
+        for (item, w) in items {
+            let slot = D2D_RECT_F {
+                left: x,
+                top: band.top,
+                right: x + w,
+                bottom: band.bottom,
+            };
+            match *item {
+                TipItem::Icon(icon) => self.draw_svg_icon_sized(icon, slot, text, alpha, *w)?,
+                TipItem::Text(t, faint) => self.d2d_context.DrawText(
+                    &wide(t),
+                    format,
+                    &slot,
+                    if faint { &dim_brush } else { &text_brush },
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                ),
+            }
+            x += w + gap;
+        }
+        Ok(())
+    }
+
+    pub unsafe fn draw_tips(&mut self, p: &TipsPill) -> Result<(), String> {
+        let cw = self.width as f32;
+        let ch = self.height as f32;
+        let spec = prompt_spec(p.style);
+        let family = ControllerIconFamily::from_label(p.controller_label);
+        let (label, counter_format) = match spec {
+            Some(spec) => {
+                let fonts = self.ensure_prompt_fonts(spec)?;
+                (fonts.label, fonts.status)
+            }
+            None => {
+                let _ = self
+                    .prompt_format
+                    .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                let _ = self
+                    .prompt_format
+                    .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                let _ = self
+                    .text_format
+                    .SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                (self.prompt_format.clone(), self.text_format.clone())
+            }
+        };
+        let (pill_h, pill_bottom, radius, chip, gap, pad_x) = match spec {
+            Some(s) => (
+                s.pill_h,
+                s.pill_bottom,
+                s.radius,
+                s.chip_px,
+                s.pill_gap,
+                s.pill_pad_x,
+            ),
+            None => (96.0, 6.0, 46.0, 56.0, 12.0, 36.0),
+        };
+        let (text, dim) = match spec {
+            Some(s) => (0x00FFFFFF, s.dim_text),
+            None => (p.text, mix_color(p.text, p.bg, 0.58)),
+        };
+
+        let counter = format!("{}/{}", p.index + 1, p.count.max(1));
+        let counter_w = self.measure_text(&counter, &counter_format);
+        let counter_gap = gap * 2.0;
+        let (items, content_w) = self.tip_items(p.cue, family, &label, chip, gap);
+        let prev = p
+            .prev_cue
+            .map(|tokens| self.tip_items(tokens, family, &label, chip, gap));
+        let morph_t = if prev.is_some() {
+            p.morph_t.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let pill_w_for = |w: f32| (w + counter_gap + counter_w + pad_x * 2.0).min(cw - 8.0);
+        let pill_w = match &prev {
+            Some((_, prev_w)) => lerp(pill_w_for(*prev_w), pill_w_for(content_w), morph_t),
+            None => pill_w_for(content_w),
+        };
+        let bottom = ch - pill_bottom;
+        let pill = D2D_RECT_F {
+            left: (cw - pill_w) * 0.5,
+            top: bottom - pill_h,
+            right: (cw + pill_w) * 0.5,
+            bottom,
+        };
+        let pill_cy = bottom - pill_h * 0.5;
+        let alpha = p.alpha.clamp(0.0, 1.0);
+
+        self.d2d_context
+            .SetTransform(&scale_about(p.scale, cw * 0.5, pill_cy));
+        self.d2d_context.BeginDraw();
+        self.d2d_context.Clear(Some(&D2D1_COLOR_F {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        }));
+
+        let shape = rounded(pill, radius);
+        match spec {
+            Some(s) => {
+                let (dy, blur, a) = s.pill_shadow;
+                self.draw_outer_shadow(&shape, (dy, blur, a * alpha))?;
+                let fill = solid_brush(
+                    &self.d2d_context,
+                    colorref_alpha(s.pill_fill, s.pill_fill_alpha * alpha),
+                )?;
+                self.d2d_context.FillRoundedRectangle(&shape, &fill);
+                let stroke = solid_brush(
+                    &self.d2d_context,
+                    colorref_alpha(0x00FFFFFF, s.ready_stroke_alpha * alpha),
+                )?;
+                self.d2d_context.DrawRoundedRectangle(
+                    &rounded(deflate(pill, 0.5), radius - 0.5),
+                    &stroke,
+                    1.0,
+                    None,
+                );
+            }
+            None => {
+                let t = self.prompt_started.elapsed().as_secs_f32();
+                let pulse = (t * 0.33).fract();
+                let pulse_alpha = (1.0 - pulse).powi(2);
+                let glow = colorref_mix(0x00FFFFFF, p.border, 0.38);
+                let bg = solid_brush(&self.d2d_context, colorref_alpha(p.bg, alpha))?;
+                let halo = solid_brush(
+                    &self.d2d_context,
+                    colorref_alpha(glow, 0.30 * pulse_alpha * alpha),
+                )?;
+                let edge = solid_brush(&self.d2d_context, colorref_alpha(glow, alpha))?;
+                self.d2d_context.FillRoundedRectangle(&shape, &bg);
+                self.d2d_context
+                    .DrawRoundedRectangle(&shape, &halo, 2.0 + 8.0 * pulse, None);
+                self.d2d_context.DrawRoundedRectangle(&shape, &edge, 1.5, None);
+            }
+        }
+
+        let counter_left = pill.right - pad_x - counter_w;
+        let row_right = counter_left - counter_gap;
+        let row_left = pill.left + pad_x;
+        let centred = |w: f32| row_left + ((row_right - row_left - w) * 0.5).max(0.0);
+        let old_alpha = 1.0 - (morph_t / 0.3).clamp(0.0, 1.0);
+        let new_alpha = ((morph_t - 0.35) / 0.65).clamp(0.0, 1.0);
+        let new_alpha = if prev.is_some() {
+            new_alpha * new_alpha * (3.0 - 2.0 * new_alpha)
+        } else {
+            1.0
+        };
+        if let Some((prev_items, prev_w)) = &prev {
+            self.draw_tip_row(
+                prev_items,
+                centred(*prev_w),
+                pill,
+                gap,
+                &label,
+                text,
+                dim,
+                old_alpha * alpha,
+            )?;
+        }
+        self.draw_tip_row(
+            &items,
+            centred(content_w),
+            pill,
+            gap,
+            &label,
+            text,
+            dim,
+            new_alpha * alpha,
+        )?;
+
+        let divider = solid_brush(&self.d2d_context, colorref_alpha(dim, 0.25 * alpha))?;
+        let divider_x = counter_left - counter_gap * 0.5;
+        self.d2d_context.DrawLine(
+            D2D_POINT_2F {
+                x: divider_x,
+                y: pill_cy - pill_h * 0.22,
+            },
+            D2D_POINT_2F {
+                x: divider_x,
+                y: pill_cy + pill_h * 0.22,
+            },
+            &divider,
+            1.0,
+            None,
+        );
+        let counter_brush = solid_brush(&self.d2d_context, colorref_alpha(dim, 0.8 * alpha))?;
+        self.d2d_context.DrawText(
+            &wide(&counter),
+            &counter_format,
+            &D2D_RECT_F {
+                left: counter_left,
+                top: pill.top,
+                right: counter_left + counter_w,
+                bottom: pill.bottom,
+            },
+            &counter_brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
+        if spec.is_none() {
+            let _ = self.text_format.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+        }
+
+        self.d2d_context.SetTransform(&IDENTITY);
+        self.d2d_context
+            .EndDraw(None, None)
+            .map_err(|e| format!("EndDraw: {e}"))?;
+        self.swapchain
+            .Present(1, DXGI_PRESENT(0))
+            .ok()
+            .map_err(|e| format!("Present: {e}"))?;
+        Ok(())
+    }
+
     unsafe fn ensure_prompt_fonts(&mut self, spec: &PromptSpec) -> Result<PromptFonts, String> {
         if let Some(fonts) = &self.prompt_fonts {
             return Ok(fonts.clone());
@@ -3479,6 +3746,28 @@ pub struct PromptCard<'a> {
     pub style: VkStyle,
 }
 
+#[derive(Clone, Copy)]
+pub struct TipsPill<'a> {
+    pub bg: u32,
+    pub border: u32,
+    pub text: u32,
+    pub controller_label: &'a str,
+    pub cue: &'a [TipToken],
+    pub prev_cue: Option<&'a [TipToken]>,
+    pub morph_t: f32,
+    pub index: usize,
+    pub count: usize,
+    pub alpha: f32,
+    pub scale: f32,
+    pub style: VkStyle,
+}
+
+#[derive(Clone, Copy)]
+enum TipItem {
+    Icon(VkIcon),
+    Text(&'static str, bool),
+}
+
 /// Everything one frame of the dictation pill needs. `alpha`/`scale` carry the
 /// enter/exit transition; `label_alpha` fades a freshly swapped phase title in.
 pub struct VoicePill<'a> {
@@ -3821,6 +4110,34 @@ mod tests {
             Some(ControllerArt::XboxOne)
         );
         assert_eq!(ControllerArt::from_label("none"), None);
+    }
+
+    #[test]
+    fn controller_tips_use_the_pad_family_glyphs() {
+        let ps = ControllerIconFamily::from_label("DualSense Wireless Controller");
+        let xb = ControllerIconFamily::from_label("Xbox Wireless Controller");
+        let expect = [
+            ("L3", VkIcon::L3Ps5, VkIcon::L3Xbox),
+            ("R3", VkIcon::R3Ps5, VkIcon::R3Xbox),
+            ("LB", VkIcon::Ps5L1, VkIcon::XboxLb),
+            ("RB", VkIcon::Ps5R1, VkIcon::XboxRb),
+            ("RT", VkIcon::Ps5R2, VkIcon::XboxRt),
+            ("LT", VkIcon::Ps5L2, VkIcon::XboxLt),
+            ("SELECT", VkIcon::SelectPs5, VkIcon::SelectXbox),
+            ("Y", VkIcon::Ps5Triangle, VkIcon::XboxY),
+        ];
+        for (button, ps_icon, xb_icon) in expect {
+            assert_eq!(ps.hint_icon(button), Some(ps_icon), "{button}");
+            assert_eq!(xb.hint_icon(button), Some(xb_icon), "{button}");
+        }
+        for cue in super::super::controller_tips::CUES.iter() {
+            for token in cue.iter() {
+                if let TipToken::Button(b) = token {
+                    assert!(ps.hint_icon(b).is_some(), "{b}");
+                    assert!(xb.hint_icon(b).is_some(), "{b}");
+                }
+            }
+        }
     }
 
     #[test]

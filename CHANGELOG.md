@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- First-run controller tips: the first time a controller connects on the desktop after an update, a short pill walks through the shortcuts (L3 keyboard, R3 dictation, screenshots, View + Y paste, View + LB in games) using your pad's own button glyphs. It waits while the keyboard, dictation or a game is up, and the tray's "Show controller tips" replays it.
+
 ## v0.6.1
 
 - Dictation knows coding words. Whisper is primed with terms like git, npm, GitHub, Claude Code and Codex, and both engines fix common mishearings such as "get push" to "git push" and "and PM" to "npm" when you talk to a terminal or a coding agent.
