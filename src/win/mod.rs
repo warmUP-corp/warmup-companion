@@ -1,5 +1,6 @@
 #[cfg(feature = "gamepad")]
 pub mod controller_center;
+pub mod controller_tips;
 pub mod debug_overlay;
 pub mod desktop;
 pub mod desktop_window;

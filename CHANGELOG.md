@@ -3,6 +3,7 @@
 ## Unreleased
 
 - With the keyboard closed, hold View and press Y to paste (Ctrl+V) into the focused app. A plain View tap still sends Enter, but now on release, so View chords such as View+Y and the View+LB+X warmUP launch no longer send a stray Enter. Start still sends Enter on press.
+- First-run controller tips: the first time a controller connects on the desktop after an update, a short pill walks through the shortcuts (L3 keyboard, R3 dictation, screenshots, View + Y paste, View + LB in games) using your pad's own button glyphs. It waits while the keyboard, dictation or a game is up, and the tray's "Show controller tips" replays it.
 
 ## v0.6.1
 
