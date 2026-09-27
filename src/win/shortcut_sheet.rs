@@ -94,6 +94,31 @@ pub static GROUPS: [SheetGroup; 3] = [
     },
 ];
 
+pub static LEGEND: [SheetRow; 10] = [
+    row(&[Button("A")], "Type"),
+    row(&[Button("B")], "Delete"),
+    row(&[Button("LB"), SLASH, Button("RB")], "Move caret"),
+    row(&[Button("RT")], "Shift"),
+    row(&[Button("LT")], "Symbols"),
+    row(&[Button("R3")], "Dictate"),
+    row(&[Button("SELECT"), Plus, Button("Y")], "Paste"),
+    row(&[Text("Tap"), Button("SELECT")], "Suggestions"),
+    row(&[Button("L3")], "Close keyboard"),
+    row(&[Text("Hold"), Button("SELECT")], "All shortcuts"),
+];
+
+pub fn fit_legend(widths: &[f32], sep: f32, avail: f32) -> Vec<usize> {
+    let mut kept: Vec<usize> = (0..widths.len()).collect();
+    let total = |kept: &[usize]| {
+        kept.iter().map(|&i| widths[i]).sum::<f32>()
+            + sep * kept.len().saturating_sub(1) as f32
+    };
+    while kept.len() > 1 && total(&kept) > avail {
+        kept.remove((kept.len() - 1) / 2);
+    }
+    kept
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Line {
     Title(&'static str),
@@ -162,6 +187,35 @@ mod tests {
             .iter()
             .all(|c| !matches!(c.last(), Some(Line::Title(_)))));
         assert_eq!(max_lines(), 7);
+    }
+
+    #[test]
+    fn legend_fit_keeps_everything_when_it_fits() {
+        let widths = [10.0; 10];
+        assert_eq!(fit_legend(&widths, 2.0, 118.0), (0..10).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn legend_fit_drops_from_the_middle_and_keeps_the_last() {
+        let widths = [10.0; 10];
+        assert_eq!(fit_legend(&widths, 2.0, 117.0), [0, 1, 2, 3, 5, 6, 7, 8, 9]);
+        assert_eq!(fit_legend(&widths, 2.0, 94.0), [0, 1, 2, 3, 6, 7, 8, 9]);
+        assert_eq!(fit_legend(&widths, 2.0, 81.0), [0, 1, 2, 7, 8, 9]);
+        assert_eq!(fit_legend(&widths, 2.0, 5.0), [9]);
+        assert_eq!(fit_legend(&[], 2.0, 5.0), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn legend_rows_match_the_sheet_and_the_vk_bindings() {
+        let sheet: Vec<&SheetRow> = GROUPS[0].rows.iter().collect();
+        for r in &LEGEND[2..9] {
+            assert!(sheet.contains(&r), "{}", r.label);
+        }
+        assert_eq!(LEGEND[0].keys, &[Button("A")]);
+        assert_eq!(LEGEND[1].keys, &[Button("B")]);
+        let last = LEGEND[LEGEND.len() - 1];
+        assert_eq!(last.label, "All shortcuts");
+        assert_eq!(last.keys, &[Text("Hold"), Button("SELECT")]);
     }
 
     #[test]

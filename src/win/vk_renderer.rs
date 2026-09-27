@@ -651,6 +651,7 @@ struct StyleFonts {
     space: IDWriteTextFormat,
     chip: IDWriteTextFormat,
     chip_sel: IDWriteTextFormat,
+    legend: IDWriteTextFormat,
 }
 
 
@@ -715,6 +716,85 @@ const SEL_GLIDE_TAU: f32 = 0.045;
 const FLOATING_PANEL_INSET: f32 = 1.0;
 
 pub const STRIP_BAND_H: f32 = 67.0;
+
+const LEGEND_ROW_DU: f32 = 26.0;
+const LEGEND_GLYPH_DU: f32 = 22.0;
+const LEGEND_GLYPH_GAP_DU: f32 = 4.0;
+const LEGEND_LABEL_GAP_DU: f32 = 7.0;
+const LEGEND_SEP_GAP_DU: f32 = 12.0;
+const LEGEND_MIN_TEXT_PX: f32 = 11.0;
+const LEGEND_SEP: &str = "\u{00B7}";
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LegendMetrics {
+    row_h: f32,
+    text_px: f32,
+    glyph_px: f32,
+    glyph_gap: f32,
+    label_gap: f32,
+    sep_gap: f32,
+}
+
+fn legend_metrics(scale: f32, style: VkStyle) -> LegendMetrics {
+    let u = ref_unit(scale, style);
+    LegendMetrics {
+        row_h: LEGEND_ROW_DU * u,
+        text_px: (style_spec(style).number_px * u).max(LEGEND_MIN_TEXT_PX),
+        glyph_px: LEGEND_GLYPH_DU * u,
+        glyph_gap: LEGEND_GLYPH_GAP_DU * u,
+        label_gap: LEGEND_LABEL_GAP_DU * u,
+        sep_gap: LEGEND_SEP_GAP_DU * u,
+    }
+}
+
+pub fn legend_band_height(scale: f32, style: VkStyle) -> f32 {
+    (LEGEND_ROW_DU + style_spec(style).pad_y) * ref_unit(scale, style)
+}
+
+fn tip_item(token: TipToken, family: ControllerIconFamily) -> Option<TipItem> {
+    match token {
+        TipToken::Button(b) => family.hint_icon(b).map(TipItem::Icon),
+        TipToken::Text(t) => Some(TipItem::Text(t, false)),
+        TipToken::Plus => Some(TipItem::Text("+", true)),
+        TipToken::Dot => Some(TipItem::Text(LEGEND_SEP, true)),
+    }
+}
+
+fn legend_item_width(
+    row: &shortcut_sheet::SheetRow,
+    family: ControllerIconFamily,
+    m: &LegendMetrics,
+    measure: &dyn Fn(&str) -> f32,
+) -> f32 {
+    let widths: Vec<f32> = row
+        .keys
+        .iter()
+        .filter_map(|&t| tip_item(t, family))
+        .map(|item| match item {
+            TipItem::Icon(_) => m.glyph_px,
+            TipItem::Text(t, _) => measure(t),
+        })
+        .collect();
+    widths.iter().sum::<f32>()
+        + m.glyph_gap * widths.len().saturating_sub(1) as f32
+        + m.label_gap
+        + measure(row.label)
+}
+
+fn legend_span(rects: &[KeyRect], client_w: f32) -> (f32, f32) {
+    let (l, r) = rects
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(l, r), kr| (l.min(kr.left), r.max(kr.right)));
+    if l > r {
+        (0.0, client_w)
+    } else {
+        (l.max(0.0), r.min(client_w))
+    }
+}
+
+fn legend_sep_width(m: &LegendMetrics, measure: &dyn Fn(&str) -> f32) -> f32 {
+    measure(LEGEND_SEP) + m.sep_gap * 2.0
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum VkIcon {
@@ -1358,6 +1438,7 @@ pub struct VkFrame<'a> {
     pub ui_scale: f32,
     pub style: VkStyle,
     pub shortcut_sheet: bool,
+    pub legend: bool,
 }
 
 /// Glyph for the Shift key (the Shift-action key reflects `shift`).
@@ -1625,6 +1706,10 @@ impl VkRenderer {
             space: make(DWRITE_FONT_WEIGHT_NORMAL, spec.space_label_px)?,
             chip: make(DWRITE_FONT_WEIGHT_NORMAL, spec.chip_px)?,
             chip_sel: make(spec.chip_sel_weight, spec.chip_px)?,
+            legend: make(
+                DWRITE_FONT_WEIGHT_NORMAL,
+                spec.number_px.max(LEGEND_MIN_TEXT_PX / u),
+            )?,
         };
         self.style_fonts = Some(built);
         Ok(())
@@ -1974,6 +2059,7 @@ impl VkRenderer {
             ui_scale,
             style,
             shortcut_sheet: sheet_on,
+            legend,
         } = *frame;
         let spec = style_spec(style);
         let controller_icons = ControllerIconFamily::from_label(controller_label);
@@ -1992,7 +2078,12 @@ impl VkRenderer {
             self.prepare_nimbus(now, nimbus_mood(voice_phase, voice_level), pal.accent);
         }
 
-        let rects = key_rects(cw, ch, scale_w, rows, top_inset, style);
+        let legend_h = if legend {
+            legend_band_height(ui_scale, style)
+        } else {
+            0.0
+        };
+        let rects = key_rects(cw, ch - legend_h, scale_w, rows, top_inset, style);
         let key_h = rects
             .first()
             .map(|kr| kr.bottom - kr.top)
@@ -2367,6 +2458,18 @@ impl VkRenderer {
             }
         }
 
+        if legend {
+            self.draw_legend(
+                spec,
+                pal,
+                &fonts,
+                &rects,
+                controller_icons,
+                legend_metrics(ui_scale, style),
+                ch - legend_h,
+            )?;
+        }
+
         drop(key_brush);
         drop(action_brush);
         drop(accent_brush);
@@ -2420,6 +2523,106 @@ impl VkRenderer {
             .Present(1, DXGI_PRESENT(0))
             .ok()
             .map_err(|e| format!("Present: {e}"))?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_legend(
+        &mut self,
+        spec: &StyleSpec,
+        pal: &VkPalette,
+        fonts: &StyleFonts,
+        rects: &[KeyRect],
+        family: ControllerIconFamily,
+        m: LegendMetrics,
+        top: f32,
+    ) -> Result<(), String> {
+        let (left, right) = legend_span(rects, self.width as f32);
+        let format = fonts.legend.clone();
+        let (widths, sep_w) = {
+            let measure = |t: &str| self.measure_text(t, &format);
+            let widths: Vec<f32> = shortcut_sheet::LEGEND
+                .iter()
+                .map(|row| legend_item_width(row, family, &m, &measure))
+                .collect();
+            (widths, legend_sep_width(&m, &measure))
+        };
+        let kept = shortcut_sheet::fit_legend(&widths, sep_w, right - left);
+        let total = kept.iter().map(|&i| widths[i]).sum::<f32>()
+            + sep_w * kept.len().saturating_sub(1) as f32;
+        let band = D2D_RECT_F {
+            left,
+            top,
+            right,
+            bottom: top + m.row_h,
+        };
+        let secondary = solid_brush(
+            &self.d2d_context,
+            colorref_alpha(pal.text_dim, spec.number_alpha),
+        )?;
+        let faint = solid_brush(
+            &self.d2d_context,
+            colorref_alpha(pal.text_dim, spec.number_alpha * 0.6),
+        )?;
+        let mut x = (left + right - total) * 0.5;
+        for (n, &i) in kept.iter().enumerate() {
+            if n > 0 {
+                self.d2d_context.DrawText(
+                    &wide(LEGEND_SEP),
+                    &format,
+                    &D2D_RECT_F {
+                        left: x,
+                        right: x + sep_w,
+                        ..band
+                    },
+                    &faint,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
+                x += sep_w;
+            }
+            let row = &shortcut_sheet::LEGEND[i];
+            let (items, _) = self.tip_items(row.keys, family, &format, m.glyph_px, m.glyph_gap);
+            for (item, w) in &items {
+                let slot = D2D_RECT_F {
+                    left: x,
+                    right: x + w,
+                    ..band
+                };
+                match *item {
+                    TipItem::Icon(icon) => {
+                        self.draw_svg_icon_sized(icon, slot, pal.text, 1.0, *w)?
+                    }
+                    TipItem::Text(t, dim) => self.d2d_context.DrawText(
+                        &wide(t),
+                        &format,
+                        &slot,
+                        if dim { &faint } else { &secondary },
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    ),
+                }
+                x += w + m.glyph_gap;
+            }
+            if !items.is_empty() {
+                x -= m.glyph_gap;
+            }
+            x += m.label_gap;
+            let label_w = self.measure_text(row.label, &format);
+            self.d2d_context.DrawText(
+                &wide(row.label),
+                &format,
+                &D2D_RECT_F {
+                    left: x,
+                    right: x + label_w,
+                    ..band
+                },
+                &secondary,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+            x += label_w;
+        }
         Ok(())
     }
 
@@ -3153,16 +3356,8 @@ impl VkRenderer {
     ) -> (Vec<(TipItem, f32)>, f32) {
         let items: Vec<(TipItem, f32)> = tokens
             .iter()
-            .map(|token| {
-                let item = match *token {
-                    TipToken::Button(b) => match family.hint_icon(b) {
-                        Some(icon) => TipItem::Icon(icon),
-                        None => TipItem::Text(b, false),
-                    },
-                    TipToken::Text(t) => TipItem::Text(t, false),
-                    TipToken::Plus => TipItem::Text("+", true),
-                    TipToken::Dot => TipItem::Text("\u{00B7}", true),
-                };
+            .filter_map(|&token| tip_item(token, family))
+            .map(|item| {
                 let w = match item {
                     TipItem::Icon(_) => chip_px,
                     TipItem::Text(t, _) => self.measure_text(t, format),
@@ -3980,7 +4175,7 @@ pub struct TipsPill<'a> {
     pub style: VkStyle,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum TipItem {
     Icon(VkIcon),
     Text(&'static str, bool),
@@ -4286,6 +4481,119 @@ mod tests {
             assert_eq!(hit.len(), 2);
             assert_eq!(hit[0].1, cols[0]);
             assert_eq!(hit[1].1, cols[1]);
+        }
+    }
+
+    fn legend_kept(scale: f32, style: VkStyle, client_w: f32) -> Vec<&'static str> {
+        let rows = crate::vk_nav::rows_for_test();
+        let (grid_w, block_h) = grid_size(REF_MON_W * scale, &rows, style);
+        let cw = client_w.min(grid_w + 40.0);
+        let ch = block_h + 200.0;
+        let rects = key_rects(cw, ch, REF_MON_W * scale, &rows, 0.0, style);
+        let (l, r) = legend_span(&rects, cw);
+        let m = legend_metrics(scale, style);
+        let measure = |t: &str| t.chars().count() as f32 * m.text_px * 0.55;
+        let family = ControllerIconFamily::Xbox;
+        let widths: Vec<f32> = shortcut_sheet::LEGEND
+            .iter()
+            .map(|row| legend_item_width(row, family, &m, &measure))
+            .collect();
+        shortcut_sheet::fit_legend(&widths, legend_sep_width(&m, &measure), r - l)
+            .into_iter()
+            .map(|i| shortcut_sheet::LEGEND[i].label)
+            .collect()
+    }
+
+    #[test]
+    fn legend_fits_in_full_at_full_size_and_drops_the_middle_when_small() {
+        let full_scale = 1.0 / crate::config::COMPACT_BAR_SCALE;
+        let all: Vec<&str> = shortcut_sheet::LEGEND.iter().map(|r| r.label).collect();
+        for style in [VkStyle::Normal, VkStyle::Mono] {
+            assert_eq!(legend_kept(full_scale, style, 1920.0), all, "{style:?}");
+            for kept in [
+                legend_kept(1.0, style, 1920.0),
+                legend_kept(full_scale, style, 1024.0),
+            ] {
+                assert!(kept.len() < all.len(), "{style:?} {kept:?}");
+                assert_eq!(kept.first(), Some(&"Type"), "{style:?}");
+                assert_eq!(kept.last(), Some(&"All shortcuts"), "{style:?}");
+                assert!(!kept.contains(&"Symbols"), "{style:?} {kept:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn legend_text_never_drops_below_the_legibility_floor() {
+        for scale in [0.6, 1.0, 1.25, 2.0] {
+            for style in [VkStyle::Normal, VkStyle::Mono] {
+                let m = legend_metrics(scale, style);
+                assert!(m.text_px >= LEGEND_MIN_TEXT_PX);
+                assert!(m.glyph_px < m.row_h);
+                assert!(legend_band_height(scale, style) > m.row_h);
+            }
+        }
+    }
+
+    #[test]
+    fn legend_uses_the_pad_family_svg_glyphs() {
+        let ps = ControllerIconFamily::from_label("DualSense Wireless Controller");
+        let xb = ControllerIconFamily::from_label("Xbox Wireless Controller");
+        let icons = |family: ControllerIconFamily, label: &str| -> Vec<VkIcon> {
+            shortcut_sheet::LEGEND
+                .iter()
+                .find(|r| r.label == label)
+                .expect(label)
+                .keys
+                .iter()
+                .filter_map(|&t| match tip_item(t, family) {
+                    Some(TipItem::Icon(i)) => Some(i),
+                    _ => None,
+                })
+                .collect()
+        };
+        let expect: [(&str, &[VkIcon], &[VkIcon]); 10] = [
+            ("Type", &[VkIcon::Ps5Cross], &[VkIcon::XboxA]),
+            ("Delete", &[VkIcon::Ps5Circle], &[VkIcon::XboxB]),
+            (
+                "Move caret",
+                &[VkIcon::Ps5L1, VkIcon::Ps5R1],
+                &[VkIcon::XboxLb, VkIcon::XboxRb],
+            ),
+            ("Shift", &[VkIcon::Ps5R2], &[VkIcon::XboxRt]),
+            ("Symbols", &[VkIcon::Ps5L2], &[VkIcon::XboxLt]),
+            ("Dictate", &[VkIcon::R3Ps5], &[VkIcon::R3Xbox]),
+            (
+                "Paste",
+                &[VkIcon::SelectPs5, VkIcon::Ps5Triangle],
+                &[VkIcon::SelectXbox, VkIcon::XboxY],
+            ),
+            ("Suggestions", &[VkIcon::SelectPs5], &[VkIcon::SelectXbox]),
+            ("Close keyboard", &[VkIcon::L3Ps5], &[VkIcon::L3Xbox]),
+            ("All shortcuts", &[VkIcon::SelectPs5], &[VkIcon::SelectXbox]),
+        ];
+        for (label, p, x) in expect {
+            assert_eq!(icons(ps, label), p, "{label}");
+            assert_eq!(icons(xb, label), x, "{label}");
+        }
+    }
+
+    #[test]
+    fn every_legend_and_sheet_button_is_an_svg_icon_for_both_families() {
+        let families = [ControllerIconFamily::Ps5, ControllerIconFamily::Xbox];
+        let sheet = super::super::shortcut_sheet::GROUPS
+            .iter()
+            .flat_map(|g| g.rows.iter());
+        for row in sheet.chain(shortcut_sheet::LEGEND.iter()) {
+            for &token in row.keys {
+                if let TipToken::Button(b) = token {
+                    for family in families {
+                        let icon = family.hint_icon(b).expect(b);
+                        assert!(icon.is_controller_tip(), "{b} {family:?}");
+                        assert!(icon.svg().contains("<svg"), "{b} {family:?}");
+                        assert_eq!(tip_item(token, family), Some(TipItem::Icon(icon)));
+                    }
+                }
+            }
         }
     }
 

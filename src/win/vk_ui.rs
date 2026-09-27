@@ -783,6 +783,18 @@ unsafe fn top_inset() -> f32 {
     vk_renderer::strip_band_height(ui_scale(), crate::config::vk_style())
 }
 
+fn legend_shown() -> bool {
+    !crate::win::logon_focus::is_active()
+}
+
+unsafe fn bottom_inset() -> f32 {
+    if legend_shown() {
+        vk_renderer::legend_band_height(ui_scale(), crate::config::vk_style())
+    } else {
+        0.0
+    }
+}
+
 ///
 /// - **Docked**: full monitor width along the bottom edge.
 /// - **Floating**: a compact, horizontally-centred card; the band is the card's top chrome.
@@ -810,7 +822,7 @@ unsafe fn floating_card_rect(chrome: f32) -> (i32, i32, i32, i32) {
     let style = crate::config::vk_style();
     let (grid_w, block_h) = vk_renderer::grid_size(scale_w, &rows, style);
     let (pad_x, pad_y) = vk_renderer::floating_pad(ui_scale(), style);
-    let (w, card_h) = floating_card_size(grid_w, block_h, chrome, pad_x, pad_y);
+    let (w, card_h) = floating_card_size(grid_w, block_h, chrome, bottom_inset(), pad_x, pad_y);
     let w = w.min(full_w);
     let card_h = card_h.clamp(100, full_h);
     let margin = (((full_h as f32) * 0.04).round() as i32).clamp(28, 80);
@@ -829,12 +841,13 @@ fn floating_card_size(
     grid_w: f32,
     block_h: f32,
     chrome: f32,
+    legend: f32,
     pad_x: f32,
     pad_y: f32,
 ) -> (i32, i32) {
     (
         (grid_w + pad_x * 2.0).round() as i32,
-        (chrome + block_h + pad_y * 2.0).ceil() as i32,
+        (chrome + block_h + pad_y * 2.0 + legend).ceil() as i32,
     )
 }
 
@@ -844,7 +857,7 @@ unsafe fn target_monitor_dpi_scale() -> f32 {
 
 unsafe fn docked_base_h(full_h: i32) -> i32 {
     let h = VK_KB_REF_H * target_monitor_dpi_scale() * crate::config::vk_bar_scale();
-    let extra = top_inset() - vk_renderer::STRIP_BAND_H;
+    let extra = top_inset() - vk_renderer::STRIP_BAND_H + bottom_inset();
     ((h + extra).round() as i32).clamp(160, full_h)
 }
 
@@ -1081,6 +1094,7 @@ fn render_frame() {
                 ui_scale: scale,
                 style,
                 shortcut_sheet: super::shortcut_sheet::shown(),
+                legend: legend_shown(),
             };
             if let Err(e) = renderer.draw(&frame) {
                 vk_log::log(&format!("renderer draw: {e}"));
@@ -1128,7 +1142,7 @@ fn strip_hit_test(hwnd: HWND, x: i32, y: i32) -> Option<usize> {
     let rows = vk_nav::rows_snapshot();
     vk_renderer::strip_hit_slot(
         client.right as f32,
-        client.bottom as f32,
+        client.bottom as f32 - unsafe { bottom_inset() },
         unsafe { vk_scale_w() },
         &rows,
         unsafe { top_inset() },
@@ -1149,7 +1163,7 @@ fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<(vk_nav::KeyPos, KeyCell)> {
     let top_inset = unsafe { top_inset() };
     let scale_w = unsafe { vk_scale_w() };
     let cw = client.right as f32;
-    let ch = client.bottom as f32;
+    let ch = client.bottom as f32 - unsafe { bottom_inset() };
     let style = crate::config::vk_style();
     for kr in vk_renderer::key_rects(cw, ch, scale_w, &rows, top_inset, style) {
         if xf >= kr.left && xf < kr.right && yf >= kr.top && yf < kr.bottom {
@@ -1191,9 +1205,11 @@ mod tests {
         // Key block 1000x300 under a 67px chrome band with 18px padding: the
         // renderer centres the block below the chrome, so the card must carry
         // 2*pad vertically to leave exactly `pad` at the bottom and both sides.
-        let (w, h) = floating_card_size(1000.0, 300.0, 67.0, 18.0, 18.0);
+        let (w, h) = floating_card_size(1000.0, 300.0, 67.0, 0.0, 18.0, 18.0);
         assert_eq!(w, 1036);
         assert_eq!(h, 67 + 300 + 36);
+        let (w2, h2) = floating_card_size(1000.0, 300.0, 67.0, 40.0, 18.0, 18.0);
+        assert_eq!((w2, h2), (w, h + 40));
         let bottom_pad = (h as f32 - 67.0 - 300.0) / 2.0;
         let side_pad = (w as f32 - 1000.0) / 2.0;
         assert_eq!(bottom_pad, side_pad);
