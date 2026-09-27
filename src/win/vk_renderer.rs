@@ -437,7 +437,7 @@ static NORMAL_SPEC: StyleSpec = StyleSpec {
     strip_button_w: 60.0,
     strip_button_h: 48.0,
     strip_button_gap: 18.0,
-    strip_hint_px: 30.0,
+    strip_hint_px: 36.0,
     chips_h: 60.0,
     chips_pad: 6.0,
     chips_gap: 4.0,
@@ -487,7 +487,7 @@ static MONO_SPEC: StyleSpec = StyleSpec {
     strip_button_w: 40.0,
     strip_button_h: 0.0,
     strip_button_gap: 0.0,
-    strip_hint_px: 22.0,
+    strip_hint_px: 32.0,
     chips_h: 72.0,
     chips_pad: 0.0,
     chips_gap: 0.0,
@@ -716,7 +716,7 @@ pub const STRIP_BAND_H: f32 = 67.0;
 
 const BAR_H: f32 = 64.0;
 const BAR_GLYPH: f32 = 28.0;
-const BAR_SHARE: f32 = 32.0;
+const BAR_SHARE: f32 = 28.0;
 const BAR_GAP: f32 = 10.0;
 const BAR_LABEL_GAP: f32 = 6.0;
 const BAR_LABEL_PX: f32 = 16.0;
@@ -732,7 +732,7 @@ const SHEET_HEADER_PX: f32 = 18.0;
 const SHEET_ACTION_PX: f32 = 19.0;
 const SHEET_TOKEN_PX: f32 = 17.0;
 const SHEET_GLYPH: f32 = 28.0;
-const SHEET_SHARE: f32 = 32.0;
+const SHEET_SHARE: f32 = 28.0;
 const SHEET_TOKEN_GAP: f32 = 8.0;
 const SHEET_ACTION_GAP: f32 = 24.0;
 const SHEET_TRAIL: f32 = 24.0;
@@ -3130,7 +3130,7 @@ impl VkRenderer {
                     icon,
                     rect,
                     pal.text_dim,
-                    spec.chip_text_alpha * alpha,
+                    alpha,
                     rect.bottom - rect.top,
                 )?;
             }
@@ -4844,10 +4844,10 @@ mod tests {
     #[test]
     fn design_sizes_scale_with_the_unit_and_keep_the_text_floor() {
         let bar = ComboStyle::bar(1.0);
-        assert_eq!((bar.glyph, bar.share, bar.gap), (28.0, 32.0, 10.0));
+        assert_eq!((bar.glyph, bar.share, bar.gap), (28.0, 28.0, 10.0));
         assert_eq!((bar.prefix_px, bar.connector_px), (16.0, 14.0));
         let sheet = SheetMetrics::at(1.0);
-        assert_eq!((sheet.cs.glyph, sheet.cs.share, sheet.cs.gap), (28.0, 32.0, 8.0));
+        assert_eq!((sheet.cs.glyph, sheet.cs.share, sheet.cs.gap), (28.0, 28.0, 8.0));
         assert_eq!((sheet.header_px, sheet.action_px, sheet.cs.prefix_px), (18.0, 19.0, 17.0));
         assert_eq!((sheet.row_h, sheet.col_gap, sheet.action_gap), (70.0, 72.0, 24.0));
         for u in [0.3, 0.667, 1.0, 1.5] {

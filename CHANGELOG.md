@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- The PlayStation Create/Share button icon is cropped to its drawn art so it shows larger in key badges, the suggestion strip, the shortcut legend and the hold-View sheet (the Options icon gains a little), and the bottom shortcut legend uses slightly bigger icons and text.
+- The PlayStation Create and Options button icons are redrawn as solid chips matching the L1/R1/L2/R2 badges: a bold white Create glyph (a capsule with three rays) and a bold white three-line Options glyph, without the tiny SHARE and OPTIONS lettering. They read clearly in key badges, the suggestion strip, the shortcut legend and the hold-View sheet, the Create icon is drawn at the same size as the other button icons there, the bottom shortcut legend uses slightly bigger icons and text, and the suggestion strip's button hint is larger and no longer dimmed.
 
 ## v0.7.0
 
