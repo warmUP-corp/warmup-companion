@@ -696,13 +696,14 @@ pub struct VkRenderer {
     nimbus_failed: bool,
     sheet_alpha: f32,
     sheet_tick: Option<Instant>,
+    sheet_fonts: HashMap<(VkStyle, i32), (IDWriteTextFormat, IDWriteTextFormat)>,
     d3d: ID3D11Device,
     _d2d_device: ID2D1Device,
     _dcomp_device: IDCompositionDevice,
     // Keep the composition target + visual alive for the window's lifetime. Dropping
     // them releases the HWND<->visual binding, so the window shows nothing.
-    _comp_target: IDCompositionTarget,
-    _visual: IDCompositionVisual,
+    _comp_target: Option<IDCompositionTarget>,
+    _visual: Option<IDCompositionVisual>,
 }
 
 pub const REF_MON_W: f32 = 1920.0;
@@ -717,11 +718,14 @@ const FLOATING_PANEL_INSET: f32 = 1.0;
 
 pub const STRIP_BAND_H: f32 = 67.0;
 
-const LEGEND_ROW_DU: f32 = 26.0;
-const LEGEND_GLYPH_DU: f32 = 22.0;
+const LEGEND_ROW_DU: f32 = 40.0;
+const LEGEND_GLYPH_DU: f32 = 30.0;
+const LEGEND_TEXT_DU: f32 = 17.0;
 const LEGEND_GLYPH_GAP_DU: f32 = 4.0;
-const LEGEND_LABEL_GAP_DU: f32 = 7.0;
-const LEGEND_SEP_GAP_DU: f32 = 12.0;
+const LEGEND_LABEL_GAP_DU: f32 = 8.0;
+const LEGEND_ITEM_GAP_DU: f32 = 18.0;
+const LEGEND_MAX_GAP_DU: f32 = 56.0;
+const LEGEND_SIDE_PAD_DU: f32 = 12.0;
 const LEGEND_MIN_TEXT_PX: f32 = 11.0;
 const LEGEND_SEP: &str = "\u{00B7}";
 
@@ -732,18 +736,26 @@ struct LegendMetrics {
     glyph_px: f32,
     glyph_gap: f32,
     label_gap: f32,
-    sep_gap: f32,
+    item_gap: f32,
+    max_gap: f32,
+    side_pad: f32,
+}
+
+fn legend_text_du(u: f32) -> f32 {
+    LEGEND_TEXT_DU.max(LEGEND_MIN_TEXT_PX / u.max(0.01))
 }
 
 fn legend_metrics(scale: f32, style: VkStyle) -> LegendMetrics {
     let u = ref_unit(scale, style);
     LegendMetrics {
         row_h: LEGEND_ROW_DU * u,
-        text_px: (style_spec(style).number_px * u).max(LEGEND_MIN_TEXT_PX),
+        text_px: legend_text_du(u) * u,
         glyph_px: LEGEND_GLYPH_DU * u,
         glyph_gap: LEGEND_GLYPH_GAP_DU * u,
         label_gap: LEGEND_LABEL_GAP_DU * u,
-        sep_gap: LEGEND_SEP_GAP_DU * u,
+        item_gap: LEGEND_ITEM_GAP_DU * u,
+        max_gap: LEGEND_MAX_GAP_DU * u,
+        side_pad: LEGEND_SIDE_PAD_DU * u,
     }
 }
 
@@ -758,6 +770,27 @@ fn tip_item(token: TipToken, family: ControllerIconFamily) -> Option<TipItem> {
         TipToken::Plus => Some(TipItem::Text("+", true)),
         TipToken::Dot => Some(TipItem::Text(LEGEND_SEP, true)),
     }
+}
+
+fn legend_positions(widths: &[f32], left: f32, right: f32, m: &LegendMetrics) -> (Vec<f32>, f32) {
+    let n = widths.len();
+    let total: f32 = widths.iter().sum();
+    let gap = if n > 1 {
+        ((right - left - total) / (n - 1) as f32).clamp(m.item_gap, m.max_gap)
+    } else {
+        0.0
+    };
+    let row_w = total + gap * n.saturating_sub(1) as f32;
+    let mut x = (left + right - row_w) * 0.5;
+    let starts = widths
+        .iter()
+        .map(|w| {
+            let at = x;
+            x += w + gap;
+            at
+        })
+        .collect();
+    (starts, gap)
 }
 
 fn legend_item_width(
@@ -781,19 +814,17 @@ fn legend_item_width(
         + measure(row.label)
 }
 
-fn legend_span(rects: &[KeyRect], client_w: f32) -> (f32, f32) {
+fn legend_span(rects: &[KeyRect], client_w: f32, m: &LegendMetrics) -> (f32, f32) {
     let (l, r) = rects
         .iter()
         .fold((f32::MAX, f32::MIN), |(l, r), kr| (l.min(kr.left), r.max(kr.right)));
-    if l > r {
+    let (l, r) = if l > r {
         (0.0, client_w)
     } else {
         (l.max(0.0), r.min(client_w))
-    }
-}
-
-fn legend_sep_width(m: &LegendMetrics, measure: &dyn Fn(&str) -> f32) -> f32 {
-    measure(LEGEND_SEP) + m.sep_gap * 2.0
+    };
+    let pad = m.side_pad.min((r - l) * 0.25).max(0.0);
+    (l + pad, r - pad)
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1467,14 +1498,22 @@ impl VkRenderer {
         GetClientRect(hwnd, &mut client).map_err(|e| format!("GetClientRect: {e}"))?;
         let width = (client.right - client.left).max(1) as u32;
         let height = (client.bottom - client.top).max(1) as u32;
+        let on_secure = crate::win::surface::thread().is_some_and(|s| s.is_winlogon());
+        Self::build(width, height, Some(hwnd), on_secure)
+    }
 
+    unsafe fn build(
+        width: u32,
+        height: u32,
+        hwnd: Option<HWND>,
+        prefer_warp: bool,
+    ) -> Result<Self, String> {
         // NVIDIA's D3D11 user-mode driver (nvwgf2umx.dll) faults with 0xC0000005
         // when driven on the Winlogon secure desktop — the GPU context there is
         // unreliable (confirmed via minidump). On the secure desktop, render with
         // the WARP software rasterizer, which never loads the vendor UMD. Userland
         // keeps hardware for perf. Either way, fall back to the other on failure.
-        let on_secure = crate::win::surface::thread().is_some_and(|s| s.is_winlogon());
-        let d3d = create_d3d_device(on_secure)?;
+        let d3d = create_d3d_device(prefer_warp)?;
         let dxgi_device: IDXGIDevice = d3d.cast().map_err(|e| format!("IDXGIDevice: {e}"))?;
 
         let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))
@@ -1512,21 +1551,27 @@ impl VkRenderer {
 
         let dcomp_device: IDCompositionDevice = DCompositionCreateDevice(&dxgi_device)
             .map_err(|e| format!("DCompositionCreateDevice: {e}"))?;
-        let comp_target = dcomp_device
-            .CreateTargetForHwnd(hwnd, true)
-            .map_err(|e| format!("CreateTargetForHwnd: {e}"))?;
-        let visual = dcomp_device
-            .CreateVisual()
-            .map_err(|e| format!("CreateVisual: {e}"))?;
-        visual
-            .SetContent(&swapchain)
-            .map_err(|e| format!("SetContent: {e}"))?;
-        comp_target
-            .SetRoot(&visual)
-            .map_err(|e| format!("SetRoot: {e}"))?;
-        dcomp_device
-            .Commit()
-            .map_err(|e| format!("DComp Commit: {e}"))?;
+        let (comp_target, visual) = match hwnd {
+            Some(hwnd) => {
+                let comp_target = dcomp_device
+                    .CreateTargetForHwnd(hwnd, true)
+                    .map_err(|e| format!("CreateTargetForHwnd: {e}"))?;
+                let visual = dcomp_device
+                    .CreateVisual()
+                    .map_err(|e| format!("CreateVisual: {e}"))?;
+                visual
+                    .SetContent(&swapchain)
+                    .map_err(|e| format!("SetContent: {e}"))?;
+                comp_target
+                    .SetRoot(&visual)
+                    .map_err(|e| format!("SetRoot: {e}"))?;
+                dcomp_device
+                    .Commit()
+                    .map_err(|e| format!("DComp Commit: {e}"))?;
+                (Some(comp_target), Some(visual))
+            }
+            None => (None, None),
+        };
 
         let dwrite = create_dwrite()?;
         let mut fonts: Option<IDWriteFontCollection> = None;
@@ -1621,6 +1666,7 @@ impl VkRenderer {
             nimbus_failed: false,
             sheet_alpha: 0.0,
             sheet_tick: None,
+            sheet_fonts: HashMap::new(),
             d3d,
             _d2d_device: d2d_device,
             _dcomp_device: dcomp_device,
@@ -1706,10 +1752,7 @@ impl VkRenderer {
             space: make(DWRITE_FONT_WEIGHT_NORMAL, spec.space_label_px)?,
             chip: make(DWRITE_FONT_WEIGHT_NORMAL, spec.chip_px)?,
             chip_sel: make(spec.chip_sel_weight, spec.chip_px)?,
-            legend: make(
-                DWRITE_FONT_WEIGHT_NORMAL,
-                spec.number_px.max(LEGEND_MIN_TEXT_PX / u),
-            )?,
+            legend: make(DWRITE_FONT_WEIGHT_NORMAL, legend_text_du(u))?,
         };
         self.style_fonts = Some(built);
         Ok(())
@@ -2039,6 +2082,15 @@ impl VkRenderer {
     }
 
     pub unsafe fn draw(&mut self, frame: &VkFrame) -> Result<(), String> {
+        self.draw_frame(frame)?;
+        self.swapchain
+            .Present(1, DXGI_PRESENT(0))
+            .ok()
+            .map_err(|e| format!("Present: {e}"))?;
+        Ok(())
+    }
+
+    unsafe fn draw_frame(&mut self, frame: &VkFrame) -> Result<(), String> {
         let VkFrame {
             pal,
             rows,
@@ -2509,6 +2561,7 @@ impl VkRenderer {
                 unit,
                 controller_icons,
                 self.sheet_alpha,
+                style,
             )?;
         }
 
@@ -2519,11 +2572,36 @@ impl VkRenderer {
         self.d2d_context
             .EndDraw(None, None)
             .map_err(|e| format!("EndDraw: {e}"))?;
-        self.swapchain
-            .Present(1, DXGI_PRESENT(0))
-            .ok()
-            .map_err(|e| format!("Present: {e}"))?;
         Ok(())
+    }
+
+    unsafe fn legend_layout(
+        &self,
+        format: &IDWriteTextFormat,
+        rects: &[KeyRect],
+        family: ControllerIconFamily,
+        m: &LegendMetrics,
+    ) -> LegendLayout {
+        let (left, right) = legend_span(rects, self.width as f32, m);
+        let measure = |t: &str| self.measure_text(t, format);
+        let widths: Vec<f32> = shortcut_sheet::LEGEND
+            .iter()
+            .map(|row| legend_item_width(row, family, m, &measure))
+            .collect();
+        let kept = shortcut_sheet::fit_legend(&widths, m.item_gap, right - left);
+        let kept_w: Vec<f32> = kept.iter().map(|&i| widths[i]).collect();
+        let (starts, gap) = legend_positions(&kept_w, left, right, m);
+        LegendLayout {
+            items: kept
+                .into_iter()
+                .zip(starts)
+                .zip(kept_w)
+                .map(|((i, x), w)| (i, x, w))
+                .collect(),
+            gap,
+            left,
+            right,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2537,23 +2615,12 @@ impl VkRenderer {
         m: LegendMetrics,
         top: f32,
     ) -> Result<(), String> {
-        let (left, right) = legend_span(rects, self.width as f32);
         let format = fonts.legend.clone();
-        let (widths, sep_w) = {
-            let measure = |t: &str| self.measure_text(t, &format);
-            let widths: Vec<f32> = shortcut_sheet::LEGEND
-                .iter()
-                .map(|row| legend_item_width(row, family, &m, &measure))
-                .collect();
-            (widths, legend_sep_width(&m, &measure))
-        };
-        let kept = shortcut_sheet::fit_legend(&widths, sep_w, right - left);
-        let total = kept.iter().map(|&i| widths[i]).sum::<f32>()
-            + sep_w * kept.len().saturating_sub(1) as f32;
+        let layout = self.legend_layout(&format, rects, family, &m);
         let band = D2D_RECT_F {
-            left,
+            left: layout.left,
             top,
-            right,
+            right: layout.right,
             bottom: top + m.row_h,
         };
         let secondary = solid_brush(
@@ -2564,25 +2631,24 @@ impl VkRenderer {
             &self.d2d_context,
             colorref_alpha(pal.text_dim, spec.number_alpha * 0.6),
         )?;
-        let mut x = (left + right - total) * 0.5;
-        for (n, &i) in kept.iter().enumerate() {
+        for (n, &(i, start, _)) in layout.items.iter().enumerate() {
             if n > 0 {
                 self.d2d_context.DrawText(
                     &wide(LEGEND_SEP),
                     &format,
                     &D2D_RECT_F {
-                        left: x,
-                        right: x + sep_w,
+                        left: start - layout.gap,
+                        right: start,
                         ..band
                     },
                     &faint,
                     D2D1_DRAW_TEXT_OPTIONS_NONE,
                     DWRITE_MEASURING_MODE_NATURAL,
                 );
-                x += sep_w;
             }
             let row = &shortcut_sheet::LEGEND[i];
             let (items, _) = self.tip_items(row.keys, family, &format, m.glyph_px, m.glyph_gap);
+            let mut x = start;
             for (item, w) in &items {
                 let slot = D2D_RECT_F {
                     left: x,
@@ -2621,7 +2687,6 @@ impl VkRenderer {
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
                 DWRITE_MEASURING_MODE_NATURAL,
             );
-            x += label_w;
         }
         Ok(())
     }
@@ -2637,6 +2702,7 @@ impl VkRenderer {
         unit: f32,
         family: ControllerIconFamily,
         alpha: f32,
+        style: VkStyle,
     ) -> Result<(), String> {
         let cw = self.width as f32;
         let ch = self.height as f32;
@@ -2679,19 +2745,14 @@ impl VkRenderer {
 
         let pad_x = spec.pad_x * unit;
         let pad_y = spec.pad_y * unit;
-        let (left, right, bottom) = if rects.is_empty() {
-            (
-                panel.left + pad_x,
-                panel.right - pad_x,
-                panel.bottom - pad_y,
-            )
+        let (left, right) = if rects.is_empty() {
+            (panel.left + pad_x, panel.right - pad_x)
         } else {
-            rects
-                .iter()
-                .fold((f32::MAX, f32::MIN, f32::MIN), |(l, r, b), kr| {
-                    (l.min(kr.left), r.max(kr.right), b.max(kr.bottom))
-                })
+            rects.iter().fold((f32::MAX, f32::MIN), |(l, r), kr| {
+                (l.min(kr.left), r.max(kr.right))
+            })
         };
+        let bottom = panel.bottom - pad_y;
         let top = panel.top + pad_y;
         let lines = shortcut_sheet::max_lines() as f32;
         let line_h = ((bottom - top) / lines).max(1.0);
@@ -2699,49 +2760,26 @@ impl VkRenderer {
         let gap = 6.0 * unit;
         let label_gap = 14.0 * unit;
         let col_gap = spec.gap * unit * 3.0;
-        let text_fmt = fonts.chip.clone();
-        let title_fmt = fonts.chip_sel.clone();
-
-        struct Col {
-            lines: Vec<(Line, Vec<(TipItem, f32)>, f32)>,
-            glyph_w: f32,
-            natural: f32,
-        }
-        let cols: Vec<Col> = shortcut_sheet::columns()
-            .into_iter()
-            .map(|col| {
-                let mut glyph_w = 0.0f32;
-                let mut label_w = 0.0f32;
-                let mut title_w = 0.0f32;
-                let lines = col
-                    .into_iter()
-                    .map(|line| match line {
-                        Line::Row(row) => {
-                            let (items, w) = self.tip_items(row.keys, family, &text_fmt, chip, gap);
-                            let lw = self.measure_text(row.label, &text_fmt);
-                            glyph_w = glyph_w.max(w);
-                            label_w = label_w.max(lw);
-                            (line, items, lw)
-                        }
-                        Line::Title(t) => {
-                            let tw = self.measure_text(t, &title_fmt);
-                            title_w = title_w.max(tw);
-                            (line, Vec::new(), tw)
-                        }
-                        Line::Blank => (line, Vec::new(), 0.0),
-                    })
-                    .collect();
-                Col {
-                    lines,
-                    glyph_w,
-                    natural: (glyph_w + label_gap + label_w).max(title_w),
-                }
-            })
-            .collect();
+        let full_px = spec.chip_px * unit;
+        let mut px = full_px;
+        let (text_fmt, title_fmt, cols) = loop {
+            let (text_fmt, title_fmt) = if px >= full_px {
+                (fonts.chip.clone(), fonts.chip_sel.clone())
+            } else {
+                self.sheet_formats(style, px)?
+            };
+            let cols = self.sheet_columns(family, &text_fmt, &title_fmt, chip, gap, label_gap);
+            let n = cols.len().max(1) as f32;
+            let need = cols.iter().map(|c| c.natural).sum::<f32>() + col_gap * (n - 1.0);
+            if need <= right - left || px <= LEGEND_MIN_TEXT_PX {
+                break (text_fmt, title_fmt, cols);
+            }
+            px = (px - 1.0).max(LEGEND_MIN_TEXT_PX);
+        };
         let n = cols.len().max(1) as f32;
         let avail = (right - left - col_gap * (n - 1.0)).max(1.0);
         let sum: f32 = cols.iter().map(|c| c.natural).sum::<f32>().max(1.0);
-        let extra = (avail - sum) / n;
+        let extra = ((avail - sum) / n).max(0.0);
 
         let text_brush = solid_brush(&self.d2d_context, colorref_alpha(pal.text, alpha))?;
         let title_brush = solid_brush(
@@ -2750,21 +2788,7 @@ impl VkRenderer {
         )?;
         let mut x = left;
         for col in &cols {
-            let col_w = if extra >= 0.0 {
-                col.natural + extra
-            } else {
-                col.natural * avail / sum
-            };
-            let clip = D2D_RECT_F {
-                left: x,
-                top,
-                right: x + col_w,
-                bottom,
-            };
-            self.d2d_context.PushAxisAlignedClip(
-                &clip,
-                windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-            );
+            let col_w = col.natural + extra;
             for (i, (line, items, w)) in col.lines.iter().enumerate() {
                 let band = D2D_RECT_F {
                     left: x,
@@ -2812,10 +2836,94 @@ impl VkRenderer {
                     Line::Blank => {}
                 }
             }
-            self.d2d_context.PopAxisAlignedClip();
             x += col_w + col_gap;
         }
         Ok(())
+    }
+
+    unsafe fn sheet_formats(
+        &mut self,
+        style: VkStyle,
+        px: f32,
+    ) -> Result<(IDWriteTextFormat, IDWriteTextFormat), String> {
+        let key = (style, (px * 4.0).round() as i32);
+        if let Some(f) = self.sheet_fonts.get(&key) {
+            return Ok(f.clone());
+        }
+        let mut fonts: Option<IDWriteFontCollection> = None;
+        self.dwrite
+            .GetSystemFontCollection(&mut fonts, false)
+            .map_err(|e| format!("GetSystemFontCollection: {e}"))?;
+        let fonts = fonts.ok_or("GetSystemFontCollection returned null")?;
+        let locale = user_locale_name();
+        let spec = style_spec(style);
+        let family = resolve_family(&fonts, spec.families);
+        let make = |weight: DWRITE_FONT_WEIGHT| -> Result<IDWriteTextFormat, String> {
+            let f = self
+                .dwrite
+                .CreateTextFormat(
+                    &family,
+                    &fonts,
+                    weight,
+                    DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    px.max(1.0),
+                    &locale,
+                )
+                .map_err(|e| format!("CreateTextFormat ({family}): {e}"))?;
+            let _ = f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            let _ = f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            let _ = f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            Ok(f)
+        };
+        let pair = (
+            make(DWRITE_FONT_WEIGHT_NORMAL)?,
+            make(spec.chip_sel_weight)?,
+        );
+        self.sheet_fonts.insert(key, pair.clone());
+        Ok(pair)
+    }
+
+    unsafe fn sheet_columns(
+        &self,
+        family: ControllerIconFamily,
+        text_fmt: &IDWriteTextFormat,
+        title_fmt: &IDWriteTextFormat,
+        chip: f32,
+        gap: f32,
+        label_gap: f32,
+    ) -> Vec<SheetCol> {
+        shortcut_sheet::columns()
+            .into_iter()
+            .map(|col| {
+                let mut glyph_w = 0.0f32;
+                let mut label_w = 0.0f32;
+                let mut title_w = 0.0f32;
+                let lines = col
+                    .into_iter()
+                    .map(|line| match line {
+                        Line::Row(row) => {
+                            let (items, w) = self.tip_items(row.keys, family, text_fmt, chip, gap);
+                            let lw = self.measure_text(row.label, text_fmt);
+                            glyph_w = glyph_w.max(w);
+                            label_w = label_w.max(lw);
+                            (line, items, lw)
+                        }
+                        Line::Title(t) => {
+                            let tw = self.measure_text(t, title_fmt);
+                            title_w = title_w.max(tw);
+                            (line, Vec::new(), tw)
+                        }
+                        Line::Blank => (line, Vec::new(), 0.0),
+                    })
+                    .collect();
+                SheetCol {
+                    lines,
+                    glyph_w,
+                    natural: (glyph_w + label_gap + label_w).max(title_w),
+                }
+            })
+            .collect()
     }
 
     unsafe fn draw_strip(
@@ -3073,9 +3181,11 @@ impl VkRenderer {
         let wide: Vec<u16> = text.encode_utf16().collect();
         let layout: Option<IDWriteTextLayout> = self
             .dwrite
-            .CreateTextLayout(&wide, format, f32::MAX, f32::MAX)
+            .CreateTextLayout(&wide, format, 1.0e6, 1.0e6)
             .ok();
         let Some(layout) = layout else { return 0.0 };
+        let _ = layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        let _ = layout.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
         let mut m = DWRITE_TEXT_METRICS::default();
         if layout.GetMetrics(&mut m).is_err() {
             return 0.0;
@@ -4175,6 +4285,19 @@ pub struct TipsPill<'a> {
     pub style: VkStyle,
 }
 
+struct SheetCol {
+    lines: Vec<(Line, Vec<(TipItem, f32)>, f32)>,
+    glyph_w: f32,
+    natural: f32,
+}
+
+struct LegendLayout {
+    items: Vec<(usize, f32, f32)>,
+    gap: f32,
+    left: f32,
+    right: f32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum TipItem {
     Icon(VkIcon),
@@ -4444,6 +4567,62 @@ fn key_metrics(
 }
 
 #[cfg(test)]
+pub const FULL_SIZE_SCALE: f32 = 1.0 / crate::config::COMPACT_BAR_SCALE;
+
+#[cfg(test)]
+impl VkRenderer {
+    pub unsafe fn offscreen(width: u32, height: u32) -> Result<Self, String> {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        Self::build(width.max(1), height.max(1), None, true)
+    }
+
+    pub unsafe fn render_bgra(&mut self, frame: &VkFrame) -> Result<(u32, u32, Vec<u8>), String> {
+        use windows::Win32::Graphics::Direct3D11::{
+            ID3D11Texture2D, D3D11_BIND_FLAG, D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE,
+            D3D11_MAP_READ, D3D11_RESOURCE_MISC_FLAG, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+        };
+        if frame.shortcut_sheet {
+            self.sheet_alpha = 1.0;
+        }
+        if frame.candidates.is_some() {
+            self.strip_shown_at = Instant::now().checked_sub(std::time::Duration::from_secs(2));
+        }
+        self.draw_frame(frame)?;
+        let tex: ID3D11Texture2D = self
+            .swapchain
+            .GetBuffer(0)
+            .map_err(|e| format!("GetBuffer: {e}"))?;
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        tex.GetDesc(&mut desc);
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+        desc.BindFlags = D3D11_BIND_FLAG(0).0 as u32;
+        desc.MiscFlags = D3D11_RESOURCE_MISC_FLAG(0).0 as u32;
+        let mut staging = None;
+        self.d3d
+            .CreateTexture2D(&desc, None, Some(&mut staging))
+            .map_err(|e| format!("staging: {e}"))?;
+        let staging = staging.ok_or("staging null")?;
+        let ctx = self
+            .d3d
+            .GetImmediateContext()
+            .map_err(|e| format!("context: {e}"))?;
+        ctx.CopyResource(&staging, &tex);
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        ctx.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+            .map_err(|e| format!("map: {e}"))?;
+        let (w, h) = (desc.Width, desc.Height);
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h as usize {
+            let row = (mapped.pData as *const u8).add(y * mapped.RowPitch as usize);
+            std::ptr::copy_nonoverlapping(row, px.as_mut_ptr().add(y * w as usize * 4), w as usize * 4);
+        }
+        ctx.Unmap(&staging, 0);
+        Ok((w, h, px))
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -4484,40 +4663,128 @@ mod tests {
         }
     }
 
-    fn legend_kept(scale: f32, style: VkStyle, client_w: f32) -> Vec<&'static str> {
+    struct LegendCheck {
+        labels: Vec<&'static str>,
+        spans: Vec<(f32, f32)>,
+        left: f32,
+        right: f32,
+    }
+
+    fn legend_check(scale: f32, style: VkStyle, client_w: f32, family: ControllerIconFamily) -> LegendCheck {
         let rows = crate::vk_nav::rows_for_test();
         let (grid_w, block_h) = grid_size(REF_MON_W * scale, &rows, style);
         let cw = client_w.min(grid_w + 40.0);
         let ch = block_h + 200.0;
         let rects = key_rects(cw, ch, REF_MON_W * scale, &rows, 0.0, style);
-        let (l, r) = legend_span(&rects, cw);
         let m = legend_metrics(scale, style);
-        let measure = |t: &str| t.chars().count() as f32 * m.text_px * 0.55;
-        let family = ControllerIconFamily::Xbox;
-        let widths: Vec<f32> = shortcut_sheet::LEGEND
-            .iter()
-            .map(|row| legend_item_width(row, family, &m, &measure))
-            .collect();
-        shortcut_sheet::fit_legend(&widths, legend_sep_width(&m, &measure), r - l)
-            .into_iter()
-            .map(|i| shortcut_sheet::LEGEND[i].label)
-            .collect()
+        unsafe {
+            let mut r = VkRenderer::offscreen(cw as u32, ch as u32).expect("offscreen renderer");
+            r.ensure_style_fonts(style, ref_key_h(scale, style)).expect("fonts");
+            let format = r.style_fonts.as_ref().expect("fonts").legend.clone();
+            let layout = r.legend_layout(&format, &rects, family, &m);
+            let spans = layout
+                .items
+                .iter()
+                .map(|&(i, x, w)| {
+                    let row = &shortcut_sheet::LEGEND[i];
+                    let label = r.measure_text(row.label, &format);
+                    let glyphs = w - m.label_gap - label;
+                    assert!(glyphs > 0.0, "{}", row.label);
+                    (x, x + w)
+                })
+                .collect();
+            LegendCheck {
+                labels: layout
+                    .items
+                    .iter()
+                    .map(|&(i, _, _)| shortcut_sheet::LEGEND[i].label)
+                    .collect(),
+                spans,
+                left: layout.left,
+                right: layout.right,
+            }
+        }
+    }
+
+    fn assert_legend_clear(c: &LegendCheck, m: &LegendMetrics, what: &str) {
+        for w in c.spans.windows(2) {
+            assert!(
+                w[1].0 - w[0].1 >= m.item_gap - 0.01,
+                "{what}: items overlap or touch {:?}",
+                c.spans
+            );
+        }
+        let first = c.spans.first().expect("legend items").0;
+        let last = c.spans.last().expect("legend items").1;
+        assert!(
+            first >= c.left - 0.01 && last <= c.right + 0.01,
+            "{what}: row {first}..{last} outside {}..{}",
+            c.left,
+            c.right
+        );
     }
 
     #[test]
     fn legend_fits_in_full_at_full_size_and_drops_the_middle_when_small() {
-        let full_scale = 1.0 / crate::config::COMPACT_BAR_SCALE;
+        let full_scale = FULL_SIZE_SCALE;
         let all: Vec<&str> = shortcut_sheet::LEGEND.iter().map(|r| r.label).collect();
+        for family in [ControllerIconFamily::Ps5, ControllerIconFamily::Xbox] {
+            for style in [VkStyle::Normal, VkStyle::Mono] {
+                let what = format!("{style:?} {family:?}");
+                let full = legend_check(full_scale, style, 1920.0, family);
+                assert_eq!(full.labels, all, "{what}");
+                assert_legend_clear(&full, &legend_metrics(full_scale, style), &what);
+                for (scale, width, must_drop) in [(1.0, 1920.0, false), (full_scale, 1024.0, true)] {
+                    let small = legend_check(scale, style, width, family);
+                    let kept = &small.labels;
+                    assert_legend_clear(&small, &legend_metrics(scale, style), &what);
+                    if !must_drop && kept == &all {
+                        continue;
+                    }
+                    assert!(kept.len() < all.len(), "{what} {kept:?}");
+                    assert_eq!(kept.first(), Some(&"Type"), "{what}");
+                    assert_eq!(kept.last(), Some(&"All shortcuts"), "{what}");
+                    assert!(!kept.contains(&"Symbols"), "{what} {kept:?}");
+                    assert_legend_clear(&small, &legend_metrics(scale, style), &what);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shortcut_sheet_columns_fit_at_compact_size_without_clipping() {
         for style in [VkStyle::Normal, VkStyle::Mono] {
-            assert_eq!(legend_kept(full_scale, style, 1920.0), all, "{style:?}");
-            for kept in [
-                legend_kept(1.0, style, 1920.0),
-                legend_kept(full_scale, style, 1024.0),
-            ] {
-                assert!(kept.len() < all.len(), "{style:?} {kept:?}");
-                assert_eq!(kept.first(), Some(&"Type"), "{style:?}");
-                assert_eq!(kept.last(), Some(&"All shortcuts"), "{style:?}");
-                assert!(!kept.contains(&"Symbols"), "{style:?} {kept:?}");
+            for family in [ControllerIconFamily::Ps5, ControllerIconFamily::Xbox] {
+                let rows = crate::vk_nav::rows_for_test();
+                let (grid_w, _) = grid_size(REF_MON_W, &rows, style);
+                let spec = style_spec(style);
+                let unit = ref_unit(1.0, style);
+                unsafe {
+                    let mut r = VkRenderer::offscreen(grid_w as u32 + 40, 400).expect("offscreen");
+                    r.ensure_style_fonts(style, ref_key_h(1.0, style)).expect("fonts");
+                    let fonts = r.style_fonts.clone().expect("fonts");
+                    let chip = spec.hint_badge * unit;
+                    let cols = r.sheet_columns(
+                        family,
+                        &fonts.chip,
+                        &fonts.chip_sel,
+                        chip,
+                        6.0 * unit,
+                        14.0 * unit,
+                    );
+                    let col_gap = spec.gap * unit * 3.0;
+                    let need = cols.iter().map(|c| c.natural).sum::<f32>()
+                        + col_gap * (cols.len() as f32 - 1.0);
+                    assert!(need <= grid_w, "{style:?} {family:?}: sheet needs {need} of {grid_w}");
+                    for c in &cols {
+                        for (line, _, w) in &c.lines {
+                            if let Line::Row(_) = line {
+                                assert!(c.glyph_w + 14.0 * unit + w <= c.natural + 0.01);
+                                assert!(*w > 0.0);
+                            }
+                        }
+                    }
+                }
             }
         }
     }

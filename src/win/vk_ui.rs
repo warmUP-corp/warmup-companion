@@ -1215,6 +1215,96 @@ mod tests {
         assert_eq!(bottom_pad, side_pad);
     }
 
+    fn render_card_png(style: crate::config::VkStyle, sheet: bool, target_w: f32) -> (u32, u32, Vec<u8>) {
+        let rows = vk_nav::rows_for_test();
+        let (w1, _) = vk_renderer::grid_size(vk_renderer::REF_MON_W, &rows, style);
+        let (p1, _) = vk_renderer::floating_pad(1.0, style);
+        let scale = target_w / (w1 + p1 * 2.0);
+        let scale_w = vk_renderer::REF_MON_W * scale;
+        let (grid_w, block_h) = vk_renderer::grid_size(scale_w, &rows, style);
+        let (pad_x, pad_y) = vk_renderer::floating_pad(scale, style);
+        let chrome = vk_renderer::strip_band_height(scale, style);
+        let legend = vk_renderer::legend_band_height(scale, style);
+        let (w, h) = floating_card_size(grid_w, block_h, chrome, legend, pad_x, pad_y);
+        let pal = vk_renderer::style_palette(style, true);
+        let strip = crate::vk_predict::StripState {
+            visible: ["I", "The", "I'm", "Thanks", "Hi", "It", "We"]
+                .iter()
+                .map(|w| w.to_string())
+                .collect(),
+            highlight_slot: 3,
+            engaged: false,
+        };
+        let frame = vk_renderer::VkFrame {
+            pal: &pal,
+            rows: &rows,
+            sel: vk_nav::KeyPos { row: 1, col: 1 },
+            key_glyph,
+            key_hint,
+            top_inset: chrome,
+            scale_w,
+            candidates: Some(&strip),
+            floating: true,
+            modifiers: vk_renderer::VkModifiers::default(),
+            pressed: None,
+            controller_label: "DualSense Wireless Controller",
+            voice_available: true,
+            voice_active: false,
+            voice_phase: vk_renderer::VoicePhase::Listening,
+            voice_level: 0.0,
+            ui_scale: scale,
+            style,
+            shortcut_sheet: sheet,
+            legend: true,
+        };
+        unsafe {
+            let mut r = vk_renderer::VkRenderer::offscreen(w as u32, h as u32).expect("offscreen");
+            r.render_bgra(&frame).expect("render")
+        }
+    }
+
+    fn write_png(path: &std::path::Path, w: u32, h: u32, bgra: &[u8]) {
+        let bg = [0x20u8, 0x1c, 0x1a];
+        let rgba: Vec<u8> = bgra
+            .chunks_exact(4)
+            .flat_map(|p| {
+                let a = p[3] as u32;
+                let over = |c: u8, b: u8| (c as u32 + b as u32 * (255 - a) / 255).min(255) as u8;
+                [over(p[2], bg[0]), over(p[1], bg[1]), over(p[0], bg[2]), 255]
+            })
+            .collect();
+        let file = std::fs::File::create(path).expect("png file");
+        let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header()
+            .expect("png header")
+            .write_image_data(&rgba)
+            .expect("png data");
+    }
+
+    #[test]
+    fn floating_card_renders_the_legend_and_the_sheet() {
+        let dir = std::env::var_os("VK_LEGEND_PNG_DIR").map(std::path::PathBuf::from);
+        for style in [crate::config::VkStyle::Mono, crate::config::VkStyle::Normal] {
+            for sheet in [false, true] {
+                let (w, h, px) = render_card_png(style, sheet, 1512.0);
+                assert!((w as i32 - 1512).abs() <= 2, "{w}");
+                let lit = px.chunks_exact(4).filter(|p| p[3] > 0).count();
+                assert!(lit > (w * h / 2) as usize);
+                if let Some(dir) = &dir {
+                    let name = match (style, sheet) {
+                        (crate::config::VkStyle::Mono, false) => "legend.png",
+                        (crate::config::VkStyle::Mono, true) => "sheet.png",
+                        (_, false) => "legend-normal.png",
+                        (_, true) => "sheet-normal.png",
+                    };
+                    write_png(&dir.join(name), w, h, &px);
+                }
+            }
+        }
+    }
+
     #[test]
     fn docked_keyboard_does_not_reflow_warmup_launcher() {
         assert!(app_reflow_blocked(
