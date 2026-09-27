@@ -477,7 +477,7 @@ static MONO_SPEC: StyleSpec = StyleSpec {
     sel_shadow: Some((8.0, 24.0, 0x80 as f32 / 255.0)),
     sel_ring_w: 2.0,
     strip: StripLook::Columns,
-    chip_slots: 3,
+    chip_slots: 7,
     strip_bar_h: 72.0,
     chip_px: 22.0,
     chip_sel_weight: DWRITE_FONT_WEIGHT_NORMAL,
@@ -3922,7 +3922,7 @@ mod tests {
             windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE
         )));
         assert_eq!(strip_slots(VkStyle::Normal), 7);
-        assert_eq!(strip_slots(VkStyle::Mono), 3);
+        assert_eq!(strip_slots(VkStyle::Mono), 7);
     }
 
     #[test]
