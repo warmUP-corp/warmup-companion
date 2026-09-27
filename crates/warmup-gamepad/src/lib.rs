@@ -156,6 +156,7 @@ const TRACKED_BUTTONS: &[SdlButton] = &[
 const SLEEP_TRACKED_BUTTONS: &[SdlButton] = &[
     SdlButton::Guide,
     SdlButton::Back,
+    SdlButton::LeftShoulder,
     SdlButton::RightShoulder,
     SdlButton::Misc1,
 ];

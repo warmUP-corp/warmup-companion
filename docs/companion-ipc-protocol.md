@@ -154,6 +154,10 @@ Sleep mode reads Guide plus warmUP's record chord: Back, RB and Share (SDL `Misc
 action (no Enter tap, no screenshot, no VK), so a game never sees extra input. warmUP handles them
 (tap Share, or hold Back + RB) and does not pass them to the hidden launcher.
 
+Sleep mode also reads LB for one companion-local action: hold Back + LB together for 600 ms to
+take one full-screen screenshot (with a rumble). It fires once per hold; release either button to
+arm it again. LB is never forwarded while sleeping, and Back is still forwarded as above.
+
 The companion maps cursor/scroll tuning fields to its internal names per the golden fixture's `configFieldMapping` (`sensitivity->cursor_speed`, `accelerationExp->cursor_accel`, `deadzone->cursor_deadzone`, `scrollSensitivity->scroll_speed`).
 
 `keyboardTheme` is optional, and each color inside it is optional. Colors are `#RRGGBB`;

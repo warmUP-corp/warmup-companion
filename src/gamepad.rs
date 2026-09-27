@@ -25,6 +25,7 @@ const IDLE_AFTER: Duration = Duration::from_secs(2);
 const WARMUP_LAUNCH_DEBOUNCE: Duration = Duration::from_secs(2);
 /// Ignore spurious X/dpad from misaligned HID for a moment after VK opens.
 const VK_NAV_INPUT_GRACE: Duration = Duration::from_millis(450);
+const SLEEP_SCREENSHOT_HOLD: Duration = Duration::from_millis(600);
 const DESKTOP_SYNC_LOG_INTERVAL: Duration = Duration::from_secs(120);
 const HAPTIC_CONFIRM_MS: u32 = 14;
 const HAPTIC_ALERT_MS: u32 = 45;
@@ -232,6 +233,9 @@ pub struct GamepadPoll {
     launch_x_down: bool,
     shot_lb_down: bool,
     shot_rb_down: bool,
+    shot_select_down: bool,
+    sleep_shot_since: Option<Instant>,
+    sleep_shot_fired: bool,
     launch_armed: bool,
     last_launch: Instant,
     last_desktop_log: Instant,
@@ -394,6 +398,9 @@ impl GamepadPoll {
             launch_x_down: false,
             shot_lb_down: false,
             shot_rb_down: false,
+            shot_select_down: false,
+            sleep_shot_since: None,
+            sleep_shot_fired: false,
             launch_armed: true,
             last_launch: crate::time_util::stale(WARMUP_LAUNCH_DEBOUNCE),
             last_desktop_log: crate::time_util::stale(DESKTOP_SYNC_LOG_INTERVAL),
@@ -461,6 +468,7 @@ impl GamepadPoll {
             cursor.set_right_button(false);
             self.shot_lb_down = false;
             self.shot_rb_down = false;
+            self.shot_select_down = false;
             return Ok(Vec::new());
         }
 
@@ -507,6 +515,7 @@ impl GamepadPoll {
             match c.button {
                 Button::Lb => self.shot_lb_down = c.pressed,
                 Button::Rb => self.shot_rb_down = c.pressed,
+                Button::Select => self.shot_select_down = c.pressed,
                 _ => {}
             }
         }
@@ -590,13 +599,35 @@ impl GamepadPoll {
 
         let changes = dedupe_consecutive_toggle_edges(changes);
         let sleeping = crate::gamepad_backend::poll_mode_is_sleep();
+        #[cfg(windows)]
+        {
+            let chord = sleeping
+                && self.shot_select_down
+                && self.shot_lb_down
+                && !Self::service_signin_desktop();
+            let now = Instant::now();
+            if !chord {
+                self.sleep_shot_since = None;
+                self.sleep_shot_fired = false;
+            } else if self.sleep_shot_since.is_none() {
+                self.sleep_shot_since = Some(now);
+            }
+            if sleep_screenshot_due(chord, self.sleep_shot_since, self.sleep_shot_fired, now) {
+                self.sleep_shot_fired = true;
+                cursor.screenshot(false);
+                self.backend.haptic_alert();
+                crate::install::log_line("View+LB hold screenshot (game mode)");
+            }
+        }
         let mut edges = Vec::new();
         if let Some(edge) = desktop_reopen {
             edges.push(edge);
         }
         for change in changes {
             if forward_only_while_sleeping(sleeping, change.button) {
-                crate::pipe_server::publish_button(change.button.as_str(), change.pressed);
+                if change.button != Button::Lb {
+                    crate::pipe_server::publish_button(change.button.as_str(), change.pressed);
+                }
                 continue;
             }
             // Use one mode snapshot for forwarding and local handling. Sending L3 to warmUP
@@ -1106,6 +1137,17 @@ fn forward_only_while_sleeping(sleeping: bool, button: Button) -> bool {
     sleeping && button != Button::Guide
 }
 
+fn sleep_screenshot_due(
+    chord_held: bool,
+    held_since: Option<Instant>,
+    fired: bool,
+    now: Instant,
+) -> bool {
+    chord_held
+        && !fired
+        && held_since.is_some_and(|since| now.duration_since(since) >= SLEEP_SCREENSHOT_HOLD)
+}
+
 fn allows_cursor_injection(game_owns_input: bool, clicks_enabled: bool) -> bool {
     !game_owns_input && clicks_enabled
 }
@@ -1348,8 +1390,10 @@ where
 mod tests {
     use super::{
         allows_cursor_injection, companion_owns_stick_click, forward_only_while_sleeping,
-        is_standalone_guide_wake, Button, ButtonChange,
+        is_standalone_guide_wake, sleep_screenshot_due, Button, ButtonChange,
+        SLEEP_SCREENSHOT_HOLD,
     };
+    use std::time::{Duration, Instant};
 
     #[test]
     fn sleeping_forwards_record_chord_without_local_actions() {
@@ -1357,7 +1401,20 @@ mod tests {
             assert!(forward_only_while_sleeping(true, button));
             assert!(!forward_only_while_sleeping(false, button));
         }
+        assert!(forward_only_while_sleeping(true, Button::Lb));
         assert!(!forward_only_while_sleeping(true, Button::Guide));
+    }
+
+    #[test]
+    fn sleeping_screenshot_fires_once_after_hold() {
+        let start = Instant::now();
+        let early = start + SLEEP_SCREENSHOT_HOLD - Duration::from_millis(1);
+        let late = start + SLEEP_SCREENSHOT_HOLD;
+        assert!(!sleep_screenshot_due(true, Some(start), false, early));
+        assert!(sleep_screenshot_due(true, Some(start), false, late));
+        assert!(!sleep_screenshot_due(true, Some(start), true, late));
+        assert!(!sleep_screenshot_due(false, Some(start), false, late));
+        assert!(!sleep_screenshot_due(true, None, false, late));
     }
 
     #[test]
