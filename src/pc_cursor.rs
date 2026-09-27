@@ -351,7 +351,7 @@ fn copy_screen_to_clipboard(window_only: bool) {
         SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
     };
 
-    let mut window_path: Option<std::path::PathBuf> = None;
+    let mut capture: Option<(Vec<u8>, String)> = None;
     let rect = if window_only {
         let hwnd = unsafe { GetForegroundWindow() };
         if hwnd.0.is_null() {
@@ -423,7 +423,10 @@ fn copy_screen_to_clipboard(window_only: bool) {
         SelectObject(mem_dc, old_obj);
 
         if blt_ok {
-            window_path = save_foreground_capture(screen_dc, bitmap, width, height, window_only);
+            capture = crate::image_paste::bitmap_rgba(screen_dc, bitmap, width, height).map(|rgba| {
+                let suffix = if window_only { " window" } else { "" };
+                (rgba, crate::image_paste::timestamp_stem("Screenshot", suffix))
+            });
         }
 
         let _ = DeleteDC(mem_dc);
@@ -455,15 +458,24 @@ fn copy_screen_to_clipboard(window_only: bool) {
             crate::install::log_line("screenshot clipboard: copy failed");
             let _ = DeleteObject(bitmap);
         }
-        if copied {
-            if let Some(path) = &window_path {
-                crate::image_paste::remember_screenshot(path.clone());
-            }
-        }
-
-        if let Some(path) = window_path {
-            let _ = MessageBeep(MB_OK);
-            spawn_toast_helper(&path, copied);
+        let seq = copied.then(|| windows::Win32::System::DataExchange::GetClipboardSequenceNumber());
+        if let Some((rgba, stem)) = capture {
+            std::thread::spawn(move || {
+                let path = crate::image_paste::save_png(
+                    &stem,
+                    width as u32,
+                    height as u32,
+                    &rgba,
+                    "screenshot",
+                );
+                if let Some(path) = path {
+                    if let Some(seq) = seq {
+                        crate::image_paste::remember_screenshot(path.clone(), seq);
+                    }
+                    let _ = MessageBeep(MB_OK);
+                    spawn_toast_helper(&path, copied);
+                }
+            });
         }
     }
 }
@@ -488,19 +500,6 @@ fn spawn_toast_helper(path: &std::path::Path, copied: bool) {
         },
         Err(e) => crate::install::log_line(&format!("screenshot toast: spawn failed: {e}")),
     }
-}
-
-#[cfg(windows)]
-fn save_foreground_capture(
-    hdc: windows::Win32::Graphics::Gdi::HDC,
-    bitmap: windows::Win32::Graphics::Gdi::HBITMAP,
-    width: i32,
-    height: i32,
-    window_only: bool,
-) -> Option<std::path::PathBuf> {
-    let rgba = crate::image_paste::bitmap_rgba(hdc, bitmap, width, height)?;
-    let stem = crate::image_paste::timestamp_stem("Screenshot", if window_only { " window" } else { "" });
-    crate::image_paste::save_png(&stem, width as u32, height as u32, &rgba, "screenshot")
 }
 
 #[derive(Clone, Copy)]

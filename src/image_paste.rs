@@ -77,8 +77,7 @@ pub fn remember_image(path: PathBuf, seq: u32) {
     }
 }
 
-pub fn remember_screenshot(path: PathBuf) {
-    let seq = unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() };
+pub fn remember_screenshot(path: PathBuf, seq: u32) {
     remember_image(path, seq);
 }
 
@@ -299,6 +298,7 @@ pub(crate) fn save_png(stem: &str, width: u32, height: u32, rgba: &[u8], tag: &s
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Fast);
     let mut writer = match encoder.write_header() {
         Ok(w) => w,
         Err(e) => {
