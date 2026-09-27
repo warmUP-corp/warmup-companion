@@ -1301,7 +1301,7 @@ mod tests {
                     };
                     write_png(&dir.join(name), w, h, &px);
                 }
-                let (fw, fh) = if sheet { (1600, 546) } else { (1600, 64) };
+                let (fw, fh) = if sheet { (1600, 546) } else { (1600, 80) };
                 let (w, h, px) = unsafe {
                     let mut r = vk_renderer::VkRenderer::offscreen(fw, fh).expect("offscreen");
                     r.render_design(style, sheet).expect("design frame")

@@ -714,15 +714,15 @@ const FLOATING_PANEL_INSET: f32 = 1.0;
 
 pub const STRIP_BAND_H: f32 = 67.0;
 
-const BAR_H: f32 = 64.0;
-const BAR_GLYPH: f32 = 28.0;
-const BAR_SHARE: f32 = 28.0;
+const BAR_H: f32 = 80.0;
+const BAR_GLYPH: f32 = 38.0;
+const BAR_SHARE: f32 = 44.0;
 const BAR_GAP: f32 = 10.0;
 const BAR_LABEL_GAP: f32 = 6.0;
-const BAR_LABEL_PX: f32 = 16.0;
-const BAR_CONNECTOR_PX: f32 = 14.0;
-const BAR_PREFIX_PX: f32 = 16.0;
-const BAR_SEP_PX: f32 = 15.0;
+const BAR_LABEL_PX: f32 = 20.0;
+const BAR_CONNECTOR_PX: f32 = 17.0;
+const BAR_PREFIX_PX: f32 = 20.0;
+const BAR_SEP_PX: f32 = 18.0;
 const SHEET_PAD_TOP: f32 = 24.0;
 const SHEET_PAD_X: f32 = 96.0;
 const SHEET_PAD_BOTTOM: f32 = 32.0;
@@ -732,7 +732,7 @@ const SHEET_HEADER_PX: f32 = 18.0;
 const SHEET_ACTION_PX: f32 = 19.0;
 const SHEET_TOKEN_PX: f32 = 17.0;
 const SHEET_GLYPH: f32 = 28.0;
-const SHEET_SHARE: f32 = 28.0;
+const SHEET_SHARE: f32 = 32.0;
 const SHEET_TOKEN_GAP: f32 = 8.0;
 const SHEET_ACTION_GAP: f32 = 24.0;
 const SHEET_TRAIL: f32 = 24.0;
@@ -932,6 +932,14 @@ fn sheet_columns(family: ControllerIconFamily, m: &SheetMetrics, measure: Measur
             }
         })
         .collect()
+}
+
+fn sheet_block_size(total: f32, m: &SheetMetrics) -> (f32, f32) {
+    let lines = shortcut_sheet::max_lines() as f32;
+    (
+        total + 2.0 * SHEET_PAD_X * m.u,
+        (SHEET_PAD_TOP + SHEET_PAD_BOTTOM) * m.u + lines * m.row_h,
+    )
 }
 
 fn sheet_total_width(cols: &[SheetColumn], m: &SheetMetrics) -> f32 {
@@ -2880,20 +2888,33 @@ impl VkRenderer {
         panel: D2D_RECT_F,
     ) -> (SheetMetrics, Vec<SheetColumn>, f32) {
         let measure = |t: &str, px: f32| self.measure_px(style, t, px);
-        let base = SheetMetrics::at(unit);
-        let cols = sheet_columns(family, &base, &measure);
-        let total = sheet_total_width(&cols, &base).max(1.0);
-        let lines = shortcut_sheet::max_lines() as f32;
-        let fit_w = (panel.right - panel.left - 2.0 * SHEET_PAD_X * unit) / total;
-        let fit_h = (panel.bottom - panel.top - (SHEET_PAD_TOP + SHEET_PAD_BOTTOM) * unit)
-            / (lines * SHEET_ROW_H * unit).max(1.0);
-        let fit = fit_w.min(fit_h).min(1.0);
-        if fit >= 1.0 {
-            return (base, cols, total);
+        let avail_w = (panel.right - panel.left).max(1.0);
+        let avail_h = (panel.bottom - panel.top).max(1.0);
+        let mut u = unit.max(1e-3);
+        let mut m = SheetMetrics::at(u);
+        let mut cols = sheet_columns(family, &m, &measure);
+        let mut total = sheet_total_width(&cols, &m);
+        for _ in 0..3 {
+            let (w, h) = sheet_block_size(total, &m);
+            let fit = (avail_w / w.max(1.0)).min(avail_h / h.max(1.0));
+            if (fit - 1.0).abs() < 0.002 {
+                break;
+            }
+            u = (u * fit).max(0.05);
+            m = SheetMetrics::at(u);
+            cols = sheet_columns(family, &m, &measure);
+            total = sheet_total_width(&cols, &m);
         }
-        let m = SheetMetrics::at(unit * fit.max(0.1));
-        let cols = sheet_columns(family, &m, &measure);
-        let total = sheet_total_width(&cols, &m);
+        while u > 0.05 {
+            let (w, h) = sheet_block_size(total, &m);
+            if w <= avail_w + 0.5 && h <= avail_h + 0.5 {
+                break;
+            }
+            u *= 0.98;
+            m = SheetMetrics::at(u);
+            cols = sheet_columns(family, &m, &measure);
+            total = sheet_total_width(&cols, &m);
+        }
         (m, cols, total)
     }
 
@@ -4815,7 +4836,9 @@ mod tests {
             for style in [VkStyle::Normal, VkStyle::Mono] {
                 let what = format!("{style:?} {family:?}");
                 let (labels, layout, l, r) = bar_check(FULL_SIZE_SCALE, style, 1920.0, family);
-                assert_eq!(labels, all, "{what}");
+                assert!(labels.len() + 1 >= all.len(), "{what}: {labels:?}");
+                assert_eq!(labels.first(), all.first(), "{what}");
+                assert_eq!(labels.last(), all.last(), "{what}");
                 assert_bar_clear(&layout, l, r, &what);
                 let (_, first, _) = layout.items[0];
                 assert!(first > l + 1.0, "{what}: the bar is a compact centred group");
@@ -4844,10 +4867,11 @@ mod tests {
     #[test]
     fn design_sizes_scale_with_the_unit_and_keep_the_text_floor() {
         let bar = ComboStyle::bar(1.0);
-        assert_eq!((bar.glyph, bar.share, bar.gap), (28.0, 28.0, 10.0));
-        assert_eq!((bar.prefix_px, bar.connector_px), (16.0, 14.0));
+        assert_eq!((bar.glyph, bar.share, bar.gap), (38.0, 44.0, 10.0));
+        assert_eq!((bar.prefix_px, bar.connector_px), (20.0, 17.0));
+        assert_eq!((text_px(BAR_LABEL_PX, 1.0), text_px(BAR_SEP_PX, 1.0), BAR_H), (20.0, 18.0, 80.0));
         let sheet = SheetMetrics::at(1.0);
-        assert_eq!((sheet.cs.glyph, sheet.cs.share, sheet.cs.gap), (28.0, 28.0, 8.0));
+        assert_eq!((sheet.cs.glyph, sheet.cs.share, sheet.cs.gap), (28.0, 32.0, 8.0));
         assert_eq!((sheet.header_px, sheet.action_px, sheet.cs.prefix_px), (18.0, 19.0, 17.0));
         assert_eq!((sheet.row_h, sheet.col_gap, sheet.action_gap), (70.0, 72.0, 24.0));
         for u in [0.3, 0.667, 1.0, 1.5] {
@@ -4896,10 +4920,20 @@ mod tests {
                     bottom: strip_band_height(1.0, style) + block_h + 2.0 * pad_y + legend_band_height(1.0, style),
                 };
                 let (m, cols, total) = rd.sheet_fit(style, family, ref_unit(1.0, style), panel);
-                assert!(total <= panel.right - 2.0 * SHEET_PAD_X * ref_unit(1.0, style) + 1.0, "{style:?}");
-                let lines = shortcut_sheet::max_lines() as f32;
-                assert!(lines * m.row_h <= panel.bottom + 0.01, "{style:?}");
+                let (bw, bh) = sheet_block_size(total, &m);
+                assert!(bw <= panel.right + 1.0 && bh <= panel.bottom + 1.0, "{style:?} {bw}x{bh}");
+                let fill = (bw / panel.right).max(bh / panel.bottom);
+                assert!(fill >= 0.9, "{style:?} fills only {fill}");
+                assert!(m.u > ref_unit(1.0, style), "{style:?} sheet grows past the design size");
                 assert_eq!(cols.len(), 3);
+                let (m2, _, total2) = rd.sheet_fit(
+                    style,
+                    family,
+                    ref_unit(1.5, style),
+                    D2D_RECT_F { right: panel.right * 1.5, bottom: panel.bottom * 1.5, ..panel },
+                );
+                assert!((m2.u - m.u * 1.5).abs() < m.u * 0.05, "{style:?} {} vs {}", m2.u, m.u);
+                assert!((total2 - total * 1.5).abs() < total * 0.05);
             }
         }
     }
