@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The PlayStation Create/Share button icon is cropped to its drawn art so it shows larger in key badges, the suggestion strip, the shortcut legend and the hold-View sheet (the Options icon gains a little), and the bottom shortcut legend uses slightly bigger icons and text.
+
 ## v0.7.0
 
 - The open keyboard always shows a slim shortcut legend along the bottom of its panel, drawn with your pad's own button icons: A Type, B Delete, LB / RB Move caret, RT Shift, R3 Dictate, View + Y Paste, tap View Suggestions, L3 Close keyboard, and hold View All shortcuts. The keyboard grows by the strip's height instead of shrinking its keys, and apps it pushes up make room for it. When the legend does not fit, items drop from the middle and "hold View All shortcuts" always stays. The hold-View cheat sheet covers it while shown, and the legend is hidden on the sign-in screen, where dictation is unavailable.

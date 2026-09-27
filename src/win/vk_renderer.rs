@@ -714,14 +714,14 @@ const FLOATING_PANEL_INSET: f32 = 1.0;
 
 pub const STRIP_BAND_H: f32 = 67.0;
 
-const BAR_H: f32 = 60.0;
-const BAR_GLYPH: f32 = 24.0;
-const BAR_SHARE: f32 = 28.0;
+const BAR_H: f32 = 64.0;
+const BAR_GLYPH: f32 = 28.0;
+const BAR_SHARE: f32 = 32.0;
 const BAR_GAP: f32 = 10.0;
 const BAR_LABEL_GAP: f32 = 6.0;
-const BAR_LABEL_PX: f32 = 15.0;
-const BAR_CONNECTOR_PX: f32 = 13.0;
-const BAR_PREFIX_PX: f32 = 15.0;
+const BAR_LABEL_PX: f32 = 16.0;
+const BAR_CONNECTOR_PX: f32 = 14.0;
+const BAR_PREFIX_PX: f32 = 16.0;
 const BAR_SEP_PX: f32 = 15.0;
 const SHEET_PAD_TOP: f32 = 24.0;
 const SHEET_PAD_X: f32 = 96.0;
@@ -4844,8 +4844,8 @@ mod tests {
     #[test]
     fn design_sizes_scale_with_the_unit_and_keep_the_text_floor() {
         let bar = ComboStyle::bar(1.0);
-        assert_eq!((bar.glyph, bar.share, bar.gap), (24.0, 28.0, 10.0));
-        assert_eq!((bar.prefix_px, bar.connector_px), (15.0, 13.0));
+        assert_eq!((bar.glyph, bar.share, bar.gap), (28.0, 32.0, 10.0));
+        assert_eq!((bar.prefix_px, bar.connector_px), (16.0, 14.0));
         let sheet = SheetMetrics::at(1.0);
         assert_eq!((sheet.cs.glyph, sheet.cs.share, sheet.cs.gap), (28.0, 32.0, 8.0));
         assert_eq!((sheet.header_px, sheet.action_px, sheet.cs.prefix_px), (18.0, 19.0, 17.0));
