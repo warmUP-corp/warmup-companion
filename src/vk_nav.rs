@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 use crate::gamepad_backend::Button;
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyboardLayout, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_END, VK_ESCAPE, VK_LEFT, VK_RETURN,
-    VK_RIGHT, VK_SPACE,
+    GetKeyboardLayout, MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_END,
+    VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE,
 };
 
 #[derive(Clone)]
@@ -1006,6 +1006,14 @@ fn vk_event(vk: VIRTUAL_KEY, up: bool) -> INPUT {
     }
 }
 
+fn scan_vk_event(vk: VIRTUAL_KEY, up: bool) -> INPUT {
+    let mut event = vk_event(vk, up);
+    unsafe {
+        event.Anonymous.ki.wScan = MapVirtualKeyW(vk.0 as u32, MAPVK_VK_TO_VSC) as u16;
+    }
+    event
+}
+
 /// Build a Unicode-scancode down (or up) `INPUT`.
 fn unicode_event(unit: u16, up: bool) -> INPUT {
     INPUT {
@@ -1127,10 +1135,10 @@ fn inject_nav_vk(vk: VIRTUAL_KEY) {
 
 fn inject_ctrl_key(vk: VIRTUAL_KEY) {
     let mut batch = Vec::with_capacity(4);
-    batch.push(vk_event(VK_CONTROL, false));
-    batch.push(vk_event(vk, false));
-    batch.push(vk_event(vk, true));
-    batch.push(vk_event(VK_CONTROL, true));
+    batch.push(scan_vk_event(VK_CONTROL, false));
+    batch.push(scan_vk_event(vk, false));
+    batch.push(scan_vk_event(vk, true));
+    batch.push(scan_vk_event(VK_CONTROL, true));
     unsafe {
         let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
     }
@@ -1138,12 +1146,12 @@ fn inject_ctrl_key(vk: VIRTUAL_KEY) {
 
 fn inject_ctrl_key_then_vk(ctrl_vk: VIRTUAL_KEY, vk: VIRTUAL_KEY) {
     let mut batch = Vec::with_capacity(6);
-    batch.push(vk_event(VK_CONTROL, false));
-    batch.push(vk_event(ctrl_vk, false));
-    batch.push(vk_event(ctrl_vk, true));
-    batch.push(vk_event(VK_CONTROL, true));
-    batch.push(vk_event(vk, false));
-    batch.push(vk_event(vk, true));
+    batch.push(scan_vk_event(VK_CONTROL, false));
+    batch.push(scan_vk_event(ctrl_vk, false));
+    batch.push(scan_vk_event(ctrl_vk, true));
+    batch.push(scan_vk_event(VK_CONTROL, true));
+    batch.push(scan_vk_event(vk, false));
+    batch.push(scan_vk_event(vk, true));
     unsafe {
         let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
     }
