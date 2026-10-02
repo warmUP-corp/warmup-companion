@@ -166,6 +166,11 @@ fn items() -> Vec<Item> {
             "sleep_on_game",
         ),
         check(0, "Guide-only in games (legacy)", "auto_stop_on_game"),
+        check(
+            0,
+            "Show controller hints on the sign-in screen",
+            "signin_hints",
+        ),
         item(0, "Pause gamepad input", Kind::PausePoll),
         // Mouse
         slider(1, "Cursor speed", "cursor_speed", 1, 40, 1.0, 0),
@@ -210,6 +215,7 @@ fn current(item: &Item) -> (bool, i32) {
                 "cursor_enabled" => s.cursor_enabled,
                 "sleep_on_game" => s.sleep_on_game,
                 "auto_stop_on_game" => s.auto_stop_on_game,
+                "signin_hints" => s.signin_hints,
                 "natural_scroll" => s.natural_scroll,
                 "vk_mode" => {
                     crate::config::vk_layout_mode() == crate::config::VkLayoutMode::Floating
