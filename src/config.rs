@@ -118,6 +118,7 @@ pub struct GamepadSettings {
     pub auto_stop_on_game: bool,
     /// Show the userland prompt debug overlay.
     pub prompt_userland_debug: bool,
+    pub signin_hints: bool,
     /// Master switch for gamepad-driven mouse control ("Enable gamepad cursor" in
     /// warmUP, pushed as `config.enabled`). When false the sticks and the touchpad
     /// stop moving/scrolling the OS cursor and A/B stop emitting OS clicks — button
@@ -143,6 +144,7 @@ impl Default for GamepadSettings {
             sleep_on_game: true,
             auto_stop_on_game: false,
             prompt_userland_debug: false,
+            signin_hints: true,
             cursor_enabled: true,
             cursor_deadzone: 0.15,
             cursor_speed: 15.0,
@@ -337,6 +339,9 @@ fn apply_gamepad_settings_text(settings: &mut GamepadSettings, text: &str) {
             "prompt_userland_debug" => {
                 settings.prompt_userland_debug = parse_bool(value, settings.prompt_userland_debug)
             }
+            "signin_hints" => {
+                settings.signin_hints = parse_bool(value, settings.signin_hints)
+            }
             "cursor_enabled" => {
                 settings.cursor_enabled = parse_bool(value, settings.cursor_enabled)
             }
@@ -520,6 +525,9 @@ const SETTINGS_TEMPLATE: &str = r#"# Warmup Companion settings. One `key = value
 # auto_stop_on_game = false
 # prompt_userland_debug = false
 
+# Show the controller hints on the sign-in screen: "Connect controller", "Press ... for keyboard", "Connected" (true|false)
+# signin_hints = true
+
 # Gamepad cursor master switch (true|false). False parks stick/touchpad cursor
 # movement, scrolling and A/B OS clicks; the pad still navigates warmUP via d-pad.
 # cursor_enabled = true
@@ -636,7 +644,8 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
         | "auto_stop_on_game"
         | "stop_on_game"
         | "stop_when_game_active"
-        | "prompt_userland_debug" => match value.trim().to_ascii_lowercase().as_str() {
+        | "prompt_userland_debug"
+        | "signin_hints" => match value.trim().to_ascii_lowercase().as_str() {
             "true" | "false" | "1" | "0" | "yes" | "no" | "on" | "off" => Ok(()),
             _ => Err(format!("{key} must be a boolean")),
         },

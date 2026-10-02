@@ -499,7 +499,7 @@ pub fn tick(vk_open: bool) {
     } else if userland_debug {
         Some(debug_replay_visual(now.duration_since(c.debug_epoch)))
     } else if on_winlogon {
-        if vk_open {
+        if vk_open || !crate::config::gamepad_settings().signin_hints {
             None
         } else if connected_intro_active {
             Some(PromptVisual::Connected)

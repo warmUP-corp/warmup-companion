@@ -247,6 +247,7 @@ fn print_gamepad_settings() {
     println!("userland_poll={}", poll_mode_name(s.userland_poll_mode));
     println!("sleep_on_game={}", s.sleep_on_game);
     println!("auto_stop_on_game={}", s.auto_stop_on_game);
+    println!("signin_hints={}", s.signin_hints);
     println!("cursor_deadzone={}", s.cursor_deadzone);
     println!("cursor_speed={}", s.cursor_speed);
     println!("cursor_accel={}", s.cursor_accel);

@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.7.3
+
+- New setting to hide the controller hints on the sign-in and lock screen ("Connect controller", "Press ... for keyboard", "Connected"). Turn it off in the tray (Sign-in controller hints), in Controller Center under General, or with `signin_hints = false` in `settings.ini`. The keyboard still opens from the pad when the hints are hidden.
+
 ## v0.7.2
 
 - The keyboard opens on the sign-in and lock screen again. A false game detection there no longer swallows L3.
