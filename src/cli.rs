@@ -293,11 +293,39 @@ pub fn dispatch_install_or_service(args: &[String]) {
             std::process::exit(0);
         }
         #[cfg(feature = "gamepad")]
+        Some("diagnostics") => {
+            match crate::linux_diag::write_report() {
+                Ok(path) => {
+                    println!("{}", path.display());
+                    std::process::exit(0);
+                }
+                Err(error) => {
+                    eprintln!("diagnostics failed: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        #[cfg(feature = "gamepad")]
         Some("settings") => {
             run_settings_command(args);
             std::process::exit(0);
         }
         _ => {}
+    }
+    if args.iter().any(|a| a == "--controller-center") {
+        #[cfg(feature = "gamepad")]
+        {
+            if let Err(error) = crate::linux_center::show_blocking() {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            std::process::exit(0);
+        }
+        #[cfg(not(feature = "gamepad"))]
+        {
+            eprintln!("Rebuild with default features enabled: cargo build --release");
+            std::process::exit(1);
+        }
     }
     if args.iter().any(|a| a == "--service") {
         #[cfg(feature = "service")]

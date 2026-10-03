@@ -91,3 +91,8 @@ windows = { version = "0.58", features = [
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
 nix = { version = "0.31", features = ["socket", "fs", "user"] }
+ksni = "0.2.2"
+notify-rust = "4"
+eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+wayland-client = "0.31"
+wayland-protocols-wlr = "0.3"

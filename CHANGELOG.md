@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- On Linux the companion sits in the system tray. From there you can pause input, open Controller Center, turn game detection on or off, open the log, and save a diagnostics report.
+- The first time it starts, a notification tells you the controller moves the pointer, scrolls, clicks, and presses Enter.
+- While warmUP is closed, a fullscreen game on Hyprland pauses controller input when that option is on. Plasma does not offer the shared window list this build can read, so that pause stays off there.
 - On Linux, a connected controller moves the pointer, scrolls, clicks, and presses Enter while warmUP is closed. The companion installs into your home folder and starts with the graphical session.
 - Gaming distributions already allow the virtual pointer. Other distributions can install the bundled device rule so the companion can create it.
 - The desktop talks to the companion through a socket that only your user can open.

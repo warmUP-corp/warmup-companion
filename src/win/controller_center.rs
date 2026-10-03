@@ -75,13 +75,17 @@ const ID_EDIT_INI: usize = 4;
 const ID_TAB_BASE: usize = 100;
 const ID_ITEM_BASE: usize = 200;
 
-/// (label, Segoe MDL2 Assets glyph)
-const TABS: [(&str, &str); 4] = [
-    ("General", "\u{E713}"),
-    ("Mouse", "\u{E962}"),
-    ("Keyboard", "\u{E765}"),
-    ("Controller", "\u{E7FC}"),
-];
+const TAB_GLYPHS: [&str; 4] = ["\u{E713}", "\u{E962}", "\u{E765}", "\u{E7FC}"];
+
+fn tabs() -> [(&'static str, &'static str); 4] {
+    let names = crate::center_rows::TABS;
+    [
+        (names[0], TAB_GLYPHS[0]),
+        (names[1], TAB_GLYPHS[1]),
+        (names[2], TAB_GLYPHS[2]),
+        (names[3], TAB_GLYPHS[3]),
+    ]
+}
 
 /// One staged setting. Checkboxes write `on_val`/`off_val`; trackbars write
 /// `pos / div` with `decimals` places.
@@ -123,18 +127,6 @@ fn item(tab: usize, label: &'static str, kind: Kind) -> Item {
     }
 }
 
-fn check(tab: usize, label: &'static str, key: &'static str) -> Item {
-    item(
-        tab,
-        label,
-        Kind::Check {
-            key,
-            on_val: "true",
-            off_val: "false",
-        },
-    )
-}
-
 fn slider(
     tab: usize,
     label: &'static str,
@@ -158,72 +150,38 @@ fn slider(
 }
 
 fn items() -> Vec<Item> {
-    vec![
-        // General
-        check(
-            0,
-            "Enable gamepad cursor (sticks move the mouse, A/B click)",
-            "cursor_enabled",
-        ),
-        check(
-            0,
-            "Sleep during games (only the Guide button is watched)",
-            "sleep_on_game",
-        ),
-        check(0, "Guide-only in games (legacy)", "auto_stop_on_game"),
-        check(
-            0,
-            "Show controller hints on the sign-in screen",
-            "signin_hints",
-        ),
-        check(0, "Guide / PS button opens warmUP when it is closed", "guide_launch"),
-        item(0, "Pause gamepad input", Kind::PausePoll),
-        item(
-            0,
-            "Only run on the sign-in and lock screen (sleeps after you sign in)",
-            Kind::Check {
-                key: "run_mode",
-                on_val: "signin",
-                off_val: "always",
-            },
-        ),
-        // Mouse
-        slider(1, "Cursor speed", "cursor_speed", 1, 40, 1.0, 0),
-        slider(1, "Cursor acceleration", "cursor_accel", 10, 50, 10.0, 1),
-        slider(1, "Cursor dead zone", "cursor_deadzone", 0, 90, 100.0, 2),
-        slider(1, "Cursor smoothing", "cursor_smoothing", 0, 90, 100.0, 2),
-        slider(1, "Scroll speed", "scroll_speed", 1, 20, 1.0, 0),
-        slider(1, "Scroll acceleration", "scroll_accel", 10, 50, 10.0, 1),
-        check(
-            1,
-            "Natural scrolling (invert scroll direction)",
-            "natural_scroll",
-        ),
-        // Keyboard
-        item(
-            2,
-            "Floating layout (card in the middle instead of a docked bar)",
-            Kind::Check {
-                key: "vk_mode",
-                on_val: "floating",
-                off_val: "docked",
-            },
-        ),
-        item(
-            2,
-            "Compact size (smaller docked bar)",
-            Kind::Check {
-                key: "vk_bar_scale",
-                on_val: "0.8",
-                off_val: "1.0",
-            },
-        ),
-        item(
-            2,
-            "Coding vocabulary (terminal & agent terms)",
-            Kind::Vocabulary,
-        ),
-    ]
+    crate::center_rows::ROWS
+        .iter()
+        .map(|row| {
+            let kind = match row.kind {
+                crate::center_rows::RowKind::Check {
+                    key,
+                    on_val,
+                    off_val,
+                } => Kind::Check {
+                    key,
+                    on_val,
+                    off_val,
+                },
+                crate::center_rows::RowKind::PausePoll => Kind::PausePoll,
+                crate::center_rows::RowKind::Slider {
+                    key,
+                    min,
+                    max,
+                    div,
+                    decimals,
+                } => Kind::Slider {
+                    key,
+                    min,
+                    max,
+                    div,
+                    decimals,
+                },
+                crate::center_rows::RowKind::Vocabulary => Kind::Vocabulary,
+            };
+            item(row.tab, row.label, kind)
+        })
+        .collect()
 }
 
 /// Current value from settings: `(checked, trackbar position)`.
@@ -453,7 +411,7 @@ fn ui_show() {
 
         // Right rail: big right-aligned names, icon beside each.
         let mut tabs = Vec::new();
-        for (i, (name, glyph)) in TABS.iter().enumerate() {
+        for (i, (name, glyph)) in tabs().iter().enumerate() {
             let y = RAIL_Y + i as i32 * RAIL_STEP;
             let id = ID_TAB_BASE + i;
             let label = child(
@@ -888,7 +846,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     sync_from_config(ui);
                 }),
                 ID_EDIT_INI => crate::tray::edit_settings(),
-                t if (ID_TAB_BASE..ID_TAB_BASE + TABS.len()).contains(&t) => with_ui(|ui| {
+                t if (ID_TAB_BASE..ID_TAB_BASE + tabs().len()).contains(&t) => with_ui(|ui| {
                     ui.tab = t - ID_TAB_BASE;
                     apply_tab(ui);
                     refresh_live(ui);
@@ -960,6 +918,6 @@ mod tests {
 
     #[test]
     fn every_item_sits_on_a_rail_tab() {
-        assert!(items().iter().all(|i| i.tab < TABS.len()));
+        assert!(items().iter().all(|i| i.tab < tabs().len()));
     }
 }

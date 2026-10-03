@@ -140,7 +140,12 @@ pub fn standalone_game_active_now() -> bool {
     crate::win::game_detect::standalone_game_active_cached()
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub fn standalone_game_active_now() -> bool {
+    crate::linux_game_detect::standalone_game_active_cached()
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn standalone_game_active_now() -> bool {
     false
 }

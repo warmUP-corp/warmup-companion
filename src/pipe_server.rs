@@ -406,6 +406,19 @@ fn disconnected() -> ConnectionPayload {
 
 /// Map the active backend's controller label to a connection snapshot and store it.
 /// `"none"` (the `GamepadPoll` sentinel) or an empty label means no controller.
+pub fn connection_name() -> String {
+    state()
+        .lock()
+        .map(|snap| {
+            if snap.connected {
+                snap.controller_name.clone()
+            } else {
+                "none".to_string()
+            }
+        })
+        .unwrap_or_else(|_| "none".to_string())
+}
+
 pub fn publish_from_label(label: &str) {
     let next = label_to_payload(label);
     if let Ok(mut g) = state().lock() {

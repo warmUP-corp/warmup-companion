@@ -68,3 +68,11 @@ If Steam Input grabs the controller, the pad disappears from SDL. The companion 
 The virtual pointer is a relative mouse. The compositor's pointer acceleration still applies, so the on-screen distance will not match the raw stick math one-for-one.
 
 There is no on-screen keyboard in this stage. L3 does not open one. Enter is a real key on a second virtual device that only has that key.
+
+## Tray and settings
+
+The running service adds a StatusNotifierItem. Right-click it, or left-click it, for the menu: pause input, Controller Center, keyboard layout settings, game detection, the log, diagnostics, and uninstall.
+
+`warmup-companion settings` reads and writes `$XDG_CONFIG_HOME/warmup-companion/settings.ini`. `warmup-companion --controller-center` opens the same window. `warmup-companion diagnostics` writes a tarball under `$XDG_STATE_HOME/warmup-companion/diagnostics/`.
+
+On Hyprland, "Pause input while a game is running" sleeps the pad while the focused window is fullscreen, or a floating window covers the monitor, unless that program is a browser, launcher, or shell. KDE Plasma's KWin does not advertise `zwlr_foreign_toplevel_management_v1`, so the same switch does not see games there.

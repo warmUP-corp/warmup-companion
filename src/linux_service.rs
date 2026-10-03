@@ -18,6 +18,8 @@ pub fn run() -> Result<(), String> {
     std::env::set_var("WARMUP_VK_SERVICE", "1");
     install_stop_signals();
     crate::install::log_line("warmup-companion service starting (SDL3 + uinput)");
+    crate::linux_game_detect::start();
+    crate::linux_tray::spawn();
     let mut app = App::default();
     app.use_real_win32 = false;
     let vk_open = Cell::new(false);
