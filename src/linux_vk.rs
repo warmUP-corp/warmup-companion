@@ -158,11 +158,13 @@ fn keyboard_loop(wake: UnixStream) -> Result<(), String> {
             shell.dirty = true;
         }
     }
+    if let smithay_client_toolkit::shell::wlr_layer::SurfaceKind::Wlr(proxy) = shell.layer.kind() {
+        proxy.destroy();
+    }
+    let _ = queue.roundtrip(&mut shell);
     drop(shell);
     drop(queue);
-    if let Err(error) = conn.flush().and_then(|_| conn.roundtrip()) {
-        crate::install::log_line(&format!("keyboard close: {error}"));
-    }
+    let _ = conn.flush();
     Ok(())
 }
 
@@ -399,11 +401,30 @@ fn run_prompt() -> Result<(), String> {
     prompt.layer.commit();
     let deadline = std::time::Instant::now() + Duration::from_secs(6);
     while std::time::Instant::now() < deadline && !prompt.exit {
-        let _ = queue.blocking_dispatch(&mut prompt);
+        let _ = queue.dispatch_pending(&mut prompt);
+        let Some(guard) = queue.prepare_read() else {
+            continue;
+        };
+        let remain = deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .as_millis()
+            .min(400) as u16;
+        let mut fds = [nix::poll::PollFd::new(
+            guard.connection_fd(),
+            nix::poll::PollFlags::POLLIN,
+        )];
+        let _ = nix::poll::poll(&mut fds, nix::poll::PollTimeout::from(remain));
+        if fds[0].any().unwrap_or(false) {
+            let _ = guard.read();
+        }
     }
+    if let smithay_client_toolkit::shell::wlr_layer::SurfaceKind::Wlr(proxy) = prompt.layer.kind() {
+        proxy.destroy();
+    }
+    let _ = queue.roundtrip(&mut prompt);
     drop(prompt);
     drop(queue);
-    let _ = conn.flush().and_then(|_| conn.roundtrip());
+    let _ = conn.flush();
     Ok(())
 }
 
