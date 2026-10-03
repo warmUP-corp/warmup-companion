@@ -53,11 +53,14 @@ mod predict_ngram;
 mod vk_commit;
 #[cfg(windows)]
 mod image_paste;
+mod vk_geom;
 mod vk_key;
 mod vk_nav;
 mod vk_predict;
 #[cfg(target_os = "linux")]
 mod linux_type;
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+mod linux_vk;
 #[cfg(windows)]
 mod win;
 #[cfg(not(windows))]
@@ -404,7 +407,6 @@ impl App {
         self.modal_block_bit_4 = false;
         self.xbox_window_desktop = None;
         self.spiral_window_desktop = None;
-        #[cfg(windows)]
         crate::vk_nav::reset_selection();
         if let Some(session) = self.vk_session.take() {
             let kind = session.describe();
@@ -433,7 +435,6 @@ impl App {
                     let kind = session.describe();
                     self.vk_open_latch = true;
                     self.log(&format!("VK shown: {kind}"));
-                    #[cfg(windows)]
                     crate::vk_nav::reset_selection();
                     self.vk_session = Some(session);
                 }
@@ -441,10 +442,29 @@ impl App {
                     self.action_latch = false;
                     self.modal_block_bit_4 = false;
                     self.log(&format!("VK failed: {e}"));
-                    #[cfg(windows)]
                     if crate::config::service_mode() {
                         install::log_line(&format!("VK failed: {e}"));
                     }
+                }
+            }
+        } else if cfg!(target_os = "linux") {
+            let attach = match attach {
+                vk_gate::GateAttach::Input => win::VkAttach::Input,
+                vk_gate::GateAttach::Current => win::VkAttach::Current,
+            };
+            match win::VkSession::open(attach) {
+                Ok(session) => {
+                    let kind = session.describe();
+                    self.vk_open_latch = true;
+                    self.log(&format!("VK shown: {kind}"));
+                    crate::vk_nav::reset_selection();
+                    self.vk_session = Some(session);
+                }
+                Err(e) => {
+                    self.action_latch = false;
+                    self.modal_block_bit_4 = false;
+                    self.log(&format!("VK failed: {e}"));
+                    crate::install::log_line(&format!("VK failed: {e}"));
                 }
             }
         } else {

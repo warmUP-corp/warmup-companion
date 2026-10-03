@@ -92,7 +92,7 @@ pub struct KeyRow {
     pub keys: Vec<KeyCell>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct KeyPos {
     pub row: usize,
     pub col: usize,
@@ -949,6 +949,8 @@ fn notify_vk_key(vk: VIRTUAL_KEY) {
 pub(crate) fn request_ui_repaint() {
     #[cfg(windows)]
     crate::win::vk_ui::request_repaint();
+    #[cfg(all(target_os = "linux", feature = "gamepad"))]
+    crate::linux_vk::request_repaint();
 }
 
 pub fn backspace() {

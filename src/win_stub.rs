@@ -16,8 +16,10 @@ pub mod desktop {
 }
 
 pub mod xbox_vk {
-    #[derive(Debug)]
-    pub struct VkSession;
+    pub struct VkSession {
+        #[cfg(all(target_os = "linux", feature = "gamepad"))]
+        overlay: Option<crate::linux_vk::Overlay>,
+    }
 
     pub enum VkAttach {
         Current,
@@ -25,13 +27,49 @@ pub mod xbox_vk {
     }
 
     impl VkSession {
-        pub fn open(_attach: VkAttach) -> Result<Self, String> {
-            Err("real on-screen keyboard requires Windows".into())
+        pub fn open(attach: VkAttach) -> Result<Self, String> {
+            #[cfg(all(target_os = "linux", feature = "gamepad"))]
+            {
+                let overlay = crate::linux_vk::Overlay::open(matches!(attach, VkAttach::Input))?;
+                return Ok(Self { overlay: Some(overlay) });
+            }
+            #[cfg(not(all(target_os = "linux", feature = "gamepad")))]
+            {
+                let _ = attach;
+                Err("real on-screen keyboard requires Windows".into())
+            }
         }
         pub fn describe(&self) -> &'static str {
-            "n/a"
+            #[cfg(all(target_os = "linux", feature = "gamepad"))]
+            {
+                "layer shell keyboard"
+            }
+            #[cfg(not(all(target_os = "linux", feature = "gamepad")))]
+            {
+                "n/a"
+            }
         }
-        pub fn close(self) {}
+        pub fn close(mut self) {
+            #[cfg(all(target_os = "linux", feature = "gamepad"))]
+            if let Some(overlay) = self.overlay.take() {
+                overlay.close();
+            }
+        }
+    }
+
+    impl std::fmt::Debug for VkSession {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("VkSession")
+        }
+    }
+
+    impl Drop for VkSession {
+        fn drop(&mut self) {
+            #[cfg(all(target_os = "linux", feature = "gamepad"))]
+            if let Some(overlay) = self.overlay.take() {
+                overlay.close();
+            }
+        }
     }
 }
 

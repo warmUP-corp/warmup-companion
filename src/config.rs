@@ -217,7 +217,7 @@ pub fn prompt_userland_debug() -> bool {
 
 #[cfg(not(windows))]
 pub fn prompt_overlay_enabled() -> bool {
-    false
+    !std::env::var_os("WARMUP_VK_PROMPT").is_some_and(|value| value == "0")
 }
 
 #[cfg(not(windows))]

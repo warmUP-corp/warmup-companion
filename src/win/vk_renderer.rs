@@ -1267,18 +1267,8 @@ impl VkIcon {
 /// card padding and top chrome. Lets the floating card be sized to wrap keys that
 /// render at the same scale as the docked bar.
 pub fn grid_size(scale_w: f32, rows: &[KeyRow], style: VkStyle) -> (f32, f32) {
-    let (kw, kh, gap) = key_metrics(scale_w, f32::INFINITY, rows, 0.0, style);
-    let grid_w = rows
-        .iter()
-        .map(|r| row_pixel_width(r, kw, gap))
-        .fold(0.0f32, f32::max);
-    let n = rows.len() as f32;
-    let block_h = n * kh + (n - 1.0).max(0.0) * gap;
-    (grid_w, block_h)
-}
-/// Key width in px for a span of `n` key-units (`FUN_00463bd0`: span×keyW + (span−1)×gap).
-fn key_width(kw: f32, gap: f32, span: f32) -> f32 {
-    span * kw + (span - 1.0).max(0.0) * gap
+    let spec = style_spec(style);
+    crate::vk_geom::grid_size(scale_w, rows, spec.key_aspect, spec.gap, spec.design_kh)
 }
 
 /// One key's on-screen rect (logical px). Single source of layout truth shared by
@@ -1487,16 +1477,6 @@ fn key_icon(action: &KeyAction, shift: bool) -> Option<(VkIcon, bool)> {
     }
 }
 
-/// Compute every key's rect for the given client size + layout rows. Each key's
-/// width is `span * kw` so the wide space bar covers several key-units.
-fn row_pixel_width(row: &KeyRow, kw: f32, gap: f32) -> f32 {
-    row.keys
-        .iter()
-        .map(|k| key_width(kw, gap, k.span))
-        .sum::<f32>()
-        + gap * (row.keys.len().saturating_sub(1) as f32)
-}
-
 pub fn key_rects(
     client_w: f32,
     client_h: f32,
@@ -1505,38 +1485,26 @@ pub fn key_rects(
     top_inset: f32,
     style: VkStyle,
 ) -> Vec<KeyRect> {
-    let (kw, kh, gap) = key_metrics(scale_w, client_h, rows, top_inset, style);
-    let n = rows.len() as f32;
-    let block_h = n * kh + (n - 1.0).max(0.0) * gap;
-    let mut top = top_inset + ((client_h - top_inset - block_h) / 2.0).max(0.0);
-    // Widest row sets the block width (same span sum can differ in pixel width by gap count).
-    let grid_w = rows
-        .iter()
-        .map(|r| row_pixel_width(r, kw, gap))
-        .fold(0.0f32, f32::max);
-    let grid_left = (client_w - grid_w) / 2.0;
-    let mut out = Vec::new();
-    for (ri, row) in rows.iter().enumerate() {
-        // Flex-grow parity with the web rows: distribute the row's slack across
-        // every key proportionally so all rows share the same left/right edge.
-        let gaps_w = gap * (row.keys.len().saturating_sub(1) as f32);
-        let row_keys_w = (row_pixel_width(row, kw, gap) - gaps_w).max(1.0);
-        let scale = (grid_w - gaps_w).max(1.0) / row_keys_w;
-        let mut left = grid_left;
-        for (ci, key) in row.keys.iter().enumerate() {
-            let w = key_width(kw, gap, key.span) * scale;
-            out.push(KeyRect {
-                pos: KeyPos { row: ri, col: ci },
-                left,
-                top,
-                right: left + w,
-                bottom: top + kh,
-            });
-            left += w + gap;
-        }
-        top += kh + gap;
-    }
-    out
+    let spec = style_spec(style);
+    crate::vk_geom::key_rects(
+        client_w,
+        client_h,
+        scale_w,
+        rows,
+        top_inset,
+        spec.key_aspect,
+        spec.gap,
+        spec.design_kh,
+    )
+    .into_iter()
+    .map(|rect| KeyRect {
+        pos: rect.pos,
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+    })
+    .collect()
 }
 
 /// Shift/caps captured for one frame, so the glyph loop never re-reads global
@@ -4620,31 +4588,6 @@ fn user_locale_name() -> windows::core::HSTRING {
         "en-US".to_string()
     }
     .into()
-}
-
-fn key_metrics(
-    scale_w: f32,
-    client_h: f32,
-    rows: &[KeyRow],
-    top_inset: f32,
-    style: VkStyle,
-) -> (f32, f32, f32) {
-    let spec = style_spec(style);
-    let scale = (scale_w / REF_MON_W).max(0.05);
-    let mut kw = REF_KEY_W * scale;
-    let mut kh = kw * spec.key_aspect;
-    let mut gap = kh * spec.gap / spec.design_kh;
-    let n = rows.len().max(1) as f32;
-    // Fit below top chrome (chips when active); shrink if rows overflow.
-    let avail = (client_h - top_inset - kh * 0.25).max(1.0);
-    let block = n * kh + (n - 1.0) * gap;
-    if block > avail {
-        let s = avail / block;
-        kh *= s;
-        gap *= s;
-        kw = kh / spec.key_aspect;
-    }
-    (kw, kh, gap)
 }
 
 #[cfg(test)]

@@ -292,6 +292,24 @@ pub fn dispatch_install_or_service(args: &[String]) {
             crate::install::run_stop();
             std::process::exit(0);
         }
+        #[cfg(feature = "gamepad")]
+        Some("keyboard") => {
+            match crate::linux_vk::Overlay::open(false) {
+                Ok(overlay) => {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let _ = ctrlc::set_handler(move || {
+                        let _ = tx.send(());
+                    });
+                    let _ = rx.recv_timeout(std::time::Duration::from_secs(20));
+                    overlay.close();
+                    std::process::exit(0);
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Some("type") => {
             let text = args.iter().skip(2).cloned().collect::<Vec<_>>().join(" ");
             if text.is_empty() {
