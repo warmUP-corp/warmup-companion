@@ -54,7 +54,7 @@ pub(crate) fn run_boot_gamepad_loop(
     service_mode: bool,
 ) -> Result<(), String> {
     // The companion owns the device; host the pipe so the warmUP desktop can read
-    // connection state over IPC (#347). No-op on non-Windows.
+    // connection state over IPC (#347).
     crate::pipe_server::spawn();
     #[cfg(windows)]
     crate::parental_guard::spawn_guardian_loop();
@@ -153,14 +153,15 @@ pub(crate) fn warmup_exe_path() -> Result<std::path::PathBuf, String> {
         return Err(format!("WARMUP_EXE does not exist: {}", path.display()));
     }
 
-    if let Ok(raw) = std::fs::read_to_string(crate::install::DEV_EXE_PATH) {
+    let dev_exe = crate::paths::dev_exe_file();
+    if let Ok(raw) = std::fs::read_to_string(&dev_exe) {
         let path = std::path::PathBuf::from(raw.trim().trim_matches('"'));
         if path.is_file() {
             return Ok(path);
         }
         return Err(format!(
             "{} points to missing exe: {}",
-            crate::install::DEV_EXE_PATH,
+            dev_exe.display(),
             path.display()
         ));
     }
@@ -196,7 +197,7 @@ pub(crate) fn warmup_exe_path() -> Result<std::path::PathBuf, String> {
         .ok_or_else(|| {
             format!(
                 "warmup.exe not found; set WARMUP_EXE or write the full path to {}",
-                crate::install::DEV_EXE_PATH
+                dev_exe.display()
             )
         })
 }

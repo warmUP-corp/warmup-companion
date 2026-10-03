@@ -16,6 +16,7 @@ pub mod desktop {
 }
 
 pub mod xbox_vk {
+    #[derive(Debug)]
     pub struct VkSession;
 
     pub enum VkAttach {

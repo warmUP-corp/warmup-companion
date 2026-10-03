@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::tracking_owner::TrackingOwner;
 use crate::protocol::{ExternalPlaySession, PlaySessionsAckPayload};
 
-const PENDING_FILE: &str = r"C:\ProgramData\WarmupVk\pending-play-sessions.json";
+fn pending_file() -> std::path::PathBuf {
+    crate::paths::pending_play_sessions_file()
+}
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 static STORE: OnceLock<Mutex<PendingStore>> = OnceLock::new();
@@ -120,7 +122,7 @@ pub(crate) fn closed_sessions_for_wire(owner: &TrackingOwner) -> Vec<ExternalPla
 }
 
 fn load_pending_from_disk() -> PendingStore {
-    let Ok(raw) = std::fs::read_to_string(PENDING_FILE) else {
+    let Ok(raw) = std::fs::read_to_string(pending_file()) else {
         return PendingStore::default();
     };
     match serde_json::from_str(&raw) {
@@ -136,8 +138,11 @@ fn load_pending_from_disk() -> PendingStore {
 
 pub(crate) fn persist_pending(store: &PendingStore) {
     if let Ok(json) = serde_json::to_string(store) {
-        let _ = std::fs::create_dir_all(r"C:\ProgramData\WarmupVk");
-        let _ = std::fs::write(PENDING_FILE, json);
+        let path = pending_file();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, json);
     }
 }
 

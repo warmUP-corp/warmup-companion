@@ -35,6 +35,18 @@ const HAPTIC_ALERT_MS: u32 = 45;
 /// move, chip cycle) — short and faint so fast typing reads as texture, not buzz.
 const HAPTIC_TICK_MS: u32 = 8;
 
+fn warmup_browser_foreground(button: Button) -> bool {
+    #[cfg(windows)]
+    {
+        matches!(button, Button::L3 | Button::R3) && crate::vk_nav::foreground_is_warmup_browser()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = button;
+        false
+    }
+}
+
 /// Desktop text-entry shortcuts belong to the companion, not the launcher's dock/topbar.
 fn companion_owns_stick_click(
     button: Button,
@@ -474,7 +486,9 @@ impl GamepadPoll {
 
     #[cfg(not(windows))]
     pub fn open_service() -> Result<Self, String> {
-        Err("XInput service backend requires Windows".to_string())
+        let backend = SdlThreadBackend::open()?;
+        service_log("gamepad backend: SDL3");
+        Ok(Self::new(Backend::Sdl(Box::new(backend))))
     }
 
     fn new(backend: Backend) -> Self {
@@ -749,8 +763,7 @@ impl GamepadPoll {
             // while also opening the native VK lets a delayed launcher event open/focus its dock
             // over the user's browser. Keep desktop VK/voice shortcuts local, just as in Browser.
             let native_vk_suppressed = crate::pipe_server::native_vk_suppressed();
-            let warmup_browser_foreground = matches!(change.button, Button::L3 | Button::R3)
-                && crate::vk_nav::foreground_is_warmup_browser();
+            let warmup_browser_foreground = warmup_browser_foreground(change.button);
             if !companion_owns_stick_click(
                 change.button,
                 native_vk_suppressed,
@@ -1360,7 +1373,6 @@ where
 #[cfg(windows)]
 static NATIVE_VK_SKIP_LOGGED: AtomicBool = AtomicBool::new(false);
 
-#[cfg(windows)]
 fn service_log(msg: &str) {
     if crate::config::service_mode() {
         crate::install::log_line(msg);
@@ -1384,23 +1396,26 @@ where
         }
         #[cfg(not(windows))]
         {
-            return GamepadPoll::open_service();
+            GamepadPoll::open_service()?
         }
     } else {
         GamepadPoll::open_desktop()?
     };
 
-    #[cfg(windows)]
-    if service_mode {
-        service_log(&format!("gamepad ready: {}", poll.controller_label()));
-    }
     if use_ctrlc {
         install_ctrlc_handler()?;
     } else {
         RUNNING.store(true, Ordering::SeqCst);
     }
     let mut cursor = if service_mode {
-        PcCursor::new_service()
+        #[cfg(windows)]
+        {
+            PcCursor::new_service()
+        }
+        #[cfg(not(windows))]
+        {
+            PcCursor::new()?
+        }
     } else {
         PcCursor::new()?
     };
@@ -1431,7 +1446,10 @@ where
         println!("  R3           → voice input");
         println!("Ctrl+C to stop.");
     } else {
-        #[cfg(windows)]
+        service_log(&format!(
+            "gamepad ready: {}",
+            poll.controller_label()
+        ));
         service_log(&format!(
             "gamepad loop running ({}; L3=toggle VK)",
             poll.controller_label()
@@ -1489,7 +1507,6 @@ where
             }
             Err(e) => {
                 if service_mode {
-                    #[cfg(windows)]
                     service_log(&format!("gamepad poll error (continuing): {e}"));
                 } else {
                     return Err(e);
@@ -1534,7 +1551,6 @@ where
             interruptible_sleep(interval - elapsed);
         }
     }
-    #[cfg(windows)]
     if service_mode {
         service_log("gamepad loop exited (stop flag)");
     }

@@ -208,6 +208,13 @@ impl SdlBackend {
         if connected_change {
             // Re-arm gyro on the freshly opened pad (or clear if it went away).
             self.gyro_enabled = self.input.enable_gyro();
+            #[cfg(target_os = "linux")]
+            log_device_change(
+                &self
+                    .input
+                    .active_controller_name()
+                    .unwrap_or_else(|| "none".to_string()),
+            );
         }
         if mode != PollMode::Full {
             self.touchpad = TouchpadFrame::default();
@@ -386,6 +393,14 @@ fn sdl_thread_main(
 
     let mut input = match GamepadInput::new(&db) {
         Ok(i) => {
+            let name = i
+                .active_controller_name()
+                .unwrap_or_else(|| "none".to_string());
+            if let Ok(mut label) = shared.label.lock() {
+                *label = name.clone();
+            }
+            #[cfg(target_os = "linux")]
+            log_device_change(&name);
             let _ = tx.send(Ok(()));
             i
         }
@@ -434,6 +449,12 @@ fn sdl_thread_main(
         if connected_change {
             // Pad connected/disconnected: re-arm gyro on the new device.
             gyro_enabled = input.enable_gyro();
+            #[cfg(target_os = "linux")]
+            log_device_change(
+                &input
+                    .active_controller_name()
+                    .unwrap_or_else(|| "none".to_string()),
+            );
         }
         let changes = input.detect_button_changes();
         if !changes.is_empty() {
@@ -578,15 +599,16 @@ impl Drop for SdlThreadBackend {
 }
 
 pub fn mapping_db_path() -> PathBuf {
-    if let Ok(p) = std::env::var("WARMUP_GAMECONTROLLER_DB") {
-        return PathBuf::from(p);
+    crate::paths::mapping_db_file()
+}
+
+#[cfg(target_os = "linux")]
+fn log_device_change(name: &str) {
+    if name == "none" {
+        crate::install::log_line(
+            "gamepad device change: none (Steam Input may have grabbed the pad; not reclaiming)",
+        );
+    } else {
+        crate::install::log_line(&format!("gamepad device change: {name}"));
     }
-    #[cfg(windows)]
-    {
-        let installed = PathBuf::from(r"C:\ProgramData\WarmupVk\gamecontrollerdb.txt");
-        if installed.is_file() {
-            return installed;
-        }
-    }
-    PathBuf::from("gamecontrollerdb.txt")
 }

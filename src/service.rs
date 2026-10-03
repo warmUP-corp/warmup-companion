@@ -150,7 +150,10 @@ pub fn run_worker() -> Result<(), String> {
     // module+rva and writes a minidump before the worker dies. See src/crash.rs.
     crate::crash::install();
     install::log_line("service worker starting (XInput + VK UI)");
-    install::log_line(r"service log file: C:\ProgramData\WarmupVk\service.log");
+    install::log_line(&format!(
+        "service log file: {}",
+        crate::paths::log_file().display()
+    ));
 
     let mut app = App::default();
     app.use_real_win32 = true;

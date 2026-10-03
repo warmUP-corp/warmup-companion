@@ -16,6 +16,9 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+#[path = "ipc_io.rs"]
+mod ipc_io;
+
 /// Cursor mode (A → OS left-click). `false` = focus/D-pad mode (buttons only). Default true;
 /// the connected desktop pushes the real value via `config` frames (#349).
 static CLICKS_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -32,7 +35,9 @@ static BROWSER_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// True while a warmUP desktop client has completed the pipe handshake.
 static DESKTOP_CONNECTED: AtomicBool = AtomicBool::new(false);
 
-pub(crate) use crate::tracking_owner::{tracking_owner_from_process, TrackingOwner};
+#[cfg(windows)]
+pub(crate) use crate::tracking_owner::tracking_owner_from_process;
+pub(crate) use crate::tracking_owner::TrackingOwner;
 pub(crate) use crate::led_engine::apply_led;
 pub use crate::device_commands::drain_device_commands;
 
@@ -498,7 +503,7 @@ fn apply_library_watch(owner: &TrackingOwner, payload: &crate::protocol::Library
     }
 }
 
-#[cfg(all(windows, not(feature = "gamepad")))]
+#[cfg(not(all(windows, feature = "gamepad")))]
 fn apply_library_watch(_owner: &TrackingOwner, _payload: &crate::protocol::LibraryWatchPayload) {}
 
 #[cfg(all(windows, feature = "gamepad"))]
@@ -506,7 +511,7 @@ fn apply_parental_guard(payload: &ParentalGuardPayload) {
     crate::parental_guard::apply_guard(payload);
 }
 
-#[cfg(all(windows, not(feature = "gamepad")))]
+#[cfg(not(all(windows, feature = "gamepad")))]
 fn apply_parental_guard(_payload: &ParentalGuardPayload) {}
 
 #[cfg(all(windows, feature = "gamepad"))]
@@ -518,7 +523,7 @@ fn apply_play_sessions_ack(
     crate::playtime_tracker::apply_play_sessions_ack(owner, payload, issued)
 }
 
-#[cfg(all(windows, not(feature = "gamepad")))]
+#[cfg(not(all(windows, feature = "gamepad")))]
 fn apply_play_sessions_ack(
     _owner: &TrackingOwner,
     _payload: &crate::protocol::PlaySessionsAckPayload,
@@ -543,35 +548,29 @@ fn inbound_frame_ready(peeked: &[u8], available: u32) -> bool {
     peeked.contains(&b'\n') || available as usize > peeked.len()
 }
 
-/// Start the pipe server on its own thread. No-op on non-Windows (there the desktop
-/// owns input in-process, so there is no companion to serve).
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub fn spawn() {
     std::thread::Builder::new()
-        .name("warmup-pipe-server".into())
-        .spawn(server::serve_forever)
+        .name("warmup-input-server".into())
+        .spawn(|| {
+            #[cfg(windows)]
+            server::serve_forever();
+            #[cfg(target_os = "linux")]
+            ipc_io::serve_unix();
+        })
         .ok();
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn spawn() {}
 
 #[cfg(windows)]
 mod server {
     use super::{
-        apply_companion_settings, apply_config, apply_led, apply_library_watch, apply_mode,
-        apply_parental_guard, apply_play_sessions_ack, apply_rumble, clear_desktop_mode, current,
-        current_axis, current_battery, drain_buttons, drain_parental_blocked, inbound_frame_ready,
-        reset_button_stream, set_native_vk_request, take_cursor_moved, take_touchpad,
-        tracking_owner_from_process, TrackingOwner, DESKTOP_CONNECTED,
+        clear_desktop_mode, reset_button_stream, tracking_owner_from_process, DESKTOP_CONNECTED,
     };
-    use crate::protocol::{
-        is_supported_protocol_version, AxisPayload, BatteryPayload, ConnectionPayload, DownFrame,
-        Hello, UpFrame, PROTOCOL_VERSION,
-    };
-    use std::collections::HashSet;
     use std::sync::atomic::Ordering;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
         CloseHandle, GetLastError, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
@@ -591,16 +590,6 @@ mod server {
     const PIPE_NAME: &str = r"\\.\pipe\warmup-input";
     /// SYSTEM full control; the interactive user (the desktop's account) gets read+write.
     const SDDL: &str = "D:(A;;GA;;;SY)(A;;GRGW;;;IU)";
-    /// Re-send the current snapshot at least this often so a dropped idle client is noticed
-    /// (the write fails) and the server loops back to accept a new one.
-    const KEEPALIVE: Duration = Duration::from_secs(1);
-    /// Throttle for outbound `cursor_moved` hints (the OS cursor already moved; this just
-    /// keeps the webview's visual cursor in sync).
-    const CURSOR_HINT_INTERVAL: Duration = Duration::from_millis(100);
-
-    struct ClientIdentity {
-        owner: TrackingOwner,
-    }
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -676,9 +665,7 @@ mod server {
         Some((sa, psd))
     }
 
-    /// Handle one client connection start-to-finish, then disconnect the pipe instance.
     fn serve_one(pipe: HANDLE) {
-        // Block until a client connects. ERROR_PIPE_CONNECTED (client beat us to it) is fine.
         let _ = unsafe { ConnectNamedPipe(pipe, None) };
         let Some(identity) = client_identity(pipe) else {
             unsafe {
@@ -687,10 +674,10 @@ mod server {
             return;
         };
         DESKTOP_CONNECTED.store(true, Ordering::Relaxed);
-        if let Ok(issued_session_ids) = handshake(pipe, &identity) {
-            // Drop edges queued before this client connected (stale to it).
+        let mut session = super::ipc_io::Session::new(PipeRead { pipe }, PipeWrite { pipe });
+        if let Ok(issued_session_ids) = super::ipc_io::handshake(&mut session, &identity) {
             reset_button_stream();
-            stream(pipe, &identity.owner, issued_session_ids);
+            super::ipc_io::stream(&mut session, &identity.owner, issued_session_ids);
         }
         DESKTOP_CONNECTED.store(false, Ordering::Relaxed);
         clear_desktop_mode();
@@ -699,7 +686,7 @@ mod server {
         }
     }
 
-    fn client_identity(pipe: HANDLE) -> Option<ClientIdentity> {
+    fn client_identity(pipe: HANDLE) -> Option<super::ipc_io::ClientIdentity> {
         let mut pid = 0u32;
         if unsafe { GetNamedPipeClientProcessId(pipe, &mut pid) }.is_err() {
             return None;
@@ -717,257 +704,63 @@ mod server {
                 "pipe client rejected: process has no interactive non-System owner",
             );
         }
-        owner.map(|owner| ClientIdentity { owner })
+        owner.map(|owner| super::ipc_io::ClientIdentity { owner })
     }
 
-    /// Read the client `hello`, reject unsupported versions, reply with the negotiated version.
-    fn handshake(pipe: HANDLE, identity: &ClientIdentity) -> std::io::Result<HashSet<String>> {
-        let line = read_line(pipe)?;
-        let protocol_version;
-        match DownFrame::parse_line(line.trim_end()) {
-            Ok(DownFrame::Hello(h)) if is_supported_protocol_version(h.protocol_version) => {
-                protocol_version = h.protocol_version;
-                if let Some(config) = h.config {
-                    if let Ok(p) = serde_json::from_value(config) {
-                        apply_config(&p);
-                    }
-                }
-                if let Some(mode) = h.mode {
-                    apply_mode(&mode);
-                }
-                if let Some(settings) = h.companion_settings {
-                    apply_companion_settings(&settings);
-                }
-                if let Some(guard) = h.parental_guard {
-                    apply_parental_guard(&guard);
-                }
-                if let Some(watch) = h.library_watch {
-                    apply_library_watch(&identity.owner, &watch);
-                }
-            }
-            Ok(DownFrame::Hello(h)) => {
-                return Err(io_err(&format!(
-                    "hello rejected: client protocol_version={}, companion expects {PROTOCOL_VERSION}",
-                    h.protocol_version
-                )));
-            }
-            _ => return Err(io_err("hello rejected: missing or invalid hello frame")),
-        }
-        let reply = UpFrame::Hello(Hello {
-            protocol_version,
-            config: None,
-            mode: None,
-            companion_settings: None,
-            parental_guard: None,
-            library_watch: None,
-        });
-        write_all(pipe, reply.to_ndjson_line().as_bytes())?;
-        #[cfg(feature = "gamepad")]
-        {
-            crate::playtime_tracker::on_desktop_connected(&identity.owner);
-            if protocol_version == PROTOCOL_VERSION {
-                return flush_play_sessions(pipe, &identity.owner);
-            }
-        }
-        Ok(HashSet::new())
-    }
-
-    /// Push any closed offline sessions to warmUP immediately after handshake.
-    fn flush_play_sessions(
+    struct PipeRead {
         pipe: HANDLE,
-        owner: &TrackingOwner,
-    ) -> std::io::Result<HashSet<String>> {
-        let payload = crate::playtime_tracker::take_closed_sessions_for_flush(owner);
-        if payload.sessions.is_empty() {
-            return Ok(HashSet::new());
-        }
-        let issued = payload
-            .sessions
-            .iter()
-            .map(|session| session.external_id.clone())
-            .collect();
-        write_all(
-            pipe,
-            UpFrame::PlaySessions(payload).to_ndjson_line().as_bytes(),
-        )?;
-        Ok(issued)
     }
 
-    /// Full-duplex session: drain inbound `config` (non-blocking), and write button edges
-    /// (low latency), `cursor_moved` hints (throttled), and connection snapshots (on change
-    /// plus a keepalive so a dropped idle client is noticed via the write error).
-    fn stream(pipe: HANDLE, owner: &TrackingOwner, mut issued_session_ids: HashSet<String>) {
-        let mut last: Option<ConnectionPayload> = None;
-        let mut last_battery: Option<BatteryPayload> = None;
-        let mut last_axis: Option<AxisPayload> = None;
-        let mut last_conn_write = Instant::now()
-            .checked_sub(KEEPALIVE)
-            .unwrap_or_else(Instant::now);
-        let mut last_cursor_write = Instant::now();
-        loop {
-            // Inbound config — never block the writer; only read a line that is fully buffered.
-            if drain_inbound_config(pipe, owner, &mut issued_session_ids).is_err() {
-                return;
+    impl std::io::Read for PipeRead {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
             }
-            for edge in drain_buttons() {
-                if write_all(pipe, UpFrame::Button(edge).to_ndjson_line().as_bytes()).is_err() {
-                    return; // client gone — return to accept a new one
-                }
+            let mut avail = 0u32;
+            unsafe { PeekNamedPipe(self.pipe, None, 0, None, Some(&mut avail), None) }
+                .map_err(to_io)?;
+            if avail == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "pipe empty",
+                ));
             }
-            for blocked in drain_parental_blocked() {
-                if write_all(
-                    pipe,
-                    UpFrame::ParentalBlocked(blocked)
-                        .to_ndjson_line()
-                        .as_bytes(),
-                )
-                .is_err()
-                {
-                    return;
-                }
-            }
-            // Battery — send only when it changes (low-rate; no keepalive needed).
-            let battery = current_battery();
-            if battery.is_some() && battery != last_battery {
-                if let Some(b) = battery {
-                    if write_all(pipe, UpFrame::Battery(b).to_ndjson_line().as_bytes()).is_err() {
-                        return;
-                    }
-                    last_battery = Some(b);
-                }
-            }
-            if last_cursor_write.elapsed() >= CURSOR_HINT_INTERVAL {
-                if let Some(hint) = take_cursor_moved() {
-                    if write_all(pipe, UpFrame::CursorMoved(hint).to_ndjson_line().as_bytes())
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
-                // Touchpad shares the cursor throttle (both are ≈100 ms visual hints).
-                let axis = current_axis();
-                if axis.is_some() && axis != last_axis {
-                    if let Some(a) = axis {
-                        if write_all(pipe, UpFrame::Axis(a).to_ndjson_line().as_bytes()).is_err() {
-                            return;
-                        }
-                        last_axis = Some(a);
-                    }
-                }
-                if let Some(tp) = take_touchpad() {
-                    if write_all(pipe, UpFrame::Touchpad(tp).to_ndjson_line().as_bytes()).is_err() {
-                        return;
-                    }
-                }
-                last_cursor_write = Instant::now();
-            }
-            let cur = current();
-            if last.as_ref() != Some(&cur) || last_conn_write.elapsed() >= KEEPALIVE {
-                if write_all(
-                    pipe,
-                    UpFrame::Connection(cur.clone()).to_ndjson_line().as_bytes(),
-                )
-                .is_err()
-                {
-                    return;
-                }
-                last = Some(cur);
-                last_conn_write = Instant::now();
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    /// Read and apply any fully-buffered `config` lines without blocking the write side.
-    fn drain_inbound_config(
-        pipe: HANDLE,
-        owner: &TrackingOwner,
-        issued_session_ids: &mut HashSet<String>,
-    ) -> std::io::Result<()> {
-        while peek_has_newline(pipe)? {
-            let line = read_line(pipe)?;
-            let trimmed = line.trim_end();
-            if trimmed.is_empty() {
-                continue;
-            }
-            match DownFrame::parse_line(trimmed) {
-                Ok(DownFrame::Config(p)) => apply_config(&p),
-                Ok(DownFrame::Mode(p)) => apply_mode(&p),
-                Ok(DownFrame::Rumble(p)) => apply_rumble(&p),
-                Ok(DownFrame::Led(p)) => apply_led(&p),
-                Ok(DownFrame::CompanionSettings(p)) => apply_companion_settings(&p),
-                Ok(DownFrame::NativeVk(p)) => set_native_vk_request(&p),
-                Ok(DownFrame::ParentalGuard(p)) => apply_parental_guard(&p),
-                Ok(DownFrame::LibraryWatch(p)) => apply_library_watch(owner, &p),
-                Ok(DownFrame::PlaySessionsAck(p)) => {
-                    let removed = apply_play_sessions_ack(owner, &p, issued_session_ids);
-                    if removed != 0 {
-                        issued_session_ids
-                            .retain(|external_id| !p.external_ids.contains(external_id));
-                    }
-                }
-                // A malformed known-type frame is a contract break (e.g. the rumble
-                // durationMs mismatch) — log it instead of dropping silently.
-                Err(e) => {
-                    crate::install::log_line(&format!("pipe inbound frame parse error: {e}"));
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
-
-    /// Read once a newline is visible or the frame exceeds the peek buffer; the latter must
-    /// be drained so a large frame cannot permanently hide its newline.
-    fn peek_has_newline(pipe: HANDLE) -> std::io::Result<bool> {
-        let mut buf = [0u8; 4096];
-        let mut read = 0u32;
-        let mut avail = 0u32;
-        unsafe {
-            PeekNamedPipe(
-                pipe,
-                Some(buf.as_mut_ptr() as *mut core::ffi::c_void),
-                buf.len() as u32,
-                Some(&mut read),
-                Some(&mut avail),
-                None,
-            )
-        }
-        .map_err(to_io)?;
-        Ok(inbound_frame_ready(&buf[..read as usize], avail))
-    }
-
-    fn read_line(pipe: HANDLE) -> std::io::Result<String> {
-        let mut out: Vec<u8> = Vec::with_capacity(256);
-        let mut byte = [0u8; 1];
-        loop {
             let mut read = 0u32;
-            unsafe { ReadFile(pipe, Some(&mut byte), Some(&mut read), None) }.map_err(to_io)?;
+            let take = buf.len().min(avail as usize);
+            unsafe { ReadFile(self.pipe, Some(&mut buf[..take]), Some(&mut read), None) }
+                .map_err(to_io)?;
             if read == 0 {
-                break; // EOF
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "pipe closed",
+                ));
             }
-            if byte[0] == b'\n' {
-                break;
-            }
-            out.push(byte[0]);
-            if out.len() > 64 * 1024 {
-                return Err(io_err("hello line too long"));
-            }
+            Ok(read as usize)
         }
-        String::from_utf8(out).map_err(|_| io_err("hello not valid UTF-8"))
     }
 
-    fn write_all(pipe: HANDLE, mut buf: &[u8]) -> std::io::Result<()> {
-        while !buf.is_empty() {
+    struct PipeWrite {
+        pipe: HANDLE,
+    }
+
+    impl std::io::Write for PipeWrite {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
             let mut written = 0u32;
-            unsafe { WriteFile(pipe, Some(buf), Some(&mut written), None) }.map_err(to_io)?;
+            unsafe { WriteFile(self.pipe, Some(buf), Some(&mut written), None) }.map_err(to_io)?;
             if written == 0 {
                 return Err(io_err("pipe write returned 0 bytes"));
             }
-            buf = &buf[written as usize..];
+            Ok(written as usize)
         }
-        Ok(())
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
+
 }
 
 #[cfg(test)]

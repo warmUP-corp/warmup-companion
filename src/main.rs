@@ -1,4 +1,5 @@
 mod config;
+mod paths;
 /// Cursor/scroll golden-fixture loader (#346). Pure serde; used by tests and the
 /// math-parity slice (#349). Unused in the normal binary build for now.
 #[allow(dead_code)]
@@ -23,8 +24,10 @@ mod vk_motion;
 
 #[cfg(windows)]
 mod crash;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 mod install;
+#[cfg(all(target_os = "linux", feature = "service"))]
+mod linux_service;
 #[cfg(all(windows, feature = "service"))]
 mod service;
 #[cfg(all(windows, feature = "service"))]
@@ -658,7 +661,7 @@ mod repl_scroll {
 fn main() {
     let _sentry = sentry_telemetry::init();
     let args: Vec<String> = env::args().collect();
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     cli::dispatch_install_or_service(&args);
     #[cfg(all(windows, feature = "gamepad"))]
     tray::spawn();

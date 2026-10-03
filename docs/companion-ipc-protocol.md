@@ -12,6 +12,14 @@ This spec is the **versioned wire contract** between the two processes. It is mi
 - **Development builds:** executable-path client trust checks are compiled out. Release builds only accept the installed warmUP executable.
 - **Direction:** full-duplex. "Up" = companion→desktop (input). "Down" = desktop→companion (control).
 
+### Transport (Linux)
+
+Frames, the handshake, and the roles are the same as the named pipe. Only the socket differs.
+
+- **Socket:** Unix domain socket `$XDG_RUNTIME_DIR/warmup/input.sock`. The companion creates the directory mode `0700` and the socket mode `0600`, and removes a stale socket before binding.
+- **Peer check:** a connection is accepted only when `SO_PEERCRED` reports a uid equal to the companion's effective uid. Any other peer is logged and dropped.
+- **One client:** the companion serves one desktop at a time. A second companion cannot bind the socket while the lock file is held.
+
 ## Framing
 
 **Newline-delimited JSON (NDJSON).** One JSON object per line, terminated by a single `\n` (`0x0A`). No embedded newlines inside a frame. UTF-8.

@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+- On Linux, a connected controller moves the pointer, scrolls, clicks, and presses Enter while warmUP is closed. The companion installs into your home folder and starts with the graphical session.
+- Gaming distributions already allow the virtual pointer. Other distributions can install the bundled device rule so the companion can create it.
+- The desktop talks to the companion through a socket that only your user can open.
+
 ## v0.7.3
 
 - New setting to hide the controller hints on the sign-in and lock screen ("Connect controller", "Press ... for keyboard", "Connected"). Turn it off in the tray (Sign-in controller hints), in Controller Center under General, or with `signin_hints = false` in `settings.ini`. The keyboard still opens from the pad when the hints are hidden.

@@ -38,6 +38,8 @@ Type anywhere in Windows with the controller already in your hands. warmUP Compa
 
 No Steam setup is required. To try the sign-in path after confirming normal desktop typing, press `Win+L` and use the controller from the lock screen.
 
+Linux on KDE Plasma gaming distributions (SteamOS desktop mode, Bazzite, CachyOS, ChimeraOS, Nobara) and on Hyprland installs for the current user only. See [docs/linux-install.md](docs/linux-install.md). GNOME is not supported.
+
 ### Supported controllers
 
 - Xbox 360 and Xbox One-family controllers

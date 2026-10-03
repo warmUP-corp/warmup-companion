@@ -7,6 +7,7 @@
 //! (`screenW/1920`, `screenH/1080`), so the feel
 //! is resolution-independent.
 
+#[cfg(not(target_os = "linux"))]
 use enigo::{Axis, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 
 const BASE_SPEED: f32 = 100.0;
@@ -36,6 +37,7 @@ fn screen_scale() -> (f32, f32) {
 }
 
 pub struct PcCursor {
+    #[cfg(not(target_os = "linux"))]
     enigo: Option<Enigo>,
     /// Service worker only: dedicated SendInput thread on the Default desktop.
     /// The worker main thread is attached to Winlogon, so injecting from it lands
@@ -43,13 +45,19 @@ pub struct PcCursor {
     /// the process startup desktop (`winsta0\default`), so its SendInput reaches
     /// the user's desktop with no SetThreadDesktop (which fails ERROR_BUSY on a
     /// thread that owns windows).
+    #[cfg(windows)]
     injector: Option<Injector>,
     /// When set (service worker on the Winlogon/lock desktop), inject on the
     /// CALLING thread instead of the default-desktop injector. The gamepad loop
     /// thread is attached to "winlogon" there, so its `SendInput` lands on the
     /// secure desktop — where the native PIN keypad lives. The default-desktop
     /// injector would target `winsta0\default` (invisible on the lock screen).
+    #[cfg(windows)]
     on_winlogon: bool,
+    #[cfg(target_os = "linux")]
+    mouse: Option<evdev::uinput::VirtualDevice>,
+    #[cfg(target_os = "linux")]
+    keyboard: Option<evdev::uinput::VirtualDevice>,
     remainder_x: f32,
     remainder_y: f32,
     scroll_remainder_x: f32,
@@ -68,15 +76,24 @@ pub struct PcCursor {
 
 impl PcCursor {
     pub fn new() -> Result<Self, String> {
-        let enigo =
-            Enigo::new(&Settings::default()).map_err(|e| format!("enigo init failed: {e}"))?;
-        Ok(Self::with_enigo(Some(enigo)))
+        #[cfg(target_os = "linux")]
+        {
+            let (mouse, keyboard) = open_uinput_devices()?;
+            return Ok(Self::from_devices(Some(mouse), Some(keyboard)));
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let enigo =
+                Enigo::new(&Settings::default()).map_err(|e| format!("enigo init failed: {e}"))?;
+            Ok(Self::with_enigo(Some(enigo)))
+        }
     }
 
     /// Service worker (user session, not session 0). Holds BOTH an inline Enigo
     /// (used on the Winlogon desktop, where the calling loop thread is attached)
     /// and a dedicated Default-desktop injector thread (used post-login). The
     /// active path is chosen per-frame by [`set_on_winlogon`].
+    #[cfg(windows)]
     pub fn new_service() -> Self {
         let (scale_x, scale_y) = screen_scale();
         Self {
@@ -96,12 +113,37 @@ impl PcCursor {
         }
     }
 
+    #[cfg(not(target_os = "linux"))]
     fn with_enigo(enigo: Option<Enigo>) -> Self {
         let (scale_x, scale_y) = screen_scale();
         Self {
             enigo,
+            #[cfg(windows)]
             injector: None,
+            #[cfg(windows)]
             on_winlogon: false,
+            remainder_x: 0.0,
+            remainder_y: 0.0,
+            scroll_remainder_x: 0.0,
+            scroll_remainder_y: 0.0,
+            scale_x,
+            scale_y,
+            left_held: false,
+            right_held: false,
+            smooth_dx: 0.0,
+            smooth_dy: 0.0,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn from_devices(
+        mouse: Option<evdev::uinput::VirtualDevice>,
+        keyboard: Option<evdev::uinput::VirtualDevice>,
+    ) -> Self {
+        let (scale_x, scale_y) = screen_scale();
+        Self {
+            mouse,
+            keyboard,
             remainder_x: 0.0,
             remainder_y: 0.0,
             scroll_remainder_x: 0.0,
@@ -117,6 +159,7 @@ impl PcCursor {
 
     /// Published each poll by the service loop: true while the input desktop is
     /// Winlogon. Routes injection to the calling (winlogon-attached) thread.
+    #[cfg(windows)]
     pub fn set_on_winlogon(&mut self, on_winlogon: bool) {
         self.on_winlogon = on_winlogon;
     }
@@ -283,24 +326,38 @@ impl PcCursor {
     /// thread so `SendInput` reaches the secure desktop. Otherwise: the Default-
     /// desktop injector thread (service post-login), else inline Enigo.
     fn dispatch(&mut self, cmd: Cmd) {
-        if self.on_winlogon {
+        #[cfg(windows)]
+        {
+            if self.on_winlogon {
+                if let Some(enigo) = self.enigo.as_mut() {
+                    apply_cmd(enigo, cmd);
+                }
+                return;
+            }
+            if let Some(injector) = &self.injector {
+                injector.send(cmd);
+                return;
+            }
             if let Some(enigo) = self.enigo.as_mut() {
                 apply_cmd(enigo, cmd);
             }
-            return;
         }
-        if let Some(injector) = &self.injector {
-            injector.send(cmd);
-            return;
+        #[cfg(target_os = "linux")]
+        {
+            apply_uinput(self.mouse.as_mut(), self.keyboard.as_mut(), cmd);
         }
-        if let Some(enigo) = self.enigo.as_mut() {
-            apply_cmd(enigo, cmd);
+        #[cfg(not(any(windows, target_os = "linux")))]
+        {
+            if let Some(enigo) = self.enigo.as_mut() {
+                apply_cmd(enigo, cmd);
+            }
         }
     }
 }
 
 /// Apply one cursor command through an Enigo instance (SendInput on the calling
 /// thread's desktop). Shared by the inline path and the injector thread.
+#[cfg(not(target_os = "linux"))]
 fn apply_cmd(enigo: &mut Enigo, cmd: Cmd) {
     match cmd {
         Cmd::Move(dx, dy) => {
@@ -518,10 +575,12 @@ enum Cmd {
 /// Dedicated cursor-injection thread. Owns its own Enigo and runs on whatever
 /// desktop the thread was born on — for the service worker that is the process
 /// startup desktop `winsta0\default`, i.e. the user's desktop after login.
+#[cfg(windows)]
 struct Injector {
     tx: std::sync::mpsc::Sender<Cmd>,
 }
 
+#[cfg(windows)]
 impl Injector {
     fn spawn() -> Option<Self> {
         let (tx, rx) = std::sync::mpsc::channel::<Cmd>();
@@ -537,6 +596,7 @@ impl Injector {
     }
 }
 
+#[cfg(windows)]
 fn injector_main(rx: std::sync::mpsc::Receiver<Cmd>) {
     let mut enigo = Enigo::new(&Settings::default()).ok();
     while let Ok(cmd) = rx.recv() {
@@ -589,6 +649,156 @@ fn stick_delta(
     (norm_x * speed, -norm_y * speed)
 }
 
+#[cfg(target_os = "linux")]
+fn vertical_wheel(notches: i32) -> (i32, i32) {
+    (-notches, -notches.saturating_mul(120))
+}
+
+#[cfg(target_os = "linux")]
+fn horizontal_wheel(notches: i32) -> (i32, i32) {
+    (notches, notches.saturating_mul(120))
+}
+
+#[cfg(target_os = "linux")]
+fn open_uinput_devices() -> Result<
+    (
+        evdev::uinput::VirtualDevice,
+        evdev::uinput::VirtualDevice,
+    ),
+    String,
+> {
+    Ok((open_pointer()?, open_enter_key()?))
+}
+
+#[cfg(target_os = "linux")]
+fn open_pointer() -> Result<evdev::uinput::VirtualDevice, String> {
+    use evdev::{AttributeSet, BusType, InputId, KeyCode, PropType, RelativeAxisCode};
+    let mut keys = AttributeSet::<KeyCode>::new();
+    keys.insert(KeyCode::BTN_LEFT);
+    keys.insert(KeyCode::BTN_RIGHT);
+    let mut axes = AttributeSet::<RelativeAxisCode>::new();
+    axes.insert(RelativeAxisCode::REL_X);
+    axes.insert(RelativeAxisCode::REL_Y);
+    axes.insert(RelativeAxisCode::REL_WHEEL);
+    axes.insert(RelativeAxisCode::REL_HWHEEL);
+    axes.insert(RelativeAxisCode::REL_WHEEL_HI_RES);
+    axes.insert(RelativeAxisCode::REL_HWHEEL_HI_RES);
+    let mut props = AttributeSet::<PropType>::new();
+    props.insert(PropType::POINTER);
+    evdev::uinput::VirtualDevice::builder()
+        .map_err(uinput_error)?
+        .name("warmup-companion mouse")
+        .input_id(InputId::new(BusType::BUS_VIRTUAL, 0x1234, 0x5755, 1))
+        .with_keys(&keys)
+        .map_err(uinput_error)?
+        .with_relative_axes(&axes)
+        .map_err(uinput_error)?
+        .with_properties(&props)
+        .map_err(uinput_error)?
+        .build()
+        .map_err(uinput_error)
+}
+
+#[cfg(target_os = "linux")]
+fn open_enter_key() -> Result<evdev::uinput::VirtualDevice, String> {
+    use evdev::{AttributeSet, BusType, InputId, KeyCode};
+    let mut keys = AttributeSet::<KeyCode>::new();
+    keys.insert(KeyCode::KEY_ENTER);
+    evdev::uinput::VirtualDevice::builder()
+        .map_err(uinput_error)?
+        .name("warmup-companion keyboard")
+        .input_id(InputId::new(BusType::BUS_VIRTUAL, 0x1234, 0x5756, 1))
+        .with_keys(&keys)
+        .map_err(uinput_error)?
+        .build()
+        .map_err(uinput_error)
+}
+
+#[cfg(target_os = "linux")]
+fn uinput_error(error: std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        format!(
+            "cannot open /dev/uinput ({error}). Gaming distros already grant this through Steam's udev rule. On other distributions install install/70-warmup-companion.rules and run: udevadm control --reload-rules && udevadm trigger"
+        )
+    } else {
+        format!("cannot open /dev/uinput ({error})")
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn apply_uinput(
+    mouse: Option<&mut evdev::uinput::VirtualDevice>,
+    keyboard: Option<&mut evdev::uinput::VirtualDevice>,
+    cmd: Cmd,
+) {
+    let Some(mouse) = mouse else {
+        return;
+    };
+    match cmd {
+        Cmd::Move(dx, dy) => emit_rel(
+            mouse,
+            &[
+                (evdev::RelativeAxisCode::REL_X, dx),
+                (evdev::RelativeAxisCode::REL_Y, dy),
+            ],
+        ),
+        Cmd::ScrollV(v) => {
+            let (wheel, hi_res) = vertical_wheel(v);
+            emit_rel(
+                mouse,
+                &[
+                    (evdev::RelativeAxisCode::REL_WHEEL, wheel),
+                    (evdev::RelativeAxisCode::REL_WHEEL_HI_RES, hi_res),
+                ],
+            );
+        }
+        Cmd::ScrollH(h) => {
+            let (wheel, hi_res) = horizontal_wheel(h);
+            emit_rel(
+                mouse,
+                &[
+                    (evdev::RelativeAxisCode::REL_HWHEEL, wheel),
+                    (evdev::RelativeAxisCode::REL_HWHEEL_HI_RES, hi_res),
+                ],
+            );
+        }
+        Cmd::ButtonDown => emit_key(mouse, evdev::KeyCode::BTN_LEFT, 1),
+        Cmd::ButtonUp => emit_key(mouse, evdev::KeyCode::BTN_LEFT, 0),
+        Cmd::RButtonDown => emit_key(mouse, evdev::KeyCode::BTN_RIGHT, 1),
+        Cmd::RButtonUp => emit_key(mouse, evdev::KeyCode::BTN_RIGHT, 0),
+        Cmd::EnterTap => {
+            let Some(keyboard) = keyboard else {
+                return;
+            };
+            emit_key(keyboard, evdev::KeyCode::KEY_ENTER, 1);
+            emit_key(keyboard, evdev::KeyCode::KEY_ENTER, 0);
+        }
+        Cmd::Screenshot { .. } => {
+            crate::install::log_line("screenshot is not available on linux in this stage");
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn emit_rel(device: &mut evdev::uinput::VirtualDevice, axes: &[(evdev::RelativeAxisCode, i32)]) {
+    let events: Vec<evdev::InputEvent> = axes
+        .iter()
+        .copied()
+        .map(|(code, value)| evdev::InputEvent::from(evdev::RelativeAxisEvent::new_now(code, value)))
+        .collect();
+    if let Err(error) = device.emit(&events) {
+        crate::install::log_line(&format!("uinput emit failed: {error}"));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn emit_key(device: &mut evdev::uinput::VirtualDevice, code: evdev::KeyCode, value: i32) {
+    let event = evdev::InputEvent::from(evdev::KeyEvent::new_now(code, value));
+    if let Err(error) = device.emit(&[event]) {
+        crate::install::log_line(&format!("uinput emit failed: {error}"));
+    }
+}
+
 #[cfg(test)]
 mod parity_tests {
     //! Golden-vector parity (#349): the companion `stick_delta` must reproduce the
@@ -638,5 +848,22 @@ mod parity_tests {
             !missing,
             "fixture has unpopulated expected values:\n{report}"
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod uinput_tests {
+    use super::{horizontal_wheel, vertical_wheel};
+
+    #[test]
+    fn vertical_wheel_matches_enigo_sign() {
+        assert_eq!(vertical_wheel(2), (-2, -240));
+        assert_eq!(vertical_wheel(-1), (1, 120));
+    }
+
+    #[test]
+    fn horizontal_wheel_matches_enigo_sign() {
+        assert_eq!(horizontal_wheel(2), (2, 240));
+        assert_eq!(horizontal_wheel(-1), (-1, -120));
     }
 }

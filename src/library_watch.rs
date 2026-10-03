@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use crate::pipe_server::TrackingOwner;
 use crate::protocol::{LibraryWatchGameEntry, LibraryWatchPayload};
 
-const WATCH_FILE: &str = r"C:\ProgramData\WarmupVk\library-watch.json";
+fn watch_file() -> std::path::PathBuf {
+    crate::paths::library_watch_file()
+}
 const MAX_WATCH_GAMES: usize = 256;
 const MAX_SELECTORS_PER_GAME: usize = 16;
 const MAX_TOTAL_SELECTORS: usize = MAX_WATCH_GAMES * MAX_SELECTORS_PER_GAME;
@@ -110,7 +112,7 @@ pub fn apply_watch(
 }
 
 pub fn load_persisted_watch() {
-    let Ok(raw) = std::fs::read_to_string(WATCH_FILE) else {
+    let Ok(raw) = std::fs::read_to_string(watch_file()) else {
         return;
     };
     let Ok(owned) = serde_json::from_str::<OwnedWatch>(&raw) else {
@@ -144,8 +146,11 @@ pub fn current_games() -> Option<(TrackingOwner, Vec<LibraryWatchGameEntry>)> {
 
 fn persist_watch(owned: &OwnedWatch) {
     if let Ok(json) = serde_json::to_string(owned) {
-        let _ = std::fs::create_dir_all(r"C:\ProgramData\WarmupVk");
-        let _ = std::fs::write(WATCH_FILE, json);
+        let path = watch_file();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, json);
     }
 }
 

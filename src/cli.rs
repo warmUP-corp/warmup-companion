@@ -120,8 +120,9 @@ fn has_interactive_console() -> bool {
     }
 }
 
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(feature = "gamepad")]
 fn run_settings_command(args: &[String]) {
+    #[cfg(windows)]
     let usage = "usage:
   warmup-companion.exe settings get
   warmup-companion.exe settings path
@@ -129,12 +130,20 @@ fn run_settings_command(args: &[String]) {
   warmup-companion.exe settings sleep-on-game <get|on|off>
   warmup-companion.exe settings auto-stop-on-game <get|on|off>
   warmup-companion.exe settings userland-poll <get|full|sleep|path>";
+    #[cfg(not(windows))]
+    let usage = "usage:
+  warmup-companion settings get
+  warmup-companion settings path
+  warmup-companion settings set <key> <value>
+  warmup-companion settings sleep-on-game <get|on|off>
+  warmup-companion settings auto-stop-on-game <get|on|off>
+  warmup-companion settings userland-poll <get|full|sleep|path>";
     match args.get(2).map(String::as_str) {
         Some("get") | None => print_gamepad_settings(),
         Some("path") => match crate::config::settings_path() {
             Some(path) => println!("{}", path.display()),
             None => {
-                eprintln!("LOCALAPPDATA is not set");
+                eprintln!("settings path is unavailable");
                 std::process::exit(1);
             }
         },
@@ -179,7 +188,7 @@ fn run_settings_command(args: &[String]) {
             Some("path") => match crate::config::settings_path() {
                 Some(path) => println!("{}", path.display()),
                 None => {
-                    eprintln!("LOCALAPPDATA is not set");
+                    eprintln!("settings path is unavailable");
                     std::process::exit(1);
                 }
             },
@@ -241,7 +250,7 @@ fn run_settings_command(args: &[String]) {
     }
 }
 
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(feature = "gamepad")]
 fn poll_mode_name(mode: warmup_gamepad::PollMode) -> &'static str {
     match mode {
         warmup_gamepad::PollMode::Full => "full",
@@ -249,7 +258,7 @@ fn poll_mode_name(mode: warmup_gamepad::PollMode) -> &'static str {
     }
 }
 
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(feature = "gamepad")]
 fn print_gamepad_settings() {
     let s = crate::config::gamepad_settings();
     println!("userland_poll={}", poll_mode_name(s.userland_poll_mode));
@@ -262,6 +271,52 @@ fn print_gamepad_settings() {
     println!("scroll_deadzone={}", s.scroll_deadzone);
     println!("scroll_speed={}", s.scroll_speed);
     println!("scroll_accel={}", s.scroll_accel);
+}
+
+#[cfg(target_os = "linux")]
+pub fn dispatch_install_or_service(args: &[String]) {
+    match args.get(1).map(String::as_str) {
+        Some("install") => {
+            crate::install::run_install();
+            std::process::exit(0);
+        }
+        Some("uninstall") => {
+            crate::install::run_uninstall();
+            std::process::exit(0);
+        }
+        Some("verify") => {
+            crate::install::run_verify();
+            std::process::exit(0);
+        }
+        Some("stop") => {
+            crate::install::run_stop();
+            std::process::exit(0);
+        }
+        #[cfg(feature = "gamepad")]
+        Some("settings") => {
+            run_settings_command(args);
+            std::process::exit(0);
+        }
+        _ => {}
+    }
+    if args.iter().any(|a| a == "--service") {
+        #[cfg(feature = "service")]
+        {
+            match crate::linux_service::run() {
+                Ok(()) => std::process::exit(0),
+                Err(error) => {
+                    crate::install::log_line(&format!("service failed: {error}"));
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        #[cfg(not(feature = "service"))]
+        {
+            eprintln!("Rebuild with default features enabled: cargo build --release");
+            std::process::exit(1);
+        }
+    }
 }
 
 pub fn help_screen_rows(help: &str) -> u32 {
