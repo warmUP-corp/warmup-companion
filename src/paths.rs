@@ -171,6 +171,21 @@ pub fn pending_play_sessions_file() -> PathBuf {
     data_dir().join("pending-play-sessions.json")
 }
 
+pub fn personal_dict_file() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA").map(|base| {
+            PathBuf::from(base)
+                .join("WarmupKeyboard")
+                .join("personal.dict")
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        Some(data_dir().join("personal.dict"))
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub fn runtime_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {

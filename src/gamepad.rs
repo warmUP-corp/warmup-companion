@@ -663,14 +663,11 @@ impl GamepadPoll {
         let desktop_reopen = None;
 
         if vk_open {
-            #[cfg(windows)]
-            {
-                self.sync_stick_nav(lx, ly);
-                if crate::win::vk_ui::tick_dpad_hold(Instant::now()) {
-                    // Held d-pad move or held-key auto-repeat fired — ratchet tick.
-                    self.backend.haptic_tick();
-                    crate::win::vk_ui::request_repaint();
-                }
+            self.sync_stick_nav(lx, ly);
+            let now = Instant::now();
+            if crate::vk_nav::tick_dpad_hold(now) || crate::vk_nav::tick_key_repeat(now) {
+                self.backend.haptic_tick();
+                crate::vk_nav::request_ui_repaint();
             }
             let mut edges = Vec::new();
             if let Some(edge) = desktop_reopen {
@@ -989,10 +986,8 @@ impl GamepadPoll {
         crate::config::service_mode() && Self::input_desktop_is_winlogon()
     }
 
-    #[cfg(windows)]
     fn handle_vk_open_button(&mut self, change: &ButtonChange) -> Option<VkLoopAction> {
         use crate::vk_nav;
-        use crate::win::vk_ui;
 
         if change.button != VK_BUTTON
             && self
@@ -1028,7 +1023,7 @@ impl GamepadPoll {
                 if vk_nav::dpad_pressed(change.button) {
                     self.backend.haptic_tick();
                 }
-                vk_ui::request_repaint();
+                vk_nav::request_ui_repaint();
                 None
             }
             (Button::Up | Button::Down | Button::Left | Button::Right, false) => {
@@ -1047,7 +1042,7 @@ impl GamepadPoll {
                     vk_nav::repeat_pressed(vk_nav::RepeatKey::Activate);
                     self.backend.haptic_tick();
                 }
-                vk_ui::request_repaint();
+                vk_nav::request_ui_repaint();
                 None
             }
             (Button::A | Button::Touchpad, false) => {
@@ -1063,7 +1058,7 @@ impl GamepadPoll {
                     vk_nav::backspace();
                     vk_nav::repeat_pressed(vk_nav::RepeatKey::Backspace);
                     self.backend.haptic_tick();
-                    vk_ui::request_repaint();
+                    vk_nav::request_ui_repaint();
                 }
                 None
             }
@@ -1092,7 +1087,7 @@ impl GamepadPoll {
                     vk_nav::space();
                     vk_nav::repeat_pressed(vk_nav::RepeatKey::Space);
                     self.backend.haptic_tick();
-                    vk_ui::request_repaint();
+                    vk_nav::request_ui_repaint();
                 }
                 None
             }
@@ -1114,6 +1109,7 @@ impl GamepadPoll {
                     .view_sheet
                     .release(Instant::now(), self.vk_select_chord_used);
                 if release.hide_sheet {
+                    #[cfg(windows)]
                     crate::win::shortcut_sheet::set_shown(false);
                 }
                 if release.tap {
@@ -1121,10 +1117,10 @@ impl GamepadPoll {
                     if crate::vk_predict::strip_engaged() {
                         crate::vk_predict::disengage();
                         self.backend.haptic_tick();
-                        vk_ui::request_repaint();
+                        vk_nav::request_ui_repaint();
                     } else if crate::vk_predict::engage() {
                         self.backend.haptic_tick();
-                        vk_ui::request_repaint();
+                        vk_nav::request_ui_repaint();
                     }
                 }
                 self.vk_select_chord_used = false;
@@ -1138,7 +1134,7 @@ impl GamepadPoll {
                     vk_nav::ShoulderNav::CycleSuggestions => {
                         if crate::vk_predict::cycle_prev() {
                             self.backend.haptic_tick();
-                            vk_ui::request_repaint();
+                            vk_nav::request_ui_repaint();
                         }
                     }
                     vk_nav::ShoulderNav::CaretWord => {
@@ -1168,7 +1164,7 @@ impl GamepadPoll {
                     vk_nav::ShoulderNav::CycleSuggestions => {
                         if crate::vk_predict::cycle_next() {
                             self.backend.haptic_tick();
-                            vk_ui::request_repaint();
+                            vk_nav::request_ui_repaint();
                         }
                     }
                     vk_nav::ShoulderNav::CaretWord => {
@@ -1202,7 +1198,7 @@ impl GamepadPoll {
             }
             (Button::R3, true) => {
                 vk_nav::start_voice_input();
-                vk_ui::request_repaint();
+                vk_nav::request_ui_repaint();
                 self.backend.haptic_alert();
                 None
             }
@@ -1217,16 +1213,8 @@ impl GamepadPoll {
         }
     }
 
-    #[cfg(not(windows))]
-    fn handle_vk_open_button(&mut self, _change: &ButtonChange) -> Option<VkLoopAction> {
-        None
-    }
-
-    /// Left stick → grid focus with the same hold-repeat path as the D-pad (`FUN_00464d00`).
-    #[cfg(windows)]
     fn sync_stick_nav(&mut self, lx: f32, ly: f32) {
         use crate::vk_nav;
-        use crate::win::vk_ui;
 
         const THRESH: f32 = 0.55;
         let dir = if lx.abs().max(ly.abs()) < THRESH {
@@ -1247,7 +1235,7 @@ impl GamepadPoll {
                 if vk_nav::dpad_pressed(d) {
                     self.backend.haptic_tick();
                 }
-                vk_ui::request_repaint();
+                vk_nav::request_ui_repaint();
             }
             (Some(old), None) => vk_nav::dpad_released(old),
             (Some(old), Some(d)) if old != d => {
@@ -1255,7 +1243,7 @@ impl GamepadPoll {
                 if vk_nav::dpad_pressed(d) {
                     self.backend.haptic_tick();
                 }
-                vk_ui::request_repaint();
+                vk_nav::request_ui_repaint();
             }
             _ => {}
         }

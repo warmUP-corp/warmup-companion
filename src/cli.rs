@@ -292,6 +292,15 @@ pub fn dispatch_install_or_service(args: &[String]) {
             crate::install::run_stop();
             std::process::exit(0);
         }
+        Some("type") => {
+            let text = args.iter().skip(2).cloned().collect::<Vec<_>>().join(" ");
+            if text.is_empty() {
+                eprintln!("usage: warmup-companion type <text>");
+                std::process::exit(2);
+            }
+            crate::vk_nav::send_text_direct(&text);
+            std::process::exit(0);
+        }
         #[cfg(feature = "gamepad")]
         Some("diagnostics") => {
             match crate::linux_diag::write_report() {

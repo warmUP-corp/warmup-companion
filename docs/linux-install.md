@@ -67,7 +67,7 @@ If Steam Input grabs the controller, the pad disappears from SDL. The companion 
 
 The virtual pointer is a relative mouse. The compositor's pointer acceleration still applies, so the on-screen distance will not match the raw stick math one-for-one.
 
-There is no on-screen keyboard in this stage. L3 does not open one. Enter is a real key on a second virtual device that only has that key.
+There is no on-screen keyboard yet, so L3 does not open one. `warmup-companion type <text>` types into the focused window, including characters outside the current layout. Enter on the stick is still its own key, separate from that typing device.
 
 ## Tray and settings
 

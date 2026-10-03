@@ -92,11 +92,15 @@ pub fn predictions_enabled() -> bool {
     {
         true
     }
-    #[cfg(not(test))]
+    #[cfg(all(not(test), windows))]
     {
         crate::win::surface::input()
             .map(|s| s.is_userland())
             .unwrap_or(false)
+    }
+    #[cfg(all(not(test), not(windows)))]
+    {
+        true
     }
 }
 
@@ -482,10 +486,23 @@ fn maybe_learn(s: &mut PredictState, word: &str) {
 }
 
 fn safe_to_learn_from_focus() -> bool {
-    matches!(
-        crate::win::logon_focus::focused_is_password_field(),
-        Some(false)
-    )
+    matches!(focused_is_password_field(), Some(false))
+}
+
+fn focused_is_password_field() -> Option<bool> {
+    #[cfg(windows)]
+    {
+        crate::win::logon_focus::focused_is_password_field()
+    }
+    #[cfg(not(windows))]
+    {
+        linux_password_probe()
+    }
+}
+
+#[cfg(not(windows))]
+fn linux_password_probe() -> Option<bool> {
+    None
 }
 
 /// Commit the highlighted candidate through `sink` (CONTEXT.md "Candidate

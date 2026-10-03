@@ -6,10 +6,15 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "gamepad")]
 use crate::gamepad_backend::Button;
 
+#[cfg_attr(not(windows), allow(unused_imports))]
+use crate::vk_key::{
+    VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_END, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE,
+};
+
+#[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyboardLayout, MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_END,
-    VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC,
 };
 
 #[derive(Clone)]
@@ -237,7 +242,10 @@ fn build_web_layout(layer: Layer, lang_de: bool) -> Vec<KeyRow> {
     row_bottom.push(KeyCell::tri('.', ':', '=', layer));
     row_bottom.push(KeyCell::vk("Backspace", VK_BACK, SPAN_KEY));
 
+    #[cfg(windows)]
     let mic = crate::win::speech_input::available();
+    #[cfg(not(windows))]
+    let mic = false;
     let mut space = KeyCell::vk(
         "Space",
         VK_SPACE,
@@ -614,11 +622,14 @@ pub fn copy_selection() {
 }
 
 pub fn paste_clipboard() {
-    let (_, exe, class, _) = foreground_info();
-    if crate::image_paste::is_terminal(&exe, &class) {
-        if let Some(text) = crate::image_paste::terminal_paste_text(&exe) {
-            send_text_direct(&text);
-            return;
+    #[cfg(windows)]
+    {
+        let (_, exe, class, _) = foreground_info();
+        if crate::image_paste::is_terminal(&exe, &class) {
+            if let Some(text) = crate::image_paste::terminal_paste_text(&exe) {
+                send_text_direct(&text);
+                return;
+            }
         }
     }
     inject_ctrl_key(VIRTUAL_KEY(b'V' as u16));
@@ -685,8 +696,10 @@ pub fn toggle_language() {
         de = nav.lang_de;
         rebuild(&mut nav);
     }
-    // Drive whisper recognition with the VK language (live; helper reads it per utterance).
+    #[cfg(windows)]
     crate::win::speech_input::set_vk_language(de);
+    #[cfg(not(windows))]
+    let _ = de;
     request_ui_repaint();
 }
 
@@ -767,6 +780,7 @@ pub fn send_text_direct(text: &str) {
 /// window. Used both to keep dictation out of warmUP and to log the real inject
 /// target — the speech helper injects from its own process, so this is the only
 /// way to see where a transcript actually went.
+#[cfg(windows)]
 fn foreground_info() -> (usize, String, String, String) {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
@@ -822,6 +836,11 @@ fn foreground_info() -> (usize, String, String, String) {
     }
 }
 
+#[cfg(not(windows))]
+fn foreground_info() -> (usize, String, String, String) {
+    (0, String::new(), String::new(), String::new())
+}
+
 /// True if `exe`/`title` identify the warmUP game launcher rather than the
 /// standalone browser/overlay. The docked keyboard must not resize this window:
 /// Guide-close leaves it foreground, and reflowing it brings the launcher back.
@@ -850,10 +869,14 @@ pub(crate) fn foreground_is_warmup_browser() -> bool {
 /// ACL-locked to SYSTEM, so an inject done from the user-session speech helper
 /// leaves no trail there — this mirror makes it visible.
 fn diag_inject_log(msg: &str) {
-    let Some(base) = std::env::var_os("LOCALAPPDATA") else {
+    #[cfg(windows)]
+    let Some(dir) = std::env::var_os("LOCALAPPDATA")
+        .map(|base| std::path::PathBuf::from(base).join("WarmupVk"))
+    else {
         return;
     };
-    let dir = std::path::Path::new(&base).join("WarmupVk");
+    #[cfg(not(windows))]
+    let dir = crate::paths::state_dir();
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("inject.log");
     if std::fs::metadata(&path)
@@ -879,6 +902,12 @@ pub struct SendInputSink;
 
 impl crate::vk_commit::TextSink for SendInputSink {
     fn replace(&mut self, del: usize, ins: &str) -> std::io::Result<()> {
+        #[cfg(not(windows))]
+        {
+            return crate::linux_type::replace_text(del, ins);
+        }
+        #[cfg(windows)]
+        {
         let collapse = focus_for_inject();
         let units: Vec<u16> = ins.encode_utf16().collect();
         let mut batch: Vec<INPUT> = Vec::with_capacity(2 + del * 2 + units.len() * 2);
@@ -901,11 +930,12 @@ impl crate::vk_commit::TextSink for SendInputSink {
                 batch.len()
             )))
         }
+        }
     }
 }
 
 fn notify_vk_key(vk: VIRTUAL_KEY) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_SPACE};
+    use crate::vk_key::{VK_BACK, VK_SPACE};
     if vk == VK_BACK {
         crate::vk_predict::on_backspace();
     } else if vk == VK_SPACE {
@@ -916,7 +946,8 @@ fn notify_vk_key(vk: VIRTUAL_KEY) {
     }
 }
 
-fn request_ui_repaint() {
+pub(crate) fn request_ui_repaint() {
+    #[cfg(windows)]
     crate::win::vk_ui::request_repaint();
 }
 
@@ -940,6 +971,13 @@ pub fn enter() {
 }
 
 pub fn start_voice_input() {
+    #[cfg(not(windows))]
+    {
+        crate::install::log_line("voice input is not available on linux in this build");
+        return;
+    }
+    #[cfg(windows)]
+    {
     if crate::win::logon_focus::is_active() {
         crate::install::log_line("vk voice input ignored on Winlogon");
         return;
@@ -976,6 +1014,7 @@ pub fn start_voice_input() {
         set_voice_input_active(false);
         crate::install::log_line(&format!("speech helper start failed: {e}"));
     }
+    }
 }
 
 /// Focus the credential field for an inject. Returns true on Winlogon, where the
@@ -985,15 +1024,26 @@ pub fn start_voice_input() {
 /// (or re-process focus) between them, so every key after the first overwrites
 /// the selection. False off Winlogon, where normal caret rules apply.
 fn focus_for_inject() -> bool {
-    crate::win::logon_focus::focus_password_field()
+    #[cfg(windows)]
+    {
+        crate::win::logon_focus::focus_password_field()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
-#[cfg(feature = "gamepad")]
+#[cfg(all(feature = "gamepad", windows))]
 fn refocus_after_nav_move() {
     let _ = crate::win::logon_focus::focus_password_field();
 }
 
+#[cfg(all(feature = "gamepad", not(windows)))]
+fn refocus_after_nav_move() {}
+
 /// Build a virtual-key down (or up) `INPUT`.
+#[cfg(windows)]
 fn vk_event(vk: VIRTUAL_KEY, up: bool) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
@@ -1013,6 +1063,7 @@ fn vk_event(vk: VIRTUAL_KEY, up: bool) -> INPUT {
     }
 }
 
+#[cfg(windows)]
 fn scan_vk_event(vk: VIRTUAL_KEY, up: bool) -> INPUT {
     let mut event = vk_event(vk, up);
     unsafe {
@@ -1022,6 +1073,7 @@ fn scan_vk_event(vk: VIRTUAL_KEY, up: bool) -> INPUT {
 }
 
 /// Build a Unicode-scancode down (or up) `INPUT`.
+#[cfg(windows)]
 fn unicode_event(unit: u16, up: bool) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
@@ -1044,6 +1096,7 @@ fn unicode_event(unit: u16, up: bool) -> INPUT {
 /// Push a caret-to-end (`VK_END`) down+up onto a Winlogon inject batch so the
 /// select-on-focus selection collapses in the same injection as the key. No-op
 /// off Winlogon.
+#[cfg(windows)]
 fn push_collapse(batch: &mut Vec<INPUT>, on_winlogon: bool) {
     if on_winlogon {
         batch.push(vk_event(VK_END, false));
@@ -1071,7 +1124,7 @@ pub fn logon_pin_key(b: Button) -> Option<VIRTUAL_KEY> {
     })
 }
 
-#[cfg(feature = "gamepad")]
+#[cfg(all(feature = "gamepad", windows))]
 pub fn inject_logon_pin(b: Button) -> bool {
     let focused = focus_for_inject();
     let vk = if focused {
@@ -1096,6 +1149,13 @@ pub fn inject_logon_pin(b: Button) -> bool {
 }
 
 fn inject_vk(vk: VIRTUAL_KEY) {
+    #[cfg(not(windows))]
+    {
+        crate::linux_type::tap_vk(vk.0);
+        return;
+    }
+    #[cfg(windows)]
+    {
     let collapse = focus_for_inject();
     let mut batch: Vec<INPUT> = Vec::with_capacity(4);
     push_collapse(&mut batch, collapse);
@@ -1105,6 +1165,7 @@ fn inject_vk(vk: VIRTUAL_KEY) {
         let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
     }
     suppress_native_keyboard_after_winlogon_inject(collapse);
+    }
 }
 
 pub fn caret_left() {
@@ -1132,15 +1193,30 @@ fn after_caret_move() {
 
 fn inject_nav_vk(vk: VIRTUAL_KEY) {
     after_caret_move();
+    #[cfg(not(windows))]
+    {
+        crate::linux_type::tap_vk(vk.0);
+        return;
+    }
+    #[cfg(windows)]
+    {
     let mut batch: Vec<INPUT> = Vec::with_capacity(2);
     batch.push(vk_event(vk, false));
     batch.push(vk_event(vk, true));
     unsafe {
         let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
     }
+    }
 }
 
 fn inject_ctrl_key(vk: VIRTUAL_KEY) {
+    #[cfg(not(windows))]
+    {
+        crate::linux_type::tap_ctrl(vk.0);
+        return;
+    }
+    #[cfg(windows)]
+    {
     let mut batch = Vec::with_capacity(4);
     batch.push(scan_vk_event(VK_CONTROL, false));
     batch.push(scan_vk_event(vk, false));
@@ -1149,9 +1225,17 @@ fn inject_ctrl_key(vk: VIRTUAL_KEY) {
     unsafe {
         let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
     }
+    }
 }
 
 fn inject_ctrl_key_then_vk(ctrl_vk: VIRTUAL_KEY, vk: VIRTUAL_KEY) {
+    #[cfg(not(windows))]
+    {
+        crate::linux_type::ctrl_then(ctrl_vk.0, vk.0);
+        return;
+    }
+    #[cfg(windows)]
+    {
     let mut batch = Vec::with_capacity(6);
     batch.push(scan_vk_event(VK_CONTROL, false));
     batch.push(scan_vk_event(ctrl_vk, false));
@@ -1162,6 +1246,7 @@ fn inject_ctrl_key_then_vk(ctrl_vk: VIRTUAL_KEY, vk: VIRTUAL_KEY) {
     unsafe {
         let _ = SendInput(&batch, std::mem::size_of::<INPUT>() as i32);
     }
+    }
 }
 
 /// Chunk size + gap for paced injection. Console hosts (conhost / Windows
@@ -1170,10 +1255,20 @@ fn inject_ctrl_key_then_vk(ctrl_vk: VIRTUAL_KEY, vk: VIRTUAL_KEY) {
 /// sentence sent at once never lands in a terminal (a single VK keypress does:
 /// it's one event, paced by the human). Calibration knob: if a terminal still
 /// drops dictated text, shrink INJECT_CHUNK or raise INJECT_GAP.
+#[cfg(windows)]
 const INJECT_CHUNK: usize = 8;
+#[cfg(windows)]
 const INJECT_GAP: Duration = Duration::from_millis(6);
 
 fn send_unicode(units: &[u16]) {
+    #[cfg(not(windows))]
+    {
+        let text = String::from_utf16_lossy(units);
+        crate::linux_type::type_text(&text);
+        return;
+    }
+    #[cfg(windows)]
+    {
     let collapse = focus_for_inject();
     // One char (a VK keypress) is a single chunk → one SendInput, no added
     // latency. Long injects (voice dictation) pace out so terminals keep up.
@@ -1211,14 +1306,17 @@ fn send_unicode(units: &[u16]) {
         crate::install::log_line(&line);
         diag_inject_log(&line);
     }
+    }
 }
 
+#[cfg(windows)]
 fn suppress_native_keyboard_after_winlogon_inject(on_winlogon: bool) {
     if on_winlogon {
         crate::win::native_keyboard::suppress_for(Duration::from_millis(300));
     }
 }
 
+#[cfg(windows)]
 #[allow(dead_code)]
 fn active_langid() -> u32 {
     let hkl = unsafe { GetKeyboardLayout(0) };

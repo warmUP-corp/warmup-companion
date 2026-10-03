@@ -5,12 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 
 fn personal_dict_path() -> Option<PathBuf> {
-    let base = std::env::var_os("LOCALAPPDATA")?;
-    Some(
-        PathBuf::from(base)
-            .join("WarmupKeyboard")
-            .join("personal.dict"),
-    )
+    crate::paths::personal_dict_file()
 }
 
 pub fn load_personal(into: &mut HashSet<String>) {

@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, text is typed into the focused window. Keys the on-screen keyboard already uses are real keys. Other characters follow the active keyboard layout, including Shift and AltGr, so umlauts and € land as they would from a physical keyboard. A character the layout does not contain is typed through the compositor's virtual keyboard. Words are not added to the personal dictionary unless the focused field is known to be an ordinary text field. The dictionary file is `personal.dict` in the companion's data folder.
 - On Linux the companion sits in the system tray. From there you can pause input, open Controller Center, turn game detection on or off, open the log, and save a diagnostics report.
 - The first time it starts, a notification tells you the controller moves the pointer, scrolls, clicks, and presses Enter.
 - While warmUP is closed, a fullscreen game on Hyprland pauses controller input when that option is on. Plasma does not offer the shared window list this build can read, so that pause stays off there.

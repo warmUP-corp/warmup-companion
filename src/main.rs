@@ -49,16 +49,15 @@ mod linux_game_detect;
 
 #[cfg(windows)]
 mod debug_state;
-#[cfg(windows)]
 mod predict_ngram;
-#[cfg(windows)]
 mod vk_commit;
 #[cfg(windows)]
 mod image_paste;
-#[cfg(windows)]
+mod vk_key;
 mod vk_nav;
-#[cfg(windows)]
 mod vk_predict;
+#[cfg(target_os = "linux")]
+mod linux_type;
 #[cfg(windows)]
 mod win;
 #[cfg(not(windows))]
@@ -85,7 +84,6 @@ mod parental_guard;
 mod parental_store;
 #[cfg(feature = "gamepad")]
 mod pc_cursor;
-#[cfg(windows)]
 mod predict_dict;
 #[cfg(all(windows, feature = "gamepad"))]
 mod process_guard;
