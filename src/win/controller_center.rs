@@ -176,6 +176,7 @@ fn items() -> Vec<Item> {
             "Show controller hints on the sign-in screen",
             "signin_hints",
         ),
+        check(0, "Guide / PS button opens warmUP when it is closed", "guide_launch"),
         item(0, "Pause gamepad input", Kind::PausePoll),
         item(
             0,
@@ -235,6 +236,7 @@ fn current(item: &Item) -> (bool, i32) {
                 "sleep_on_game" => s.sleep_on_game,
                 "auto_stop_on_game" => s.auto_stop_on_game,
                 "signin_hints" => s.signin_hints,
+                "guide_launch" => s.guide_launch,
                 "natural_scroll" => s.natural_scroll,
                 "vk_mode" => {
                     crate::config::vk_layout_mode() == crate::config::VkLayoutMode::Floating

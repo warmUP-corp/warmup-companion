@@ -81,6 +81,7 @@ No Steam setup is required. To try the sign-in path after confirming normal desk
 | Setting | Default | What it does |
 | --- | --- | --- |
 | Sign-in only | Off | Runs the companion only on the sign-in and lock screen (`run_mode = signin`). After you sign in or unlock, its worker process exits and the service idles with no input, tray or voice engine until you lock the PC again. To reach the tray and Controller Center while it sleeps, open **Warmup Companion** from the Start menu (or run `warmup-companion.exe wake`); it stays awake until the next sign-in or unlock. |
+| Guide opens warmUP | On | Pressing Guide (Xbox) or PS (PlayStation) while warmUP is closed starts it. If warmUP is already open nothing changes, repeat presses during startup are ignored, and it never fires on the sign-in screen. Turn off with `guide_launch = false` or in the Controller Center. |
 | Game sleep | On | Stops companion mouse and keyboard input while a fullscreen game is active. Press Guide or PS to wake it. |
 | Voice typing | Off until installed | Uses an optional local speech engine on the normal desktop. It is unavailable on lock and sign-in screens. |
 | Dictation vocabulary | Coding | Primes voice typing with terminal and coding-agent terms (git, npm, Claude Code, herdr, …) and fixes common mishearings. Add your own comma-separated words in the Controller Center, or set `vocabulary = off` in `settings.ini`. |
