@@ -10,9 +10,10 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOU
 use windows::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
 use windows_service::service::{
     ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
-    ServiceType, SessionChangeReason,
+    ServiceAccess, ServiceType, SessionChangeReason, UserEventCode,
 };
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
+use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{define_windows_service, service_dispatcher};
 
 use crate::install::{self, SERVICE_NAME};
@@ -27,6 +28,8 @@ const LAUNCH_RETRY_SECS: u64 = 2;
 
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static RESTART_REQUESTED: AtomicBool = AtomicBool::new(false);
+static SLEEPING: AtomicBool = AtomicBool::new(false);
+const WAKE_CONTROL: u32 = 128;
 static CHILD_PROCESS: AtomicIsize = AtomicIsize::new(0);
 
 define_windows_service!(ffi_service_main, service_main);
@@ -62,7 +65,28 @@ fn run_service_core() -> Result<(), String> {
             terminate_child();
             ServiceControlHandlerResult::NoError
         }
+        ServiceControl::SessionChange(change)
+            if matches!(
+                change.reason,
+                SessionChangeReason::SessionLogon | SessionChangeReason::SessionUnlock
+            ) && crate::config::run_mode() == crate::config::RunMode::SignIn =>
+        {
+            install::log_line(&format!(
+                "session change {:?}; run_mode=signin, worker sleeping until lock",
+                change.reason
+            ));
+            SLEEPING.store(true, Ordering::SeqCst);
+            crate::win::speech_input::unload_engine();
+            RESTART_REQUESTED.store(true, Ordering::SeqCst);
+            ServiceControlHandlerResult::NoError
+        }
         ServiceControl::SessionChange(change) => {
+            if matches!(
+                change.reason,
+                SessionChangeReason::SessionLock | SessionChangeReason::SessionLogoff
+            ) {
+                SLEEPING.store(false, Ordering::SeqCst);
+            }
             // User reached or reconnected to the desktop: keep the worker alive and
             // let the gamepad loop switch backend. Hard-restart tears down VK and
             // loses controller state mid-transition.
@@ -79,6 +103,11 @@ fn run_service_core() -> Result<(), String> {
             if restart {
                 RESTART_REQUESTED.store(true, Ordering::SeqCst);
             }
+            ServiceControlHandlerResult::NoError
+        }
+        ServiceControl::UserEvent(code) if code.to_raw() == WAKE_CONTROL => {
+            install::log_line("wake requested; worker running until next sign-in or unlock");
+            SLEEPING.store(false, Ordering::SeqCst);
             ServiceControlHandlerResult::NoError
         }
         ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
@@ -150,8 +179,26 @@ pub fn run_worker() -> Result<(), String> {
     gamepad_result
 }
 
+pub fn wake() -> Result<(), String> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .map_err(|e| format!("open service manager: {e}"))?;
+    let service = manager
+        .open_service(SERVICE_NAME, ServiceAccess::USER_DEFINED_CONTROL)
+        .map_err(|e| format!("open {SERVICE_NAME}: {e}"))?;
+    let code = UserEventCode::from_raw(WAKE_CONTROL).map_err(|e| format!("{e:?}"))?;
+    service
+        .notify(code)
+        .map_err(|e| format!("wake {SERVICE_NAME}: {e}"))?;
+    Ok(())
+}
+
 fn launcher_loop() -> Result<(), String> {
     while !STOP_REQUESTED.load(Ordering::SeqCst) {
+        if SLEEPING.load(Ordering::SeqCst) {
+            RESTART_REQUESTED.store(false, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_secs(1));
+            continue;
+        }
         let child = match service_worker::launch_worker_in_active_session() {
             Ok(c) => c,
             Err(e) => {
@@ -177,6 +224,11 @@ fn launcher_loop() -> Result<(), String> {
                 return Ok(());
             }
             if RESTART_REQUESTED.swap(false, Ordering::SeqCst) {
+                if SLEEPING.load(Ordering::SeqCst) {
+                    install::log_line("stopping service worker for sign-in sleep");
+                    terminate_child();
+                    break;
+                }
                 install::log_line("stopping service worker after session change (graceful)");
                 stop_child_gracefully(child.handle);
                 break;

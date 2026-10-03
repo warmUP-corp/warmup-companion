@@ -149,6 +149,9 @@ Section "!Warmup Companion service (required)" SEC_MAIN
     Abort
   ${EndIf}
 
+  SetShellVarContext all
+  CreateShortCut "$SMPROGRAMS\Warmup Companion.lnk" "$INSTDIR\warmup-companion.exe" "wake" "$INSTDIR\icon.ico" 0 SW_SHOWMINIMIZED
+
   ; Add/Remove Programs entry + uninstaller.
   WriteUninstaller "$INSTDIR\uninstall.exe"
   WriteRegStr   HKLM "${UNINSTKEY}" "DisplayName"          "${APPNAME}"
@@ -308,6 +311,8 @@ Section "Uninstall"
     Abort
   ${EndIf}
 
+  SetShellVarContext all
+  Delete "$SMPROGRAMS\Warmup Companion.lnk"
   Delete "$INSTDIR\warmup-companion.exe"
   Delete "$INSTDIR\Get-WarmupSpeech.ps1"
   Delete "$INSTDIR\Get-WarmupParakeet.ps1"

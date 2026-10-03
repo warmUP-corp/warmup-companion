@@ -70,6 +70,7 @@ const MENU_STYLE_NORMAL: usize = 1018;
 const MENU_STYLE_MONO: usize = 1019;
 const MENU_CONTROLLER_TIPS: usize = 1020;
 const MENU_SIGNIN_HINTS: usize = 1021;
+const MENU_UNLOAD_VOICE: usize = 1022;
 /// Mic device i is `MENU_MIC_BASE + i` (capped at 32 devices in the menu).
 const MENU_MIC_BASE: usize = 1100;
 /// Global hotkey id for "toggle voice dictation" (Ctrl+Alt+V).
@@ -300,6 +301,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 MENU_ENGINE_WHISPER => crate::win::speech_input::set_engine("whisper"),
                 MENU_ENGINE_PARAKEET => crate::win::speech_input::set_engine("parakeet"),
                 MENU_MIC_DEFAULT => crate::win::speech_input::set_mic_choice(""),
+                MENU_UNLOAD_VOICE => {
+                    let _ = std::thread::Builder::new()
+                        .name("voice-unload".into())
+                        .spawn(crate::win::speech_input::unload_engine);
+                }
                 id if (MENU_MIC_BASE..MENU_MIC_BASE + 32).contains(&id) => {
                     let mics = crate::win::speech_input::list_mics();
                     if let Some(name) = mics.get(id - MENU_MIC_BASE) {
@@ -471,6 +477,12 @@ unsafe fn show_menu(hwnd: HWND) {
             }
             let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("Microphone"));
         }
+        let _ = AppendMenuW(
+            menu,
+            MF_STRING,
+            MENU_UNLOAD_VOICE,
+            w!("Unload voice engine (free memory)"),
+        );
     }
 
     // Diagnostics.

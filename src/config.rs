@@ -88,6 +88,34 @@ pub fn vk_style() -> VkStyle {
     parse_vk_style(raw.as_deref())
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RunMode {
+    #[default]
+    Always,
+    SignIn,
+}
+
+#[cfg(feature = "gamepad")]
+pub fn parse_run_mode(raw: Option<&str>) -> RunMode {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("signin") => RunMode::SignIn,
+        _ => RunMode::Always,
+    }
+}
+
+#[cfg(feature = "gamepad")]
+pub fn run_mode() -> RunMode {
+    let raw = settings_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|text| {
+            text.lines().find_map(|line| {
+                let (k, v) = line.split_once('=')?;
+                (k.trim() == "run_mode").then(|| v.trim().to_string())
+            })
+        });
+    parse_run_mode(raw.as_deref())
+}
+
 #[cfg(feature = "gamepad")]
 pub const COMPACT_BAR_SCALE: f32 = 0.8;
 
@@ -119,6 +147,7 @@ pub struct GamepadSettings {
     /// Show the userland prompt debug overlay.
     pub prompt_userland_debug: bool,
     pub signin_hints: bool,
+    pub guide_launch: bool,
     /// Master switch for gamepad-driven mouse control ("Enable gamepad cursor" in
     /// warmUP, pushed as `config.enabled`). When false the sticks and the touchpad
     /// stop moving/scrolling the OS cursor and A/B stop emitting OS clicks — button
@@ -145,6 +174,7 @@ impl Default for GamepadSettings {
             auto_stop_on_game: false,
             prompt_userland_debug: false,
             signin_hints: true,
+            guide_launch: true,
             cursor_enabled: true,
             cursor_deadzone: 0.15,
             cursor_speed: 15.0,
@@ -342,6 +372,9 @@ fn apply_gamepad_settings_text(settings: &mut GamepadSettings, text: &str) {
             "signin_hints" => {
                 settings.signin_hints = parse_bool(value, settings.signin_hints)
             }
+            "guide_launch" => {
+                settings.guide_launch = parse_bool(value, settings.guide_launch)
+            }
             "cursor_enabled" => {
                 settings.cursor_enabled = parse_bool(value, settings.cursor_enabled)
             }
@@ -516,6 +549,10 @@ const SETTINGS_TEMPLATE: &str = r#"# Warmup Companion settings. One `key = value
 # Cursor/scroll/theme are normally set in the warmUP desktop app and pushed over
 # IPC; values set here apply until the next push.
 
+# When the companion runs: always | signin. signin = only on the sign-in and lock
+# screen; after you sign in or unlock the companion sleeps and wakes again on lock.
+# run_mode = always
+
 # Gamepad poll mode: full | sleep
 # userland_poll = full
 
@@ -527,6 +564,9 @@ const SETTINGS_TEMPLATE: &str = r#"# Warmup Companion settings. One `key = value
 
 # Show the controller hints on the sign-in screen: "Connect controller", "Press ... for keyboard", "Connected" (true|false)
 # signin_hints = true
+
+# Guide (Xbox) / PS button opens warmUP when it is closed (true|false)
+# guide_launch = true
 
 # Gamepad cursor master switch (true|false). False parks stick/touchpad cursor
 # movement, scrolling and A/B OS clicks; the pad still navigates warmUP via d-pad.
@@ -560,6 +600,8 @@ const SETTINGS_TEMPLATE: &str = r#"# Warmup Companion settings. One `key = value
 # Voice typing (offline whisper) is an opt-in install (-Speech). Recognition
 # language defaults to your Windows locale; override with the WARMUP_WHISPER_LANG
 # environment variable. Mic = your Windows default input device.
+# Dictation vocabulary: coding (built-in terminal/agent terms) | off | a comma list, e.g. coding, herdr, MyProject
+# vocabulary = coding
 "#;
 
 /// Path to `settings.ini`, creating it with the documented template if missing
@@ -645,7 +687,8 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
         | "stop_on_game"
         | "stop_when_game_active"
         | "prompt_userland_debug"
-        | "signin_hints" => match value.trim().to_ascii_lowercase().as_str() {
+        | "signin_hints"
+        | "guide_launch" => match value.trim().to_ascii_lowercase().as_str() {
             "true" | "false" | "1" | "0" | "yes" | "no" | "on" | "off" => Ok(()),
             _ => Err(format!("{key} must be a boolean")),
         },
@@ -680,13 +723,105 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
             .filter(|v| (0.6..=1.2).contains(v))
             .map(|_| ())
             .ok_or_else(|| "vk_bar_scale must be between 0.6 and 1.2".to_string()),
+        "run_mode" => match value.trim().to_ascii_lowercase().as_str() {
+            "always" | "signin" => Ok(()),
+            _ => Err("run_mode must be always or signin".to_string()),
+        },
+        "vocabulary" => {
+            if value.len() > 2000 {
+                Err("vocabulary must be at most 2000 characters".to_string())
+            } else if value.contains(['\n', '\r', '=']) {
+                Err("vocabulary must not contain newlines or '='".to_string())
+            } else {
+                Ok(())
+            }
+        }
         _ => Err(format!("unknown setting: {key}")),
     }
+}
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Vocabulary {
+    pub coding: bool,
+    pub words: Vec<String>,
+}
+
+pub fn parse_vocabulary_list(raw: &str) -> Vocabulary {
+    let mut vocab = Vocabulary::default();
+    for token in raw.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+        match token.to_ascii_lowercase().as_str() {
+            "coding" => vocab.coding = true,
+            "off" | "none" => {}
+            _ if vocab.words.iter().any(|w| w.eq_ignore_ascii_case(token)) => {}
+            _ => vocab.words.push(token.to_string()),
+        }
+    }
+    vocab
+}
+
+pub fn parse_vocabulary(settings: Option<&str>) -> Vocabulary {
+    let raw = settings.and_then(|text| {
+        text.lines().find_map(|line| {
+            let (k, v) = line.split_once('=')?;
+            (k.trim() == "vocabulary").then(|| v.trim())
+        })
+    });
+    match raw {
+        Some(raw) => parse_vocabulary_list(raw),
+        None => Vocabulary {
+            coding: true,
+            words: Vec::new(),
+        },
+    }
+}
+
+pub fn format_vocabulary(vocab: &Vocabulary) -> String {
+    let parts: Vec<&str> = vocab
+        .coding
+        .then_some("coding")
+        .into_iter()
+        .chain(vocab.words.iter().map(String::as_str))
+        .collect();
+    if parts.is_empty() {
+        "off".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
+pub fn vocabulary() -> Vocabulary {
+    let text = settings_path().and_then(|p| std::fs::read_to_string(p).ok());
+    parse_vocabulary(text.as_deref())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vocabulary_round_trips_through_settings_value() {
+        for raw in ["coding", "off", "herdr, MyProject", "coding, herdr, Jonas"] {
+            let v = parse_vocabulary(Some(&format!("vocabulary = {raw}")));
+            assert_eq!(format_vocabulary(&v), raw);
+        }
+        assert_eq!(format_vocabulary(&parse_vocabulary(None)), "coding");
+        assert_eq!(format_vocabulary(&parse_vocabulary(Some("vocabulary = none"))), "off");
+        assert_eq!(format_vocabulary(&parse_vocabulary(Some("vocabulary ="))), "off");
+        assert_eq!(
+            format_vocabulary(&parse_vocabulary(Some("vocabulary = herdr ,coding,HERDR"))),
+            "coding, herdr"
+        );
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn vocabulary_setting_rejects_line_breaks_and_equals() {
+        assert!(validate_gamepad_setting("vocabulary", "coding, herdr").is_ok());
+        assert!(validate_gamepad_setting("vocabulary", "off").is_ok());
+        assert!(validate_gamepad_setting("vocabulary", "a\nb").is_err());
+        assert!(validate_gamepad_setting("vocabulary", "a=b").is_err());
+        assert!(validate_gamepad_setting("vocabulary", &"x".repeat(2001)).is_err());
+    }
 
     #[cfg(feature = "gamepad")]
     #[test]
@@ -738,6 +873,17 @@ mod tests {
         assert!(validate_gamepad_setting("vk_style", "refined").is_ok());
         assert!(validate_gamepad_setting("vk_style", "Normal").is_ok());
         assert!(validate_gamepad_setting("vk_style", "ios").is_err());
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn run_mode_defaults_to_always_and_validates() {
+        assert_eq!(parse_run_mode(None), RunMode::Always);
+        assert_eq!(parse_run_mode(Some(" SignIn ")), RunMode::SignIn);
+        assert_eq!(parse_run_mode(Some("bogus")), RunMode::Always);
+        assert!(validate_gamepad_setting("run_mode", "signin").is_ok());
+        assert!(validate_gamepad_setting("run_mode", "always").is_ok());
+        assert!(validate_gamepad_setting("run_mode", "never").is_err());
     }
 
     #[cfg(feature = "gamepad")]

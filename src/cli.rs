@@ -65,6 +65,14 @@ pub fn dispatch_install_or_service(args: &[String]) {
             println!("Requested Windows touch keyboard/search service restore.");
             std::process::exit(0);
         }
+        #[cfg(feature = "service")]
+        Some("wake") => match crate::service::wake() {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        },
         #[cfg(feature = "gamepad")]
         Some("settings") => {
             run_settings_command(args);

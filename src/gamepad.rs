@@ -23,6 +23,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(8);
 const POLL_INTERVAL_IDLE: Duration = Duration::from_millis(125);
 const IDLE_AFTER: Duration = Duration::from_secs(2);
 const WARMUP_LAUNCH_DEBOUNCE: Duration = Duration::from_secs(2);
+const GUIDE_LAUNCH_DEBOUNCE: Duration = Duration::from_secs(10);
 /// Ignore spurious X/dpad from misaligned HID for a moment after VK opens.
 const VK_NAV_INPUT_GRACE: Duration = Duration::from_millis(450);
 const SLEEP_SCREENSHOT_HOLD: Duration = Duration::from_millis(600);
@@ -758,12 +759,14 @@ impl GamepadPoll {
                 crate::pipe_server::publish_button(change.button.as_str(), change.pressed);
             }
             #[cfg(windows)]
-            if is_standalone_guide_wake(
+            if is_guide_launch(
                 change,
                 crate::pipe_server::desktop_connected(),
-                crate::gamepad_backend::standalone_game_active_now(),
-            ) {
-                if crate::warmup_installed() {
+                Self::service_signin_desktop(),
+            ) && crate::config::gamepad_settings().guide_launch
+            {
+                if self.last_launch.elapsed() >= GUIDE_LAUNCH_DEBOUNCE && crate::warmup_installed() {
+                    self.last_launch = Instant::now();
                     self.backend.haptic_alert();
                     edges.push(VkLoopAction::LaunchWarmup);
                 }
@@ -1277,12 +1280,8 @@ impl GamepadPoll {
     }
 }
 
-fn is_standalone_guide_wake(
-    change: ButtonChange,
-    desktop_connected: bool,
-    standalone_game_active: bool,
-) -> bool {
-    change.button == Button::Guide && change.pressed && !desktop_connected && standalone_game_active
+fn is_guide_launch(change: ButtonChange, desktop_connected: bool, signin_desktop: bool) -> bool {
+    change.button == Button::Guide && change.pressed && !desktop_connected && !signin_desktop
 }
 
 fn forward_only_while_sleeping(sleeping: bool, button: Button) -> bool {
@@ -1546,7 +1545,7 @@ where
 mod tests {
     use super::{
         allows_cursor_injection, companion_owns_stick_click, forward_only_while_sleeping,
-        is_standalone_guide_wake, sleep_screenshot_due, view_chord_step, Button, ButtonChange,
+        is_guide_launch, sleep_screenshot_due, view_chord_step, Button, ButtonChange,
         ViewChordAction, ViewRelease, ViewSheetHold, SLEEP_SCREENSHOT_HOLD, VIEW_SHEET_HOLD,
     };
     use std::time::{Duration, Instant};
@@ -1603,20 +1602,29 @@ mod tests {
     }
 
     #[test]
-    fn standalone_game_wakes_only_on_guide_press() {
+    fn guide_launches_only_when_warmup_closed_on_desktop() {
         let guide = ButtonChange {
             button: Button::Guide,
             pressed: true,
         };
-        assert!(is_standalone_guide_wake(guide, false, true));
-        assert!(!is_standalone_guide_wake(guide, true, true));
-        assert!(!is_standalone_guide_wake(
+        assert!(is_guide_launch(guide, false, false));
+        assert!(!is_guide_launch(guide, true, false));
+        assert!(!is_guide_launch(guide, false, true));
+        assert!(!is_guide_launch(
+            ButtonChange {
+                button: Button::Guide,
+                pressed: false,
+            },
+            false,
+            false,
+        ));
+        assert!(!is_guide_launch(
             ButtonChange {
                 button: Button::A,
                 pressed: true,
             },
             false,
-            true,
+            false,
         ));
     }
 
