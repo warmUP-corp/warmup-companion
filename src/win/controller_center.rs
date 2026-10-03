@@ -30,11 +30,13 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, KillTimer, SendMessageW,
-    SetForegroundWindow, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, BM_GETCHECK,
+    GetWindowTextLengthW, GetWindowTextW, MessageBoxW, IDOK, MB_DEFBUTTON2, MB_ICONWARNING,
+    MB_OKCANCEL, SetForegroundWindow, SetTimer, SetWindowPos,
+    SetWindowTextW, ShowWindow, BM_GETCHECK,
     BM_SETCHECK, BS_AUTOCHECKBOX, HMENU, HWND_TOP, SM_CXSCREEN, SM_CYSCREEN, SWP_NOZORDER, SW_HIDE,
     SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CTLCOLORBTN,
     WM_CTLCOLORSTATIC, WM_DESTROY, WM_HSCROLL, WM_SETFONT, WM_TIMER, WS_CAPTION, WS_CHILD,
-    WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    WS_BORDER, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use super::desktop_window::{self, DesktopApp, DesktopWindowThread};
@@ -43,6 +45,7 @@ use super::desktop_window::{self, DesktopApp, DesktopWindowThread};
 const TBM_GETPOS: u32 = 0x0400;
 const SS_RIGHT: u32 = 0x0002;
 const SS_NOTIFY: u32 = 0x0100;
+const ES_AUTOHSCROLL: u32 = 0x0080;
 
 const WINDOW_CLASS: PCWSTR = w!("WarmupControllerCenter");
 /// Client size in logical (96-dpi) px, matching the reference dialog.
@@ -63,6 +66,7 @@ const TIMER_MS: u32 = 250;
 
 const TEXT_DARK: u32 = 0x00333333;
 const TEXT_GREY: u32 = 0x00A6A6A6;
+const TEXT_NOTE: u32 = 0x00808080;
 
 const ID_OK: usize = 1;
 const ID_CANCEL: usize = 2;
@@ -96,6 +100,7 @@ enum Kind {
         div: f32,
         decimals: usize,
     },
+    Vocabulary,
 }
 
 struct Item {
@@ -172,6 +177,15 @@ fn items() -> Vec<Item> {
             "signin_hints",
         ),
         item(0, "Pause gamepad input", Kind::PausePoll),
+        item(
+            0,
+            "Only run on the sign-in and lock screen (sleeps after you sign in)",
+            Kind::Check {
+                key: "run_mode",
+                on_val: "signin",
+                off_val: "always",
+            },
+        ),
         // Mouse
         slider(1, "Cursor speed", "cursor_speed", 1, 40, 1.0, 0),
         slider(1, "Cursor acceleration", "cursor_accel", 10, 50, 10.0, 1),
@@ -203,6 +217,11 @@ fn items() -> Vec<Item> {
                 off_val: "1.0",
             },
         ),
+        item(
+            2,
+            "Coding vocabulary (terminal & agent terms)",
+            Kind::Vocabulary,
+        ),
     ]
 }
 
@@ -221,11 +240,13 @@ fn current(item: &Item) -> (bool, i32) {
                     crate::config::vk_layout_mode() == crate::config::VkLayoutMode::Floating
                 }
                 "vk_bar_scale" => crate::config::vk_bar_scale() < 1.0,
+                "run_mode" => crate::config::run_mode() == crate::config::RunMode::SignIn,
                 _ => false,
             },
             0,
         ),
         Kind::PausePoll => (crate::gamepad_backend::userland_poll_paused(), 0),
+        Kind::Vocabulary => (crate::config::vocabulary().coding, 0),
         Kind::Slider { key, div, .. } => {
             let v = match *key {
                 "cursor_speed" => s.cursor_speed,
@@ -267,6 +288,7 @@ thread_local! {
     /// SetWindowText/ShowWindow while `UI` is mutably borrowed.
     static RAIL: RefCell<(usize, Vec<(HWND, HWND)>)> = const { RefCell::new((0, Vec::new())) };
     static COMCTL_READY: Cell<bool> = const { Cell::new(false) };
+    static NOTE: Cell<HWND> = Cell::new(HWND::default());
 }
 
 static THREAD: OnceLock<Mutex<Option<DesktopWindowThread>>> = OnceLock::new();
@@ -473,7 +495,57 @@ fn ui_show() {
                         scale,
                         body,
                     );
+                    if matches!(it.kind, Kind::Check { key: "run_mode", .. }) {
+                        let note = child(
+                            hwnd,
+                            w!("STATIC"),
+                            "Hides the tray icon and this window after you sign in.\r\n\
+                             Undo it in warmUP settings or Start > Warmup Companion.",
+                            0,
+                            0,
+                            (CONTENT_X + 22, *y + 24, CONTENT_W - 22, 40),
+                            scale,
+                            body,
+                        );
+                        NOTE.with(|n| n.set(note));
+                        it.extra = vec![note];
+                        *y += 40;
+                    }
                     *y += 40;
+                }
+                Kind::Vocabulary => {
+                    it.hwnd = child(
+                        hwnd,
+                        w!("BUTTON"),
+                        it.label,
+                        BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0,
+                        id,
+                        (CONTENT_X, *y, CONTENT_W, 24),
+                        scale,
+                        body,
+                    );
+                    let title = child(
+                        hwnd,
+                        w!("STATIC"),
+                        "Custom words (comma-separated)",
+                        0,
+                        0,
+                        (CONTENT_X, *y + 40, CONTENT_W, 20),
+                        scale,
+                        body,
+                    );
+                    let words = child(
+                        hwnd,
+                        w!("EDIT"),
+                        "",
+                        ES_AUTOHSCROLL | WS_BORDER.0 | WS_TABSTOP.0,
+                        0,
+                        (CONTENT_X, *y + 62, CONTENT_W, 24),
+                        scale,
+                        body,
+                    );
+                    it.extra = vec![title, words];
+                    *y += 102;
                 }
                 Kind::Slider { min, max, .. } => {
                     let title = child(
@@ -611,6 +683,19 @@ fn sync_from_config(ui: &Ui) {
                         LPARAM(0),
                     );
                 }
+                Kind::Vocabulary => {
+                    let v = crate::config::vocabulary();
+                    SendMessageW(
+                        it.hwnd,
+                        BM_SETCHECK,
+                        WPARAM(if v.coding { BST_CHECKED.0 as usize } else { 0 }),
+                        LPARAM(0),
+                    );
+                    if let Some(words) = it.extra.get(1) {
+                        let text = wide(&v.words.join(", "));
+                        let _ = SetWindowTextW(*words, PCWSTR(text.as_ptr()));
+                    }
+                }
                 Kind::Slider { .. } => {
                     SendMessageW(it.hwnd, TBM_SETPOS, WPARAM(1), LPARAM(pos as isize));
                     update_value_label(it);
@@ -641,6 +726,10 @@ fn apply(ui: &Ui) {
                 } => {
                     let c = checked(it.hwnd);
                     if c != on {
+                        if *key == "run_mode" && c && !confirm_signin_only(ui.hwnd) {
+                            SendMessageW(it.hwnd, BM_SETCHECK, WPARAM(0), LPARAM(0));
+                            continue;
+                        }
                         set(key, if c { on_val } else { off_val });
                     }
                 }
@@ -649,6 +738,13 @@ fn apply(ui: &Ui) {
                     if c != on {
                         crate::gamepad_backend::set_userland_poll_paused(c);
                         let _ = crate::config::write_userland_poll_paused(c);
+                    }
+                }
+                Kind::Vocabulary => {
+                    let words = it.extra.get(1).map(|h| window_text(*h)).unwrap_or_default();
+                    let staged = staged_vocabulary(checked(it.hwnd), &words);
+                    if staged != crate::config::vocabulary() {
+                        set("vocabulary", &crate::config::format_vocabulary(&staged));
                     }
                 }
                 Kind::Slider {
@@ -662,6 +758,40 @@ fn apply(ui: &Ui) {
             }
         }
     }
+}
+
+unsafe fn confirm_signin_only(owner: HWND) -> bool {
+    let title = wide("Sign-in screen only");
+    let body = wide(
+        "After you next sign in or unlock, the companion sleeps on the desktop: no controller input, \
+         no tray icon and no Controller Center.\r\n\r\n\
+         It only wakes on the lock and sign-in screen. To change this setting later, use \
+         warmUP > Settings > Controller > Companion (or Start menu > Warmup Companion).\r\n\r\n\
+         Turn it on?",
+    );
+    MessageBoxW(
+        owner,
+        PCWSTR(body.as_ptr()),
+        PCWSTR(title.as_ptr()),
+        MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2,
+    ) == IDOK
+}
+
+unsafe fn window_text(hwnd: HWND) -> String {
+    let len = GetWindowTextLengthW(hwnd).max(0) as usize;
+    let mut buf = vec![0u16; len + 1];
+    let n = GetWindowTextW(hwnd, &mut buf).max(0) as usize;
+    String::from_utf16_lossy(&buf[..n])
+}
+
+fn staged_vocabulary(coding: bool, words: &str) -> crate::config::Vocabulary {
+    let cleaned: String = words
+        .chars()
+        .map(|c| if c == '=' || c.is_control() { ' ' } else { c })
+        .collect();
+    let mut vocab = crate::config::parse_vocabulary_list(&cleaned);
+    vocab.coding = coding;
+    vocab
 }
 
 fn apply_tab(ui: &Ui) {
@@ -727,14 +857,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // when selected, grey otherwise (the reference look).
             let hdc = HDC(wparam.0 as *mut _);
             let ctl = HWND(lparam.0 as *mut _);
-            let color = RAIL.with(|r| {
-                let (tab, ctls) = &*r.borrow();
-                match ctls.iter().position(|(l, ic)| *l == ctl || *ic == ctl) {
-                    Some(i) if i == *tab => TEXT_DARK,
-                    Some(_) => TEXT_GREY,
-                    None => 0x00000000,
-                }
-            });
+            let color = if NOTE.with(Cell::get) == ctl {
+                TEXT_NOTE
+            } else {
+                RAIL.with(|r| {
+                    let (tab, ctls) = &*r.borrow();
+                    match ctls.iter().position(|(l, ic)| *l == ctl || *ic == ctl) {
+                        Some(i) if i == *tab => TEXT_DARK,
+                        Some(_) => TEXT_GREY,
+                        None => 0x00000000,
+                    }
+                })
+            };
             SetTextColor(hdc, COLORREF(color));
             SetBkMode(hdc, TRANSPARENT);
             LRESULT(GetStockObject(WHITE_BRUSH).0 as isize)
@@ -805,6 +939,21 @@ mod tests {
             unreachable!()
         };
         assert_eq!(format!("{:.*}", decimals, 20 as f32 / div), "2.0");
+    }
+
+    #[test]
+    fn vocabulary_controls_map_to_one_setting() {
+        let fmt = |c: bool, w: &str| crate::config::format_vocabulary(&staged_vocabulary(c, w));
+        assert_eq!(fmt(true, "herdr, MyProject"), "coding, herdr, MyProject");
+        assert_eq!(fmt(true, " "), "coding");
+        assert_eq!(fmt(false, "herdr,, MyProject "), "herdr, MyProject");
+        assert_eq!(fmt(false, ""), "off");
+        assert_eq!(fmt(false, "coding, herdr"), "herdr");
+        assert_eq!(fmt(false, "a=b"), "a b");
+        for raw in ["coding", "off", "herdr, MyProject", "coding, herdr, Jonas"] {
+            let v = crate::config::parse_vocabulary(Some(&format!("vocabulary = {raw}")));
+            assert_eq!(fmt(v.coding, &v.words.join(", ")), raw);
+        }
     }
 
     #[test]

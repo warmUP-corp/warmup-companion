@@ -24,6 +24,10 @@ Type anywhere in Windows with the controller already in your hands. warmUP Compa
 
 <sub>Press L3 (left-stick click) to open the keyboard.</sub>
 
+| Normal | Mono |
+| --- | --- |
+| ![Normal keyboard style with word suggestions](assets/promo/keyboard-normal.png) | ![Mono keyboard style](assets/promo/keyboard-mono.png) |
+
 ---
 
 ## Installation
@@ -42,6 +46,8 @@ No Steam setup is required. To try the sign-in path after confirming normal desk
 - Other compatible HID gamepads recognized through the controller mapping database
 
 ## Controller controls
+
+![Shortcut legend overlay](assets/promo/shortcut-legend.png)
 
 ### Keyboard closed
 
@@ -74,8 +80,10 @@ No Steam setup is required. To try the sign-in path after confirming normal desk
 
 | Setting | Default | What it does |
 | --- | --- | --- |
+| Sign-in only | Off | Runs the companion only on the sign-in and lock screen (`run_mode = signin`). After you sign in or unlock, its worker process exits and the service idles with no input, tray or voice engine until you lock the PC again. To reach the tray and Controller Center while it sleeps, open **Warmup Companion** from the Start menu (or run `warmup-companion.exe wake`); it stays awake until the next sign-in or unlock. |
 | Game sleep | On | Stops companion mouse and keyboard input while a fullscreen game is active. Press Guide or PS to wake it. |
 | Voice typing | Off until installed | Uses an optional local speech engine on the normal desktop. It is unavailable on lock and sign-in screens. |
+| Dictation vocabulary | Coding | Primes voice typing with terminal and coding-agent terms (git, npm, Claude Code, herdr, …) and fixes common mishearings. Add your own comma-separated words in the Controller Center, or set `vocabulary = off` in `settings.ini`. |
 | Suggestions | On | Keeps a local, English-only prefix buffer from characters typed by the companion. |
 
 Use the tray icon to check status and privacy settings. To manage game sleep from a terminal:
