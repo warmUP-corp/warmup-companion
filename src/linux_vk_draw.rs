@@ -1756,86 +1756,133 @@ pub fn paint_voice_key(pixmap: &mut Pixmap, frame: &Frame, orb: &[u8], orb_px: u
     );
 }
 
-pub struct VoicePainter {
-    fonts: FontSystem,
-    cache: SwashCache,
-    label: String,
-    hint: String,
-    base: Option<Pixmap>,
+pub fn voice_swell(phase: u8, level: f32) -> f32 {
+    let drive = match phase {
+        2 => {
+            let t = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f32())
+                .unwrap_or(0.0);
+            0.5 + 0.5 * (t * 2.4).sin()
+        }
+        1 => 0.5 + 0.5 * level.clamp(0.0, 1.0),
+        _ => 0.5,
+    };
+    let scale = 0.70 + 0.36 * drive.clamp(0.0, 1.0);
+    let rest = 0.70 + 0.36 * 0.5;
+    scale / rest
 }
 
-impl VoicePainter {
-    pub fn new() -> Self {
-        Self {
-            fonts: font_system(),
-            cache: SwashCache::new(),
-            label: String::new(),
-            hint: String::new(),
-            base: None,
-        }
-    }
-
-    pub fn paint(&mut self, label: &str, hint: &str, orb: Option<&[u8]>, orb_px: u32) -> Option<Pixmap> {
-        if self.base.is_none() || self.label != label || self.hint != hint {
-            self.base = draw_voice_pill_with(label, hint, None, 0, &mut self.fonts, &mut self.cache);
-            self.label = label.to_string();
-            self.hint = hint.to_string();
-        }
-        let mut frame = clone_pixmap(self.base.as_ref()?)?;
-        if let Some(orb) = orb {
-            blit_premul(&mut frame, orb, orb_px, 16.0, 16.0, 72.0);
-        }
-        Some(frame)
-    }
-}
-
-pub fn draw_voice_pill(label: &str, hint: &str, orb: Option<&[u8]>, orb_px: u32) -> Option<Pixmap> {
-    let mut fonts = font_system();
-    let mut cache = SwashCache::new();
-    draw_voice_pill_with(label, hint, orb, orb_px, &mut fonts, &mut cache)
-}
-
-fn draw_voice_pill_with(
-    label: &str,
-    hint: &str,
+pub fn paint_voice_screen(
+    width: u32,
+    height: u32,
+    phase: u8,
+    level: f32,
+    show_orb: bool,
     orb: Option<&[u8]>,
     orb_px: u32,
-    mut fonts: &mut FontSystem,
-    mut cache: &mut SwashCache,
+    accent: u32,
 ) -> Option<Pixmap> {
-    let scale = 1.0f32;
-    let mut pixmap = Pixmap::new(420, 104)?;
-    round_rect(&mut pixmap, 0.0, 0.0, 420.0, 104.0, 28.0, rgb(0x141414), 242);
-    if let Some(orb) = orb {
-        blit_premul(&mut pixmap, orb, orb_px, 16.0, 16.0, 72.0);
+    if width == 0 || height == 0 {
+        return None;
     }
-    text_aligned(
-        &mut pixmap,
-        &mut fonts,
-        &mut cache,
-        label,
-        (104.0, 18.0, 400.0, 58.0),
-        26.0 * scale,
-        Weight::NORMAL,
-        rgb(0xFFFFFF),
-        255,
-        scale,
-        Align::Left,
-    );
-    text_aligned(
-        &mut pixmap,
-        &mut fonts,
-        &mut cache,
-        hint,
-        (104.0, 54.0, 400.0, 90.0),
-        16.0 * scale,
-        Weight::NORMAL,
-        rgb(0xFFFFFF),
-        0xA6,
-        scale,
-        Align::Left,
-    );
+    let mut pixmap = Pixmap::new(width, height)?;
+    let scale = (height as f32 / 1080.0).clamp(0.85, 2.0);
+    let border_alpha = if phase == 2 {
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f32())
+            .unwrap_or(0.0);
+        let pulse = 0.5 + 0.5 * (t * 2.4).sin();
+        0.8 + 0.7 * pulse
+    } else {
+        1.0
+    };
+    paint_voice_border(&mut pixmap, accent, border_alpha.min(1.0), scale);
+    if show_orb {
+        if let Some(orb) = orb {
+            let (x, y, side) = voice_screen_slot(width as f32, height as f32, phase, level);
+            blit_premul(&mut pixmap, orb, orb_px, x, y, side);
+        }
+    }
     Some(pixmap)
+}
+
+fn voice_screen_slot(width: f32, height: f32, phase: u8, level: f32) -> (f32, f32, f32) {
+    let scale = (height / 1080.0).clamp(0.85, 2.0);
+    let size = (96.0 * scale).min(width.min(height) * 0.9).max(1.0);
+    let margin = (48.0 * scale).min((width - size).max(0.0));
+    let left = (width - margin - size).max(0.0);
+    let top = ((height - size) * 0.5).max(0.0);
+    let swell = voice_swell(phase, level);
+    let side = (size * 0.94 * swell).max(1.0);
+    let cx = left + size * 0.5;
+    let cy = top + size * 0.5;
+    (cx - side * 0.5, cy - side * 0.5, side)
+}
+
+fn paint_voice_border(pixmap: &mut Pixmap, accent: u32, alpha: f32, scale: f32) {
+    let layers: [(f32, f32); 7] = [
+        (22.0, 0.02),
+        (14.0, 0.028),
+        (9.0, 0.038),
+        (5.5, 0.05),
+        (3.2, 0.065),
+        (1.8, 0.08),
+        (1.0, 0.07),
+    ];
+    let width = pixmap.width();
+    let height = pixmap.height();
+    if width == 0 || height == 0 {
+        return;
+    }
+    let r = ((accent >> 16) & 0xFF) as u8;
+    let g = ((accent >> 8) & 0xFF) as u8;
+    let b = (accent & 0xFF) as u8;
+    let max_depth = (layers[0].0 * scale).ceil() as u32;
+    let pixels = pixmap.data_mut();
+    let paint = |pixels: &mut [u8], x: u32, y: u32| {
+        let from_x = x.min(width - 1 - x);
+        let from_y = y.min(height - 1 - y);
+        let dist = from_x.min(from_y);
+        if dist >= max_depth {
+            return;
+        }
+        let mut covered = 0.0f32;
+        for (depth, layer_alpha) in layers {
+            if (dist as f32) < depth * scale {
+                covered = layer_alpha * alpha + covered * (1.0 - layer_alpha * alpha);
+            }
+        }
+        if covered <= 0.0 {
+            return;
+        }
+        let a = (covered.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let i = ((y * width + x) * 4) as usize;
+        let sa = a as u32;
+        let inv = 255 - sa;
+        pixels[i] = ((r as u32 * sa + pixels[i] as u32 * inv) / 255) as u8;
+        pixels[i + 1] = ((g as u32 * sa + pixels[i + 1] as u32 * inv) / 255) as u8;
+        pixels[i + 2] = ((b as u32 * sa + pixels[i + 2] as u32 * inv) / 255) as u8;
+        pixels[i + 3] = (sa + pixels[i + 3] as u32 * inv / 255) as u8;
+    };
+    let band = max_depth.min(height).min(width);
+    for y in 0..band {
+        for x in 0..width {
+            paint(pixels, x, y);
+            if height > band {
+                paint(pixels, x, height - 1 - y);
+            }
+        }
+    }
+    for y in band..height.saturating_sub(band) {
+        for x in 0..band {
+            paint(pixels, x, y);
+            if width > band {
+                paint(pixels, width - 1 - x, y);
+            }
+        }
+    }
 }
 
 fn blit_premul(pixmap: &mut Pixmap, src: &[u8], src_px: u32, x: f32, y: f32, size: f32) {
@@ -1911,6 +1958,25 @@ mod tests {
     use super::{draw, font_system, Frame, Glide};
     use crate::config::{KeyboardTheme, VkStyle};
     use crate::vk_nav::{rows_for_test, KeyPos};
+
+    #[test]
+    fn voice_swell_grows_with_the_mic() {
+        let quiet = super::voice_swell(1, 0.0);
+        let loud = super::voice_swell(1, 1.0);
+        assert!((quiet - 1.0).abs() < 0.001, "{quiet}");
+        assert!(loud > quiet + 0.15, "{loud}");
+    }
+
+    #[test]
+    fn voice_screen_is_a_border_with_a_cloud() {
+        let orb = vec![255u8, 255, 255, 255];
+        let pixmap = super::paint_voice_screen(800, 480, 1, 1.0, true, Some(&orb), 1, 0xA6D1FF).expect("screen");
+        assert_eq!((pixmap.width(), pixmap.height()), (800, 480));
+        let edge = pixmap.data()[3];
+        let centre = pixmap.data()[((240 * 800 + 400) * 4 + 3) as usize];
+        assert!(edge > 0, "edge {edge}");
+        assert_eq!(centre, 0);
+    }
 
     #[test]
     fn keyboard_frame_uses_the_windows_palette() {

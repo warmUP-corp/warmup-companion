@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
@@ -89,10 +90,11 @@ struct Pill {
     layer: LayerSurface,
     buffer: Option<Buffer>,
     configured: bool,
-    frames: crate::linux_vk::VoiceFrames,
+    size: (u32, u32),
+    level: f32,
+    level_at: Option<Instant>,
     shown_gen: u64,
-    shown_label: String,
-    shown_hint: String,
+    shown_open: bool,
 }
 
 impl Pill {
@@ -103,11 +105,14 @@ impl Pill {
         let surface = compositor.create_surface(qh);
         let layer = layer_shell.create_layer_surface(qh, surface, Layer::Overlay, Some("warmup-companion-voice"), None);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-        layer.set_anchor(Anchor::RIGHT);
+        layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
         layer.set_exclusive_zone(0);
-        layer.set_margin(0, 40, 0, 0);
-        layer.set_size(420, 104);
-        let pool = SlotPool::new(420 * 104 * 4 * 4, &shm).map_err(|error| error.to_string())?;
+        layer.set_margin(0, 0, 0, 0);
+        layer.set_size(0, 0);
+        if let Ok(region) = smithay_client_toolkit::compositor::Region::new(&compositor) {
+            layer.wl_surface().set_input_region(Some(region.wl_region()));
+        }
+        let pool = SlotPool::new(64 * 1024 * 1024, &shm).map_err(|error| error.to_string())?;
         Ok(Self {
             registry_state: RegistryState::new(globals),
             output_state: OutputState::new(globals, qh),
@@ -116,29 +121,46 @@ impl Pill {
             layer,
             buffer: None,
             configured: false,
-            frames: crate::linux_vk::VoiceFrames::new(),
+            size: (0, 0),
+            level: 0.0,
+            level_at: None,
             shown_gen: u64::MAX,
-            shown_label: String::new(),
-            shown_hint: String::new(),
+            shown_open: false,
         })
     }
 
     fn draw(&mut self, qh: &QueueHandle<Self>) {
-        let label = match crate::linux_speech::phase() {
-            2 => "Transcribing",
-            _ => "Listening",
-        };
-        let hint = if crate::linux_speech::phase() == 2 {
-            "One moment"
-        } else {
-            "R3 to finish"
-        };
-        let gen = crate::linux_nimbus::frame_generation();
-        if self.buffer.is_some() && self.shown_gen == gen && self.shown_label == label && self.shown_hint == hint {
+        let (width, height) = self.size;
+        if width == 0 || height == 0 {
             return;
         }
+        let phase = crate::linux_speech::phase();
+        let open = crate::linux_vk::keyboard_open();
+        let gen = crate::linux_nimbus::frame_generation();
+        if self.buffer.is_some() && self.shown_gen == gen && self.shown_open == open && phase != 2 {
+            return;
+        }
+        let now = Instant::now();
+        let dt_ms = self.level_at.map(|t| now.duration_since(t).as_secs_f32() * 1000.0).unwrap_or(0.0);
+        self.level_at = Some(now);
+        let target = crate::linux_speech::level();
+        self.level = if dt_ms > 0.0 {
+            crate::vk_motion::smooth_level(self.level, target, dt_ms)
+        } else {
+            target
+        };
         let orb = crate::linux_nimbus::latest_frame();
-        let Some(pixmap) = self.frames.paint(label, hint, orb.as_ref().map(|(_, bytes)| bytes.as_slice()), orb.as_ref().map(|(px, _)| *px).unwrap_or(0)) else {
+        let accent = crate::config::keyboard_theme().accent.unwrap_or(0xA6D1FF);
+        let Some(pixmap) = crate::linux_vk::paint_voice_screen(
+            width,
+            height,
+            phase,
+            self.level,
+            !open,
+            orb.as_ref().map(|(_, bytes)| bytes.as_slice()),
+            orb.as_ref().map(|(px, _)| *px).unwrap_or(0),
+            accent,
+        ) else {
             return;
         };
         let pixels = crate::linux_vk::draw_argb(&pixmap);
@@ -160,8 +182,7 @@ impl Pill {
         if buffer.attach_to(surface).is_ok() {
             self.buffer = Some(buffer);
             self.shown_gen = gen;
-            self.shown_label = label.to_string();
-            self.shown_hint = hint.to_string();
+            self.shown_open = open;
             self.layer.commit();
         }
     }
@@ -186,9 +207,13 @@ impl OutputHandler for Pill {
 
 impl LayerShellHandler for Pill {
     fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {}
-    fn configure(&mut self, conn: &Connection, qh: &QueueHandle<Self>, _: &LayerSurface, _: LayerSurfaceConfigure, _: u32) {
+    fn configure(&mut self, conn: &Connection, qh: &QueueHandle<Self>, _: &LayerSurface, configure: LayerSurfaceConfigure, _: u32) {
         let _ = conn.flush();
+        if configure.new_size.0 > 0 && configure.new_size.1 > 0 {
+            self.size = configure.new_size;
+        }
         self.configured = true;
+        self.shown_gen = u64::MAX;
         self.draw(qh);
     }
 }

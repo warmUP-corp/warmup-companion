@@ -34,32 +34,24 @@ mod draw;
 #[path = "linux_vk_gpu.rs"]
 mod gpu;
 
-#[cfg(feature = "speech")]
-pub struct VoiceFrames {
-    painter: draw::VoicePainter,
+static KEYBOARD_OPEN: AtomicBool = AtomicBool::new(false);
+
+pub fn keyboard_open() -> bool {
+    KEYBOARD_OPEN.load(Ordering::SeqCst)
 }
 
 #[cfg(feature = "speech")]
-impl VoiceFrames {
-    pub fn new() -> Self {
-        Self {
-            painter: draw::VoicePainter::new(),
-        }
-    }
-
-    pub fn paint(&mut self, label: &str, hint: &str, orb: Option<&[u8]>, orb_px: u32) -> Option<tiny_skia::Pixmap> {
-        self.painter.paint(label, hint, orb, orb_px)
-    }
-}
-
-#[cfg(feature = "speech")]
-pub fn draw_voice_surface(
-    label: &str,
-    hint: &str,
+pub fn paint_voice_screen(
+    width: u32,
+    height: u32,
+    phase: u8,
+    level: f32,
+    show_orb: bool,
     orb: Option<&[u8]>,
     orb_px: u32,
+    accent: u32,
 ) -> Option<tiny_skia::Pixmap> {
-    draw::draw_voice_pill(label, hint, orb, orb_px)
+    draw::paint_voice_screen(width, height, phase, level, show_orb, orb, orb_px, accent)
 }
 
 #[cfg(feature = "speech")]
@@ -161,6 +153,14 @@ fn keyboard_loop(wake: UnixStream) -> Result<(), String> {
     let qh = queue.handle();
     let display = conn.display().id().as_ptr() as *mut std::ffi::c_void;
     let mut shell = Shell::new(&globals, &qh, display, conn.clone())?;
+    KEYBOARD_OPEN.store(true, Ordering::SeqCst);
+    struct KeyboardShown;
+    impl Drop for KeyboardShown {
+        fn drop(&mut self) {
+            KEYBOARD_OPEN.store(false, Ordering::SeqCst);
+        }
+    }
+    let _keyboard_shown = KeyboardShown;
     shell.layer.commit();
     let mut wayland_dead = false;
     loop {
@@ -488,7 +488,22 @@ impl Shell {
         #[cfg(not(feature = "speech"))]
         let orb_hold: Option<(u32, Vec<u8>)> = None;
         let orb = orb_hold.as_ref().and_then(|(px, bytes)| {
-            let (x, y, size) = draw::voice_spot(frame)?;
+            let (x, y, mut size) = draw::voice_spot(frame)?;
+            #[cfg(feature = "speech")]
+            {
+                let swell = draw::voice_swell(crate::linux_speech::phase(), crate::linux_speech::level());
+                let cx = x + size * 0.5;
+                let cy = y + size * 0.5;
+                size *= swell;
+                return Some(gpu::Orb {
+                    pixels: bytes.as_slice(),
+                    px: *px,
+                    x: cx - size * 0.5,
+                    y: cy - size * 0.5,
+                    size,
+                });
+            }
+            #[cfg(not(feature = "speech"))]
             Some(gpu::Orb {
                 pixels: bytes.as_slice(),
                 px: *px,

@@ -788,7 +788,7 @@ impl GamepadPoll {
             }
             // R3 starts dictation even with the VK closed, so voice typing into the
             // focused app is a single click — no need to open the keyboard first.
-            #[cfg(windows)]
+            #[cfg(any(windows, all(target_os = "linux", feature = "speech")))]
             if change.button == Button::R3 && change.pressed && !native_vk_suppressed {
                 crate::vk_nav::start_voice_input();
                 self.backend.haptic_alert();

@@ -109,11 +109,117 @@ fn set_phase(phase: u8) {
     PHASE.store(phase, Ordering::SeqCst);
 }
 
+struct MediaPause {
+    players: Vec<String>,
+}
+
+impl MediaPause {
+    fn hold() -> Self {
+        let players = mpris_pause_playing();
+        if !players.is_empty() {
+            crate::install::log_line(&format!("speech: paused {} media session(s)", players.len()));
+        }
+        Self { players }
+    }
+}
+
+impl Drop for MediaPause {
+    fn drop(&mut self) {
+        if self.players.is_empty() {
+            return;
+        }
+        let n = mpris_resume(&self.players);
+        if n > 0 {
+            crate::install::log_line(&format!("speech: resumed {n} media session(s)"));
+        }
+    }
+}
+
+fn busctl(args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("busctl")
+        .arg("--user")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+fn mpris_names(list: &str) -> Vec<String> {
+    list.lines()
+        .filter_map(|line| {
+            let name = line.split_whitespace().next()?;
+            name.starts_with("org.mpris.MediaPlayer2.").then(|| name.to_string())
+        })
+        .collect()
+}
+
+fn playback_playing(property: &str) -> bool {
+    property.split('"').nth(1).is_some_and(|status| status == "Playing")
+}
+
+fn mpris_pause_playing() -> Vec<String> {
+    let Some(list) = busctl(&["list", "--no-pager"]) else {
+        return Vec::new();
+    };
+    let mut paused = Vec::new();
+    for name in mpris_names(&list) {
+        let Some(status) = busctl(&[
+            "get-property",
+            &name,
+            "/org/mpris/MediaPlayer2",
+            "org.mpris.MediaPlayer2.Player",
+            "PlaybackStatus",
+        ]) else {
+            continue;
+        };
+        if !playback_playing(&status) {
+            continue;
+        }
+        if busctl(&[
+            "call",
+            &name,
+            "/org/mpris/MediaPlayer2",
+            "org.mpris.MediaPlayer2.Player",
+            "Pause",
+        ])
+        .is_some()
+        {
+            paused.push(name);
+        }
+    }
+    paused
+}
+
+fn mpris_resume(players: &[String]) -> usize {
+    let mut resumed = 0usize;
+    for name in players {
+        if busctl(&[
+            "call",
+            name,
+            "/org/mpris/MediaPlayer2",
+            "org.mpris.MediaPlayer2.Player",
+            "Play",
+        ])
+        .is_some()
+        {
+            resumed += 1;
+        }
+    }
+    resumed
+}
+
 fn set_level(level: f32) {
     LEVEL.store(level.clamp(0.0, 1.0).to_bits(), Ordering::SeqCst);
 }
 
 fn record_and_type() -> Result<(), String> {
+    let _media = MediaPause::hold();
     ensure_server()?;
     let host = cpal::default_host();
     let device = host
@@ -445,7 +551,21 @@ mod engine {
 
 #[cfg(test)]
 mod tests {
-    use super::clean_transcript;
+    use super::{clean_transcript, mpris_names, playback_playing};
+
+    #[test]
+    fn mpris_list_keeps_players_only() {
+        let names = mpris_names(
+            "org.freedesktop.DBus 1 dbus\norg.mpris.MediaPlayer2.chromium.instance1 2 chromium\n",
+        );
+        assert_eq!(names, vec!["org.mpris.MediaPlayer2.chromium.instance1".to_string()]);
+    }
+
+    #[test]
+    fn playback_status_is_playing() {
+        assert!(playback_playing("s \"Playing\"\n"));
+        assert!(!playback_playing("s \"Paused\"\n"));
+    }
 
     #[test]
     fn annotations_are_not_typed() {
