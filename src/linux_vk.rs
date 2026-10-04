@@ -35,6 +35,24 @@ mod draw;
 mod gpu;
 
 #[cfg(feature = "speech")]
+pub struct VoiceFrames {
+    painter: draw::VoicePainter,
+}
+
+#[cfg(feature = "speech")]
+impl VoiceFrames {
+    pub fn new() -> Self {
+        Self {
+            painter: draw::VoicePainter::new(),
+        }
+    }
+
+    pub fn paint(&mut self, label: &str, hint: &str, orb: Option<&[u8]>, orb_px: u32) -> Option<tiny_skia::Pixmap> {
+        self.painter.paint(label, hint, orb, orb_px)
+    }
+}
+
+#[cfg(feature = "speech")]
 pub fn draw_voice_surface(
     label: &str,
     hint: &str,

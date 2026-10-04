@@ -1,5 +1,7 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const RT: u32 = 72;
 const STEPS: i32 = 36;
@@ -43,6 +45,7 @@ struct Animator {
 }
 
 static LATEST: OnceLock<Mutex<Option<(u32, Vec<u8>)>>> = OnceLock::new();
+static FRAME_GEN: AtomicU64 = AtomicU64::new(0);
 static ANIMATING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn ensure_running() {
@@ -58,21 +61,32 @@ pub fn ensure_running() {
                 let phase = crate::linux_speech::phase();
                 let level = crate::linux_speech::level();
                 let accent = [0.65, 0.82, 1.0];
-                let rendered = gpu.as_mut().and_then(|gpu| match gpu.render(phase, level, accent) {
-                    Ok(frame) => Some((GPU_RT, frame)),
-                    Err(error) => {
-                        crate::install::log_line(&format!("nimbus gpu: {error}"));
-                        None
-                    }
-                });
-                if rendered.is_none() {
+                let started = Instant::now();
+                let mut failed = false;
+                let rendered = match gpu.as_mut() {
+                    Some(gpu) => match gpu.tick(phase, level, accent) {
+                        Ok(frame) => frame.map(|pixels| (GPU_RT, pixels)),
+                        Err(error) => {
+                            crate::install::log_line(&format!("nimbus gpu: {error}"));
+                            failed = true;
+                            None
+                        }
+                    },
+                    None => Some((RT, anim.render(phase, level, accent))),
+                };
+                if failed {
                     gpu = None;
                 }
-                let (px, frame) = rendered.unwrap_or_else(|| (RT, anim.render(phase, level, accent)));
-                if let Ok(mut slot) = frame_slot().lock() {
-                    *slot = Some((px, frame));
+                if let Some((px, frame)) = rendered {
+                    if let Ok(mut slot) = frame_slot().lock() {
+                        *slot = Some((px, frame));
+                    }
+                    FRAME_GEN.fetch_add(1, Ordering::Relaxed);
                 }
-                std::thread::sleep(std::time::Duration::from_millis(16));
+                let rest = Duration::from_millis(33).saturating_sub(started.elapsed());
+                if !rest.is_zero() {
+                    std::thread::sleep(rest);
+                }
             }
             if let Ok(mut slot) = frame_slot().lock() {
                 *slot = None;
@@ -83,6 +97,10 @@ pub fn ensure_running() {
 
 pub fn latest_frame() -> Option<(u32, Vec<u8>)> {
     frame_slot().lock().ok().and_then(|guard| guard.clone())
+}
+
+pub fn frame_generation() -> u64 {
+    FRAME_GEN.load(Ordering::Relaxed)
 }
 
 fn frame_slot() -> &'static Mutex<Option<(u32, Vec<u8>)>> {
@@ -359,6 +377,15 @@ fn normalize(p: [f32; 3]) -> [f32; 3] {
 
 const GPU_RT: u32 = 128;
 
+struct ReadSlot {
+    buffer: wgpu::Buffer,
+}
+
+struct Inflight {
+    index: usize,
+    recv: mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+}
+
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -366,7 +393,9 @@ struct Gpu {
     params: wgpu::Buffer,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
-    read: wgpu::Buffer,
+    slots: [ReadSlot; 2],
+    inflight: Option<Inflight>,
+    write: usize,
     noise: f32,
     light: f32,
     swirl: f32,
@@ -488,12 +517,15 @@ impl Gpu {
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let row = align256(GPU_RT * 4);
-        let read = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("nimbus-read"),
-            size: row as u64 * GPU_RT as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        let read_buffer = |device: &wgpu::Device| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("nimbus-read"),
+                size: row as u64 * GPU_RT as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            })
+        };
+        let slots = [ReadSlot { buffer: read_buffer(&device) }, ReadSlot { buffer: read_buffer(&device) }];
         let _ = group;
         Ok(Self {
             device,
@@ -502,7 +534,9 @@ impl Gpu {
             params,
             texture,
             view,
-            read,
+            slots,
+            inflight: None,
+            write: 0,
             noise: 0.0,
             light: 0.0,
             swirl: 0.0,
@@ -511,12 +545,55 @@ impl Gpu {
         })
     }
 
+    fn tick(&mut self, phase: u8, level: f32, accent: [f32; 3]) -> Result<Option<Vec<u8>>, String> {
+        self.device.poll(wgpu::Maintain::Poll);
+        let ready = self.collect()?;
+        if self.inflight.is_none() {
+            self.submit(phase, level, accent)?;
+        }
+        Ok(ready)
+    }
+
     fn render(&mut self, phase: u8, level: f32, accent: [f32; 3]) -> Result<Vec<u8>, String> {
+        let started = Instant::now();
+        loop {
+            if let Some(frame) = self.tick(phase, level, accent)? {
+                return Ok(frame);
+            }
+            if started.elapsed() > Duration::from_millis(800) {
+                return Err("nimbus frame timed out".into());
+            }
+            if started.elapsed() > Duration::from_millis(40) {
+                self.device.poll(wgpu::Maintain::Wait);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn collect(&mut self) -> Result<Option<Vec<u8>>, String> {
+        let status = match self.inflight.as_ref() {
+            None => return Ok(None),
+            Some(inflight) => inflight.recv.try_recv(),
+        };
+        match status {
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => Err("nimbus readback dropped".into()),
+            Ok(Err(error)) => Err(error.to_string()),
+            Ok(Ok(())) => {
+                let inflight = self.inflight.take().ok_or_else(|| "nimbus readback missing".to_string())?;
+                let packed = copy_slot(&self.slots[inflight.index].buffer);
+                self.slots[inflight.index].buffer.unmap();
+                Ok(Some(packed))
+            }
+        }
+    }
+
+    fn submit(&mut self, phase: u8, level: f32, accent: [f32; 3]) -> Result<(), String> {
         let now = Instant::now();
         let dt = self
             .last
             .map(|t| now.saturating_duration_since(t).as_secs_f32().min(0.05))
-            .unwrap_or(1.0 / 60.0);
+            .unwrap_or(1.0 / 30.0);
         self.last = Some(now);
         self.age += dt;
         let level = level.clamp(0.0, 1.0);
@@ -568,11 +645,13 @@ impl Gpu {
             pass.set_bind_group(0, &bind, &[]);
             pass.draw(0..3, 0..1);
         }
+        let index = self.write;
+        self.write ^= 1;
         let row = align256(GPU_RT * 4);
         encoder.copy_texture_to_buffer(
             self.texture.as_image_copy(),
             wgpu::ImageCopyBuffer {
-                buffer: &self.read,
+                buffer: &self.slots[index].buffer,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
                     bytes_per_row: Some(row),
@@ -586,24 +665,25 @@ impl Gpu {
             },
         );
         self.queue.submit(Some(encoder.finish()));
-        let slice = self.read.slice(..);
         let (send, recv) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
+        self.slots[index].buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
             let _ = send.send(result);
         });
-        self.device.poll(wgpu::Maintain::Wait);
-        recv.recv().map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
-        let mapped = slice.get_mapped_range();
-        let mut packed = vec![0u8; (GPU_RT * GPU_RT * 4) as usize];
-        for y in 0..GPU_RT {
-            let src = (y * row) as usize;
-            let dst = (y * GPU_RT * 4) as usize;
-            packed[dst..dst + (GPU_RT * 4) as usize].copy_from_slice(&mapped[src..src + (GPU_RT * 4) as usize]);
-        }
-        drop(mapped);
-        self.read.unmap();
-        Ok(packed)
+        self.inflight = Some(Inflight { index, recv });
+        Ok(())
     }
+}
+
+fn copy_slot(buffer: &wgpu::Buffer) -> Vec<u8> {
+    let row = align256(GPU_RT * 4);
+    let mapped = buffer.slice(..).get_mapped_range();
+    let mut packed = vec![0u8; (GPU_RT * GPU_RT * 4) as usize];
+    for y in 0..GPU_RT {
+        let src = (y * row) as usize;
+        let dst = (y * GPU_RT * 4) as usize;
+        packed[dst..dst + (GPU_RT * 4) as usize].copy_from_slice(&mapped[src..src + (GPU_RT * 4) as usize]);
+    }
+    packed
 }
 
 fn align256(value: u32) -> u32 {
@@ -780,6 +860,12 @@ mod tests {
         let lit = frame.chunks_exact(4).filter(|px| px[3] > 8).count();
         assert!(lit > 40, "lit pixels {lit}");
         assert!(elapsed.as_millis() < 500, "gpu frame took {elapsed:?}");
+        let started = Instant::now();
+        for _ in 0..12 {
+            gpu.tick(1, 0.4, [0.65, 0.82, 1.0]).expect("tick");
+        }
+        let burst = started.elapsed();
+        assert!(burst.as_millis() < 80, "nimbus ticks stalled the GPU for {burst:?}");
     }
 
     #[test]

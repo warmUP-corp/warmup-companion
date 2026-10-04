@@ -73,6 +73,10 @@ struct Pill {
     pool: SlotPool,
     layer: LayerSurface,
     buffer: Option<Buffer>,
+    frames: crate::linux_vk::VoiceFrames,
+    shown_gen: u64,
+    shown_label: String,
+    shown_hint: String,
 }
 
 impl Pill {
@@ -95,6 +99,10 @@ impl Pill {
             pool,
             layer,
             buffer: None,
+            frames: crate::linux_vk::VoiceFrames::new(),
+            shown_gen: u64::MAX,
+            shown_label: String::new(),
+            shown_hint: String::new(),
         })
     }
 
@@ -108,8 +116,12 @@ impl Pill {
         } else {
             "R3 to finish"
         };
+        let gen = crate::linux_nimbus::frame_generation();
+        if self.buffer.is_some() && self.shown_gen == gen && self.shown_label == label && self.shown_hint == hint {
+            return;
+        }
         let orb = crate::linux_nimbus::latest_frame();
-        let Some(pixmap) = crate::linux_vk::draw_voice_surface(label, hint, orb.as_ref().map(|(_, bytes)| bytes.as_slice()), orb.as_ref().map(|(px, _)| *px).unwrap_or(0)) else {
+        let Some(pixmap) = self.frames.paint(label, hint, orb.as_ref().map(|(_, bytes)| bytes.as_slice()), orb.as_ref().map(|(px, _)| *px).unwrap_or(0)) else {
             return;
         };
         let pixels = crate::linux_vk::draw_argb(&pixmap);
@@ -130,6 +142,9 @@ impl Pill {
         surface.frame(qh, surface.clone());
         if buffer.attach_to(surface).is_ok() {
             self.buffer = Some(buffer);
+            self.shown_gen = gen;
+            self.shown_label = label.to_string();
+            self.shown_hint = hint.to_string();
             self.layer.commit();
         }
     }

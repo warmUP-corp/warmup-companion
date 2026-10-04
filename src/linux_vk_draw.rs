@@ -1756,15 +1756,59 @@ pub fn paint_voice_key(pixmap: &mut Pixmap, frame: &Frame, orb: &[u8], orb_px: u
     );
 }
 
+pub struct VoicePainter {
+    fonts: FontSystem,
+    cache: SwashCache,
+    label: String,
+    hint: String,
+    base: Option<Pixmap>,
+}
+
+impl VoicePainter {
+    pub fn new() -> Self {
+        Self {
+            fonts: font_system(),
+            cache: SwashCache::new(),
+            label: String::new(),
+            hint: String::new(),
+            base: None,
+        }
+    }
+
+    pub fn paint(&mut self, label: &str, hint: &str, orb: Option<&[u8]>, orb_px: u32) -> Option<Pixmap> {
+        if self.base.is_none() || self.label != label || self.hint != hint {
+            self.base = draw_voice_pill_with(label, hint, None, 0, &mut self.fonts, &mut self.cache);
+            self.label = label.to_string();
+            self.hint = hint.to_string();
+        }
+        let mut frame = clone_pixmap(self.base.as_ref()?)?;
+        if let Some(orb) = orb {
+            blit_premul(&mut frame, orb, orb_px, 16.0, 16.0, 72.0);
+        }
+        Some(frame)
+    }
+}
+
 pub fn draw_voice_pill(label: &str, hint: &str, orb: Option<&[u8]>, orb_px: u32) -> Option<Pixmap> {
+    let mut fonts = font_system();
+    let mut cache = SwashCache::new();
+    draw_voice_pill_with(label, hint, orb, orb_px, &mut fonts, &mut cache)
+}
+
+fn draw_voice_pill_with(
+    label: &str,
+    hint: &str,
+    orb: Option<&[u8]>,
+    orb_px: u32,
+    mut fonts: &mut FontSystem,
+    mut cache: &mut SwashCache,
+) -> Option<Pixmap> {
     let scale = 1.0f32;
     let mut pixmap = Pixmap::new(420, 104)?;
     round_rect(&mut pixmap, 0.0, 0.0, 420.0, 104.0, 28.0, rgb(0x141414), 242);
     if let Some(orb) = orb {
         blit_premul(&mut pixmap, orb, orb_px, 16.0, 16.0, 72.0);
     }
-    let mut fonts = font_system();
-    let mut cache = SwashCache::new();
     text_aligned(
         &mut pixmap,
         &mut fonts,
