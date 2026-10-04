@@ -312,7 +312,8 @@ pub fn card_size(output_w: f32, output_h: f32, docked: bool, rows: &[KeyRow], st
     }
 }
 
-pub fn sheet_size(output_w: f32, output_h: f32) -> (u32, u32) {
+#[cfg(test)]
+fn sheet_size(output_w: f32, output_h: f32) -> (u32, u32) {
     let fit = (output_w / SHEET_W).min(output_h / SHEET_H).min(1.0).max(0.35);
     (
         (SHEET_W * fit).round().max(320.0) as u32,
@@ -905,12 +906,37 @@ fn paint_live(pixmap: &mut Pixmap, frame: &Frame, fonts: &mut FontSystem, cache:
 }
 
 fn draw_sheet_frame(frame: &Frame, fonts: &mut FontSystem, cache: &mut SwashCache) -> Option<Pixmap> {
-    let scale = frame.scale.max(1.0);
+    let (spec, pal, _, unit, scale, _, _) = scene(frame);
     let width = (frame.logical_w * scale).round().max(1.0) as u32;
     let height = (frame.logical_h * scale).round().max(1.0) as u32;
     let mut pixmap = Pixmap::new(width, height)?;
-    fill(&mut pixmap, rgb(0x1F1F1F), 255);
+    let panel = if frame.floating {
+        let panel_r = spec.panel_radius * unit;
+        let x = FLOATING_PANEL_INSET * scale;
+        let y = FLOATING_PANEL_INSET * scale;
+        let w = (frame.logical_w - 2.0 * FLOATING_PANEL_INSET) * scale;
+        let h = (frame.logical_h - 2.0 * FLOATING_PANEL_INSET) * scale;
+        round_rect(&mut pixmap, x, y, w, h, panel_r * scale, rgb(0x1F1F1F), 255);
+        stroke_rect(
+            &mut pixmap,
+            x + 0.5 * scale,
+            y + 0.5 * scale,
+            (w - scale).max(1.0),
+            (h - scale).max(1.0),
+            (panel_r - 0.5).max(0.0) * scale,
+            pal.panel_stroke,
+            (pal.panel_stroke_alpha * 255.0) as u8,
+            scale.max(1.0),
+        );
+        Some((x, y, w, h, panel_r * scale))
+    } else {
+        fill(&mut pixmap, rgb(0x1F1F1F), 255);
+        None
+    };
     paint_sheet(&mut pixmap, fonts, cache, frame.logical_w, frame.logical_h, scale, frame.ps5);
+    if let Some((x, y, w, h, radius)) = panel {
+        clip_round(&mut pixmap, x, y, w, h, radius);
+    }
     Some(pixmap)
 }
 
@@ -1734,7 +1760,8 @@ mod tests {
         sheet.logical_h = 546.0;
         let covered = draw(&sheet, &mut fonts, &mut cache, &mut Glide::default()).expect("sheet");
         assert_eq!((covered.width(), covered.height()), (1600, 546));
-        assert_eq!(&covered.data()[..4], &[0x1F, 0x1F, 0x1F, 0xFF]);
+        let inset = (12 * 1600 + 80) * 4;
+        assert_eq!(&covered.data()[inset..inset + 4], &[0x1F, 0x1F, 0x1F, 0xFF]);
     }
 
     #[test]

@@ -188,7 +188,7 @@ struct Shell {
     buffer: Option<Buffer>,
     ps5: bool,
     glide: draw::Glide,
-    placed: Option<(bool, bool, u32, u32, i32)>,
+    placed: Option<(bool, u32, u32, i32)>,
 }
 
 impl Shell {
@@ -248,16 +248,11 @@ impl Shell {
 
     fn apply_layout(&mut self) {
         let (output_w, output_h) = self.output_size();
-        let sheet = crate::vk_sheet::shown();
         let keyboard_docked = matches!(vk_layout_mode(), VkLayoutMode::Docked);
-        let (width, height) = if sheet {
-            draw::sheet_size(output_w, output_h)
-        } else {
-            desired_size(output_w, output_h)
-        };
-        let docked = keyboard_docked && !sheet;
+        let (width, height) = desired_size(output_w, output_h);
+        let docked = keyboard_docked;
         let margin = if keyboard_docked { 0 } else { draw::floating_bottom_margin(output_h) };
-        let key = (docked, sheet, width, height, margin);
+        let key = (docked, width, height, margin);
         if self.placed == Some(key) {
             return;
         }
@@ -591,7 +586,7 @@ impl LayerShellHandler for Shell {
         configure: LayerSurfaceConfigure,
         _: u32,
     ) {
-        let docked = self.placed.is_some_and(|(docked, _, _, _, _)| docked);
+        let docked = self.placed.is_some_and(|(docked, _, _, _)| docked);
         let mut changed = !self.configured;
         if docked && configure.new_size.0 > 0 && configure.new_size.0 != self.logical_w {
             self.logical_w = configure.new_size.0;
