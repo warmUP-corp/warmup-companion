@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- R3 dictation works on Linux. It records from the microphone, transcribes with the installed voxtype engine, and types the result into the focused field. A pause ends the recording.
 - Controller Center opens from the Linux tray. The settings window runs in its own process, so the tray thread no longer has to host it.
 - The Linux on-screen keyboard matches the on-screen design: a 1468-wide card, 138 by 102 keys, the suggestion bar, and a shortcut hint bar along the bottom. Holding View opens the shortcut overlay on the keyboard that is already showing: the same three columns as the on-screen design, drawn over that keyboard. The highlight follows the D-pad without redrawing the whole keyboard. The floating keyboard sits just above the bottom edge. Lettering is Selawik, the open-source face that matches the design's metrics.
 - On Linux, L3 opens the on-screen keyboard on a layer above other windows. It never takes keyboard focus. Docked mode reserves the bottom edge; floating mode stays centred. The keys are drawn in software, follow the keyboard colours in settings, and stay sharp on a fractional-scale display. The first time it runs, a short prompt says to press L3. The lock screen cannot show the keyboard.

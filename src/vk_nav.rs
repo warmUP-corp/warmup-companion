@@ -973,7 +973,12 @@ pub fn enter() {
 }
 
 pub fn start_voice_input() {
-    #[cfg(not(windows))]
+    #[cfg(all(target_os = "linux", feature = "speech"))]
+    {
+        crate::linux_speech::toggle();
+        return;
+    }
+    #[cfg(not(any(windows, all(target_os = "linux", feature = "speech"))))]
     {
         crate::install::log_line("voice input is not available on linux in this build");
         return;

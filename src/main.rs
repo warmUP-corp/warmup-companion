@@ -61,6 +61,8 @@ mod vk_predict;
 mod vk_sheet;
 #[cfg(target_os = "linux")]
 mod linux_type;
+#[cfg(all(target_os = "linux", feature = "speech"))]
+mod linux_speech;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
 mod linux_vk;
 #[cfg(windows)]
