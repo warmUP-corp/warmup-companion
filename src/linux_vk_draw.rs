@@ -1681,6 +1681,126 @@ fn cached_svg(svg: &str, px: u32, tint: Option<Rgb>) -> Option<std::sync::Arc<Ve
     Some(bytes)
 }
 
+pub fn paint_voice_key(pixmap: &mut Pixmap, frame: &Frame, orb: &[u8], orb_px: u32) {
+    let (_spec, pal, rects, _unit, scale, _radius, _key_h) = scene(frame);
+    let Some(rect) = rects.iter().find(|rect| {
+        frame
+            .rows
+            .get(rect.pos.row)
+            .and_then(|row| row.keys.get(rect.pos.col))
+            .is_some_and(|key| matches!(key.action, KeyAction::VoiceInput))
+    }) else {
+        return;
+    };
+    let side = (rect.right - rect.left).min(rect.bottom - rect.top) * 0.86;
+    let cx = (rect.left + rect.right) * 0.5;
+    let cy = (rect.top + rect.bottom) * 0.5;
+    blit_premul(
+        pixmap,
+        orb,
+        orb_px,
+        (cx - side * 0.5) * scale,
+        (cy - side * 0.5) * scale,
+        side * scale,
+    );
+    stroke_rect(
+        pixmap,
+        rect.left * scale,
+        rect.top * scale,
+        (rect.right - rect.left) * scale,
+        (rect.bottom - rect.top) * scale,
+        ((rect.bottom - rect.top) * 0.16) * scale,
+        pal.accent,
+        180,
+        (2.0 * scale).max(1.0),
+    );
+}
+
+pub fn draw_voice_pill(label: &str, hint: &str, orb: Option<&[u8]>, orb_px: u32) -> Option<Pixmap> {
+    let scale = 1.0f32;
+    let mut pixmap = Pixmap::new(420, 104)?;
+    round_rect(&mut pixmap, 0.0, 0.0, 420.0, 104.0, 28.0, rgb(0x141414), 242);
+    if let Some(orb) = orb {
+        blit_premul(&mut pixmap, orb, orb_px, 16.0, 16.0, 72.0);
+    }
+    let mut fonts = font_system();
+    let mut cache = SwashCache::new();
+    text_aligned(
+        &mut pixmap,
+        &mut fonts,
+        &mut cache,
+        label,
+        (104.0, 18.0, 400.0, 58.0),
+        26.0 * scale,
+        Weight::NORMAL,
+        rgb(0xFFFFFF),
+        255,
+        scale,
+        Align::Left,
+    );
+    text_aligned(
+        &mut pixmap,
+        &mut fonts,
+        &mut cache,
+        hint,
+        (104.0, 54.0, 400.0, 90.0),
+        16.0 * scale,
+        Weight::NORMAL,
+        rgb(0xFFFFFF),
+        0xA6,
+        scale,
+        Align::Left,
+    );
+    Some(pixmap)
+}
+
+fn blit_premul(pixmap: &mut Pixmap, src: &[u8], src_px: u32, x: f32, y: f32, size: f32) {
+    if src_px == 0 || size < 1.0 {
+        return;
+    }
+    let width = pixmap.width();
+    let height = pixmap.height();
+    let dest = pixmap.data_mut();
+    let x0 = x.floor() as i32;
+    let y0 = y.floor() as i32;
+    let side = size.ceil() as i32;
+    for row in 0..side {
+        let dy = y0 + row;
+        if dy < 0 || dy >= height as i32 {
+            continue;
+        }
+        let sy = ((row as f32 / size) * src_px as f32) as u32;
+        if sy >= src_px {
+            continue;
+        }
+        for col in 0..side {
+            let dx = x0 + col;
+            if dx < 0 || dx >= width as i32 {
+                continue;
+            }
+            let sx = ((col as f32 / size) * src_px as f32) as u32;
+            if sx >= src_px {
+                continue;
+            }
+            let si = ((sy * src_px + sx) * 4) as usize;
+            if si + 3 >= src.len() {
+                continue;
+            }
+            let sa = src[si + 3] as u32;
+            if sa == 0 {
+                continue;
+            }
+            let di = ((dy as u32 * width + dx as u32) * 4) as usize;
+            let inv = 255 - sa;
+            for channel in 0..3 {
+                let blended = src[si + channel] as u32 + dest[di + channel] as u32 * inv / 255;
+                dest[di + channel] = blended.min(255) as u8;
+            }
+            dest[di + 3] = (sa + dest[di + 3] as u32 * inv / 255).min(255) as u8;
+        }
+    }
+}
+
 pub fn to_argb(pixmap: &Pixmap) -> Vec<u8> {
     let mut out = Vec::with_capacity(pixmap.data().len());
     for px in pixmap.data().chunks_exact(4) {

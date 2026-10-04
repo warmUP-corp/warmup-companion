@@ -32,6 +32,21 @@ use crate::config::{vk_layout_mode, vk_style, VkLayoutMode, VkStyle};
 #[path = "linux_vk_draw.rs"]
 mod draw;
 
+#[cfg(feature = "speech")]
+pub fn draw_voice_surface(
+    label: &str,
+    hint: &str,
+    orb: Option<&[u8]>,
+    orb_px: u32,
+) -> Option<tiny_skia::Pixmap> {
+    draw::draw_voice_pill(label, hint, orb, orb_px)
+}
+
+#[cfg(feature = "speech")]
+pub fn draw_argb(pixmap: &tiny_skia::Pixmap) -> Vec<u8> {
+    draw::to_argb(pixmap)
+}
+
 static STOP: AtomicBool = AtomicBool::new(false);
 static WAKE: Mutex<Option<UnixStream>> = Mutex::new(None);
 
@@ -340,9 +355,16 @@ impl Shell {
             floating,
             sheet: crate::vk_sheet::shown(),
         };
-        let Some(pixmap) = draw::draw(&frame, &mut self.fonts, &mut self.cache, &mut self.glide) else {
+        let Some(mut pixmap) = draw::draw(&frame, &mut self.fonts, &mut self.cache, &mut self.glide) else {
             return;
         };
+        #[cfg(feature = "speech")]
+        if crate::linux_speech::visual_active() {
+            if let Some((px, bytes)) = crate::linux_nimbus::latest_frame() {
+                draw::paint_voice_key(&mut pixmap, &frame, &bytes, px);
+            }
+            self.glide.animating = true;
+        }
         let pixels = draw::to_argb(&pixmap);
         let buffer_w = pixmap.width() as i32;
         let buffer_h = pixmap.height() as i32;

@@ -1,30 +1,41 @@
-use std::path::PathBuf;
-use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::{Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat};
 
 const MAX_RECORD_S: f32 = 180.0;
 const AUTO_STOP_S: f32 = 2.5;
+const PORT: u16 = 17182;
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static STOP: AtomicBool = AtomicBool::new(false);
+static PHASE: AtomicU8 = AtomicU8::new(0);
+static LEVEL: AtomicU32 = AtomicU32::new(0);
 
 pub fn running() -> bool {
     RUNNING.load(Ordering::SeqCst)
 }
 
+pub fn visual_active() -> bool {
+    PHASE.load(Ordering::SeqCst) != 0 || running()
+}
+
+pub fn phase() -> u8 {
+    PHASE.load(Ordering::SeqCst)
+}
+
+pub fn level() -> f32 {
+    f32::from_bits(LEVEL.load(Ordering::SeqCst)).clamp(0.0, 1.0)
+}
+
 pub fn available() -> bool {
-    Command::new("voxtype")
-        .arg("-V")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    model_dir().is_some() && onnx_runtime().is_some()
 }
 
 pub fn request_stop() {
@@ -39,18 +50,32 @@ pub fn toggle() {
         return;
     }
     if !available() {
-        let message = "Dictation needs voxtype, with a Whisper or Parakeet model installed.";
+        let message = "Dictation needs the Parakeet model and ONNX Runtime next to it.";
         crate::install::log_line(message);
         let _ = crate::linux_notify::notify("Warmup Companion", message);
         return;
     }
     crate::install::log_line("vk voice input: ON");
     crate::vk_nav::set_voice_input_active(true);
-    let _ = crate::linux_notify::notify("Warmup Companion", "Listening. Pause when you are done.");
+    crate::linux_nimbus::ensure_running();
+    #[cfg(feature = "gamepad")]
+    crate::linux_voice::show();
     if let Err(error) = start() {
         crate::vk_nav::set_voice_input_active(false);
+        set_phase(0);
         crate::install::log_line(&format!("voice input failed: {error}"));
         let _ = crate::linux_notify::notify("Warmup Companion", &error);
+    }
+}
+
+pub fn run_server() -> Result<(), String> {
+    #[cfg(feature = "parakeet")]
+    {
+        return engine::serve();
+    }
+    #[cfg(not(feature = "parakeet"))]
+    {
+        Err("the Parakeet voice engine is not built into this binary".into())
     }
 }
 
@@ -59,6 +84,7 @@ fn start() -> Result<(), String> {
         return Ok(());
     }
     STOP.store(false, Ordering::SeqCst);
+    set_phase(1);
     std::thread::Builder::new()
         .name("warmup-dictation".into())
         .spawn(|| {
@@ -66,17 +92,29 @@ fn start() -> Result<(), String> {
                 crate::install::log_line(&format!("voice input: {error}"));
                 let _ = crate::linux_notify::notify("Warmup Companion", &error);
             }
+            set_phase(0);
+            LEVEL.store(0.0f32.to_bits(), Ordering::SeqCst);
             RUNNING.store(false, Ordering::SeqCst);
             crate::vk_nav::set_voice_input_active(false);
         })
         .map_err(|error| {
             RUNNING.store(false, Ordering::SeqCst);
+            set_phase(0);
             error.to_string()
         })?;
     Ok(())
 }
 
+fn set_phase(phase: u8) {
+    PHASE.store(phase, Ordering::SeqCst);
+}
+
+fn set_level(level: f32) {
+    LEVEL.store(level.clamp(0.0, 1.0).to_bits(), Ordering::SeqCst);
+}
+
 fn record_and_type() -> Result<(), String> {
+    ensure_server()?;
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -121,10 +159,10 @@ fn record_and_type() -> Result<(), String> {
     stream
         .play()
         .map_err(|error| format!("mic stream play: {error}"))?;
-
+    let ready = std::thread::spawn(wait_ready);
     let tick = Duration::from_millis(50);
     let dt = tick.as_secs_f32();
-    let mut all: Vec<f32> = Vec::new();
+    let mut all = Vec::<f32>::new();
     let mut noise = 0.0f32;
     let mut warmup = 16u32;
     let mut had_speech = false;
@@ -147,13 +185,16 @@ fn record_and_type() -> Result<(), String> {
             warmup -= 1;
         }
         let gate = (noise * 1.6).max(0.012);
-        if rms > gate {
+        let voiced = rms > gate;
+        if voiced {
             had_speech = true;
             silence_s = 0.0;
         } else {
             silence_s += dt;
             noise = noise * 0.97 + rms * 0.03;
         }
+        let target = ((rms - noise) / gate.max(0.02)).clamp(0.0, 1.0);
+        set_level(target);
         let auto_stop = had_speech && silence_s >= AUTO_STOP_S;
         if STOP.load(Ordering::SeqCst) || auto_stop || secs >= MAX_RECORD_S {
             if auto_stop {
@@ -163,17 +204,19 @@ fn record_and_type() -> Result<(), String> {
         }
     }
     drop(stream);
-
+    set_phase(2);
+    set_level(0.0);
     let secs = all.len() as f32 / in_rate as f32;
     if all.is_empty() || secs < 0.3 {
         crate::install::log_line("speech: nothing recorded");
         return Ok(());
     }
+    ready
+        .join()
+        .map_err(|_| "voice engine thread panicked".to_string())?
+        .map_err(|error| format!("voice engine: {error}"))?;
     let samples = resample_16k(&all, in_rate);
-    let path = wav_path()?;
-    std::fs::write(&path, wav_16k_mono(&samples)).map_err(|error| error.to_string())?;
-    let heard = transcribe(&path)?;
-    let _ = std::fs::remove_file(&path);
+    let heard = transcribe_via_server(&samples)?;
     let clean = clean_transcript(&heard);
     if clean.is_empty() {
         crate::install::log_line(&format!("speech: heard ({secs:.1}s) non-speech, skipped"));
@@ -184,42 +227,105 @@ fn record_and_type() -> Result<(), String> {
     Ok(())
 }
 
-fn wav_path() -> Result<PathBuf, String> {
-    let dir = crate::paths::state_dir().join("speech");
-    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-    Ok(dir.join("utterance.wav"))
+fn has_model(dir: &Path) -> bool {
+    let encoder = dir.join("encoder-model.int8.onnx").is_file() || dir.join("encoder-model.onnx").is_file();
+    let decoder = dir.join("decoder_joint-model.int8.onnx").is_file()
+        || dir.join("decoder_joint-model.onnx").is_file()
+        || dir.join("decoder_joint.onnx").is_file();
+    encoder && decoder && dir.join("vocab.txt").is_file()
 }
 
-fn transcribe(path: &std::path::Path) -> Result<String, String> {
-    let output = Command::new("voxtype")
-        .arg("-q")
-        .arg("transcribe")
-        .arg(path)
-        .output()
-        .map_err(|error| format!("voxtype: {error}"))?;
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "voxtype failed: {}",
-            err.lines().next().unwrap_or("transcription failed")
-        ));
+fn model_dir() -> Option<PathBuf> {
+    let own = crate::paths::data_dir().join("speech").join("parakeet");
+    if has_model(&own) {
+        return Some(own);
     }
-    Ok(transcript_from_voxtype(&String::from_utf8_lossy(&output.stdout)))
+    if let Some(home) = std::env::var_os("HOME") {
+        let bundled = PathBuf::from(home)
+            .join(".local/share/voxtype/models/parakeet-tdt-0.6b-v3-int8");
+        if has_model(&bundled) {
+            return Some(bundled);
+        }
+    }
+    None
 }
 
-fn transcript_from_voxtype(stdout: &str) -> String {
-    stdout
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| {
-            !line.is_empty()
-                && !line.starts_with("Loading ")
-                && !line.starts_with("Audio format:")
-                && !line.starts_with("Processing ")
-        })
-        .unwrap_or("")
-        .to_string()
+fn onnx_runtime() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("ORT_DYLIB_PATH") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    if let Some(dir) = model_dir() {
+        let beside = dir.join("libonnxruntime.so");
+        if beside.is_file() {
+            return Some(beside);
+        }
+    }
+    [
+        "/usr/lib/libonnxruntime.so",
+        "/usr/lib/voxtype/cuda-13/libonnxruntime.so",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|path| path.is_file())
+}
+
+fn addr() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], PORT))
+}
+
+fn server_up() -> bool {
+    TcpStream::connect_timeout(&addr(), Duration::from_millis(200)).is_ok()
+}
+
+fn ensure_server() -> Result<(), String> {
+    if server_up() {
+        return Ok(());
+    }
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    Command::new(exe)
+        .arg("--parakeet-server")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("voice engine: {error}"))?;
+    crate::install::log_line("speech: starting the voice engine");
+    Ok(())
+}
+
+fn wait_ready() -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        if server_up() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    Err("the voice engine did not become ready".into())
+}
+
+fn transcribe_via_server(samples: &[f32]) -> Result<String, String> {
+    let mut stream = TcpStream::connect_timeout(&addr(), Duration::from_secs(2))
+        .map_err(|error| format!("connect: {error}"))?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
+    let mut buf = Vec::with_capacity(4 + samples.len() * 4);
+    buf.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+    for sample in samples {
+        buf.extend_from_slice(&sample.to_le_bytes());
+    }
+    stream
+        .write_all(&buf)
+        .map_err(|error| format!("send: {error}"))?;
+    let _ = stream.shutdown(Shutdown::Write);
+    let mut resp = Vec::new();
+    stream
+        .read_to_end(&mut resp)
+        .map_err(|error| format!("recv: {error}"))?;
+    Ok(String::from_utf8_lossy(&resp).trim().to_string())
 }
 
 fn clean_transcript(text: &str) -> String {
@@ -268,38 +374,78 @@ fn resample_16k(input: &[f32], in_rate: u32) -> Vec<f32> {
     out
 }
 
-fn wav_16k_mono(samples: &[f32]) -> Vec<u8> {
-    let data_len = (samples.len() * 2) as u32;
-    let mut bytes = Vec::with_capacity(44 + samples.len() * 2);
-    bytes.extend_from_slice(b"RIFF");
-    bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
-    bytes.extend_from_slice(b"WAVE");
-    bytes.extend_from_slice(b"fmt ");
-    bytes.extend_from_slice(&16u32.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&16_000u32.to_le_bytes());
-    bytes.extend_from_slice(&(16_000u32 * 2).to_le_bytes());
-    bytes.extend_from_slice(&2u16.to_le_bytes());
-    bytes.extend_from_slice(&16u16.to_le_bytes());
-    bytes.extend_from_slice(b"data");
-    bytes.extend_from_slice(&data_len.to_le_bytes());
-    for &sample in samples {
-        let value = (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
-        bytes.extend_from_slice(&value.to_le_bytes());
+#[cfg(feature = "parakeet")]
+mod engine {
+    use super::{addr, model_dir, onnx_runtime, PORT};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+
+    use parakeet_rs::Transcriber;
+
+    pub fn serve() -> Result<(), String> {
+        let dir = model_dir().ok_or("the Parakeet model is not installed")?;
+        let runtime = onnx_runtime().ok_or("ONNX Runtime was not found")?;
+        std::env::set_var("ORT_DYLIB_PATH", &runtime);
+        crate::install::log_line(&format!(
+            "parakeet-server: loading {}",
+            dir.display()
+        ));
+        let mut model = parakeet_rs::ParakeetTDT::from_pretrained(&dir, None)
+            .map_err(|error| format!("parakeet load: {error}"))?;
+        let listener = TcpListener::bind(addr()).map_err(|error| format!("parakeet-server bind {PORT}: {error}"))?;
+        crate::install::log_line(&format!("parakeet-server: ready on {}", addr()));
+        for stream in listener.incoming() {
+            match stream {
+                Ok(mut socket) => {
+                    if let Err(error) = handle(&mut socket, &mut model) {
+                        crate::install::log_line(&format!("parakeet-server: {error}"));
+                    }
+                }
+                Err(error) => crate::install::log_line(&format!("parakeet-server: accept: {error}")),
+            }
+        }
+        Ok(())
     }
-    bytes
+
+    fn handle(socket: &mut TcpStream, model: &mut parakeet_rs::ParakeetTDT) -> Result<(), String> {
+        let mut lenb = [0u8; 4];
+        if socket.read_exact(&mut lenb).is_err() {
+            return Ok(());
+        }
+        let count = u32::from_le_bytes(lenb);
+        if count == u32::MAX {
+            crate::install::log_line("parakeet-server: unload requested, exiting");
+            std::process::exit(0);
+        }
+        let count = count as usize;
+        if count == 0 {
+            return Ok(());
+        }
+        if count > 16_000_000 {
+            return Err(format!("sample count too large: {count}"));
+        }
+        let mut bytes = vec![0u8; count * 4];
+        socket
+            .read_exact(&mut bytes)
+            .map_err(|error| format!("read samples: {error}"))?;
+        let samples: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect();
+        let text = model
+            .transcribe_samples(samples, 16_000, 1, None)
+            .map(|result| result.text)
+            .map_err(|error| format!("parakeet: {error}"))?;
+        socket
+            .write_all(text.as_bytes())
+            .map_err(|error| format!("write: {error}"))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_transcript, transcript_from_voxtype};
-
-    #[test]
-    fn voxtype_stdout_keeps_the_transcript_line() {
-        let stdout = "Loading audio file: \"/tmp/a.wav\"\nAudio format: 16000 Hz, 1 channel(s), Int\nProcessing 16000 samples (1.00s)...\n\nhello world\n";
-        assert_eq!(transcript_from_voxtype(stdout), "hello world");
-    }
+    use super::clean_transcript;
 
     #[test]
     fn annotations_are_not_typed() {

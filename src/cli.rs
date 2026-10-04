@@ -275,6 +275,17 @@ fn print_gamepad_settings() {
 
 #[cfg(target_os = "linux")]
 pub fn dispatch_install_or_service(args: &[String]) {
+    #[cfg(feature = "speech")]
+    if args.iter().any(|arg| arg == "--parakeet-server") {
+        let code = match crate::linux_speech::run_server() {
+            Ok(()) => 0,
+            Err(error) => {
+                crate::install::log_line(&format!("parakeet-server failed: {error}"));
+                1
+            }
+        };
+        std::process::exit(code);
+    }
     match args.get(1).map(String::as_str) {
         Some("install") => {
             crate::install::run_install();
