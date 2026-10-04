@@ -24,10 +24,11 @@ const BAR_LABEL_PX: f32 = 19.0;
 const BAR_CONNECTOR_PX: f32 = 17.0;
 const BAR_PREFIX_PX: f32 = 20.0;
 const BAR_SEP_PX: f32 = 18.0;
-const SHEET_PAD_TOP: f32 = 16.0;
-const SHEET_PAD_X: f32 = 24.0;
-const SHEET_PAD_BOTTOM: f32 = 16.0;
-const SHEET_COL_GAP: f32 = 40.0;
+const SHEET_W: f32 = 1600.0;
+const SHEET_H: f32 = 546.0;
+const SHEET_PAD_TOP: f32 = 24.0;
+const SHEET_PAD_BOTTOM: f32 = 32.0;
+const SHEET_COL_GAP: f32 = 72.0;
 const SHEET_ROW_H: f32 = 70.0;
 const SHEET_HEADER_PX: f32 = 18.0;
 const SHEET_ACTION_PX: f32 = 19.0;
@@ -46,24 +47,10 @@ const VK_KB_REF_H: f32 = 384.0;
 
 #[allow(dead_code)]
 fn sheet_metrics_are_the_windows_ones() -> f32 {
-    SHEET_PAD_TOP
-        + SHEET_PAD_X
-        + SHEET_PAD_BOTTOM
-        + SHEET_COL_GAP
-        + SHEET_ROW_H
-        + SHEET_HEADER_PX
-        + SHEET_ACTION_PX
-        + SHEET_TOKEN_PX
-        + SHEET_GLYPH
-        + SHEET_SHARE
-        + SHEET_TOKEN_GAP
-        + SHEET_ACTION_GAP
-        + SHEET_TRAIL
-        + LEGEND_MIN_TEXT_PX
+    LEGEND_MIN_TEXT_PX
         + LEGEND_SEP.len() as f32
         + ALPHA_SECONDARY
         + ALPHA_SEP
-        + ALPHA_LINE
         + BAR_GLYPH
         + BAR_SHARE
         + BAR_GAP
@@ -263,6 +250,7 @@ pub struct Glide {
     pub last: Option<Instant>,
     pub strip_at: Option<Instant>,
     pub animating: bool,
+    base: Option<(u64, Pixmap)>,
 }
 
 impl Default for Glide {
@@ -272,6 +260,7 @@ impl Default for Glide {
             last: None,
             strip_at: None,
             animating: false,
+            base: None,
         }
     }
 }
@@ -323,6 +312,14 @@ pub fn card_size(output_w: f32, output_h: f32, docked: bool, rows: &[KeyRow], st
     }
 }
 
+pub fn sheet_size(output_w: f32, output_h: f32) -> (u32, u32) {
+    let fit = (output_w / SHEET_W).min(output_h / SHEET_H).min(1.0).max(0.35);
+    (
+        (SHEET_W * fit).round().max(320.0) as u32,
+        (SHEET_H * fit).round().max(160.0) as u32,
+    )
+}
+
 fn legend_band_height(scale: f32, spec: &Spec) -> f32 {
     60.0 * ref_unit(scale, spec)
 }
@@ -338,6 +335,37 @@ pub fn draw(
     glide: &mut Glide,
 ) -> Option<Pixmap> {
     let _ = sheet_metrics_are_the_windows_ones();
+    if frame.sheet {
+        glide.base = None;
+        glide.animating = false;
+        return draw_sheet_frame(frame, fonts, cache);
+    }
+    let now = Instant::now();
+    if strip_blocking(glide, frame, now) {
+        glide.base = None;
+        return render_keyboard(frame, fonts, cache, glide, true);
+    }
+    let stamp = keyboard_stamp(frame);
+    if glide.base.as_ref().map(|(s, _)| *s) != Some(stamp) {
+        let mut base = render_keyboard(frame, fonts, cache, glide, false)?;
+        if let Some(copy) = clone_pixmap(&base) {
+            glide.base = Some((stamp, copy));
+        }
+        paint_live(&mut base, frame, fonts, cache, glide, false);
+        return Some(base);
+    }
+    let mut shown = glide.base.as_ref().and_then(|(_, pixmap)| clone_pixmap(pixmap))?;
+    paint_live(&mut shown, frame, fonts, cache, glide, true);
+    Some(shown)
+}
+
+fn render_keyboard(
+    frame: &Frame,
+    fonts: &mut FontSystem,
+    cache: &mut SwashCache,
+    glide: &mut Glide,
+    highlight: bool,
+) -> Option<Pixmap> {
     let scale = frame.scale.max(1.0);
     let width = (frame.logical_w * scale).round().max(1.0) as u32;
     let height = (frame.logical_h * scale).round().max(1.0) as u32;
@@ -402,90 +430,16 @@ pub fn draw(
         None
     };
     for rect in &rects {
-        let Some(key) = frame.rows.get(rect.pos.row).and_then(|row| row.keys.get(rect.pos.col)) else { continue };
-        let selected = rect.pos == frame.sel;
-        let press = frame.pressed.filter(|(p, _)| *p == rect.pos).map(|(_, s)| s).unwrap_or(1.0);
-        let (left, top, right, bottom) = scaled_about(rect, press);
-        let action = is_action(&key.action);
-        let modifier = !selected
-            && ((matches!(key.action, KeyAction::Shift) && frame.shift && frame.caps)
-                || (matches!(key.action, KeyAction::Symbols) && frame.symbol && frame.symbol_locked));
-        let (fill_c, label_c) = if selected {
-            (pal.accent, pal.sel_text)
-        } else if modifier {
-            (mix(pal.key, pal.accent, 0.35), pal.text)
-        } else if action {
-            (pal.key_action, pal.text)
+        let selected = highlight && rect.pos == frame.sel;
+        let press = if highlight {
+            frame.pressed.filter(|(p, _)| *p == rect.pos).map(|(_, s)| s).unwrap_or(1.0)
         } else {
-            (pal.key, pal.text)
+            1.0
         };
-        if selected {
-            if let Some((dy, blur, alpha)) = spec.sel_shadow {
-                blur_shadow(&mut pixmap, left * scale, top * scale, (right - left) * scale, (bottom - top) * scale, radius * scale, dy * unit * scale, blur * unit * scale, alpha);
-            }
-        } else if spec.key_shadow_dy > 0.0 {
-            let dy = (spec.key_shadow_dy * unit).max(1.0);
-            round_rect(&mut pixmap, left * scale, (top + dy) * scale, (right - left) * scale, (bottom - top) * scale, radius * scale, Rgb { r: 0, g: 0, b: 0 }, (spec.key_shadow_alpha * 255.0) as u8);
-        }
-        round_rect(&mut pixmap, left * scale, top * scale, (right - left) * scale, (bottom - top) * scale, radius * scale, fill_c, 255);
-        let locked = (matches!(key.action, KeyAction::Shift) && frame.caps) || (matches!(key.action, KeyAction::Symbols) && frame.symbol_locked);
-        if locked {
-            let pill_w = ((right - left) * 0.28).min(24.0 * unit);
-            let pill_h = (3.0 * unit).max(2.0);
-            let cx = (left + right) * 0.5;
-            let yb = bottom - 5.0 * unit;
-            round_rect(&mut pixmap, (cx - pill_w * 0.5) * scale, (yb - pill_h) * scale, pill_w * scale, pill_h * scale, pill_h * 0.5 * scale, if selected { pal.sel_text } else { pal.accent }, 255);
-        }
-        let is_space = matches!(key.action, KeyAction::Vk(vk) if vk == VK_SPACE);
-        let dim = if selected { pal.sel_text } else { pal.text_dim };
-        let dim_a = (spec.number_alpha * 255.0) as u8;
-        if let Some(sub) = key.sublabel.as_deref().filter(|_| !is_space) {
-            let band = band_at(left, top, right, spec.number_cy * unit, key_h);
-            text(&mut pixmap, fonts, cache, sub, band, spec.number_px * unit * scale, Weight::NORMAL, dim, dim_a, scale);
-        }
-        if matches!(key.action, KeyAction::VoiceInput) {
-            blit_svg(&mut pixmap, MIC, left, top, right, bottom, spec.icon_px * unit, scale, Some(label_c), 255);
-        } else if is_space {
-            if let Some(word) = spec.space_label {
-                text(&mut pixmap, fonts, cache, word, (left, top, right, bottom), spec.space_label_px * unit * scale, Weight::NORMAL, label_c, 255, scale);
-            } else if let Some(sub) = key.sublabel.as_deref() {
-                let cap = band_at(left, top, right, spec.caption_cy * unit, key_h);
-                text(&mut pixmap, fonts, cache, sub, cap, spec.number_px * unit * scale, Weight::MEDIUM, dim, dim_a, scale);
-                let icon = band_at(left, top, right, spec.space_icon_cy * unit, key_h);
-                blit_svg(&mut pixmap, SPACE, icon.0, icon.1, icon.2, icon.3, spec.space_icon_px * unit, scale, Some(label_c), 255);
-            }
-        } else if let Some((svg, large)) = key_icon(&key.action, frame.caps) {
-            let px = if large { spec.icon_large_px } else { spec.icon_px } * unit;
-            blit_svg(&mut pixmap, svg, left, top, right, bottom, px, scale, Some(label_c), 255);
-        } else {
-            let mut glyph = key.label.clone();
-            if spec.trim_symbols && matches!(key.action, KeyAction::Symbols) {
-                glyph = glyph.trim_start_matches('?').to_string();
-            }
-            if !glyph.is_empty() {
-                let weight = if glyph.chars().count() > 1 { spec.word_weight } else { spec.label_weight };
-                let px = if glyph.chars().count() > 1 { spec.word_px } else { spec.label_px };
-                let band = if key.sublabel.is_some() {
-                    band_at(left, top, right, spec.label_cy * unit, key_h)
-                } else {
-                    (left, top, right, bottom)
-                };
-                text(&mut pixmap, fonts, cache, &glyph, band, px * unit * scale, weight, label_c, 255, scale);
-            }
-        }
-        if let Some(hint) = key_hint(&key.action).filter(|_| !spec.mono) {
-            let badge = spec.hint_badge * unit;
-            let inset = spec.hint_inset * unit;
-            let bx = left + inset;
-            let by = top + inset;
-            if let Some(svg) = hint_svg(frame.ps5, hint) {
-                blit_svg(&mut pixmap, svg, bx, by, bx + badge, by + badge, badge, scale, None, 255);
-            }
-        }
+        paint_key(&mut pixmap, fonts, cache, frame, &spec, &pal, rect, unit, key_h, scale, radius, selected, press, true);
     }
-    if let Some((l, t, r, b)) = glide.ring {
-        let ring_w = (spec.sel_ring_w * unit).max(1.0);
-        stroke_rect(&mut pixmap, (l + ring_w * 0.5) * scale, (t + ring_w * 0.5) * scale, (r - l - ring_w) * scale, (b - t - ring_w) * scale, (radius - ring_w * 0.5).max(0.0) * scale, pal.sel_ring, 255, ring_w * scale);
+    if highlight {
+        stroke_ring(&mut pixmap, glide, &spec, &pal, unit, scale, radius);
     }
     let (strip_alpha, strip_dy) = if frame.strip.is_some() {
         if glide.strip_at.is_none() {
@@ -504,9 +458,6 @@ pub fn draw(
         draw_strip(&mut pixmap, fonts, cache, &spec, &pal, strip, &rects, unit, scale, frame.ps5, strip_dy, strip_alpha);
     }
     draw_legend(&mut pixmap, fonts, cache, &spec, &pal, &rects, frame.logical_w, frame.logical_h, lu, scale, frame.ps5);
-    if frame.sheet {
-        draw_sheet(&mut pixmap, fonts, cache, &pal, frame.logical_w, frame.logical_h, lu, scale, frame.ps5);
-    }
     if let Some((x, y, w, h, radius)) = panel {
         clip_round(&mut pixmap, x, y, w, h, radius);
     }
@@ -678,29 +629,318 @@ fn draw_legend(
     }
 }
 
-struct SheetItem {
-    title: bool,
-    parts: &'static [Leg],
-    label: &'static str,
+fn strip_blocking(glide: &Glide, frame: &Frame, now: Instant) -> bool {
+    if frame.strip.is_none() {
+        return false;
+    }
+    match glide.strip_at {
+        None => true,
+        Some(t) => now.saturating_duration_since(t).as_secs_f32() * 1000.0 < vk_motion::STRIP_ENTER_MS,
+    }
 }
 
-fn sheet_item(title: bool, parts: &'static [Leg], label: &'static str) -> SheetItem {
-    SheetItem { title, parts, label }
+fn keyboard_stamp(frame: &Frame) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    frame.logical_w.to_bits().hash(&mut hasher);
+    frame.logical_h.to_bits().hash(&mut hasher);
+    frame.scale.to_bits().hash(&mut hasher);
+    frame.scale_w.to_bits().hash(&mut hasher);
+    ui_scale().to_bits().hash(&mut hasher);
+    matches!(frame.style, VkStyle::Mono).hash(&mut hasher);
+    frame.ps5.hash(&mut hasher);
+    frame.shift.hash(&mut hasher);
+    frame.caps.hash(&mut hasher);
+    frame.symbol.hash(&mut hasher);
+    frame.symbol_locked.hash(&mut hasher);
+    frame.floating.hash(&mut hasher);
+    frame.theme.bg.hash(&mut hasher);
+    frame.theme.key.hash(&mut hasher);
+    frame.theme.accent.hash(&mut hasher);
+    frame.theme.text.hash(&mut hasher);
+    frame.theme.sel_text.hash(&mut hasher);
+    frame.theme.border.hash(&mut hasher);
+    for row in &frame.rows {
+        for key in &row.keys {
+            key.label.hash(&mut hasher);
+            key.sublabel.hash(&mut hasher);
+            key.span.to_bits().hash(&mut hasher);
+            match &key.action {
+                KeyAction::Char(c) => {
+                    0u8.hash(&mut hasher);
+                    c.hash(&mut hasher);
+                }
+                KeyAction::Vk(vk) => {
+                    1u8.hash(&mut hasher);
+                    vk.0.hash(&mut hasher);
+                }
+                KeyAction::Shift => 2u8.hash(&mut hasher),
+                KeyAction::Symbols => 3u8.hash(&mut hasher),
+                KeyAction::PredictPrev => 4u8.hash(&mut hasher),
+                KeyAction::PredictNext => 5u8.hash(&mut hasher),
+                KeyAction::VoiceInput => 6u8.hash(&mut hasher),
+            }
+        }
+    }
+    if let Some(strip) = &frame.strip {
+        true.hash(&mut hasher);
+        strip.visible.hash(&mut hasher);
+        strip.highlight_slot.hash(&mut hasher);
+        strip.engaged.hash(&mut hasher);
+    } else {
+        false.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
-fn draw_sheet(
+fn clone_pixmap(src: &Pixmap) -> Option<Pixmap> {
+    let size = tiny_skia::IntSize::from_wh(src.width(), src.height())?;
+    Pixmap::from_vec(src.data().to_vec(), size)
+}
+
+fn paint_key(
     pixmap: &mut Pixmap,
     fonts: &mut FontSystem,
     cache: &mut SwashCache,
+    frame: &Frame,
+    spec: &Spec,
     pal: &Pal,
-    frame_w: f32,
-    frame_h: f32,
-    u: f32,
+    rect: &KeyRect,
+    unit: f32,
+    key_h: f32,
     scale: f32,
-    ps5: bool,
+    radius: f32,
+    selected: bool,
+    press: f32,
+    shadow: bool,
 ) {
-    let legend_top = frame_h - 60.0 * u;
-    round_rect(pixmap, 0.0, 0.0, frame_w * scale, legend_top * scale, 0.0, pal.bg, 255);
+    let Some(key) = frame.rows.get(rect.pos.row).and_then(|row| row.keys.get(rect.pos.col)) else { return };
+    let (left, top, right, bottom) = scaled_about(rect, press);
+    let action = is_action(&key.action);
+    let modifier = !selected
+        && ((matches!(key.action, KeyAction::Shift) && frame.shift && frame.caps)
+            || (matches!(key.action, KeyAction::Symbols) && frame.symbol && frame.symbol_locked));
+    let (fill_c, label_c) = if selected {
+        (pal.accent, pal.sel_text)
+    } else if modifier {
+        (mix(pal.key, pal.accent, 0.35), pal.text)
+    } else if action {
+        (pal.key_action, pal.text)
+    } else {
+        (pal.key, pal.text)
+    };
+    if shadow {
+        if selected {
+            if let Some((dy, blur, alpha)) = spec.sel_shadow {
+                blur_shadow(pixmap, left * scale, top * scale, (right - left) * scale, (bottom - top) * scale, radius * scale, dy * unit * scale, blur * unit * scale, alpha);
+            }
+        } else if spec.key_shadow_dy > 0.0 {
+            let dy = (spec.key_shadow_dy * unit).max(1.0);
+            round_rect(pixmap, left * scale, (top + dy) * scale, (right - left) * scale, (bottom - top) * scale, radius * scale, Rgb { r: 0, g: 0, b: 0 }, (spec.key_shadow_alpha * 255.0) as u8);
+        }
+    }
+    round_rect(pixmap, left * scale, top * scale, (right - left) * scale, (bottom - top) * scale, radius * scale, fill_c, 255);
+    let locked = (matches!(key.action, KeyAction::Shift) && frame.caps) || (matches!(key.action, KeyAction::Symbols) && frame.symbol_locked);
+    if locked {
+        let pill_w = ((right - left) * 0.28).min(24.0 * unit);
+        let pill_h = (3.0 * unit).max(2.0);
+        let cx = (left + right) * 0.5;
+        let yb = bottom - 5.0 * unit;
+        round_rect(pixmap, (cx - pill_w * 0.5) * scale, (yb - pill_h) * scale, pill_w * scale, pill_h * scale, pill_h * 0.5 * scale, if selected { pal.sel_text } else { pal.accent }, 255);
+    }
+    let is_space = matches!(key.action, KeyAction::Vk(vk) if vk == VK_SPACE);
+    let dim = if selected { pal.sel_text } else { pal.text_dim };
+    let dim_a = (spec.number_alpha * 255.0) as u8;
+    if let Some(sub) = key.sublabel.as_deref().filter(|_| !is_space) {
+        let band = band_at(left, top, right, spec.number_cy * unit, key_h);
+        text(pixmap, fonts, cache, sub, band, spec.number_px * unit * scale, Weight::NORMAL, dim, dim_a, scale);
+    }
+    if matches!(key.action, KeyAction::VoiceInput) {
+        blit_svg(pixmap, MIC, left, top, right, bottom, spec.icon_px * unit, scale, Some(label_c), 255);
+    } else if is_space {
+        if let Some(word) = spec.space_label {
+            text(pixmap, fonts, cache, word, (left, top, right, bottom), spec.space_label_px * unit * scale, Weight::NORMAL, label_c, 255, scale);
+        } else if let Some(sub) = key.sublabel.as_deref() {
+            let cap = band_at(left, top, right, spec.caption_cy * unit, key_h);
+            text(pixmap, fonts, cache, sub, cap, spec.number_px * unit * scale, Weight::MEDIUM, dim, dim_a, scale);
+            let icon = band_at(left, top, right, spec.space_icon_cy * unit, key_h);
+            blit_svg(pixmap, SPACE, icon.0, icon.1, icon.2, icon.3, spec.space_icon_px * unit, scale, Some(label_c), 255);
+        }
+    } else if let Some((svg, large)) = key_icon(&key.action, frame.caps) {
+        let px = if large { spec.icon_large_px } else { spec.icon_px } * unit;
+        blit_svg(pixmap, svg, left, top, right, bottom, px, scale, Some(label_c), 255);
+    } else {
+        let mut glyph = key.label.clone();
+        if spec.trim_symbols && matches!(key.action, KeyAction::Symbols) {
+            glyph = glyph.trim_start_matches('?').to_string();
+        }
+        if !glyph.is_empty() {
+            let weight = if glyph.chars().count() > 1 { spec.word_weight } else { spec.label_weight };
+            let px = if glyph.chars().count() > 1 { spec.word_px } else { spec.label_px };
+            let band = if key.sublabel.is_some() {
+                band_at(left, top, right, spec.label_cy * unit, key_h)
+            } else {
+                (left, top, right, bottom)
+            };
+            text(pixmap, fonts, cache, &glyph, band, px * unit * scale, weight, label_c, 255, scale);
+        }
+    }
+    if let Some(hint) = key_hint(&key.action).filter(|_| !spec.mono) {
+        let badge = spec.hint_badge * unit;
+        let inset = spec.hint_inset * unit;
+        let bx = left + inset;
+        let by = top + inset;
+        if let Some(svg) = hint_svg(frame.ps5, hint) {
+            blit_svg(pixmap, svg, bx, by, bx + badge, by + badge, badge, scale, None, 255);
+        }
+    }
+}
+
+fn stroke_ring(pixmap: &mut Pixmap, glide: &Glide, spec: &Spec, pal: &Pal, unit: f32, scale: f32, radius: f32) {
+    let Some((l, t, r, b)) = glide.ring else { return };
+    let ring_w = (spec.sel_ring_w * unit).max(1.0);
+    stroke_rect(pixmap, (l + ring_w * 0.5) * scale, (t + ring_w * 0.5) * scale, (r - l - ring_w) * scale, (b - t - ring_w) * scale, (radius - ring_w * 0.5).max(0.0) * scale, pal.sel_ring, 255, ring_w * scale);
+}
+
+fn shadow_reach(spec: &Spec, unit: f32) -> f32 {
+    let drop = (spec.key_shadow_dy * unit).max(1.0);
+    let glow = spec.sel_shadow.map(|(dy, blur, _)| (dy + blur) * unit).unwrap_or(0.0);
+    drop.max(glow)
+}
+
+fn keys_near(a: &KeyRect, b: &KeyRect, pad: f32) -> bool {
+    a.left < b.right + pad && a.right > b.left - pad && a.top < b.bottom + pad && a.bottom > b.top - pad
+}
+
+fn erase_key(pixmap: &mut Pixmap, rect: &KeyRect, spec: &Spec, pal: &Pal, unit: f32, scale: f32) {
+    let dy = (spec.key_shadow_dy * unit).max(0.0);
+    round_rect(pixmap, rect.left * scale, rect.top * scale, (rect.right - rect.left) * scale, (rect.bottom - rect.top + dy) * scale, 0.0, pal.bg, 255);
+}
+
+fn scene(frame: &Frame) -> (Spec, Pal, Vec<KeyRect>, f32, f32, f32, f32) {
+    let scale = frame.scale.max(1.0);
+    let spec = spec_for(frame.style);
+    let pal = palette(frame.style, &frame.theme);
+    let lu = ref_unit(ui_scale(), &spec);
+    let top_inset = (spec.strip_bar_h + spec.gap - spec.pad_y) * lu;
+    let legend_h = legend_band_height(ui_scale(), &spec);
+    let rects = vk_geom::key_rects(
+        frame.logical_w,
+        (frame.logical_h - legend_h).max(40.0),
+        frame.scale_w,
+        &frame.rows,
+        top_inset,
+        spec.key_aspect,
+        spec.gap,
+        spec.design_kh,
+    );
+    let key_h = rects.first().map(|r| r.bottom - r.top).unwrap_or(spec.design_kh);
+    let unit = key_h / spec.design_kh;
+    let radius = spec.key_radius * unit;
+    (spec, pal, rects, unit, scale, radius, key_h)
+}
+
+fn advance_glide(glide: &mut Glide, frame: &Frame, target: Option<(f32, f32, f32, f32)>, now: Instant) {
+    if let Some(tgt) = target {
+        let dt = glide.last.map(|t| now.duration_since(t).as_secs_f32()).unwrap_or(0.0);
+        glide.last = Some(now);
+        glide.ring = Some(match glide.ring {
+            Some(cur) if dt > 0.0 => {
+                let t = (1.0 - (-dt / SEL_GLIDE_TAU).exp()).clamp(0.0, 1.0);
+                (
+                    cur.0 + (tgt.0 - cur.0) * t,
+                    cur.1 + (tgt.1 - cur.1) * t,
+                    cur.2 + (tgt.2 - cur.2) * t,
+                    cur.3 + (tgt.3 - cur.3) * t,
+                )
+            }
+            _ => tgt,
+        });
+    }
+    let ring_left = glide.ring.and_then(|cur| {
+        target.map(|tgt| (cur.0 - tgt.0).abs() + (cur.1 - tgt.1).abs() + (cur.2 - tgt.2).abs() + (cur.3 - tgt.3).abs())
+    });
+    let strip_moving = glide.strip_at.is_some_and(|t| t.elapsed().as_secs_f32() * 1000.0 < vk_motion::STRIP_ENTER_MS);
+    let pressing = frame.pressed.is_some_and(|(_, scale)| scale < 0.999);
+    glide.animating = ring_left.is_some_and(|d| d > 0.75) || strip_moving || pressing;
+}
+
+fn paint_live(pixmap: &mut Pixmap, frame: &Frame, fonts: &mut FontSystem, cache: &mut SwashCache, glide: &mut Glide, step: bool) {
+    let (spec, pal, rects, unit, scale, radius, key_h) = scene(frame);
+    let target = rects.iter().find(|r| r.pos == frame.sel).map(|r| (r.left, r.top, r.right, r.bottom));
+    if step {
+        advance_glide(glide, frame, target, Instant::now());
+    }
+    if let Some(sel_index) = rects.iter().position(|r| r.pos == frame.sel) {
+        let pad = shadow_reach(&spec, unit);
+        erase_key(pixmap, &rects[sel_index], &spec, &pal, unit, scale);
+        let press = frame.pressed.filter(|(p, _)| *p == rects[sel_index].pos).map(|(_, s)| s).unwrap_or(1.0);
+        paint_key(pixmap, fonts, cache, frame, &spec, &pal, &rects[sel_index], unit, key_h, scale, radius, true, press, true);
+        for index in 0..rects.len() {
+            if index == sel_index {
+                continue;
+            }
+            let pressed = frame.pressed.filter(|(p, _)| *p == rects[index].pos).map(|(_, s)| s);
+            if pressed.is_none() && !keys_near(&rects[index], &rects[sel_index], pad) {
+                continue;
+            }
+            if let Some(press) = pressed {
+                erase_key(pixmap, &rects[index], &spec, &pal, unit, scale);
+                paint_key(pixmap, fonts, cache, frame, &spec, &pal, &rects[index], unit, key_h, scale, radius, false, press, true);
+            } else {
+                paint_key(pixmap, fonts, cache, frame, &spec, &pal, &rects[index], unit, key_h, scale, radius, false, 1.0, false);
+            }
+        }
+    }
+    stroke_ring(pixmap, glide, &spec, &pal, unit, scale, radius);
+    if frame.floating {
+        let panel_r = spec.panel_radius * unit * scale;
+        let x = FLOATING_PANEL_INSET * scale;
+        let y = FLOATING_PANEL_INSET * scale;
+        let w = (frame.logical_w - 2.0 * FLOATING_PANEL_INSET) * scale;
+        let h = (frame.logical_h - 2.0 * FLOATING_PANEL_INSET) * scale;
+        clip_round(pixmap, x, y, w, h, panel_r);
+    }
+}
+
+fn draw_sheet_frame(frame: &Frame, fonts: &mut FontSystem, cache: &mut SwashCache) -> Option<Pixmap> {
+    let scale = frame.scale.max(1.0);
+    let width = (frame.logical_w * scale).round().max(1.0) as u32;
+    let height = (frame.logical_h * scale).round().max(1.0) as u32;
+    let mut pixmap = Pixmap::new(width, height)?;
+    fill(&mut pixmap, rgb(0x1F1F1F), 255);
+    paint_sheet(&mut pixmap, fonts, cache, frame.logical_w, frame.logical_h, scale, frame.ps5);
+    Some(pixmap)
+}
+
+enum SheetLine {
+    Title(&'static str),
+    Blank,
+    Row(&'static [Leg], &'static str),
+}
+
+struct SheetCol {
+    lines: Vec<SheetLine>,
+    combo: f32,
+    width: f32,
+}
+
+fn sheet_part_width(part: &Leg, fonts: &mut FontSystem) -> f32 {
+    match *part {
+        Leg::Btn("SELECT") => SHEET_SHARE,
+        Leg::Btn(_) => SHEET_GLYPH,
+        Leg::Word(word) => measure_label(fonts, word, SHEET_TOKEN_PX),
+        Leg::Plus => measure_label(fonts, "+", SHEET_TOKEN_PX),
+        Leg::Slash => measure_label(fonts, "/", SHEET_TOKEN_PX),
+    }
+}
+
+fn sheet_combo_width(parts: &[Leg], fonts: &mut FontSystem) -> f32 {
+    parts.iter().map(|part| sheet_part_width(part, fonts)).sum::<f32>() + SHEET_TOKEN_GAP * parts.len().saturating_sub(1) as f32
+}
+
+fn sheet_columns(fonts: &mut FontSystem) -> [SheetCol; 3] {
     const L3: &[Leg] = &[Leg::Btn("L3")];
     const R3: &[Leg] = &[Leg::Btn("R3")];
     const TAP: &[Leg] = &[Leg::Word("Tap"), Leg::Btn("SELECT")];
@@ -717,82 +957,139 @@ fn draw_sheet(
     const OPEN: &[Leg] = &[Leg::Btn("SELECT"), Leg::Plus, Leg::Btn("LB"), Leg::Plus, Leg::Btn("X")];
     const GAME_SHOT: &[Leg] = &[Leg::Word("Hold"), Leg::Btn("SELECT"), Leg::Plus, Leg::Btn("LB")];
     const RECORD: &[Leg] = &[Leg::Word("Hold"), Leg::Btn("SELECT"), Leg::Plus, Leg::Btn("RB")];
-    const NONE: &[Leg] = &[];
-    let columns: [&[SheetItem]; 3] = [
-        &[
-            sheet_item(true, NONE, "Keyboard"),
-            sheet_item(false, L3, "Close keyboard"),
-            sheet_item(false, R3, "Dictate"),
-            sheet_item(false, TAP, "Suggestions"),
-            sheet_item(false, COPY, "Copy"),
-            sheet_item(false, PASTE, "Paste"),
-            sheet_item(false, CLEAR, "Clear field"),
+    let raw = [
+        vec![
+            SheetLine::Title("Keyboard"),
+            SheetLine::Row(L3, "Close keyboard"),
+            SheetLine::Row(R3, "Dictate"),
+            SheetLine::Row(TAP, "Suggestions"),
+            SheetLine::Row(COPY, "Copy"),
+            SheetLine::Row(PASTE, "Paste"),
+            SheetLine::Row(CLEAR, "Clear field"),
         ],
-        &[
-            sheet_item(true, NONE, ""),
-            sheet_item(false, CARET, "Move caret"),
-            sheet_item(false, JUMP, "Jump a word"),
-            sheet_item(false, SHIFT_K, "Shift"),
-            sheet_item(false, SYMBOLS, "Symbols"),
-            sheet_item(false, LAYOUT, "Switch layout"),
+        vec![
+            SheetLine::Blank,
+            SheetLine::Row(CARET, "Move caret"),
+            SheetLine::Row(JUMP, "Jump a word"),
+            SheetLine::Row(SHIFT_K, "Shift"),
+            SheetLine::Row(SYMBOLS, "Symbols"),
+            SheetLine::Row(LAYOUT, "Switch layout"),
         ],
-        &[
-            sheet_item(true, NONE, "Keyboard closed"),
-            sheet_item(false, SHOT, "Screenshot"),
-            sheet_item(false, WINDOW, "Window screenshot"),
-            sheet_item(false, OPEN, "Open warmUP"),
-            sheet_item(true, NONE, "In games"),
-            sheet_item(false, GAME_SHOT, "Screenshot"),
-            sheet_item(false, RECORD, "Record"),
+        vec![
+            SheetLine::Title("Keyboard closed"),
+            SheetLine::Row(SHOT, "Screenshot"),
+            SheetLine::Row(WINDOW, "Window screenshot"),
+            SheetLine::Row(OPEN, "Open warmUP"),
+            SheetLine::Title("In games"),
+            SheetLine::Row(GAME_SHOT, "Screenshot"),
+            SheetLine::Row(RECORD, "Record (warmUP)"),
         ],
     ];
-    let col_w = (frame_w - 36.0 * u) / 3.0;
-    let row_h = ((legend_top - 20.0 * u) / 8.0).clamp(28.0 * u, 40.0 * u);
-    let glyph = 22.0 * u;
-    for (ci, column) in columns.iter().enumerate() {
-        let x = 18.0 * u + ci as f32 * col_w;
-        for (ri, item) in column.iter().enumerate() {
-            let y = 12.0 * u + ri as f32 * row_h;
-            if item.title {
-                if !item.label.is_empty() {
-                    text_aligned(pixmap, fonts, cache, item.label, (x, y, x + col_w - 8.0, y + row_h), 16.0 * u * scale, Weight::SEMIBOLD, pal.text, 255, scale, Align::Left);
+    raw.map(|lines| {
+        let mut combo = 0.0f32;
+        let mut label = 0.0f32;
+        let mut header = 0.0f32;
+        for line in &lines {
+            match line {
+                SheetLine::Row(parts, text) => {
+                    combo = combo.max(sheet_combo_width(parts, fonts));
+                    label = label.max(measure_label(fonts, text, SHEET_ACTION_PX));
                 }
-                continue;
+                SheetLine::Title(text) => header = header.max(measure_label(fonts, text, SHEET_HEADER_PX)),
+                SheetLine::Blank => {}
             }
-            let mut cursor = x;
-            for (i, part) in item.parts.iter().enumerate() {
-                if i > 0 {
-                    cursor += 4.0 * u;
+        }
+        let width = (combo + SHEET_ACTION_GAP + label + SHEET_TRAIL).max(header);
+        SheetCol { lines, combo, width }
+    })
+}
+
+fn sheet_total(cols: &[SheetCol]) -> f32 {
+    let n = cols.len();
+    cols.iter().map(|col| col.width).sum::<f32>() + SHEET_COL_GAP * n as f32 + if n >= 2 { 1.0 } else { 0.0 }
+}
+
+fn sheet_hairline(lines: &[SheetLine], index: usize) -> bool {
+    matches!(lines.get(index), Some(SheetLine::Row(_, _))) && matches!(lines.get(index + 1), Some(SheetLine::Row(_, _)))
+}
+
+fn leg_word(part: &Leg) -> &'static str {
+    match *part {
+        Leg::Word(word) => word,
+        Leg::Plus => "+",
+        Leg::Slash => "/",
+        Leg::Btn(_) => "",
+    }
+}
+
+fn paint_sheet(pixmap: &mut Pixmap, fonts: &mut FontSystem, cache: &mut SwashCache, frame_w: f32, frame_h: f32, scale: f32, ps5: bool) {
+    let cols = sheet_columns(fonts);
+    let total = sheet_total(&cols);
+    let rows = cols.iter().map(|col| col.lines.len()).max().unwrap_or(1);
+    let design_h = SHEET_PAD_TOP + rows as f32 * SHEET_ROW_H + SHEET_PAD_BOTTOM;
+    let u = (frame_w / SHEET_W).min(frame_h / design_h).clamp(0.35, 1.0);
+    let row_h = SHEET_ROW_H * u;
+    let top = SHEET_PAD_TOP * u;
+    let block_h = rows as f32 * row_h;
+    let mut x = (frame_w - total * u) * 0.5;
+    let count = cols.len();
+    let muted = (ALPHA_SECONDARY * 255.0) as u8;
+    let line_a = (ALPHA_LINE * 255.0) as u8;
+    let white = rgb(0xFFFFFF);
+    for (ci, col) in cols.iter().enumerate() {
+        let col_w = col.width * u;
+        for (index, line) in col.lines.iter().enumerate() {
+            let y = top + index as f32 * row_h;
+            match line {
+                SheetLine::Title(title) => {
+                    text_aligned(pixmap, fonts, cache, title, (x, y, x + col_w, y + row_h), SHEET_HEADER_PX * u * scale, Weight::NORMAL, white, muted, scale, Align::Left);
                 }
-                let w = match *part {
-                    Leg::Btn("SELECT") => 26.0 * u,
-                    Leg::Btn(_) => glyph,
-                    Leg::Word(word) => measure_label(fonts, word, 13.0 * u),
-                    Leg::Plus => measure_label(fonts, "+", 13.0 * u),
-                    Leg::Slash => measure_label(fonts, "/", 13.0 * u),
-                };
-                match *part {
-                    Leg::Btn(hint) => {
-                        if let Some(svg) = hint_svg(ps5, hint) {
-                            blit_svg(pixmap, svg, cursor, y, cursor + w, y + row_h, w, scale, None, 255);
+                SheetLine::Row(parts, label) => {
+                    let mut cursor = x;
+                    for (part_index, part) in parts.iter().enumerate() {
+                        if part_index > 0 {
+                            cursor += SHEET_TOKEN_GAP * u;
                         }
+                        let w = sheet_part_width(part, fonts) * u;
+                        match *part {
+                            Leg::Btn(hint) => {
+                                if let Some(svg) = hint_svg(ps5, hint) {
+                                    blit_svg(pixmap, svg, cursor, y, cursor + w, y + row_h, w, scale, None, 255);
+                                }
+                            }
+                            Leg::Word(_) | Leg::Plus | Leg::Slash => {
+                                text_aligned(pixmap, fonts, cache, leg_word(part), (cursor, y, cursor + w, y + row_h), SHEET_TOKEN_PX * u * scale, Weight::NORMAL, white, muted, scale, Align::Left);
+                            }
+                        }
+                        cursor += w;
                     }
-                    Leg::Word(_) | Leg::Plus | Leg::Slash => {
-                        let shown = match *part {
-                            Leg::Word(word) => word,
-                            Leg::Plus => "+",
-                            Leg::Slash => "/",
-                            Leg::Btn(_) => "",
-                        };
-                        text_aligned(pixmap, fonts, cache, shown, (cursor, y, cursor + w, y + row_h), 13.0 * u * scale, Weight::NORMAL, pal.text, (ALPHA_SECONDARY * 255.0) as u8, scale, Align::Left);
-                    }
+                    let label_x = x + col.combo * u + SHEET_ACTION_GAP * u;
+                    text_aligned(pixmap, fonts, cache, label, (label_x, y, x + col_w, y + row_h), SHEET_ACTION_PX * u * scale, Weight::NORMAL, white, 255, scale, Align::Left);
                 }
-                cursor += w;
+                SheetLine::Blank => {}
             }
-            text_aligned(pixmap, fonts, cache, item.label, (cursor + 8.0 * u, y, x + col_w - 4.0, y + row_h), 15.0 * u * scale, Weight::NORMAL, pal.text, 255, scale, Align::Left);
+            if sheet_hairline(&col.lines, index) {
+                round_rect(pixmap, x * scale, (y + row_h - u) * scale, col_w * scale, u * scale, 0.0, white, line_a);
+            }
+        }
+        x += col_w;
+        if ci + 1 == count {
+            break;
+        }
+        x += SHEET_COL_GAP * u;
+        if ci + 2 == count {
+            round_rect(pixmap, x * scale, top * scale, u * scale, block_h * scale, 0.0, white, line_a);
+            x += u + SHEET_COL_GAP * u;
         }
     }
 }
+
+#[cfg(test)]
+fn sheet_layout(fonts: &mut FontSystem) -> (f32, [f32; 3]) {
+    let cols = sheet_columns(fonts);
+    (sheet_total(&cols), [cols[0].combo, cols[1].combo, cols[2].combo])
+}
+
 
 fn draw_strip(
     pixmap: &mut Pixmap,
@@ -1389,7 +1686,7 @@ mod tests {
     fn keyboard_frame_uses_the_windows_palette() {
         let mut fonts = font_system();
         let mut cache = cosmic_text::SwashCache::new();
-        let frame = Frame {
+        let mut frame = Frame {
             logical_w: 1200.0,
             logical_h: 460.0,
             scale: 1.0,
@@ -1408,12 +1705,86 @@ mod tests {
             floating: true,
             sheet: false,
         };
-        let pixmap = draw(&frame, &mut fonts, &mut cache, &mut Glide::default()).expect("pixmap");
+        let mut glide = Glide::default();
+        let started = std::time::Instant::now();
+        let pixmap = draw(&frame, &mut fonts, &mut cache, &mut glide).expect("pixmap");
+        let cold = started.elapsed();
         assert!(pixmap.width() > 1000);
         assert!(pixmap.data().iter().any(|byte| *byte != 0));
+        frame.sel = KeyPos { row: 0, col: 0 };
+        let started = std::time::Instant::now();
+        let moved = draw(&frame, &mut fonts, &mut cache, &mut glide).expect("moved");
+        let warm = started.elapsed();
+        let mut same = 0usize;
+        let mut total = 0usize;
+        for (left, right) in pixmap.data().chunks_exact(4).zip(moved.data().chunks_exact(4)) {
+            total += 1;
+            if left == right {
+                same += 1;
+            }
+        }
+        assert!(same != total);
+        assert!(same * 10 > total * 8, "selection repaint changed {same}/{total}");
+        if cold > std::time::Duration::from_millis(30) {
+            assert!(warm * 3 < cold, "cold {cold:?} warm {warm:?}");
+        }
         let mut sheet = frame;
         sheet.sheet = true;
+        sheet.logical_w = 1600.0;
+        sheet.logical_h = 546.0;
         let covered = draw(&sheet, &mut fonts, &mut cache, &mut Glide::default()).expect("sheet");
-        assert!(covered.data().iter().any(|byte| *byte != 0));
+        assert_eq!((covered.width(), covered.height()), (1600, 546));
+        assert_eq!(&covered.data()[..4], &[0x1F, 0x1F, 0x1F, 0xFF]);
+    }
+
+    #[test]
+    fn shortcut_overlay_matches_the_pen_frame() {
+        let (w, h) = super::sheet_size(3072.0, 1728.0);
+        assert_eq!((w, h), (1600, 546));
+        let mut fonts = font_system();
+        let (total, combos) = super::sheet_layout(&mut fonts);
+        for (got, want) in combos.iter().zip([86.0, 183.0, 140.0]) {
+            assert!((got - want).abs() <= 16.0, "combos {combos:?} total {total}");
+        }
+        assert!(total < 1600.0 - 96.0, "content {total} leaves the pen's side inset");
+        let mut cache = cosmic_text::SwashCache::new();
+        let frame = Frame {
+            logical_w: 1600.0,
+            logical_h: 546.0,
+            scale: 1.0,
+            scale_w: 1920.0,
+            rows: rows_for_test(),
+            sel: KeyPos { row: 0, col: 0 },
+            style: VkStyle::Normal,
+            theme: KeyboardTheme::default(),
+            strip: None,
+            pressed: None,
+            ps5: true,
+            shift: false,
+            caps: false,
+            symbol: false,
+            symbol_locked: false,
+            floating: true,
+            sheet: true,
+        };
+        let pixmap = draw(&frame, &mut fonts, &mut cache, &mut Glide::default()).expect("overlay");
+        assert!(pixmap.data().chunks_exact(4).any(|px| px[0] != 0x1F || px[1] != 0x1F || px[2] != 0x1F));
+        let mut docked = frame;
+        docked.sheet = false;
+        docked.logical_w = 3072.0;
+        docked.logical_h = 577.0;
+        docked.scale = 1.25;
+        docked.floating = false;
+        docked.style = VkStyle::Mono;
+        docked.sel = KeyPos { row: 1, col: 1 };
+        let mut glide = Glide::default();
+        let cold_at = std::time::Instant::now();
+        let _ = draw(&docked, &mut fonts, &mut cache, &mut glide).expect("docked");
+        let cold = cold_at.elapsed();
+        docked.sel = KeyPos { row: 1, col: 2 };
+        let warm_at = std::time::Instant::now();
+        let _ = draw(&docked, &mut fonts, &mut cache, &mut glide).expect("docked move");
+        let warm = warm_at.elapsed();
+        assert!(warm < std::time::Duration::from_millis(120), "docked highlight cold {cold:?} warm {warm:?}");
     }
 }
