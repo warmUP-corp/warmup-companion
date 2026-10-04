@@ -64,6 +64,7 @@ fn sheet_metrics_are_the_windows_ones() -> f32 {
 
 struct Spec {
     mono: bool,
+    family: &'static str,
     design_kh: f32,
     key_aspect: f32,
     gap: f32,
@@ -112,6 +113,7 @@ fn spec_for(style: VkStyle) -> Spec {
     match style {
         VkStyle::Mono => Spec {
             mono: true,
+            family: "Inter",
             design_kh: 100.0,
             key_aspect: 100.0 / 137.0,
             gap: 8.0,
@@ -157,6 +159,7 @@ fn spec_for(style: VkStyle) -> Spec {
         },
         VkStyle::Normal => Spec {
             mono: false,
+            family: "Noto Sans",
             design_kh: 102.0,
             key_aspect: 102.0 / 138.0,
             gap: 6.0,
@@ -267,10 +270,25 @@ impl Default for Glide {
 
 pub fn font_system() -> FontSystem {
     let mut db = fontdb::Database::new();
+    for path in [
+        "/usr/share/fonts/inter/Inter.ttc",
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSans-Medium.ttf",
+        "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+    ] {
+        if std::path::Path::new(path).is_file() {
+            let _ = db.load_font_file(path);
+        }
+    }
     db.load_font_data(include_bytes!("../assets/fonts/Selawik-Regular.ttf").to_vec());
     db.load_font_data(include_bytes!("../assets/fonts/Selawik-Bold.ttf").to_vec());
-    db.set_sans_serif_family("Selawik");
-    db.set_serif_family("Selawik");
+    let sans = if db.faces().any(|face| face.families.iter().any(|(name, _)| name == "Inter")) {
+        "Inter"
+    } else {
+        "Selawik"
+    };
+    db.set_sans_serif_family(sans);
+    db.set_serif_family(sans);
     FontSystem::new_with_locale_and_db("en-US".to_string(), db)
 }
 
@@ -322,7 +340,7 @@ fn sheet_size(output_w: f32, output_h: f32) -> (u32, u32) {
 }
 
 fn legend_band_height(scale: f32, spec: &Spec) -> f32 {
-    60.0 * ref_unit(scale, spec)
+    ((BAR_H - spec.pad_y) * ref_unit(scale, spec)).max(0.0)
 }
 
 fn ref_unit(scale: f32, spec: &Spec) -> f32 {
@@ -493,20 +511,20 @@ fn fit_legend(widths: &[f32], sep: f32, avail: f32) -> Vec<usize> {
     kept
 }
 
-fn leg_part_width(part: &Leg, u: f32, fonts: &mut FontSystem) -> f32 {
+fn leg_part_width(part: &Leg, u: f32, fonts: &mut FontSystem, family: &str) -> f32 {
     match *part {
-        Leg::Btn("SELECT") => 28.0 * u,
-        Leg::Btn(_) => 24.0 * u,
-        Leg::Word(word) => measure_label(fonts, word, 15.0 * u),
-        Leg::Plus => measure_label(fonts, "+", 13.0 * u),
-        Leg::Slash => measure_label(fonts, "/", 13.0 * u),
+        Leg::Btn("SELECT") => BAR_SHARE * u,
+        Leg::Btn(_) => BAR_GLYPH * u,
+        Leg::Word(word) => measure_label(fonts, family, word, text_px(BAR_PREFIX_PX, u)),
+        Leg::Plus => measure_label(fonts, family, "+", text_px(BAR_CONNECTOR_PX, u)),
+        Leg::Slash => measure_label(fonts, family, "/", text_px(BAR_CONNECTOR_PX, u)),
     }
 }
 
-fn legend_item_width(parts: &[Leg], label: &str, u: f32, fonts: &mut FontSystem) -> f32 {
-    let gaps = 6.0 * u * parts.len().saturating_sub(1) as f32;
-    let body: f32 = parts.iter().map(|part| leg_part_width(part, u, fonts)).sum();
-    body + gaps + 6.0 * u + measure_label(fonts, label, 15.0 * u)
+fn legend_item_width(parts: &[Leg], label: &str, u: f32, fonts: &mut FontSystem, family: &str) -> f32 {
+    let gaps = BAR_GAP * u * parts.len().saturating_sub(1) as f32;
+    let body: f32 = parts.iter().map(|part| leg_part_width(part, u, fonts, family)).sum();
+    body + gaps + BAR_LABEL_GAP * u + measure_label(fonts, family, label, text_px(BAR_LABEL_PX, u))
 }
 
 fn draw_legend(
@@ -525,45 +543,47 @@ fn draw_legend(
     let pad_x = 16.0 * u;
     let left = pad_x;
     let right = (frame_w - pad_x).max(left);
-    let dot_w = measure_label(fonts, LEGEND_SEP, 15.0 * u);
-    let sep_w = 10.0 * u + dot_w + 10.0 * u;
+    let family = _spec.family;
+    let dot_w = measure_label(fonts, family, LEGEND_SEP, text_px(BAR_SEP_PX, u));
+    let sep_w = BAR_GAP * u + dot_w + BAR_GAP * u;
     let widths: Vec<f32> = LEGEND_ROWS
         .iter()
-        .map(|(parts, label)| legend_item_width(parts, label, u, fonts))
+        .map(|(parts, label)| legend_item_width(parts, label, u, fonts, family))
         .collect();
     let kept = fit_legend(&widths, sep_w, (right - left).max(1.0));
     let total = kept.iter().map(|&i| widths[i]).sum::<f32>() + sep_w * kept.len().saturating_sub(1) as f32;
     let mut x = (left + right - total) * 0.5;
-    let top = frame_h - 60.0 * u;
+    let top = frame_h - BAR_H * u;
     let bottom = frame_h;
     let secondary = (ALPHA_SECONDARY * 255.0) as u8;
     let sep_alpha = (ALPHA_SEP * 255.0) as u8;
-    let label_px = 15.0 * u;
+    let label_px = text_px(BAR_LABEL_PX, u);
     for (n, &index) in kept.iter().enumerate() {
         if n > 0 {
-            let sep_left = x - sep_w + 10.0 * u;
-            let sep_w_text = measure_label(fonts, LEGEND_SEP, 15.0 * u);
+            let sep_left = x - sep_w + BAR_GAP * u;
+            let sep_w_text = measure_label(fonts, family, LEGEND_SEP, text_px(BAR_SEP_PX, u));
             text_aligned(
                 pixmap,
                 fonts,
                 cache,
                 LEGEND_SEP,
                 (sep_left, top, sep_left + sep_w_text, bottom),
-                15.0 * u * scale,
+                text_px(BAR_SEP_PX, u) * scale,
                 Weight::NORMAL,
                 pal.text,
                 sep_alpha,
                 scale,
                 Align::Left,
+                family,
             );
         }
         let (parts, label) = LEGEND_ROWS[index];
         let mut cursor = x;
         for (i, part) in parts.iter().enumerate() {
             if i > 0 {
-                cursor += 6.0 * u;
+                cursor += BAR_GAP * u;
             }
-            let w = leg_part_width(part, u, fonts);
+            let w = leg_part_width(part, u, fonts, family);
             match *part {
                 Leg::Btn(hint) => {
                     if let Some(svg) = hint_svg(ps5, hint) {
@@ -583,19 +603,20 @@ fn draw_legend(
                         cache,
                         shown,
                         (cursor, top, cursor + w, bottom),
-                        (if matches!(*part, Leg::Word(_)) { 15.0 } else { 13.0 }) * u * scale,
+                        (if matches!(*part, Leg::Word(_)) { text_px(BAR_PREFIX_PX, u) } else { text_px(BAR_CONNECTOR_PX, u) }) * scale,
                         Weight::NORMAL,
                         pal.text,
                         secondary,
                         scale,
                         Align::Left,
+                        family,
                     );
                 }
             }
             cursor += w;
         }
-        let label_w = measure_label(fonts, label, label_px);
-        let label_x = cursor + 6.0 * u;
+        let label_w = measure_label(fonts, family, label, label_px);
+        let label_x = cursor + BAR_LABEL_GAP * u;
         text_aligned(
             pixmap,
             fonts,
@@ -608,6 +629,7 @@ fn draw_legend(
             255,
             scale,
             Align::Left,
+            family,
         );
         x += widths[index] + sep_w;
     }
@@ -738,16 +760,16 @@ fn paint_key(
     let dim_a = (spec.number_alpha * 255.0) as u8;
     if let Some(sub) = key.sublabel.as_deref().filter(|_| !is_space) {
         let band = band_at(left, top, right, spec.number_cy * unit, key_h);
-        text(pixmap, fonts, cache, sub, band, spec.number_px * unit * scale, Weight::NORMAL, dim, dim_a, scale);
+        text(pixmap, fonts, cache, sub, band, spec.number_px * unit * scale, Weight::NORMAL, dim, dim_a, scale, spec.family);
     }
     if matches!(key.action, KeyAction::VoiceInput) {
         blit_svg(pixmap, MIC, left, top, right, bottom, spec.icon_px * unit, scale, Some(label_c), 255);
     } else if is_space {
         if let Some(word) = spec.space_label {
-            text(pixmap, fonts, cache, word, (left, top, right, bottom), spec.space_label_px * unit * scale, Weight::NORMAL, label_c, 255, scale);
+            text(pixmap, fonts, cache, word, (left, top, right, bottom), spec.space_label_px * unit * scale, Weight::NORMAL, label_c, 255, scale, spec.family);
         } else if let Some(sub) = key.sublabel.as_deref() {
             let cap = band_at(left, top, right, spec.caption_cy * unit, key_h);
-            text(pixmap, fonts, cache, sub, cap, spec.number_px * unit * scale, Weight::MEDIUM, dim, dim_a, scale);
+            text(pixmap, fonts, cache, sub, cap, spec.number_px * unit * scale, Weight::NORMAL, dim, dim_a, scale, spec.family);
             let icon = band_at(left, top, right, spec.space_icon_cy * unit, key_h);
             blit_svg(pixmap, SPACE, icon.0, icon.1, icon.2, icon.3, spec.space_icon_px * unit, scale, Some(label_c), 255);
         }
@@ -767,10 +789,10 @@ fn paint_key(
             } else {
                 (left, top, right, bottom)
             };
-            text(pixmap, fonts, cache, &glyph, band, px * unit * scale, weight, label_c, 255, scale);
+            text(pixmap, fonts, cache, &glyph, band, px * unit * scale, weight, label_c, 255, scale, spec.family);
         }
     }
-    if let Some(hint) = key_hint(&key.action).filter(|_| !spec.mono) {
+    if let Some(hint) = key_hint(&key.action) {
         let badge = spec.hint_badge * unit;
         let inset = spec.hint_inset * unit;
         let bx = left + inset;
@@ -906,9 +928,9 @@ fn sheet_part_width(part: &Leg, fonts: &mut FontSystem) -> f32 {
     match *part {
         Leg::Btn("SELECT") => SHEET_SHARE,
         Leg::Btn(_) => SHEET_GLYPH,
-        Leg::Word(word) => measure_label(fonts, word, SHEET_TOKEN_PX),
-        Leg::Plus => measure_label(fonts, "+", SHEET_TOKEN_PX),
-        Leg::Slash => measure_label(fonts, "/", SHEET_TOKEN_PX),
+        Leg::Word(word) => measure_label(fonts, "Noto Sans", word, SHEET_TOKEN_PX),
+        Leg::Plus => measure_label(fonts, "Noto Sans", "+", SHEET_TOKEN_PX),
+        Leg::Slash => measure_label(fonts, "Noto Sans", "/", SHEET_TOKEN_PX),
     }
 }
 
@@ -969,9 +991,9 @@ fn sheet_columns(fonts: &mut FontSystem) -> [SheetCol; 3] {
             match line {
                 SheetLine::Row(parts, text) => {
                     combo = combo.max(sheet_combo_width(parts, fonts));
-                    label = label.max(measure_label(fonts, text, SHEET_ACTION_PX));
+                    label = label.max(measure_label(fonts, "Noto Sans", text, SHEET_ACTION_PX));
                 }
-                SheetLine::Title(text) => header = header.max(measure_label(fonts, text, SHEET_HEADER_PX)),
+                SheetLine::Title(text) => header = header.max(measure_label(fonts, "Noto Sans", text, SHEET_HEADER_PX)),
                 SheetLine::Blank => {}
             }
         }
@@ -1018,7 +1040,7 @@ fn paint_sheet(pixmap: &mut Pixmap, fonts: &mut FontSystem, cache: &mut SwashCac
             let y = top + index as f32 * row_h;
             match line {
                 SheetLine::Title(title) => {
-                    text_aligned(pixmap, fonts, cache, title, (x, y, x + col_w, y + row_h), SHEET_HEADER_PX * u * scale, Weight::NORMAL, white, muted, scale, Align::Left);
+                    text_aligned(pixmap, fonts, cache, title, (x, y, x + col_w, y + row_h), SHEET_HEADER_PX * u * scale, Weight::NORMAL, white, muted, scale, Align::Left, "Noto Sans");
                 }
                 SheetLine::Row(parts, label) => {
                     let mut cursor = x;
@@ -1034,13 +1056,13 @@ fn paint_sheet(pixmap: &mut Pixmap, fonts: &mut FontSystem, cache: &mut SwashCac
                                 }
                             }
                             Leg::Word(_) | Leg::Plus | Leg::Slash => {
-                                text_aligned(pixmap, fonts, cache, leg_word(part), (cursor, y, cursor + w, y + row_h), SHEET_TOKEN_PX * u * scale, Weight::NORMAL, white, muted, scale, Align::Left);
+                                text_aligned(pixmap, fonts, cache, leg_word(part), (cursor, y, cursor + w, y + row_h), SHEET_TOKEN_PX * u * scale, Weight::NORMAL, white, muted, scale, Align::Left, "Noto Sans");
                             }
                         }
                         cursor += w;
                     }
                     let label_x = x + col.combo * u + SHEET_ACTION_GAP * u;
-                    text_aligned(pixmap, fonts, cache, label, (label_x, y, x + col_w, y + row_h), SHEET_ACTION_PX * u * scale, Weight::NORMAL, white, 255, scale, Align::Left);
+                    text_aligned(pixmap, fonts, cache, label, (label_x, y, x + col_w, y + row_h), SHEET_ACTION_PX * u * scale, Weight::NORMAL, white, 255, scale, Align::Left, "Noto Sans");
                 }
                 SheetLine::Blank => {}
             }
@@ -1109,7 +1131,7 @@ fn draw_strip(
             let selected = i == strip.highlight_slot;
             let alpha = fade_u8(if selected { 1.0 } else { spec.chip_text_alpha });
             let color = if selected { pal.text } else { pal.text_dim };
-            text(pixmap, fonts, cache, word, (x0, top, x1, bottom), spec.chip_px * unit * scale, if selected { spec.chip_sel_weight } else { Weight::NORMAL }, color, alpha, scale);
+            text(pixmap, fonts, cache, word, (x0, top, x1, bottom), spec.chip_px * unit * scale, if selected { spec.chip_sel_weight } else { Weight::NORMAL }, color, alpha, scale, spec.family);
         }
         return;
     }
@@ -1152,7 +1174,7 @@ fn draw_strip(
         let alpha = fade_u8(if selected { 1.0 } else { spec.chip_text_alpha });
         let weight = if selected { spec.chip_sel_weight } else { Weight::NORMAL };
         let label = (x0 + chip_r * 0.5, inner_t, x0 + chip_w - chip_r * 0.5, inner_b);
-        text(pixmap, fonts, cache, word, label, spec.chip_px * unit * scale, weight, pal.text, alpha, scale);
+        text(pixmap, fonts, cache, word, label, spec.chip_px * unit * scale, weight, pal.text, alpha, scale, spec.family);
     }
 }
 
@@ -1176,28 +1198,41 @@ fn palette(style: VkStyle, theme: &KeyboardTheme) -> Pal {
             bg: rgb(0x1C1C1E),
             key: rgb(0x3A3A3C),
             key_action: rgb(0x2C2C2E),
-            accent: rgb(0xFFFFFF),
-            sel_ring: rgb(0xFFFFFF),
+            accent: rgb(0xC9BCFF),
+            sel_ring: rgb(0xB6A0FF),
             text: rgb(0xFFFFFF),
             text_dim: rgb(0xEBEBF5),
-            sel_text: rgb(0x000000),
+            sel_text: rgb(0x211047),
             border: rgb(0x545458),
             panel_stroke: rgb(0xFFFFFF),
             panel_stroke_alpha: 0x14 as f32 / 255.0,
             chip_sel: rgb(0x3A3A3C),
         },
     };
+    if style == VkStyle::Mono {
+        if let Some(v) = theme.accent {
+            let accent = from_colorref(v);
+            pal.accent = mix(pal.key, accent, 0.7);
+            pal.sel_ring = accent;
+        }
+        if let Some(v) = theme.sel_text {
+            pal.sel_text = from_colorref(v);
+        }
+        return pal;
+    }
     if let Some(v) = theme.bg {
         pal.bg = from_colorref(v);
     }
     if let Some(v) = theme.key {
-        pal.key = from_colorref(v);
-        pal.key_action = from_colorref(v);
-        pal.chip_sel = from_colorref(v);
+        let key = from_colorref(v);
+        pal.key = key;
+        pal.key_action = mix(rgb(0x000000), key, 0.26);
+        pal.chip_sel = mix(rgb(0xFFFFFF), key, 0.10);
     }
     if let Some(v) = theme.accent {
-        pal.accent = from_colorref(v);
-        pal.sel_ring = mix(rgb(0xFFFFFF), from_colorref(v), 0.5);
+        let accent = from_colorref(v);
+        pal.accent = accent;
+        pal.sel_ring = mix(rgb(0xFFFFFF), accent, 0.5);
     }
     if let Some(v) = theme.text {
         pal.text = from_colorref(v);
@@ -1435,19 +1470,20 @@ fn text(
     color: Rgb,
     alpha: u8,
     scale: f32,
+    family: &str,
 ) {
-    text_aligned(pixmap, fonts, cache, value, band, px, weight, color, alpha, scale, Align::Center);
+    text_aligned(pixmap, fonts, cache, value, band, px, weight, color, alpha, scale, Align::Center, family);
 }
 
-fn measure_label(fonts: &mut FontSystem, value: &str, px: f32) -> f32 {
+fn measure_label(fonts: &mut FontSystem, family: &str, value: &str, px: f32) -> f32 {
     if value.is_empty() || px < 1.0 {
         return 0.0;
     }
-    let metrics = Metrics::new(px, px * 1.2);
+    let metrics = Metrics::new(px, px);
     let mut buffer = Buffer::new(fonts, metrics);
     buffer.set_size(fonts, None, None);
     buffer.set_wrap(fonts, Wrap::None);
-    let attrs = Attrs::new().family(Family::Name("Selawik")).weight(Weight::NORMAL);
+    let attrs = Attrs::new().family(Family::Name(family)).weight(Weight::NORMAL);
     buffer.set_text(fonts, value, &attrs, Shaping::Advanced);
     buffer.shape_until_scroll(fonts, false);
     buffer.layout_runs().map(|run| run.line_w).fold(0.0, f32::max)
@@ -1465,6 +1501,7 @@ fn text_aligned(
     alpha: u8,
     scale: f32,
     align: Align,
+    family: &str,
 ) {
     if value.is_empty() || px < 4.0 {
         return;
@@ -1475,11 +1512,11 @@ fn text_aligned(
     if w < 2.0 || h < 2.0 {
         return;
     }
-    let metrics = Metrics::new(px, px * 1.2);
+    let metrics = Metrics::new(px, px);
     let mut buffer = Buffer::new(fonts, metrics);
     buffer.set_size(fonts, Some(w), Some(h));
     buffer.set_wrap(fonts, Wrap::None);
-    let attrs = Attrs::new().family(Family::Name("Selawik")).weight(weight);
+    let attrs = Attrs::new().family(Family::Name(family)).weight(weight);
     buffer.set_text(fonts, value, &attrs, Shaping::Advanced);
     for line in &mut buffer.lines {
         line.set_align(Some(align));
@@ -1961,7 +1998,7 @@ pub fn draw_prompt(text_value: &str, scale: f32, fonts: &mut FontSystem, cache: 
     let logical_h = 72.0;
     let mut pixmap = Pixmap::new((logical_w * scale) as u32, (logical_h * scale) as u32)?;
     fill(&mut pixmap, rgb(0x15161C), 235);
-    text(&mut pixmap, fonts, cache, text_value, (16.0, 16.0, logical_w - 16.0, logical_h - 16.0), 22.0 * scale, Weight::MEDIUM, rgb(0xFFFFFF), 255, 1.0);
+    text(&mut pixmap, fonts, cache, text_value, (16.0, 16.0, logical_w - 16.0, logical_h - 16.0), 22.0 * scale, Weight::MEDIUM, rgb(0xFFFFFF), 255, 1.0, "Noto Sans");
     Some(pixmap)
 }
 

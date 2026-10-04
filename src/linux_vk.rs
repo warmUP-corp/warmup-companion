@@ -398,11 +398,7 @@ impl Shell {
 
     fn draw(&mut self, qh: &QueueHandle<Self>) {
         self.apply_layout();
-        let scale = if self.viewport.is_some() {
-            1.0
-        } else {
-            self.buffer_scale() as f32
-        };
+        let scale = self.buffer_scale() as f32;
         let rows = crate::vk_nav::rows_snapshot();
         let mono = matches!(vk_style(), VkStyle::Mono);
         let strip = crate::vk_predict::strip(if mono { 3 } else { 7 }, mono);
