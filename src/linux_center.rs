@@ -1,5 +1,3 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use eframe::egui;
 
 use crate::center_rows::{RowKind, TABS};
@@ -19,26 +17,25 @@ struct CenterApp {
 }
 
 pub fn show() {
-    static OPEN: AtomicBool = AtomicBool::new(false);
-    if OPEN.swap(true, Ordering::SeqCst) {
+    let Ok(exe) = std::env::current_exe() else {
+        crate::install::log_line("controller center: the companion binary is unavailable");
         return;
+    };
+    if let Err(error) = std::process::Command::new(exe)
+        .arg("--controller-center")
+        .spawn()
+    {
+        crate::install::log_line(&format!("controller center: {error}"));
     }
-    let _ = std::thread::Builder::new()
-        .name("warmup-controller-center".into())
-        .spawn(|| {
-            let result = show_blocking();
-            OPEN.store(false, Ordering::SeqCst);
-            if let Err(error) = result {
-                crate::install::log_line(&format!("controller center: {error}"));
-            }
-        });
 }
 
 pub fn show_blocking() -> Result<(), String> {
     eframe::run_native(
         "Controller Center",
         eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([760.0, 640.0]),
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([760.0, 640.0])
+                .with_app_id("warmup-companion"),
             ..Default::default()
         },
         Box::new(|_cc| Ok(Box::new(CenterApp::load()))),
