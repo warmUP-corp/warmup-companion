@@ -623,7 +623,7 @@ fn strip_blocking(glide: &Glide, frame: &Frame, now: Instant) -> bool {
     }
 }
 
-fn keyboard_stamp(frame: &Frame) -> u64 {
+pub(crate) fn keyboard_stamp(frame: &Frame) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
@@ -1629,6 +1629,96 @@ fn cached_svg(svg: &str, px: u32, tint: Option<Rgb>) -> Option<std::sync::Arc<Ve
         guard.insert(key, bytes.clone());
     }
     Some(bytes)
+}
+
+pub struct KeyPatch {
+    pub pixels: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub dest_x: f32,
+    pub dest_y: f32,
+    pub body_x: f32,
+    pub body_y: f32,
+    pub body_w: f32,
+    pub body_h: f32,
+    pub radius: f32,
+    pub ring: [f32; 4],
+    pub ring_w: f32,
+}
+
+pub fn raster_unselected(
+    frame: &Frame,
+    fonts: &mut FontSystem,
+    cache: &mut SwashCache,
+    glide: &mut Glide,
+) -> Option<Pixmap> {
+    render_keyboard(frame, fonts, cache, glide, false)
+}
+
+pub fn voice_spot(frame: &Frame) -> Option<(f32, f32, f32)> {
+    let (_spec, _pal, rects, _unit, scale, _radius, _key_h) = scene(frame);
+    let rect = rects.iter().find(|rect| {
+        frame
+            .rows
+            .get(rect.pos.row)
+            .and_then(|row| row.keys.get(rect.pos.col))
+            .is_some_and(|key| matches!(key.action, KeyAction::VoiceInput))
+    })?;
+    let side = (rect.right - rect.left).min(rect.bottom - rect.top) * 0.86 * scale;
+    let cx = (rect.left + rect.right) * 0.5 * scale;
+    let cy = (rect.top + rect.bottom) * 0.5 * scale;
+    Some((cx - side * 0.5, cy - side * 0.5, side))
+}
+
+pub fn raster_selected_key(
+    frame: &Frame,
+    fonts: &mut FontSystem,
+    cache: &mut SwashCache,
+    press: f32,
+) -> Option<KeyPatch> {
+    let (spec, pal, rects, unit, scale, radius, key_h) = scene(frame);
+    let rect = rects.iter().find(|rect| rect.pos == frame.sel)?;
+    let pad = 8.0;
+    let local = KeyRect {
+        pos: rect.pos,
+        left: pad,
+        top: pad,
+        right: pad + (rect.right - rect.left),
+        bottom: pad + (rect.bottom - rect.top),
+    };
+    let width = (local.right * scale).ceil().max(1.0) as u32;
+    let height = (local.bottom * scale).ceil().max(1.0) as u32;
+    let mut pixmap = Pixmap::new(width, height)?;
+    paint_key(
+        &mut pixmap,
+        fonts,
+        cache,
+        frame,
+        &spec,
+        &pal,
+        &local,
+        unit,
+        key_h,
+        scale,
+        radius,
+        true,
+        press,
+        true,
+    );
+    Some(KeyPatch {
+        pixels: pixmap.data().to_vec(),
+        width,
+        height,
+        dest_x: (rect.left - pad) * scale,
+        dest_y: (rect.top - pad) * scale,
+        body_x: rect.left * scale,
+        body_y: rect.top * scale,
+        body_w: (rect.right - rect.left) * scale,
+        body_h: (rect.bottom - rect.top) * scale,
+        radius: radius * scale,
+        ring: [pal.sel_ring.r as f32 / 255.0, pal.sel_ring.g as f32 / 255.0, pal.sel_ring.b as f32 / 255.0, 1.0],
+        ring_w: (spec.sel_ring_w * unit * scale).max(1.0),
+    })
 }
 
 pub fn paint_voice_key(pixmap: &mut Pixmap, frame: &Frame, orb: &[u8], orb_px: u32) {

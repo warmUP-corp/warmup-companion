@@ -21,7 +21,7 @@ use smithay_client_toolkit::{
 };
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::{wl_output, wl_surface};
-use wayland_client::{Connection, Dispatch, QueueHandle};
+use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
 use wayland_protocols::wp::fractional_scale::v1::client::{
     wp_fractional_scale_manager_v1, wp_fractional_scale_v1,
 };
@@ -31,6 +31,8 @@ use crate::config::{vk_layout_mode, vk_style, VkLayoutMode, VkStyle};
 
 #[path = "linux_vk_draw.rs"]
 mod draw;
+#[path = "linux_vk_gpu.rs"]
+mod gpu;
 
 #[cfg(feature = "speech")]
 pub fn draw_voice_surface(
@@ -139,7 +141,8 @@ fn keyboard_loop(wake: UnixStream) -> Result<(), String> {
     let conn = Connection::connect_to_env().map_err(|error| error.to_string())?;
     let (globals, mut queue) = registry_queue_init::<Shell>(&conn).map_err(|error| error.to_string())?;
     let qh = queue.handle();
-    let mut shell = Shell::new(&globals, &qh)?;
+    let display = conn.display().id().as_ptr() as *mut std::ffi::c_void;
+    let mut shell = Shell::new(&globals, &qh, display, conn.clone())?;
     shell.layer.commit();
     loop {
         if STOP.load(Ordering::SeqCst) || shell.exit {
@@ -173,6 +176,7 @@ fn keyboard_loop(wake: UnixStream) -> Result<(), String> {
             shell.dirty = true;
         }
     }
+    shell.gpu.take();
     if let smithay_client_toolkit::shell::wlr_layer::SurfaceKind::Wlr(proxy) = shell.layer.kind() {
         proxy.destroy();
     }
@@ -204,12 +208,18 @@ struct Shell {
     ps5: bool,
     glide: draw::Glide,
     placed: Option<(bool, u32, u32, i32)>,
+    display: *mut std::ffi::c_void,
+    conn: Connection,
+    gpu: Option<gpu::Presenter>,
+    gpu_failed: bool,
 }
 
 impl Shell {
     fn new(
         globals: &wayland_client::globals::GlobalList,
         qh: &QueueHandle<Self>,
+        display: *mut std::ffi::c_void,
+        conn: Connection,
     ) -> Result<Self, String> {
         let compositor = CompositorState::bind(globals, qh).map_err(|error| error.to_string())?;
         let layer_shell = LayerShell::bind(globals, qh).map_err(|_| {
@@ -256,6 +266,10 @@ impl Shell {
             ps5: ps5_pad(),
             glide: draw::Glide::default(),
             placed: None,
+            display,
+            conn,
+            gpu: None,
+            gpu_failed: false,
         };
         shell.apply_layout();
         Ok(shell)
@@ -359,6 +373,9 @@ impl Shell {
             floating,
             sheet: crate::vk_sheet::shown(),
         };
+        if self.try_present_gpu(qh, &frame) {
+            return;
+        }
         let Some(mut pixmap) = draw::draw(&frame, &mut self.fonts, &mut self.cache, &mut self.glide) else {
             return;
         };
@@ -399,6 +416,73 @@ impl Shell {
         }
         self.buffer = Some(buffer);
         self.layer.commit();
+    }
+
+    fn try_present_gpu(&mut self, qh: &QueueHandle<Self>, frame: &draw::Frame) -> bool {
+        if self.gpu_failed || self.logical_w == 0 || self.logical_h == 0 {
+            return false;
+        }
+        if self.gpu.is_none() {
+            let surface = self.layer.wl_surface().id().as_ptr() as *mut std::ffi::c_void;
+            match gpu::Presenter::open(self.display, surface) {
+                Ok(presenter) => self.gpu = Some(presenter),
+                Err(error) => {
+                    crate::install::log_line(&format!("keyboard gpu unavailable: {error}"));
+                    self.gpu_failed = true;
+                    return false;
+                }
+            }
+        }
+        #[cfg(feature = "speech")]
+        let orb_hold = crate::linux_speech::visual_active().then(crate::linux_nimbus::latest_frame).flatten();
+        #[cfg(not(feature = "speech"))]
+        let orb_hold: Option<(u32, Vec<u8>)> = None;
+        let orb = orb_hold.as_ref().and_then(|(px, bytes)| {
+            let (x, y, size) = draw::voice_spot(frame)?;
+            Some(gpu::Orb {
+                pixels: bytes.as_slice(),
+                px: *px,
+                x,
+                y,
+                size,
+            })
+        });
+        self.queue_gpu_frame(qh);
+        let Some(presenter) = self.gpu.as_mut() else {
+            return false;
+        };
+        match presenter.present(frame, &mut self.fonts, &mut self.cache, &mut self.glide, orb.as_ref()) {
+            Ok(()) => {
+                self.frame_pending = true;
+                self.dirty = self.glide.animating;
+                true
+            }
+            Err(error) if error == "cpu" => false,
+            Err(error) => {
+                crate::install::log_line(&format!("keyboard gpu: {error}"));
+                self.gpu = None;
+                self.gpu_failed = true;
+                false
+            }
+        }
+    }
+
+    fn queue_gpu_frame(&self, qh: &QueueHandle<Self>) {
+        let surface = self.layer.wl_surface();
+        if let Some(viewport) = &self.viewport {
+            let _ = surface.set_buffer_scale(1);
+            viewport.set_destination(self.logical_w as i32, self.logical_h as i32);
+        } else {
+            let _ = surface.set_buffer_scale(self.buffer_scale().round().max(1.0) as i32);
+        }
+        surface.frame(qh, surface.clone());
+        let _ = self.conn.flush();
+    }
+}
+
+impl Drop for Shell {
+    fn drop(&mut self) {
+        self.gpu.take();
     }
 }
 
