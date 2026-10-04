@@ -101,5 +101,7 @@ wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 ksni = "0.2.2"
 notify-rust = "4"
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+wgpu = "23"
+pollster = "0.4"
 wayland-client = "0.31"
 wayland-protocols-wlr = "0.3"

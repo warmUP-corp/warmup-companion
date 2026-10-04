@@ -53,14 +53,26 @@ pub fn ensure_running() {
         .name("warmup-nimbus".into())
         .spawn(|| {
             let mut anim = Animator::new();
+            let mut gpu = Gpu::open();
             while crate::linux_speech::visual_active() {
                 let phase = crate::linux_speech::phase();
                 let level = crate::linux_speech::level();
-                let frame = anim.render(phase, level, [0.65, 0.82, 1.0]);
-                if let Ok(mut slot) = frame_slot().lock() {
-                    *slot = Some((RT, frame));
+                let accent = [0.65, 0.82, 1.0];
+                let rendered = gpu.as_mut().and_then(|gpu| match gpu.render(phase, level, accent) {
+                    Ok(frame) => Some((GPU_RT, frame)),
+                    Err(error) => {
+                        crate::install::log_line(&format!("nimbus gpu: {error}"));
+                        None
+                    }
+                });
+                if rendered.is_none() {
+                    gpu = None;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(33));
+                let (px, frame) = rendered.unwrap_or_else(|| (RT, anim.render(phase, level, accent)));
+                if let Ok(mut slot) = frame_slot().lock() {
+                    *slot = Some((px, frame));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(16));
             }
             if let Ok(mut slot) = frame_slot().lock() {
                 *slot = None;
@@ -345,9 +357,430 @@ fn normalize(p: [f32; 3]) -> [f32; 3] {
     mul(p, 1.0 / len)
 }
 
+const GPU_RT: u32 = 128;
+
+struct Gpu {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pipeline: wgpu::RenderPipeline,
+    params: wgpu::Buffer,
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    read: wgpu::Buffer,
+    noise: f32,
+    light: f32,
+    swirl: f32,
+    age: f32,
+    last: Option<Instant>,
+}
+
+impl Gpu {
+    fn open() -> Option<Self> {
+        match Self::try_open() {
+            Ok(gpu) => Some(gpu),
+            Err(error) => {
+                crate::install::log_line(&format!("nimbus staying on the CPU: {error}"));
+                None
+            }
+        }
+    }
+
+    fn try_open() -> Result<Self, String> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..Default::default()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))
+        .ok_or_else(|| "no Vulkan adapter".to_string())?;
+        crate::install::log_line(&format!(
+            "nimbus: {} ({:?})",
+            adapter.get_info().name,
+            adapter.get_info().backend
+        ));
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("nimbus"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::downlevel_defaults(),
+                memory_hints: wgpu::MemoryHints::default(),
+            },
+            None,
+        ))
+        .map_err(|error| error.to_string())?;
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("nimbus"),
+            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        });
+        let params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("nimbus-params"),
+            size: std::mem::size_of::<GpuParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("nimbus"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("nimbus"),
+            layout: &bind,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: params.as_entire_binding(),
+            }],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("nimbus"),
+            bind_group_layouts: &[&bind],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("nimbus"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("nimbus"),
+            size: wgpu::Extent3d {
+                width: GPU_RT,
+                height: GPU_RT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let row = align256(GPU_RT * 4);
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("nimbus-read"),
+            size: row as u64 * GPU_RT as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let _ = group;
+        Ok(Self {
+            device,
+            queue,
+            pipeline,
+            params,
+            texture,
+            view,
+            read,
+            noise: 0.0,
+            light: 0.0,
+            swirl: 0.0,
+            age: 0.0,
+            last: None,
+        })
+    }
+
+    fn render(&mut self, phase: u8, level: f32, accent: [f32; 3]) -> Result<Vec<u8>, String> {
+        let now = Instant::now();
+        let dt = self
+            .last
+            .map(|t| now.saturating_duration_since(t).as_secs_f32().min(0.05))
+            .unwrap_or(1.0 / 60.0);
+        self.last = Some(now);
+        self.age += dt;
+        let level = level.clamp(0.0, 1.0);
+        let pulse = match phase {
+            2 => (0.5 + 0.5 * (self.age * 2.4).sin()).clamp(0.0, 1.0),
+            1 => 0.5 + 0.5 * level,
+            _ => 0.5,
+        };
+        let noise_rate = match phase {
+            1 => 0.22 + 0.2 * level,
+            2 => 0.4 + 0.22 * pulse,
+            _ => 0.22,
+        };
+        self.noise += dt * noise_rate;
+        self.light += dt * 0.08;
+        let swirl_rate = match phase {
+            1 => 0.15 + 0.4 * level,
+            2 => 0.30,
+            _ => 0.15,
+        };
+        self.swirl = (self.swirl + dt * swirl_rate).rem_euclid(std::f32::consts::TAU);
+        let params = GpuParams::from_mood(pulse, self.noise, self.light, self.swirl, accent);
+        self.queue.write_buffer(&self.params, 0, bytemuck_bytes(&params));
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: self.params.as_entire_binding(),
+            }],
+        });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("nimbus") });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("nimbus"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        let row = align256(GPU_RT * 4);
+        encoder.copy_texture_to_buffer(
+            self.texture.as_image_copy(),
+            wgpu::ImageCopyBuffer {
+                buffer: &self.read,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(GPU_RT),
+                },
+            },
+            wgpu::Extent3d {
+                width: GPU_RT,
+                height: GPU_RT,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+        let slice = self.read.slice(..);
+        let (send, recv) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = send.send(result);
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        recv.recv().map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
+        let mapped = slice.get_mapped_range();
+        let mut packed = vec![0u8; (GPU_RT * GPU_RT * 4) as usize];
+        for y in 0..GPU_RT {
+            let src = (y * row) as usize;
+            let dst = (y * GPU_RT * 4) as usize;
+            packed[dst..dst + (GPU_RT * 4) as usize].copy_from_slice(&mapped[src..src + (GPU_RT * 4) as usize]);
+        }
+        drop(mapped);
+        self.read.unmap();
+        Ok(packed)
+    }
+}
+
+fn align256(value: u32) -> u32 {
+    (value + 255) & !255
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct GpuParams {
+    a: [f32; 4],
+    b: [f32; 4],
+    c: [f32; 4],
+    d: [f32; 4],
+    e: [f32; 4],
+    f: [f32; 4],
+    light: [f32; 4],
+    shadow: [f32; 4],
+}
+
+impl GpuParams {
+    fn from_mood(pulse: f32, speed: f32, light_spin: f32, swirl: f32, accent: [f32; 3]) -> Self {
+        let glow = pulse;
+        Self {
+            a: [GPU_RT as f32, GPU_RT as f32, 0.55, pulse],
+            b: [speed, 4.4, 1.8, 2.0],
+            c: [1.15, glow, 0.40 - 0.16 * glow, 0.5],
+            d: [1.35 + 2.6 * glow, 0.72, 1.5, 0.7],
+            e: [0.4, light_spin, 0.8 + 0.45 * glow, 0.06 + 0.08 * glow],
+            f: [0.50 + 0.20 * glow, 1.0, swirl, 0.0],
+            light: [accent[0], accent[1], accent[2], 1.0],
+            shadow: [accent[0] * 0.7, accent[1] * 0.7, accent[2] * 0.7, 1.0],
+        }
+    }
+}
+
+fn bytemuck_bytes(params: &GpuParams) -> &[u8] {
+    unsafe {
+        std::slice::from_raw_parts(
+            (params as *const GpuParams) as *const u8,
+            std::mem::size_of::<GpuParams>(),
+        )
+    }
+}
+
+const SHADER: &str = r#"
+struct Params {
+    a: vec4<f32>,
+    b: vec4<f32>,
+    c: vec4<f32>,
+    d: vec4<f32>,
+    e: vec4<f32>,
+    f: vec4<f32>,
+    light: vec4<f32>,
+    shadow: vec4<f32>,
+}
+@group(0) @binding(0) var<uniform> u: Params;
+
+fn saturate(x: f32) -> f32 { return clamp(x, 0.0, 1.0); }
+fn lerp(a: f32, b: f32, t: f32) -> f32 { return a + (b - a) * t; }
+fn lerp3(a: vec3<f32>, b: vec3<f32>, t: f32) -> vec3<f32> { return mix(a, b, t); }
+fn smoothstep3(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = saturate((x - e0) / (e1 - e0));
+    return t * t * (3.0 - 2.0 * t);
+}
+fn tanh1(x: f32) -> f32 {
+    let c = clamp(x, -10.0, 10.0);
+    let e = exp(2.0 * c);
+    return (e - 1.0) / (e + 1.0);
+}
+fn phaseHG(c: f32, g: f32) -> f32 {
+    let g2 = g * g;
+    return (1.0 - g2) / pow(max(1.0 + g2 - 2.0 * g * c, 0.0001), 1.5);
+}
+fn rotateAxis(p: vec3<f32>, axis: vec3<f32>, angle: f32) -> vec3<f32> {
+    let s = sin(angle);
+    let c = cos(angle);
+    return p * c + cross(axis, p) * s + axis * dot(axis, p) * (1.0 - c);
+}
+fn hueRotate(col: vec3<f32>, ang: f32) -> vec3<f32> {
+    let k = vec3<f32>(0.57735, 0.57735, 0.57735);
+    let ca = cos(ang);
+    return col * ca + cross(k, col) * sin(ang) + k * dot(k, col) * (1.0 - ca);
+}
+fn density(p: vec3<f32>, nimbusDensity: f32) -> f32 {
+    let radius = u.b.w;
+    let shell = 1.0 - length(p) / radius;
+    if (shell <= 0.0) { return 0.0; }
+    let voice = saturate(u.c.y);
+    let pulse = saturate(u.a.w);
+    let amp = 0.55 + 0.3 * sin(u.b.x * 2.2) + 0.5 * voice + 0.95 * pulse;
+    let axis = normalize(vec3<f32>(0.35 * sin(u.f.z), 1.0, 0.35 * cos(u.f.z)));
+    var swirled = rotateAxis(p, axis, u.f.z);
+    swirled = swirled + vec3<f32>(sin(u.f.z + 1.7), cos(u.f.z * 2.0 + 0.4), sin(u.f.z + 2.9)) * 0.05;
+    var q = swirled * (u.c.x * (1.0 + 0.16 * voice + 0.5 * pulse));
+    var freq = 1.0;
+    for (var k = 0; k < 4; k = k + 1) {
+        q = q + cos(q.yzx * freq + vec3<f32>(u.b.x)) * amp / freq;
+        freq = freq * 1.8;
+    }
+    let n = (sin(q.x) + sin(q.y) + sin(q.z)) / 3.0 * 0.5 + 0.5;
+    let thresh = lerp(u.c.z, u.c.z * 0.45, pulse);
+    let clump = smoothstep3(thresh, 1.0, n);
+    return clump * pow(shell, u.c.w) * nimbusDensity;
+}
+
+@vertex
+fn vs(@builtin(vertex_index) id: u32) -> @builtin(position) vec4<f32> {
+    let xy = vec2<f32>(f32((id << 1u) & 2u), f32(id & 2u));
+    return vec4<f32>(xy * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.0, 1.0);
+}
+
+@fragment
+fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let res = vec2<f32>(u.a.x, u.a.y);
+    let frag = vec2<f32>(pos.x, res.y - pos.y);
+    let uv = (2.0 * frag - res) / min(res.x, res.y);
+    let ro = vec3<f32>(0.0, 0.0, -u.b.y);
+    let rd = normalize(vec3<f32>(uv, u.b.z));
+    let L = normalize(vec3<f32>(cos(u.e.y) * 0.7, 0.45, sin(u.e.y) * 0.35 + 0.65));
+    let phase = phaseHG(dot(rd, L), u.e.x);
+    let rayDist = length(cross(rd, ro));
+    let rad = u.b.w;
+    if (rayDist > rad + 0.08) { return vec4<f32>(0.0); }
+    let tStart = max(u.b.y - rad, 0.0);
+    let dt = (2.0 * rad) / 48.0;
+    var T = 1.0;
+    var scattered = vec3<f32>(0.0);
+    let nimbusPower = u.e.z;
+    let nimbusDensity = u.d.x * (1.0 + 0.35 * u.a.z);
+    for (var i = 0; i < 48; i = i + 1) {
+        let t = tStart + (f32(i) + 0.5) * dt;
+        let p = ro + rd * t;
+        let dn = density(p, nimbusDensity);
+        if (dn > 0.001) {
+            var shadow = 1.0;
+            let lstep = rad / 4.0;
+            for (var s = 1; s <= 4; s = s + 1) {
+                let lp = p + L * (f32(s) - 0.5) * lstep;
+                shadow = shadow * exp(-density(lp, nimbusDensity) * lstep * u.d.z);
+            }
+            let hue = 0.6 * sin(dot(p, vec3<f32>(0.8, 0.5, -0.3)) * 1.4 + u.f.z);
+            let light = saturate3(hueRotate(u.light.rgb, hue));
+            let lit = lerp3(u.shadow.rgb * u.d.w, light, shadow);
+            scattered = scattered + T * dn * dt * lit * phase * nimbusPower;
+            T = T * exp(-dn * dt * u.d.y);
+            if (T < 0.01) { break; }
+        }
+    }
+    let body = 1.0 - T;
+    scattered = scattered + u.light.rgb * body * u.e.w;
+    let cover = smoothstep3(rad + 0.05, rad - 0.14, rayDist);
+    var rgb = u.shadow.rgb * cover + scattered;
+    rgb = rgb * u.f.x;
+    let peak = max(max(rgb.r, rgb.g), max(rgb.b, 0.0001));
+    let huev = rgb / peak * tanh1(peak);
+    let col = lerp3(huev, vec3<f32>(tanh1(rgb.r), tanh1(rgb.g), tanh1(rgb.b)), 0.35 * saturate(u.c.y));
+    return vec4<f32>(col, saturate(cover * u.f.y));
+}
+fn saturate3(c: vec3<f32>) -> vec3<f32> { return clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)); }
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vulkan_nimbus_renders_on_the_gpu() {
+        let Ok(mut gpu) = Gpu::try_open() else {
+            return;
+        };
+        let started = Instant::now();
+        let frame = gpu.render(1, 0.7, [0.65, 0.82, 1.0]).expect("frame");
+        let elapsed = started.elapsed();
+        let lit = frame.chunks_exact(4).filter(|px| px[3] > 8).count();
+        assert!(lit > 40, "lit pixels {lit}");
+        assert!(elapsed.as_millis() < 500, "gpu frame took {elapsed:?}");
+    }
 
     #[test]
     fn one_frame_has_a_cloud() {

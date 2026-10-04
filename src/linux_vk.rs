@@ -324,7 +324,11 @@ impl Shell {
 
     fn draw(&mut self, qh: &QueueHandle<Self>) {
         self.apply_layout();
-        let scale = self.buffer_scale() as f32;
+        let scale = if self.viewport.is_some() {
+            1.0
+        } else {
+            self.buffer_scale() as f32
+        };
         let rows = crate::vk_nav::rows_snapshot();
         let mono = matches!(vk_style(), VkStyle::Mono);
         let strip = crate::vk_predict::strip(if mono { 3 } else { 7 }, mono);
@@ -363,7 +367,6 @@ impl Shell {
             if let Some((px, bytes)) = crate::linux_nimbus::latest_frame() {
                 draw::paint_voice_key(&mut pixmap, &frame, &bytes, px);
             }
-            self.glide.animating = true;
         }
         let pixels = draw::to_argb(&pixmap);
         let buffer_w = pixmap.width() as i32;

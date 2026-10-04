@@ -12,7 +12,7 @@ use crate::vk_predict::StripState;
 
 pub const REF_MON_W: f32 = 1920.0;
 const REF_KEY_W: f32 = 92.0;
-const SEL_GLIDE_TAU: f32 = 0.045;
+
 const FLOATING_PANEL_INSET: f32 = 1.0;
 pub const STRIP_BAND_H: f32 = 67.0;
 const BAR_H: f32 = 80.0;
@@ -392,20 +392,8 @@ fn render_keyboard(
     let now = Instant::now();
     let target = rects.iter().find(|r| r.pos == frame.sel).map(|r| (r.left, r.top, r.right, r.bottom));
     if let Some(tgt) = target {
-        let dt = glide.last.map(|t| now.duration_since(t).as_secs_f32()).unwrap_or(0.0);
         glide.last = Some(now);
-        glide.ring = Some(match glide.ring {
-            Some(cur) if dt > 0.0 => {
-                let t = (1.0 - (-dt / SEL_GLIDE_TAU).exp()).clamp(0.0, 1.0);
-                (
-                    cur.0 + (tgt.0 - cur.0) * t,
-                    cur.1 + (tgt.1 - cur.1) * t,
-                    cur.2 + (tgt.2 - cur.2) * t,
-                    cur.3 + (tgt.3 - cur.3) * t,
-                )
-            }
-            _ => tgt,
-        });
+        glide.ring = Some(tgt);
     }
     let panel = if frame.floating {
         let panel_r = spec.panel_radius * unit;
@@ -462,16 +450,11 @@ fn render_keyboard(
     if let Some((x, y, w, h, radius)) = panel {
         clip_round(&mut pixmap, x, y, w, h, radius);
     }
-    let ring_left = glide.ring.and_then(|cur| {
-        target.map(|tgt| {
-            (cur.0 - tgt.0).abs() + (cur.1 - tgt.1).abs() + (cur.2 - tgt.2).abs() + (cur.3 - tgt.3).abs()
-        })
-    });
     let strip_moving = glide
         .strip_at
         .is_some_and(|t| t.elapsed().as_secs_f32() * 1000.0 < vk_motion::STRIP_ENTER_MS);
     let pressing = frame.pressed.is_some_and(|(_, s)| s < 0.999);
-    glide.animating = ring_left.is_some_and(|d| d > 0.75) || strip_moving || pressing;
+    glide.animating = strip_moving || pressing;
     Some(pixmap)
 }
 
@@ -804,16 +787,6 @@ fn stroke_ring(pixmap: &mut Pixmap, glide: &Glide, spec: &Spec, pal: &Pal, unit:
     stroke_rect(pixmap, (l + ring_w * 0.5) * scale, (t + ring_w * 0.5) * scale, (r - l - ring_w) * scale, (b - t - ring_w) * scale, (radius - ring_w * 0.5).max(0.0) * scale, pal.sel_ring, 255, ring_w * scale);
 }
 
-fn shadow_reach(spec: &Spec, unit: f32) -> f32 {
-    let drop = (spec.key_shadow_dy * unit).max(1.0);
-    let glow = spec.sel_shadow.map(|(dy, blur, _)| (dy + blur) * unit).unwrap_or(0.0);
-    drop.max(glow)
-}
-
-fn keys_near(a: &KeyRect, b: &KeyRect, pad: f32) -> bool {
-    a.left < b.right + pad && a.right > b.left - pad && a.top < b.bottom + pad && a.bottom > b.top - pad
-}
-
 fn erase_key(pixmap: &mut Pixmap, rect: &KeyRect, spec: &Spec, pal: &Pal, unit: f32, scale: f32) {
     let dy = (spec.key_shadow_dy * unit).max(0.0);
     round_rect(pixmap, rect.left * scale, rect.top * scale, (rect.right - rect.left) * scale, (rect.bottom - rect.top + dy) * scale, 0.0, pal.bg, 255);
@@ -844,27 +817,12 @@ fn scene(frame: &Frame) -> (Spec, Pal, Vec<KeyRect>, f32, f32, f32, f32) {
 
 fn advance_glide(glide: &mut Glide, frame: &Frame, target: Option<(f32, f32, f32, f32)>, now: Instant) {
     if let Some(tgt) = target {
-        let dt = glide.last.map(|t| now.duration_since(t).as_secs_f32()).unwrap_or(0.0);
         glide.last = Some(now);
-        glide.ring = Some(match glide.ring {
-            Some(cur) if dt > 0.0 => {
-                let t = (1.0 - (-dt / SEL_GLIDE_TAU).exp()).clamp(0.0, 1.0);
-                (
-                    cur.0 + (tgt.0 - cur.0) * t,
-                    cur.1 + (tgt.1 - cur.1) * t,
-                    cur.2 + (tgt.2 - cur.2) * t,
-                    cur.3 + (tgt.3 - cur.3) * t,
-                )
-            }
-            _ => tgt,
-        });
+        glide.ring = Some(tgt);
     }
-    let ring_left = glide.ring.and_then(|cur| {
-        target.map(|tgt| (cur.0 - tgt.0).abs() + (cur.1 - tgt.1).abs() + (cur.2 - tgt.2).abs() + (cur.3 - tgt.3).abs())
-    });
     let strip_moving = glide.strip_at.is_some_and(|t| t.elapsed().as_secs_f32() * 1000.0 < vk_motion::STRIP_ENTER_MS);
     let pressing = frame.pressed.is_some_and(|(_, scale)| scale < 0.999);
-    glide.animating = ring_left.is_some_and(|d| d > 0.75) || strip_moving || pressing;
+    glide.animating = strip_moving || pressing;
 }
 
 fn paint_live(pixmap: &mut Pixmap, frame: &Frame, fonts: &mut FontSystem, cache: &mut SwashCache, glide: &mut Glide, step: bool) {
@@ -874,23 +832,15 @@ fn paint_live(pixmap: &mut Pixmap, frame: &Frame, fonts: &mut FontSystem, cache:
         advance_glide(glide, frame, target, Instant::now());
     }
     if let Some(sel_index) = rects.iter().position(|r| r.pos == frame.sel) {
-        let pad = shadow_reach(&spec, unit);
         erase_key(pixmap, &rects[sel_index], &spec, &pal, unit, scale);
         let press = frame.pressed.filter(|(p, _)| *p == rects[sel_index].pos).map(|(_, s)| s).unwrap_or(1.0);
         paint_key(pixmap, fonts, cache, frame, &spec, &pal, &rects[sel_index], unit, key_h, scale, radius, true, press, true);
-        for index in 0..rects.len() {
-            if index == sel_index {
-                continue;
-            }
-            let pressed = frame.pressed.filter(|(p, _)| *p == rects[index].pos).map(|(_, s)| s);
-            if pressed.is_none() && !keys_near(&rects[index], &rects[sel_index], pad) {
-                continue;
-            }
-            if let Some(press) = pressed {
-                erase_key(pixmap, &rects[index], &spec, &pal, unit, scale);
-                paint_key(pixmap, fonts, cache, frame, &spec, &pal, &rects[index], unit, key_h, scale, radius, false, press, true);
-            } else {
-                paint_key(pixmap, fonts, cache, frame, &spec, &pal, &rects[index], unit, key_h, scale, radius, false, 1.0, false);
+        if let Some((pos, press)) = frame.pressed {
+            if pos != rects[sel_index].pos {
+                if let Some(other) = rects.iter().find(|rect| rect.pos == pos) {
+                    erase_key(pixmap, other, &spec, &pal, unit, scale);
+                    paint_key(pixmap, fonts, cache, frame, &spec, &pal, other, unit, key_h, scale, radius, false, press, true);
+                }
             }
         }
     }
