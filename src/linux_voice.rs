@@ -40,10 +40,21 @@ fn run() -> Result<(), String> {
     let qh = queue.handle();
     let mut pill = Pill::new(&globals, &qh)?;
     pill.layer.commit();
-    while crate::linux_speech::visual_active() {
-        let _ = queue.dispatch_pending(&mut pill);
-        pill.draw(&qh);
-        let _ = queue.flush();
+    let mut wayland_dead = false;
+    while crate::linux_speech::visual_active() && !wayland_dead {
+        if let Err(error) = queue.dispatch_pending(&mut pill) {
+            crate::install::log_line(&format!("voice pill wayland: {error}"));
+            wayland_dead = true;
+            break;
+        }
+        if pill.configured {
+            pill.draw(&qh);
+        }
+        if let Err(error) = queue.flush() {
+            crate::install::log_line(&format!("voice pill wayland: {error}"));
+            wayland_dead = true;
+            break;
+        }
         let Some(guard) = queue.prepare_read() else {
             continue;
         };
@@ -52,14 +63,18 @@ fn run() -> Result<(), String> {
             nix::poll::PollFlags::POLLIN,
         )];
         let _ = nix::poll::poll(&mut fds, nix::poll::PollTimeout::from(33u16));
-        if fds[0].any().unwrap_or(false) {
-            let _ = guard.read();
+        if fds[0].any().unwrap_or(false) && guard.read().is_err() {
+            crate::install::log_line("voice pill wayland: read failed");
+            wayland_dead = true;
+            break;
         }
     }
-    if let smithay_client_toolkit::shell::wlr_layer::SurfaceKind::Wlr(proxy) = pill.layer.kind() {
-        proxy.destroy();
+    if !wayland_dead {
+        if let smithay_client_toolkit::shell::wlr_layer::SurfaceKind::Wlr(proxy) = pill.layer.kind() {
+            proxy.destroy();
+        }
+        let _ = queue.roundtrip(&mut pill);
     }
-    let _ = queue.roundtrip(&mut pill);
     drop(pill);
     drop(queue);
     let _ = conn.flush();
@@ -73,6 +88,7 @@ struct Pill {
     pool: SlotPool,
     layer: LayerSurface,
     buffer: Option<Buffer>,
+    configured: bool,
     frames: crate::linux_vk::VoiceFrames,
     shown_gen: u64,
     shown_label: String,
@@ -99,6 +115,7 @@ impl Pill {
             pool,
             layer,
             buffer: None,
+            configured: false,
             frames: crate::linux_vk::VoiceFrames::new(),
             shown_gen: u64::MAX,
             shown_label: String::new(),
@@ -169,7 +186,9 @@ impl OutputHandler for Pill {
 
 impl LayerShellHandler for Pill {
     fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {}
-    fn configure(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: &LayerSurface, _: LayerSurfaceConfigure, _: u32) {
+    fn configure(&mut self, conn: &Connection, qh: &QueueHandle<Self>, _: &LayerSurface, _: LayerSurfaceConfigure, _: u32) {
+        let _ = conn.flush();
+        self.configured = true;
         self.draw(qh);
     }
 }

@@ -162,11 +162,16 @@ fn keyboard_loop(wake: UnixStream) -> Result<(), String> {
     let display = conn.display().id().as_ptr() as *mut std::ffi::c_void;
     let mut shell = Shell::new(&globals, &qh, display, conn.clone())?;
     shell.layer.commit();
+    let mut wayland_dead = false;
     loop {
         if STOP.load(Ordering::SeqCst) || shell.exit {
             break;
         }
-        let _ = queue.dispatch_pending(&mut shell);
+        if let Err(error) = queue.dispatch_pending(&mut shell) {
+            crate::install::log_line(&format!("keyboard wayland: {error}"));
+            wayland_dead = true;
+            break;
+        }
         #[cfg(feature = "speech")]
         if shell.configured {
             let gen = crate::linux_nimbus::frame_generation();
@@ -182,7 +187,11 @@ fn keyboard_loop(wake: UnixStream) -> Result<(), String> {
         if shell.dirty && shell.configured && !shell.frame_pending {
             shell.draw(&qh);
         }
-        let _ = queue.flush();
+        if let Err(error) = queue.flush() {
+            crate::install::log_line(&format!("keyboard wayland: {error}"));
+            wayland_dead = true;
+            break;
+        }
         let Some(guard) = queue.prepare_read() else {
             continue;
         };
@@ -201,8 +210,10 @@ fn keyboard_loop(wake: UnixStream) -> Result<(), String> {
                 fds[1].any().unwrap_or(false),
             )
         };
-        if wayland_ready {
-            let _ = guard.read();
+        if wayland_ready && guard.read().is_err() {
+            crate::install::log_line("keyboard wayland: read failed");
+            wayland_dead = true;
+            break;
         }
         if wake_ready {
             let mut buf = [0u8; 32];
@@ -211,10 +222,12 @@ fn keyboard_loop(wake: UnixStream) -> Result<(), String> {
         }
     }
     shell.gpu.take();
-    if let smithay_client_toolkit::shell::wlr_layer::SurfaceKind::Wlr(proxy) = shell.layer.kind() {
-        proxy.destroy();
+    if !wayland_dead {
+        if let smithay_client_toolkit::shell::wlr_layer::SurfaceKind::Wlr(proxy) = shell.layer.kind() {
+            proxy.destroy();
+        }
+        let _ = queue.roundtrip(&mut shell);
     }
-    let _ = queue.roundtrip(&mut shell);
     drop(shell);
     drop(queue);
     let _ = conn.flush();
@@ -458,6 +471,7 @@ impl Shell {
         if self.gpu_failed || self.logical_w == 0 || self.logical_h == 0 {
             return false;
         }
+        let _ = self.conn.flush();
         if self.gpu.is_none() {
             let surface = self.layer.wl_surface().id().as_ptr() as *mut std::ffi::c_void;
             match gpu::Presenter::open(self.display, surface) {
@@ -725,12 +739,13 @@ impl LayerShellHandler for Shell {
 
     fn configure(
         &mut self,
-        _: &Connection,
+        conn: &Connection,
         qh: &QueueHandle<Self>,
         _: &LayerSurface,
         configure: LayerSurfaceConfigure,
         _: u32,
     ) {
+        let _ = conn.flush();
         let docked = self.placed.is_some_and(|(docked, _, _, _)| docked);
         let mut changed = !self.configured;
         if docked && configure.new_size.0 > 0 && configure.new_size.0 != self.logical_w {
