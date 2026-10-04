@@ -21,6 +21,7 @@
 //! `vk_nav::start_voice_input` bails on `logon_focus::is_active`), so the helper
 //! only ever runs on the default desktop where the user has audio + consent.
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use windows::core::{PCWSTR, PWSTR};
@@ -60,6 +61,9 @@ fn process_alive(process: HANDLE) -> bool {
 /// Spawn the speech helper as the real logged-in user, if one is not already
 /// running. Returns Ok if a helper is now (or was already) running.
 pub fn start_helper() -> Result<(), String> {
+    if !crate::config::voice_enabled() {
+        return Err("voice transcription is disabled".into());
+    }
     let mut guard = HELPER
         .lock()
         .map_err(|_| "speech helper lock poisoned".to_string())?;
@@ -88,7 +92,11 @@ pub fn start_helper() -> Result<(), String> {
 /// when parakeet is the selected engine and nothing is listening on its port yet.
 /// Fire-and-forget — the mic helper waits for readiness when it needs to transcribe.
 fn ensure_parakeet_server() {
-    if engine() != "parakeet" || !parakeet_available() || parakeet_server_up() {
+    if !crate::config::voice_enabled()
+        || engine() != "parakeet"
+        || !parakeet_available()
+        || parakeet_server_up()
+    {
         return;
     }
     let exe = match std::env::current_exe() {
@@ -116,19 +124,58 @@ fn ensure_parakeet_server() {
     }
 }
 
+enum HelperSlot {
+    Held(std::sync::MutexGuard<'static, Option<Helper>>),
+    Superseded,
+    Poisoned,
+}
+
 /// Kill the running helper, if any. Safe to call when none is running.
 pub fn stop_helper() {
-    let taken = HELPER.lock().ok().and_then(|mut g| g.take());
-    if let Some(h) = taken {
+    let _ = helper_slot(None);
+}
+
+fn helper_slot(generation: Option<u64>) -> HelperSlot {
+    let mut guard = match HELPER.lock() {
+        Ok(guard) => guard,
+        Err(_) => return HelperSlot::Poisoned,
+    };
+    if generation.is_some_and(|generation| {
+        VOICE_OFF_GENERATION.load(Ordering::SeqCst) != generation
+    }) {
+        return HelperSlot::Superseded;
+    }
+    if let Some(helper) = guard.take() {
         unsafe {
-            let _ = TerminateProcess(h.process, 0);
-            let _ = CloseHandle(h.process);
+            let _ = TerminateProcess(helper.process, 0);
+            let _ = CloseHandle(helper.process);
         }
     }
+    HelperSlot::Held(guard)
 }
 
 pub fn unload_engine() {
-    stop_helper();
+    let _ = unload_engine_if(None);
+}
+
+fn unload_engine_if(generation: Option<u64>) -> bool {
+    let guard = match helper_slot(generation) {
+        HelperSlot::Held(guard) => guard,
+        HelperSlot::Superseded => return false,
+        HelperSlot::Poisoned => {
+            if generation.is_some() {
+                return false;
+            }
+            kill_resident_servers();
+            return true;
+        }
+    };
+    kill_resident_servers();
+    drop(guard);
+    true
+}
+
+fn kill_resident_servers() {
     if let Some(h) = PARAKEET_SERVER.lock().ok().and_then(|mut g| g.take()) {
         unsafe {
             let _ = TerminateProcess(h.process, 0);
@@ -140,6 +187,75 @@ pub fn unload_engine() {
     crate::install::log_line(&format!(
         "voice engine unloaded (whisper-server killed: {killed})"
     ));
+}
+
+static VOICE_OFF_APPLIED: AtomicBool = AtomicBool::new(false);
+static VOICE_OFF_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Make the `voice_enabled` setting real. While it is on, this does nothing.
+/// When it is off, an in-progress recording is dropped (not transcribed) and the
+/// speech engine is unloaded. Safe to call often; a second call while already
+/// off does not spawn another unload.
+pub fn enforce_voice_enabled() {
+    if crate::config::voice_enabled() {
+        // Bump only on the rising edge so an unload already in flight bails
+        // without the steady poll advancing the generation every second.
+        if VOICE_OFF_APPLIED.swap(false, Ordering::SeqCst) {
+            VOICE_OFF_GENERATION.fetch_add(1, Ordering::SeqCst);
+        }
+        return;
+    }
+    if VOICE_OFF_APPLIED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let generation = VOICE_OFF_GENERATION.load(Ordering::SeqCst);
+    crate::vk_nav::set_voice_input_active(false);
+    crate::install::log_line(
+        "voice transcription disabled; discarding any recording and unloading the engine",
+    );
+    if std::thread::Builder::new()
+        .name("voice-unload".into())
+        .spawn(move || release_voice_engine(generation))
+        .is_err()
+    {
+        VOICE_OFF_APPLIED.store(false, Ordering::SeqCst);
+    }
+}
+
+fn release_voice_engine(generation: u64) {
+    // The helper polls the setting about every 50ms and exits without injecting
+    // text, which also resumes media it paused. Kill it only if that does not
+    // happen quickly.
+    for _ in 0..40 {
+        if VOICE_OFF_GENERATION.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        if !helper_alive() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !unload_engine_if(Some(generation)) {
+        return;
+    }
+    // A parakeet process that was still loading its model binds after the first
+    // quit. Ask again once it can hear.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    if VOICE_OFF_GENERATION.load(Ordering::SeqCst) != generation {
+        return;
+    }
+    let mut still_up = helper_alive() || parakeet_server_up();
+    if still_up {
+        if !unload_engine_if(Some(generation)) {
+            return;
+        }
+        still_up = helper_alive() || parakeet_server_up();
+    }
+    // Still resident (model was mid-load and not listening yet). Try again on
+    // the next poll instead of leaving it in memory with the switch off.
+    if still_up && VOICE_OFF_GENERATION.load(Ordering::SeqCst) == generation {
+        VOICE_OFF_APPLIED.store(false, Ordering::SeqCst);
+    }
 }
 
 fn kill_whisper_servers() -> usize {
@@ -725,7 +841,10 @@ mod coding_vocab {
         while let Some(off) = lower[i..].find(&pat) {
             let start = i + off;
             let end = start + pat.len();
-            let before_ok = s[..start].chars().next_back().map_or(true, |c| !is_word_char(c));
+            let before_ok = s[..start]
+                .chars()
+                .next_back()
+                .map_or(true, |c| !is_word_char(c));
             let after_ok = s[end..].chars().next().map_or(true, |c| !is_word_char(c));
             if before_ok && after_ok {
                 out.push_str(&s[i..start]);
@@ -742,9 +861,9 @@ mod coding_vocab {
     }
 
     pub fn fix_coding_terms(text: &str) -> String {
-        CORRECTIONS
-            .iter()
-            .fold(text.to_string(), |s, (from, to)| replace_phrase(&s, from, to))
+        CORRECTIONS.iter().fold(text.to_string(), |s, (from, to)| {
+            replace_phrase(&s, from, to)
+        })
     }
 
     use crate::config::Vocabulary;
@@ -787,7 +906,10 @@ mod coding_vocab {
             let cases = [
                 ("get push to main", "git push to main"),
                 ("Get status.", "git status."),
-                ("then get commit and get pull", "then git commit and git pull"),
+                (
+                    "then get commit and get pull",
+                    "then git commit and git pull",
+                ),
                 ("open it on get hub", "open it on GitHub"),
                 ("run and PM install", "run npm install"),
                 ("run N PM install", "run npm install"),
@@ -846,7 +968,10 @@ mod coding_vocab {
                 ("a next JS app", "a Next.js app"),
                 ("add tail wind CSS", "add Tailwind CSS"),
                 ("run ES lint", "run ESLint"),
-                ("write type script and java script", "write TypeScript and JavaScript"),
+                (
+                    "write type script and java script",
+                    "write TypeScript and JavaScript",
+                ),
                 ("run V test", "run Vitest"),
                 ("a play wright test", "a Playwright test"),
                 ("read the Claude dot MD", "read the CLAUDE.md"),
@@ -913,10 +1038,18 @@ mod coding_vocab {
                 words: Vec::new(),
             };
             assert_eq!(parse_vocabulary(None), coding);
-            assert_eq!(parse_vocabulary(Some("vk_mode = docked\n# vocabulary = off\n")), coding);
+            assert_eq!(
+                parse_vocabulary(Some("vk_mode = docked\n# vocabulary = off\n")),
+                coding
+            );
             assert_eq!(parse_vocabulary(Some("vocabulary = coding")), coding);
             assert_eq!(parse_vocabulary(Some("vocabulary = CODING\n")), coding);
-            for off in ["vocabulary = off", "vocabulary = none", "vocabulary =", "vocabulary = , "] {
+            for off in [
+                "vocabulary = off",
+                "vocabulary = none",
+                "vocabulary =",
+                "vocabulary = , ",
+            ] {
                 let v = parse_vocabulary(Some(off));
                 assert_eq!(v, Vocabulary::default(), "input: {off}");
                 assert_eq!(v.prompt(), "");
@@ -927,10 +1060,14 @@ mod coding_vocab {
             assert!(!custom.coding);
             assert_eq!(custom.words, ["herdr", "MyProject"]);
             assert_eq!(custom.prompt(), "Words: herdr, MyProject.");
-            assert_eq!(custom.fix("run Herdr on myproject"), "run herdr on MyProject");
+            assert_eq!(
+                custom.fix("run Herdr on myproject"),
+                "run herdr on MyProject"
+            );
             assert_eq!(custom.fix("get push"), "get push");
 
-            let mixed = parse_vocabulary(Some("vk_mode=docked\nvocabulary = coding, herdr, Jonas\n"));
+            let mixed =
+                parse_vocabulary(Some("vk_mode=docked\nvocabulary = coding, herdr, Jonas\n"));
             assert!(mixed.coding);
             assert_eq!(mixed.words, ["herdr", "Jonas"]);
             assert!(mixed.prompt().starts_with(WHISPER_PROMPT));
@@ -940,7 +1077,11 @@ mod coding_vocab {
 
         #[test]
         fn whisper_prompt_fits_and_covers_vocab() {
-            assert!(WHISPER_PROMPT.len() <= 900, "prompt is {} chars", WHISPER_PROMPT.len());
+            assert!(
+                WHISPER_PROMPT.len() <= 900,
+                "prompt is {} chars",
+                WHISPER_PROMPT.len()
+            );
             for w in VOCAB {
                 assert!(WHISPER_PROMPT.contains(w), "prompt misses {w}");
             }
@@ -949,7 +1090,7 @@ mod coding_vocab {
 }
 
 #[cfg(not(feature = "speech"))]
-pub fn run_blocking()-> Result<(), String> {
+pub fn run_blocking() -> Result<(), String> {
     Err("speech feature not built into this binary".into())
 }
 
@@ -1230,6 +1371,9 @@ mod engine {
     /// survives the helper being killed on mic toggle-off and keeps the model
     /// loaded across toggles) and waits for it to bind + load the model once.
     fn ensure_server() -> Result<(), String> {
+        if !crate::config::voice_enabled() {
+            return Err("voice transcription disabled".into());
+        }
         if server_up() {
             return Ok(());
         }
@@ -1260,6 +1404,9 @@ mod engine {
 
         let deadline = Instant::now() + Duration::from_secs(40);
         while Instant::now() < deadline {
+            if !crate::config::voice_enabled() {
+                return Err("voice transcription disabled".into());
+            }
             if server_up() {
                 return Ok(());
             }
@@ -1507,6 +1654,9 @@ mod engine {
         pub fn wait_ready() -> Result<(), String> {
             let deadline = Instant::now() + Duration::from_secs(90);
             while Instant::now() < deadline {
+                if !crate::config::voice_enabled() {
+                    return Err("voice transcription disabled".into());
+                }
                 if server_up() {
                     return Ok(());
                 }
@@ -1547,8 +1697,16 @@ mod engine {
         // ponytail: single-threaded, no idle shutdown. Add an idle-timeout exit if the
         // resident RAM proves annoying when the mic is unused for long stretches.
         pub fn serve() -> Result<(), String> {
+            if !crate::config::voice_enabled() {
+                super::log("parakeet-server: voice disabled, not loading the model");
+                return Ok(());
+            }
             super::log("parakeet-server: loading model");
             let mut model = load()?; // slow, once; binds only after this returns
+            if !crate::config::voice_enabled() {
+                super::log("parakeet-server: voice disabled during load, exiting");
+                return Ok(());
+            }
             let listener = TcpListener::bind(addr())
                 .map_err(|e| format!("parakeet-server bind {PORT}: {e}"))?;
             super::log(&format!("parakeet-server: ready on {}", addr()));
@@ -1592,6 +1750,10 @@ mod engine {
                 .chunks_exact(4)
                 .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect();
+            if !crate::config::voice_enabled() {
+                super::log("parakeet-server: voice disabled, dropping audio");
+                std::process::exit(0);
+            }
             let text = transcribe(model, &samples)?;
             s.write_all(text.as_bytes())
                 .map_err(|e| format!("write: {e}"))?;
@@ -1758,6 +1920,10 @@ mod engine {
     /// resident server, and inject the text. Blocks until idle auto-stop; the
     /// worker kills this process for a manual toggle-off.
     pub fn run_blocking() -> Result<(), String> {
+        if !crate::config::voice_enabled() {
+            log("speech: disabled, helper not recording");
+            return Ok(());
+        }
         let host = cpal::default_host();
         let device = pick_device(&host).ok_or("no input device (microphone)")?;
         log(&format!(
@@ -1817,9 +1983,21 @@ mod engine {
             log("speech: waiting for parakeet server (background)");
             Some(std::thread::spawn(parakeet::wait_ready))
         } else {
-            ensure_server()?;
+            if let Err(e) = ensure_server() {
+                if !crate::config::voice_enabled() {
+                    log("speech: disabled during startup, not transcribing");
+                    let _ = std::fs::remove_file(status_path());
+                    return Ok(());
+                }
+                return Err(e);
+            }
             None
         };
+        if !crate::config::voice_enabled() {
+            log("speech: disabled during startup, not transcribing");
+            let _ = std::fs::remove_file(status_path());
+            return Ok(());
+        }
         log(if pk_ready.is_some() {
             "speech: recording (parakeet server warming)"
         } else {
@@ -1847,6 +2025,7 @@ mod engine {
         let mut warmup = 16u32;
         let mut had_speech = false;
         let mut silence_s = 0.0f32;
+        let mut discard = false;
         loop {
             std::thread::sleep(tick);
             let new: Vec<f32> = {
@@ -1893,7 +2072,13 @@ mod engine {
                 since_log = 0.0;
             }
             // Finish on: manual stop, auto-stop after a post-speech pause, or the cap.
+            // Disabling voice drops the recording. It must not be transcribed.
             let auto_stop = had_speech && silence_s >= AUTO_STOP_S;
+            if !crate::config::voice_enabled() {
+                log("speech: disabled, recording discarded");
+                discard = true;
+                break;
+            }
             if stop_requested() || auto_stop || secs >= MAX_RECORD_S {
                 if auto_stop {
                     log(&format!("speech: auto-stop after {AUTO_STOP_S}s silence"));
@@ -1902,9 +2087,11 @@ mod engine {
             }
         }
 
-        set_phase("transcribing");
         let secs = all.len() as f32 / in_rate as f32;
-        if !all.is_empty() {
+        if discard || !crate::config::voice_enabled() {
+            log("speech: disabled, transcript discarded");
+        } else if !all.is_empty() {
+            set_phase("transcribing");
             let samples = resample_16k(&all, in_rate);
             // Parakeet transcribes via its resident server (model stays loaded there);
             // whisper goes via WAV + HTTP. For parakeet, join the background "ensure
@@ -1927,6 +2114,8 @@ mod engine {
                             "speech: heard ({secs:.1}s) non-speech, skipped (\"{}\")",
                             t.trim()
                         ));
+                    } else if !crate::config::voice_enabled() {
+                        log("speech: disabled, transcript discarded");
                     } else {
                         log(&format!("speech: heard ({secs:.1}s) \"{clean}\""));
                         crate::vk_nav::send_text_direct(&format!("{clean} "));

@@ -61,7 +61,9 @@ pub fn dispatch_install_or_service(args: &[String]) {
         Some("restore-keyboard") | Some("restore-native-keyboard") => {
             crate::win::native_keyboard::restore_auto_invoke();
             crate::win::native_keyboard::ensure_search_service_running();
-            crate::install::log_line("restore-keyboard: requested Windows keyboard service restore");
+            crate::install::log_line(
+                "restore-keyboard: requested Windows keyboard service restore",
+            );
             println!("Requested Windows touch keyboard/search service restore.");
             std::process::exit(0);
         }
@@ -256,6 +258,7 @@ fn print_gamepad_settings() {
     println!("sleep_on_game={}", s.sleep_on_game);
     println!("auto_stop_on_game={}", s.auto_stop_on_game);
     println!("signin_hints={}", s.signin_hints);
+    println!("voice_enabled={}", s.voice_enabled);
     println!("cursor_deadzone={}", s.cursor_deadzone);
     println!("cursor_speed={}", s.cursor_speed);
     println!("cursor_accel={}", s.cursor_accel);
