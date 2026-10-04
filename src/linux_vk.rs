@@ -302,7 +302,8 @@ impl Shell {
         self.apply_layout();
         let scale = self.buffer_scale() as f32;
         let rows = crate::vk_nav::rows_snapshot();
-        let strip = crate::vk_predict::strip(7, matches!(vk_style(), VkStyle::Mono));
+        let mono = matches!(vk_style(), VkStyle::Mono);
+        let strip = crate::vk_predict::strip(if mono { 3 } else { 7 }, mono);
         let pressed = crate::vk_nav::press_feedback().map(|(pos, at)| {
             (
                 pos,
@@ -315,7 +316,7 @@ impl Shell {
             logical_w: self.logical_w as f32,
             logical_h: self.logical_h as f32,
             scale,
-            scale_w: draw::REF_MON_W * draw::ui_scale(),
+            scale_w: draw::layout_scale_w(vk_style()),
             rows,
             sel: crate::vk_nav::selection(),
             style: vk_style(),

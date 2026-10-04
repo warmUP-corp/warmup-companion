@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- The Linux on-screen keyboard uses the same key geometry, colours, corner badges, suggestion bar and shortcut legend as the Windows keyboard. The floating keyboard sits along the bottom of the screen. Lettering is Selawik, the open-source face that matches Segoe UI's metrics.
+- The Linux on-screen keyboard matches the on-screen design: a 1468-wide card, 138 by 102 keys, the suggestion bar, and a shortcut hint bar along the bottom. The floating keyboard sits just above the bottom edge. Lettering is Selawik, the open-source face that matches the design's metrics.
 - On Linux, L3 opens the on-screen keyboard on a layer above other windows. It never takes keyboard focus. Docked mode reserves the bottom edge; floating mode stays centred. The keys are drawn in software, follow the keyboard colours in settings, and stay sharp on a fractional-scale display. The first time it runs, a short prompt says to press L3. The lock screen cannot show the keyboard.
 - On Linux, text is typed into the focused window. Keys the on-screen keyboard already uses are real keys. Other characters follow the active keyboard layout, including Shift and AltGr, so umlauts and € land as they would from a physical keyboard. A character the layout does not contain is typed through the compositor's virtual keyboard. Words are not added to the personal dictionary unless the focused field is known to be an ordinary text field. The dictionary file is `personal.dict` in the companion's data folder.
 - On Linux the companion sits in the system tray. From there you can pause input, open Controller Center, turn game detection on or off, open the log, and save a diagnostics report.

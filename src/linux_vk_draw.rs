@@ -292,29 +292,38 @@ pub fn floating_bottom_margin(output_h: f32) -> i32 {
     ((output_h.max(0.0) * 0.04).round() as i32).clamp(28, 80)
 }
 
+pub fn layout_scale(style: VkStyle) -> f32 {
+    let key_w = match style {
+        VkStyle::Normal => 138.0,
+        VkStyle::Mono => 137.0,
+    };
+    key_w / REF_KEY_W
+}
+
+pub fn layout_scale_w(style: VkStyle) -> f32 {
+    REF_MON_W * layout_scale(style)
+}
+
 pub fn card_size(output_w: f32, output_h: f32, docked: bool, rows: &[KeyRow], style: VkStyle) -> (u32, u32) {
     let spec = spec_for(style);
-    let scale = ui_scale();
+    let scale = layout_scale(style);
     let scale_w = REF_MON_W * scale;
     let (grid_w, block_h) = vk_geom::grid_size(scale_w, rows, spec.key_aspect, spec.gap, spec.design_kh);
     let u = ref_unit(scale, &spec);
     let chrome = (spec.strip_bar_h + spec.gap - spec.pad_y) * u;
     let legend = legend_band_height(scale, &spec);
-    let (pad_x, pad_y) = (spec.pad_x * u + FLOATING_PANEL_INSET, spec.pad_y * u + FLOATING_PANEL_INSET);
+    let (pad_x, pad_y) = (spec.pad_x * u, spec.pad_y * u);
+    let height = (chrome + block_h + pad_y * 2.0 + legend).ceil().clamp(160.0, output_h.max(160.0));
     if docked {
-        let h = VK_KB_REF_H * crate::config::vk_bar_scale();
-        let extra = chrome - STRIP_BAND_H + legend;
-        let height = (h + extra).round().clamp(160.0, output_h.max(160.0));
         (output_w.max(640.0) as u32, height as u32)
     } else {
         let width = (grid_w + pad_x * 2.0).round().min(output_w.max(480.0));
-        let height = (chrome + block_h + pad_y * 2.0 + legend).ceil().clamp(160.0, output_h.max(160.0));
         (width as u32, height as u32)
     }
 }
 
 fn legend_band_height(scale: f32, spec: &Spec) -> f32 {
-    ((BAR_H - spec.pad_y) * ref_unit(scale, spec)).max(0.0)
+    60.0 * ref_unit(scale, spec)
 }
 
 fn ref_unit(scale: f32, spec: &Spec) -> f32 {
@@ -463,7 +472,7 @@ pub fn draw(
                 text(&mut pixmap, fonts, cache, &glyph, band, px * unit * scale, weight, label_c, 255, scale);
             }
         }
-        if let Some(hint) = key_hint(&key.action) {
+        if let Some(hint) = key_hint(&key.action).filter(|_| !spec.mono) {
             let badge = spec.hint_badge * unit;
             let inset = spec.hint_inset * unit;
             let bx = left + inset;
@@ -547,43 +556,38 @@ fn fit_legend(widths: &[f32], sep: f32, avail: f32) -> Vec<usize> {
 
 fn leg_part_width(part: &Leg, u: f32, fonts: &mut FontSystem) -> f32 {
     match *part {
-        Leg::Btn("SELECT") => BAR_SHARE * u,
-        Leg::Btn(_) => BAR_GLYPH * u,
-        Leg::Word(word) => measure_label(fonts, word, text_px(BAR_PREFIX_PX, u)),
-        Leg::Plus => measure_label(fonts, "+", text_px(BAR_CONNECTOR_PX, u)),
-        Leg::Slash => measure_label(fonts, "/", text_px(BAR_CONNECTOR_PX, u)),
+        Leg::Btn("SELECT") => 28.0 * u,
+        Leg::Btn(_) => 24.0 * u,
+        Leg::Word(word) => measure_label(fonts, word, 15.0 * u),
+        Leg::Plus => measure_label(fonts, "+", 13.0 * u),
+        Leg::Slash => measure_label(fonts, "/", 13.0 * u),
     }
 }
 
 fn legend_item_width(parts: &[Leg], label: &str, u: f32, fonts: &mut FontSystem) -> f32 {
-    let gaps = BAR_GAP * u * parts.len().saturating_sub(1) as f32;
+    let gaps = 6.0 * u * parts.len().saturating_sub(1) as f32;
     let body: f32 = parts.iter().map(|part| leg_part_width(part, u, fonts)).sum();
-    body + gaps + BAR_LABEL_GAP * u + measure_label(fonts, label, text_px(BAR_LABEL_PX, u))
+    body + gaps + 6.0 * u + measure_label(fonts, label, 15.0 * u)
 }
 
 fn draw_legend(
     pixmap: &mut Pixmap,
     fonts: &mut FontSystem,
     cache: &mut SwashCache,
-    spec: &Spec,
+    _spec: &Spec,
     pal: &Pal,
-    rects: &[KeyRect],
+    _rects: &[KeyRect],
     frame_w: f32,
     frame_h: f32,
     u: f32,
     scale: f32,
     ps5: bool,
 ) {
-    let pad_x = spec.pad_x * u + FLOATING_PANEL_INSET;
-    let (span_l, span_r) = rects.iter().fold((pad_x, frame_w - pad_x), |(l, r), key| {
-        (l.min(key.left), r.max(key.right))
-    });
-    let (left, right) = if span_l > span_r {
-        (0.0, frame_w)
-    } else {
-        (span_l.max(0.0), span_r.min(frame_w))
-    };
-    let sep_w = 2.0 * BAR_GAP * u + measure_label(fonts, LEGEND_SEP, text_px(BAR_SEP_PX, u));
+    let pad_x = 16.0 * u;
+    let left = pad_x;
+    let right = (frame_w - pad_x).max(left);
+    let dot_w = measure_label(fonts, LEGEND_SEP, 15.0 * u);
+    let sep_w = 10.0 * u + dot_w + 10.0 * u;
     let widths: Vec<f32> = LEGEND_ROWS
         .iter()
         .map(|(parts, label)| legend_item_width(parts, label, u, fonts))
@@ -591,22 +595,22 @@ fn draw_legend(
     let kept = fit_legend(&widths, sep_w, (right - left).max(1.0));
     let total = kept.iter().map(|&i| widths[i]).sum::<f32>() + sep_w * kept.len().saturating_sub(1) as f32;
     let mut x = (left + right - total) * 0.5;
-    let top = frame_h - BAR_H * u;
+    let top = frame_h - 60.0 * u;
     let bottom = frame_h;
     let secondary = (ALPHA_SECONDARY * 255.0) as u8;
     let sep_alpha = (ALPHA_SEP * 255.0) as u8;
-    let label_px = text_px(BAR_LABEL_PX, u);
+    let label_px = 15.0 * u;
     for (n, &index) in kept.iter().enumerate() {
         if n > 0 {
-            let sep_left = x - sep_w + BAR_GAP * u;
-            let sep_w_text = measure_label(fonts, LEGEND_SEP, text_px(BAR_SEP_PX, u));
+            let sep_left = x - sep_w + 10.0 * u;
+            let sep_w_text = measure_label(fonts, LEGEND_SEP, 15.0 * u);
             text_aligned(
                 pixmap,
                 fonts,
                 cache,
                 LEGEND_SEP,
                 (sep_left, top, sep_left + sep_w_text, bottom),
-                text_px(BAR_SEP_PX, u) * scale,
+                15.0 * u * scale,
                 Weight::NORMAL,
                 pal.text,
                 sep_alpha,
@@ -618,7 +622,7 @@ fn draw_legend(
         let mut cursor = x;
         for (i, part) in parts.iter().enumerate() {
             if i > 0 {
-                cursor += BAR_GAP * u;
+                cursor += 6.0 * u;
             }
             let w = leg_part_width(part, u, fonts);
             match *part {
@@ -640,7 +644,7 @@ fn draw_legend(
                         cache,
                         shown,
                         (cursor, top, cursor + w, bottom),
-                        text_px(if matches!(*part, Leg::Word(_)) { BAR_PREFIX_PX } else { BAR_CONNECTOR_PX }, u) * scale,
+                        (if matches!(*part, Leg::Word(_)) { 15.0 } else { 13.0 }) * u * scale,
                         Weight::NORMAL,
                         pal.text,
                         secondary,
@@ -652,7 +656,7 @@ fn draw_legend(
             cursor += w;
         }
         let label_w = measure_label(fonts, label, label_px);
-        let label_x = cursor + BAR_LABEL_GAP * u;
+        let label_x = cursor + 6.0 * u;
         text_aligned(
             pixmap,
             fonts,
@@ -695,24 +699,11 @@ fn draw_strip(
     let top = (bottom - spec.strip_bar_h * unit).max(0.0);
     let cy = (top + bottom) * 0.5;
     if spec.mono {
-        let lane = spec.strip_button_w * unit;
-        let inner_l = left + lane;
-        let inner_r = (right - lane).max(inner_l);
+        let inner_l = left;
+        let inner_r = right;
         let n = strip.visible.len().max(1) as f32;
         let col_w = (inner_r - inner_l) / n;
         let sep_h = spec.separator_h * unit;
-        let side = spec.strip_hint_px * unit;
-        let hints: &[(&str, f32)] = if strip.engaged {
-            &[("LB", left + lane * 0.5), ("RB", right - lane * 0.5)]
-        } else {
-            &[("SELECT", left + lane * 0.5)]
-        };
-        for (hint, cx) in hints {
-            if let Some(svg) = hint_svg(ps5, hint) {
-                let half = side * 0.5;
-                blit_svg(pixmap, svg, cx - half, cy - half, cx + half, cy + half, side, scale, None, fade_u8(1.0));
-            }
-        }
         for (i, word) in strip.visible.iter().enumerate() {
             let x0 = inner_l + i as f32 * col_w;
             let x1 = x0 + col_w;
@@ -722,12 +713,7 @@ fn draw_strip(
             if word.is_empty() {
                 continue;
             }
-            let selected = strip.engaged && i == strip.highlight_slot;
-            if selected {
-                let sel_h = (sep_h * 1.6).min(bottom - top);
-                let pad = 4.0 * unit;
-                round_rect(pixmap, (x0 + pad) * scale, (cy - sel_h * 0.5) * scale, (col_w - pad * 2.0) * scale, sel_h * scale, sel_h * 0.5 * scale, pal.chip_sel, fade_u8(1.0));
-            }
+            let selected = i == strip.highlight_slot;
             let alpha = fade_u8(if selected { 1.0 } else { spec.chip_text_alpha });
             let color = if selected { pal.text } else { pal.text_dim };
             text(pixmap, fonts, cache, word, (x0, top, x1, bottom), spec.chip_px * unit * scale, if selected { spec.chip_sel_weight } else { Weight::NORMAL }, color, alpha, scale);
@@ -751,7 +737,7 @@ fn draw_strip(
         round_rect(pixmap, rect.0 * scale, rect.1 * scale, (rect.2 - rect.0) * scale, (rect.3 - rect.1) * scale, rad * scale, pal.key_action, fade_u8(1.0));
         stroke_rect(pixmap, (rect.0 + 0.5) * scale, (rect.1 + 0.5) * scale, (rect.2 - rect.0 - 1.0) * scale, (rect.3 - rect.1 - 1.0) * scale, (rad - 0.5).max(0.0) * scale, pal.border, fade_u8(1.0), scale.max(1.0));
         if let Some(svg) = hint_svg(ps5, hint) {
-            let px = spec.strip_hint_px * unit;
+            let px = 30.0 * unit;
             let cx = (rect.0 + rect.2) * 0.5;
             let half = px * 0.5;
             blit_svg(pixmap, svg, cx - half, cy - half, cx + half, cy + half, px, scale, None, fade_u8(1.0));
