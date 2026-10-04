@@ -252,10 +252,13 @@ impl Shell {
         if matches!(vk_layout_mode(), VkLayoutMode::Docked) {
             self.layer.set_anchor(Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
             self.layer.set_exclusive_zone(height as i32);
+            self.layer.set_margin(0, 0, 0, 0);
             self.layer.set_size(0, height);
         } else {
-            self.layer.set_anchor(Anchor::empty());
+            let margin = draw::floating_bottom_margin(output_h);
+            self.layer.set_anchor(Anchor::BOTTOM);
             self.layer.set_exclusive_zone(0);
+            self.layer.set_margin(0, 0, margin, 0);
             self.layer.set_size(width, height);
         }
     }

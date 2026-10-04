@@ -288,6 +288,10 @@ pub fn ui_scale() -> f32 {
     crate::config::vk_bar_scale() / crate::config::COMPACT_BAR_SCALE
 }
 
+pub fn floating_bottom_margin(output_h: f32) -> i32 {
+    ((output_h.max(0.0) * 0.04).round() as i32).clamp(28, 80)
+}
+
 pub fn card_size(output_w: f32, output_h: f32, docked: bool, rows: &[KeyRow], style: VkStyle) -> (u32, u32) {
     let spec = spec_for(style);
     let scale = ui_scale();
@@ -295,17 +299,22 @@ pub fn card_size(output_w: f32, output_h: f32, docked: bool, rows: &[KeyRow], st
     let (grid_w, block_h) = vk_geom::grid_size(scale_w, rows, spec.key_aspect, spec.gap, spec.design_kh);
     let u = ref_unit(scale, &spec);
     let chrome = (spec.strip_bar_h + spec.gap - spec.pad_y) * u;
+    let legend = legend_band_height(scale, &spec);
     let (pad_x, pad_y) = (spec.pad_x * u + FLOATING_PANEL_INSET, spec.pad_y * u + FLOATING_PANEL_INSET);
     if docked {
         let h = VK_KB_REF_H * crate::config::vk_bar_scale();
-        let extra = chrome - STRIP_BAND_H;
+        let extra = chrome - STRIP_BAND_H + legend;
         let height = (h + extra).round().clamp(160.0, output_h.max(160.0));
         (output_w.max(640.0) as u32, height as u32)
     } else {
         let width = (grid_w + pad_x * 2.0).round().min(output_w.max(480.0));
-        let height = (chrome + block_h + pad_y * 2.0).ceil().clamp(160.0, output_h.max(160.0));
+        let height = (chrome + block_h + pad_y * 2.0 + legend).ceil().clamp(160.0, output_h.max(160.0));
         (width as u32, height as u32)
     }
+}
+
+fn legend_band_height(scale: f32, spec: &Spec) -> f32 {
+    ((BAR_H - spec.pad_y) * ref_unit(scale, spec)).max(0.0)
 }
 
 fn ref_unit(scale: f32, spec: &Spec) -> f32 {
@@ -325,10 +334,12 @@ pub fn draw(
     let mut pixmap = Pixmap::new(width, height)?;
     let spec = spec_for(frame.style);
     let pal = palette(frame.style, &frame.theme);
-    let top_inset = (spec.strip_bar_h + spec.gap - spec.pad_y) * ref_unit(ui_scale(), &spec);
+    let lu = ref_unit(ui_scale(), &spec);
+    let top_inset = (spec.strip_bar_h + spec.gap - spec.pad_y) * lu;
+    let legend_h = legend_band_height(ui_scale(), &spec);
     let rects = vk_geom::key_rects(
         frame.logical_w,
-        (frame.logical_h - top_inset).max(40.0),
+        (frame.logical_h - legend_h).max(40.0),
         frame.scale_w,
         &frame.rows,
         top_inset,
@@ -482,6 +493,7 @@ pub fn draw(
     if let Some(strip) = &frame.strip {
         draw_strip(&mut pixmap, fonts, cache, &spec, &pal, strip, &rects, unit, scale, frame.ps5, strip_dy, strip_alpha);
     }
+    draw_legend(&mut pixmap, fonts, cache, &spec, &pal, &rects, frame.logical_w, frame.logical_h, lu, scale, frame.ps5);
     if let Some((x, y, w, h, radius)) = panel {
         clip_round(&mut pixmap, x, y, w, h, radius);
     }
@@ -496,6 +508,166 @@ pub fn draw(
     let pressing = frame.pressed.is_some_and(|(_, s)| s < 0.999);
     glide.animating = ring_left.is_some_and(|d| d > 0.75) || strip_moving || pressing;
     Some(pixmap)
+}
+
+#[derive(Clone, Copy)]
+enum Leg {
+    Btn(&'static str),
+    Word(&'static str),
+    Plus,
+    Slash,
+}
+
+const LEGEND_ROWS: &[(&[Leg], &str)] = &[
+    (&[Leg::Btn("A")], "Type"),
+    (&[Leg::Btn("B")], "Delete"),
+    (&[Leg::Btn("LB"), Leg::Slash, Leg::Btn("RB")], "Move caret"),
+    (&[Leg::Btn("RT")], "Shift"),
+    (&[Leg::Btn("R3")], "Dictate"),
+    (&[Leg::Btn("SELECT"), Leg::Plus, Leg::Btn("Y")], "Paste"),
+    (&[Leg::Word("Tap"), Leg::Btn("SELECT")], "Suggestions"),
+    (&[Leg::Btn("L3")], "Close keyboard"),
+    (&[Leg::Word("Hold"), Leg::Btn("SELECT")], "All shortcuts"),
+];
+
+fn text_px(design: f32, u: f32) -> f32 {
+    (design * u).max(LEGEND_MIN_TEXT_PX)
+}
+
+fn fit_legend(widths: &[f32], sep: f32, avail: f32) -> Vec<usize> {
+    let mut kept: Vec<usize> = (0..widths.len()).collect();
+    let total = |kept: &[usize]| {
+        kept.iter().map(|&i| widths[i]).sum::<f32>() + sep * kept.len().saturating_sub(1) as f32
+    };
+    while kept.len() > 1 && total(&kept) > avail {
+        kept.remove((kept.len() - 1) / 2);
+    }
+    kept
+}
+
+fn leg_part_width(part: &Leg, u: f32, fonts: &mut FontSystem) -> f32 {
+    match *part {
+        Leg::Btn("SELECT") => BAR_SHARE * u,
+        Leg::Btn(_) => BAR_GLYPH * u,
+        Leg::Word(word) => measure_label(fonts, word, text_px(BAR_PREFIX_PX, u)),
+        Leg::Plus => measure_label(fonts, "+", text_px(BAR_CONNECTOR_PX, u)),
+        Leg::Slash => measure_label(fonts, "/", text_px(BAR_CONNECTOR_PX, u)),
+    }
+}
+
+fn legend_item_width(parts: &[Leg], label: &str, u: f32, fonts: &mut FontSystem) -> f32 {
+    let gaps = BAR_GAP * u * parts.len().saturating_sub(1) as f32;
+    let body: f32 = parts.iter().map(|part| leg_part_width(part, u, fonts)).sum();
+    body + gaps + BAR_LABEL_GAP * u + measure_label(fonts, label, text_px(BAR_LABEL_PX, u))
+}
+
+fn draw_legend(
+    pixmap: &mut Pixmap,
+    fonts: &mut FontSystem,
+    cache: &mut SwashCache,
+    spec: &Spec,
+    pal: &Pal,
+    rects: &[KeyRect],
+    frame_w: f32,
+    frame_h: f32,
+    u: f32,
+    scale: f32,
+    ps5: bool,
+) {
+    let pad_x = spec.pad_x * u + FLOATING_PANEL_INSET;
+    let (span_l, span_r) = rects.iter().fold((pad_x, frame_w - pad_x), |(l, r), key| {
+        (l.min(key.left), r.max(key.right))
+    });
+    let (left, right) = if span_l > span_r {
+        (0.0, frame_w)
+    } else {
+        (span_l.max(0.0), span_r.min(frame_w))
+    };
+    let sep_w = 2.0 * BAR_GAP * u + measure_label(fonts, LEGEND_SEP, text_px(BAR_SEP_PX, u));
+    let widths: Vec<f32> = LEGEND_ROWS
+        .iter()
+        .map(|(parts, label)| legend_item_width(parts, label, u, fonts))
+        .collect();
+    let kept = fit_legend(&widths, sep_w, (right - left).max(1.0));
+    let total = kept.iter().map(|&i| widths[i]).sum::<f32>() + sep_w * kept.len().saturating_sub(1) as f32;
+    let mut x = (left + right - total) * 0.5;
+    let top = frame_h - BAR_H * u;
+    let bottom = frame_h;
+    let secondary = (ALPHA_SECONDARY * 255.0) as u8;
+    let sep_alpha = (ALPHA_SEP * 255.0) as u8;
+    let label_px = text_px(BAR_LABEL_PX, u);
+    for (n, &index) in kept.iter().enumerate() {
+        if n > 0 {
+            let sep_left = x - sep_w + BAR_GAP * u;
+            let sep_w_text = measure_label(fonts, LEGEND_SEP, text_px(BAR_SEP_PX, u));
+            text_aligned(
+                pixmap,
+                fonts,
+                cache,
+                LEGEND_SEP,
+                (sep_left, top, sep_left + sep_w_text, bottom),
+                text_px(BAR_SEP_PX, u) * scale,
+                Weight::NORMAL,
+                pal.text,
+                sep_alpha,
+                scale,
+                Align::Left,
+            );
+        }
+        let (parts, label) = LEGEND_ROWS[index];
+        let mut cursor = x;
+        for (i, part) in parts.iter().enumerate() {
+            if i > 0 {
+                cursor += BAR_GAP * u;
+            }
+            let w = leg_part_width(part, u, fonts);
+            match *part {
+                Leg::Btn(hint) => {
+                    if let Some(svg) = hint_svg(ps5, hint) {
+                        blit_svg(pixmap, svg, cursor, top, cursor + w, bottom, w, scale, None, 255);
+                    }
+                }
+                Leg::Word(_) | Leg::Plus | Leg::Slash => {
+                    let shown = match *part {
+                        Leg::Word(word) => word,
+                        Leg::Plus => "+",
+                        Leg::Slash => "/",
+                        Leg::Btn(_) => "",
+                    };
+                    text_aligned(
+                        pixmap,
+                        fonts,
+                        cache,
+                        shown,
+                        (cursor, top, cursor + w, bottom),
+                        text_px(if matches!(*part, Leg::Word(_)) { BAR_PREFIX_PX } else { BAR_CONNECTOR_PX }, u) * scale,
+                        Weight::NORMAL,
+                        pal.text,
+                        secondary,
+                        scale,
+                        Align::Left,
+                    );
+                }
+            }
+            cursor += w;
+        }
+        let label_w = measure_label(fonts, label, label_px);
+        let label_x = cursor + BAR_LABEL_GAP * u;
+        text_aligned(
+            pixmap,
+            fonts,
+            cache,
+            label,
+            (label_x, top, label_x + label_w, bottom),
+            label_px * scale,
+            Weight::NORMAL,
+            pal.text,
+            255,
+            scale,
+            Align::Left,
+        );
+        x += widths[index] + sep_w;
+    }
 }
 
 fn draw_strip(
@@ -728,16 +900,22 @@ fn key_icon(action: &KeyAction, shift: bool) -> Option<(&'static str, bool)> {
 
 fn hint_svg(ps5: bool, hint: &str) -> Option<&'static str> {
     Some(match (ps5, hint) {
+        (true, "A") => include_str!("../controller-icons/p5_face_cross_colored.svg"),
         (true, "B") => include_str!("../controller-icons/p5_face_circle_colored.svg"),
         (true, "Y") => include_str!("../controller-icons/p5_face_triangle_colored.svg"),
+        (true, "L3") => include_str!("../controller-icons/p5_l3_click.svg"),
+        (true, "SELECT") => include_str!("../controller-icons/p5_share.svg"),
         (true, "LB") => include_str!("../controller-icons/p5_shoulder_l1.svg"),
         (true, "RB") => include_str!("../controller-icons/p5_shoulder_r1.svg"),
         (true, "LT") => include_str!("../controller-icons/p5_trigger_l2.svg"),
         (true, "RT") => include_str!("../controller-icons/p5_trigger_r2.svg"),
         (true, "R3") => include_str!("../controller-icons/p5_r3_click.svg"),
         (true, "START") => include_str!("../controller-icons/p5_options.svg"),
+        (false, "A") => include_str!("../controller-icons/x_face_a_colored.svg"),
         (false, "B") => include_str!("../controller-icons/x_face_b_colored.svg"),
         (false, "Y") => include_str!("../controller-icons/x_face_y_colored.svg"),
+        (false, "L3") => include_str!("../controller-icons/x_l3_click.svg"),
+        (false, "SELECT") => include_str!("../controller-icons/x_menu_view.svg"),
         (false, "LB") => include_str!("../controller-icons/x_shoulder_lb.svg"),
         (false, "RB") => include_str!("../controller-icons/x_shoulder_rb.svg"),
         (false, "LT") => include_str!("../controller-icons/x_trigger_lt.svg"),
@@ -873,6 +1051,36 @@ fn text(
     alpha: u8,
     scale: f32,
 ) {
+    text_aligned(pixmap, fonts, cache, value, band, px, weight, color, alpha, scale, Align::Center);
+}
+
+fn measure_label(fonts: &mut FontSystem, value: &str, px: f32) -> f32 {
+    if value.is_empty() || px < 1.0 {
+        return 0.0;
+    }
+    let metrics = Metrics::new(px, px * 1.2);
+    let mut buffer = Buffer::new(fonts, metrics);
+    buffer.set_size(fonts, None, None);
+    buffer.set_wrap(fonts, Wrap::None);
+    let attrs = Attrs::new().family(Family::Name("Selawik")).weight(Weight::NORMAL);
+    buffer.set_text(fonts, value, &attrs, Shaping::Advanced);
+    buffer.shape_until_scroll(fonts, false);
+    buffer.layout_runs().map(|run| run.line_w).fold(0.0, f32::max)
+}
+
+fn text_aligned(
+    pixmap: &mut Pixmap,
+    fonts: &mut FontSystem,
+    cache: &mut SwashCache,
+    value: &str,
+    band: (f32, f32, f32, f32),
+    px: f32,
+    weight: Weight,
+    color: Rgb,
+    alpha: u8,
+    scale: f32,
+    align: Align,
+) {
     if value.is_empty() || px < 4.0 {
         return;
     }
@@ -889,7 +1097,7 @@ fn text(
     let attrs = Attrs::new().family(Family::Name("Selawik")).weight(weight);
     buffer.set_text(fonts, value, &attrs, Shaping::Advanced);
     for line in &mut buffer.lines {
-        line.set_align(Some(Align::Center));
+        line.set_align(Some(align));
     }
     buffer.shape_until_scroll(fonts, false);
     let mut block_top = 0.0;
