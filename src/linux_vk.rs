@@ -187,6 +187,7 @@ struct Shell {
     cache: cosmic_text::SwashCache,
     buffer: Option<Buffer>,
     ps5: bool,
+    glide: draw::Glide,
 }
 
 impl Shell {
@@ -233,17 +234,19 @@ impl Shell {
             dirty: true,
             frame_pending: false,
             exit: false,
-            fonts: cosmic_text::FontSystem::new(),
+            fonts: draw::font_system(),
             cache: cosmic_text::SwashCache::new(),
             buffer: None,
             ps5: ps5_pad(),
+            glide: draw::Glide::default(),
         };
         shell.apply_layout();
         Ok(shell)
     }
 
     fn apply_layout(&mut self) {
-        let (width, height) = desired_size(self.output_width());
+        let (output_w, output_h) = self.output_size();
+        let (width, height) = desired_size(output_w, output_h);
         self.logical_w = width;
         self.logical_h = height;
         if matches!(vk_layout_mode(), VkLayoutMode::Docked) {
@@ -257,26 +260,26 @@ impl Shell {
         }
     }
 
-    fn output_width(&self) -> f32 {
+    fn output_size(&self) -> (f32, f32) {
         let Some(output) = &self.output else {
-            return 1280.0;
+            return (1920.0, 1080.0);
         };
         let Some(info) = self.output_state.info(output) else {
-            return 1280.0;
+            return (1920.0, 1080.0);
         };
-        if let Some((width, _)) = info.logical_size {
-            if width > 0 {
-                return width as f32;
+        if let Some((width, height)) = info.logical_size {
+            if width > 0 && height > 0 {
+                return (width as f32, height as f32);
             }
         }
-        let pixels = info
+        let (pixels_w, pixels_h) = info
             .modes
             .iter()
             .find(|mode| mode.current)
-            .map(|mode| mode.dimensions.0)
-            .unwrap_or(1920);
+            .map(|mode| mode.dimensions)
+            .unwrap_or((1920, 1080));
         let scale = info.scale_factor.max(1) as f32;
-        pixels as f32 / scale
+        (pixels_w as f32 / scale, pixels_h as f32 / scale)
     }
 
     fn buffer_scale(&self) -> f64 {
@@ -303,15 +306,13 @@ impl Shell {
                 crate::vk_motion::press_scale(at.elapsed().as_secs_f32() * 1000.0),
             )
         });
+        let (shift, caps, symbol, symbol_locked) = crate::vk_nav::modifier_state();
+        let floating = !matches!(vk_layout_mode(), VkLayoutMode::Docked);
         let frame = draw::Frame {
             logical_w: self.logical_w as f32,
             logical_h: self.logical_h as f32,
             scale,
-            scale_w: if matches!(vk_layout_mode(), VkLayoutMode::Docked) {
-                self.output_width()
-            } else {
-                vk_geom_ref_width()
-            },
+            scale_w: draw::REF_MON_W * draw::ui_scale(),
             rows,
             sel: crate::vk_nav::selection(),
             style: vk_style(),
@@ -319,8 +320,13 @@ impl Shell {
             strip,
             pressed,
             ps5: self.ps5,
+            shift,
+            caps,
+            symbol,
+            symbol_locked,
+            floating,
         };
-        let Some(pixmap) = draw::draw(&frame, &mut self.fonts, &mut self.cache) else {
+        let Some(pixmap) = draw::draw(&frame, &mut self.fonts, &mut self.cache, &mut self.glide) else {
             return;
         };
         let pixels = draw::to_argb(&pixmap);
@@ -347,7 +353,7 @@ impl Shell {
         surface.damage_buffer(0, 0, buffer_w, buffer_h);
         surface.frame(qh, surface.clone());
         self.frame_pending = true;
-        self.dirty = false;
+        self.dirty = self.glide.animating;
         if let Err(error) = buffer.attach_to(surface) {
             crate::install::log_line(&format!("keyboard buffer: {error}"));
             return;
@@ -357,31 +363,10 @@ impl Shell {
     }
 }
 
-fn vk_geom_ref_width() -> f32 {
-    1920.0
-}
-
-fn desired_size(output_w: f32) -> (u32, u32) {
+fn desired_size(output_w: f32, output_h: f32) -> (u32, u32) {
     let rows = crate::vk_nav::rows_snapshot();
-    let mono = matches!(vk_style(), VkStyle::Mono);
-    let metrics = crate::vk_geom::style_metrics(mono);
     let docked = matches!(vk_layout_mode(), VkLayoutMode::Docked);
-    let scale_w = if docked { output_w.max(640.0) } else { 1920.0 };
-    let (grid_w, grid_h) = crate::vk_geom::grid_size(
-        scale_w,
-        &rows,
-        metrics.key_aspect,
-        metrics.gap,
-        metrics.design_kh,
-    );
-    let strip = if crate::vk_predict::strip(7, mono).is_some() { 64.0 } else { 8.0 };
-    let height = (grid_h + strip + 44.0 + metrics.pad_y).round().clamp(120.0, 640.0);
-    let width = if docked {
-        output_w.max(640.0)
-    } else {
-        (grid_w + metrics.pad_x * 2.0).round().clamp(480.0, output_w.max(480.0))
-    };
-    (width as u32, height as u32)
+    draw::card_size(output_w, output_h, docked, &rows, vk_style())
 }
 
 fn ps5_pad() -> bool {
@@ -473,7 +458,7 @@ impl Prompt {
             layer,
             exit: false,
             drawn: false,
-            fonts: cosmic_text::FontSystem::new(),
+            fonts: draw::font_system(),
             cache: cosmic_text::SwashCache::new(),
             buffer: None,
             })

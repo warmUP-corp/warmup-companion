@@ -245,7 +245,7 @@ fn build_web_layout(layer: Layer, lang_de: bool) -> Vec<KeyRow> {
     #[cfg(windows)]
     let mic = crate::win::speech_input::available();
     #[cfg(not(windows))]
-    let mic = false;
+    let mic = true;
     let mut space = KeyCell::vk(
         "Space",
         VK_SPACE,
