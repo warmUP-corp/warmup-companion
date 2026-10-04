@@ -41,6 +41,17 @@ pub fn keyboard_open() -> bool {
 }
 
 #[cfg(feature = "speech")]
+pub fn paint_voice_orb(
+    side: u32,
+    phase: u8,
+    level: f32,
+    orb: &[u8],
+    orb_px: u32,
+) -> Option<tiny_skia::Pixmap> {
+    draw::paint_voice_orb(side, phase, level, orb, orb_px)
+}
+
+#[cfg(feature = "speech")]
 pub fn paint_voice_screen(
     width: u32,
     height: u32,

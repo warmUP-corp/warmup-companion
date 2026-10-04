@@ -1773,6 +1773,18 @@ pub fn voice_swell(phase: u8, level: f32) -> f32 {
     scale / rest
 }
 
+pub fn paint_voice_orb(side: u32, phase: u8, level: f32, orb: &[u8], orb_px: u32) -> Option<Pixmap> {
+    if side == 0 {
+        return None;
+    }
+    let mut pixmap = Pixmap::new(side, side)?;
+    let swell = voice_swell(phase, level);
+    let drawn = (side as f32 * 0.94 * swell / 1.25).clamp(1.0, side as f32);
+    let origin = (side as f32 - drawn) * 0.5;
+    blit_premul(&mut pixmap, orb, orb_px, origin, origin, drawn);
+    Some(pixmap)
+}
+
 pub fn paint_voice_screen(
     width: u32,
     height: u32,
