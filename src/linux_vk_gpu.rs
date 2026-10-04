@@ -30,6 +30,7 @@ pub struct Presenter {
     alpha: wgpu::CompositeAlphaMode,
     present_mode: wgpu::PresentMode,
     shown: u32,
+    showing_sheet: bool,
 }
 
 struct Image {
@@ -235,6 +236,7 @@ impl Presenter {
             alpha,
             present_mode,
             shown: 0,
+            showing_sheet: false,
         })
     }
 
@@ -246,10 +248,7 @@ impl Presenter {
         glide: &mut Glide,
         orb: Option<&Orb<'_>>,
     ) -> Result<(), String> {
-        if frame.sheet {
-            return Err("cpu".into());
-        }
-        if frame.pressed.is_some_and(|(pos, _)| pos != frame.sel) {
+        if !frame.sheet && frame.pressed.is_some_and(|(pos, _)| pos != frame.sel) {
             return Err("cpu".into());
         }
         let width = (frame.logical_w * frame.scale.max(1.0)).round().max(1.0) as u32;
@@ -260,7 +259,22 @@ impl Presenter {
         let stamp = draw::keyboard_stamp(frame);
         let strip_live = strip_live(glide, frame);
         let mut raster = false;
-        if strip_live || self.base.is_none() || self.stamp != stamp {
+        if frame.sheet {
+            if !self.showing_sheet {
+                let pixmap = draw::draw(frame, fonts, cache, glide).ok_or_else(|| "sheet raster failed".to_string())?;
+                self.base = Some(upload(&self.device, &self.queue, "keyboard-sheet", pixmap.data(), pixmap.width(), pixmap.height()));
+                self.keys.clear();
+                self.stamp = 0;
+                self.showing_sheet = true;
+                raster = true;
+            }
+        } else if self.showing_sheet {
+            self.showing_sheet = false;
+            self.base = None;
+            self.stamp = 0;
+            self.keys.clear();
+        }
+        if !frame.sheet && (strip_live || self.base.is_none() || self.stamp != stamp) {
             let pixmap = draw::raster_unselected(frame, fonts, cache, glide).ok_or_else(|| "keyboard raster failed".to_string())?;
             self.base = Some(upload(&self.device, &self.queue, "keyboard-base", pixmap.data(), pixmap.width(), pixmap.height()));
             self.keys.clear();
@@ -268,7 +282,7 @@ impl Presenter {
             raster = true;
         }
         let key_id = (frame.sel.row, frame.sel.col);
-        if !self.keys.contains_key(&key_id) {
+        if !frame.sheet && !self.keys.contains_key(&key_id) {
             let patch = draw::raster_selected_key(frame, fonts, cache, 1.0).ok_or_else(|| "cpu".to_string())?;
             let image = upload(&self.device, &self.queue, "keyboard-key", &patch.pixels, patch.width, patch.height);
             self.keys.insert(
@@ -302,8 +316,25 @@ impl Presenter {
             self.orb_live = false;
         }
         let raster_ms = started.elapsed().as_secs_f32() * 1000.0;
-        let patch = self.keys.get(&key_id).ok_or_else(|| "missing selected key".to_string())?.patch;
+        let patch = if frame.sheet {
+            Patch {
+                dest_x: 0.0,
+                dest_y: 0.0,
+                width: 1.0,
+                height: 1.0,
+                body_x: 0.0,
+                body_y: 0.0,
+                body_w: 1.0,
+                body_h: 1.0,
+                radius: 0.0,
+                ring: [0.0; 4],
+                ring_w: 0.0,
+            }
+        } else {
+            self.keys.get(&key_id).ok_or_else(|| "missing selected key".to_string())?.patch
+        };
         let press = frame.pressed.filter(|(pos, _)| *pos == frame.sel).map(|(_, scale)| scale).unwrap_or(1.0);
+        let show_key = if frame.sheet { 0.0 } else { 1.0 };
         let orb_box = orb
             .filter(|_| self.orb_live)
             .map(|orb| [orb.x, orb.y, orb.size, orb.size])
@@ -313,13 +344,20 @@ impl Presenter {
             key: [patch.dest_x, patch.dest_y, patch.width, patch.height],
             body: [patch.body_x, patch.body_y, patch.body_w, patch.body_h],
             ring: patch.ring,
-            extra: [patch.ring_w, patch.radius, 1.0, press],
+            extra: [patch.ring_w, patch.radius, show_key, press],
             orb: orb_box,
         };
         self.queue.write_buffer(&self.uniform, 0, bytes_of(&uniforms));
         let gpu_at = Instant::now();
         let base = self.base.as_ref().ok_or_else(|| "missing keyboard texture".to_string())?;
-        let key = self.keys.get(&key_id).ok_or_else(|| "missing selected key".to_string())?;
+        let key_fallback;
+        let key_view = if frame.sheet {
+            key_fallback = None;
+            &self.orb.view
+        } else {
+            key_fallback = Some(self.keys.get(&key_id).ok_or_else(|| "missing selected key".to_string())?);
+            &key_fallback.as_ref().unwrap().image.view
+        };
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("keyboard"),
             layout: &self.layout,
@@ -334,7 +372,7 @@ impl Presenter {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&key.image.view),
+                    resource: wgpu::BindingResource::TextureView(key_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,

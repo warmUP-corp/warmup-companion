@@ -194,6 +194,7 @@ After=graphical-session.target\n\
 \n\
 [Service]\n\
 Type=simple\n\
+Environment=__NV_DISABLE_EXPLICIT_SYNC=1\n\
 ExecStart={exec} --service\n\
 Restart=on-failure\n\
 RestartSec=2\n\

@@ -7,6 +7,7 @@
 - The voice cloud on the mic key keeps moving while you dictate. It no longer waits for a D-pad move before the next frame is shown.
 - The keyboard and the listening pill wait until the compositor has accepted the layer before attaching a picture. A broken Wayland connection closes those windows instead of crashing the companion.
 - R3 starts and stops dictation with the keyboard closed. Whatever is playing pauses while you speak and resumes when dictation ends. The listening frame matches Windows: a glow around the screen and a cloud on the right that grows and moves with your voice. With the keyboard open, that cloud stays on the mic key. The glow is drawn once; only the cloud is updated while you speak.
+- Holding Share shows the shortcut list and leaves the keyboard open. Dictation no longer stalls the keyboard for a tenth of a second on each cloud frame.
 - R3 dictation on Linux uses the same Parakeet voice engine as Windows. The nimbus cloud is drawn by a Vulkan shader on the GPU, on the mic key and in a pill, while you speak.
 - The on-screen keyboard highlight moves with the D-pad without redrawing the whole card or animating the ring across extra frames. The picture is the screen's logical size, so a fractional-scale display does not paint a larger buffer.
 - Controller Center opens from the Linux tray. The settings window runs in its own process, so the tray thread no longer has to host it.

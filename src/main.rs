@@ -697,6 +697,8 @@ mod repl_scroll {
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    std::env::set_var("__NV_DISABLE_EXPLICIT_SYNC", "1");
     let _sentry = sentry_telemetry::init();
     let args: Vec<String> = env::args().collect();
     #[cfg(any(windows, target_os = "linux"))]
