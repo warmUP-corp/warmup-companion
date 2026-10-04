@@ -74,6 +74,7 @@ const MENU_CONTROLLER_TIPS: usize = 1020;
 const MENU_SIGNIN_HINTS: usize = 1021;
 const MENU_UNLOAD_VOICE: usize = 1022;
 const MENU_VOICE_ENABLED: usize = 1023;
+const MENU_VOICE_OFF: usize = 1024;
 /// Mic device i is `MENU_MIC_BASE + i` (capped at 32 devices in the menu).
 const MENU_MIC_BASE: usize = 1100;
 /// Global hotkey id for "toggle voice dictation" (Ctrl+Alt+V).
@@ -305,16 +306,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 MENU_STYLE_NORMAL => set_vk_style("normal"),
                 MENU_STYLE_MONO => set_vk_style("mono"),
                 MENU_EDIT_SETTINGS => edit_settings(),
-                MENU_ENGINE_WHISPER => crate::win::speech_input::set_engine("whisper"),
-                MENU_ENGINE_PARAKEET => crate::win::speech_input::set_engine("parakeet"),
-                MENU_MIC_DEFAULT => crate::win::speech_input::set_mic_choice(""),
-                MENU_VOICE_ENABLED => {
-                    toggle_setting_bool(
-                        "voice_enabled",
-                        crate::config::gamepad_settings().voice_enabled,
-                    );
-                    sync_voice_hotkey(hwnd);
+                MENU_ENGINE_WHISPER => {
+                    crate::win::speech_input::set_engine("whisper");
+                    set_voice_enabled(hwnd, true);
                 }
+                MENU_ENGINE_PARAKEET => {
+                    crate::win::speech_input::set_engine("parakeet");
+                    set_voice_enabled(hwnd, true);
+                }
+                MENU_MIC_DEFAULT => crate::win::speech_input::set_mic_choice(""),
+                MENU_VOICE_ENABLED => set_voice_enabled(
+                    hwnd,
+                    !crate::config::gamepad_settings().voice_enabled,
+                ),
+                MENU_VOICE_OFF => set_voice_enabled(hwnd, false),
                 MENU_UNLOAD_VOICE => {
                     let _ = std::thread::Builder::new()
                         .name("voice-unload".into())
@@ -450,27 +455,31 @@ unsafe fn show_menu(hwnd: HWND) {
         let _ = AppendMenuW(menu, MF_POPUP, game.0 as usize, w!("Game detection"));
     }
 
-    // Voice typing is the on/off setting. Unchecking it disables transcription
-    // and unloads the helper, Parakeet, and whisper-server. Engine and mic
-    // choices stay hidden while it is off, and only appear once speech is
-    // installed. Mic-name buffers must outlive TrackPopupMenu.
     let mut mic_labels: Vec<Vec<u16>> = Vec::new();
     let voice_on = crate::config::gamepad_settings().voice_enabled;
-    let _ = AppendMenuW(menu, chk(voice_on), MENU_VOICE_ENABLED, w!("Voice typing"));
-    if crate::win::speech_input::available_cached() {
-        if voice_on && crate::win::speech_input::parakeet_available() {
-            let eng = CreatePopupMenu().unwrap_or_default();
-            if !eng.0.is_null() {
-                let parakeet = crate::win::speech_input::engine() == "parakeet";
-                let _ = AppendMenuW(eng, chk(!parakeet), MENU_ENGINE_WHISPER, w!("Whisper"));
+    if !crate::win::speech_input::available_cached() {
+        let _ = AppendMenuW(menu, chk(voice_on), MENU_VOICE_ENABLED, w!("Voice typing"));
+    } else {
+        let eng = CreatePopupMenu().unwrap_or_default();
+        if !eng.0.is_null() {
+            let parakeet = crate::win::speech_input::parakeet_available()
+                && crate::win::speech_input::engine() == "parakeet";
+            let _ = AppendMenuW(eng, chk(!voice_on), MENU_VOICE_OFF, w!("Off"));
+            let _ = AppendMenuW(
+                eng,
+                chk(voice_on && !parakeet),
+                MENU_ENGINE_WHISPER,
+                w!("Whisper"),
+            );
+            if crate::win::speech_input::parakeet_available() {
                 let _ = AppendMenuW(
                     eng,
-                    chk(parakeet),
+                    chk(voice_on && parakeet),
                     MENU_ENGINE_PARAKEET,
                     w!("Parakeet (NVIDIA)"),
                 );
-                let _ = AppendMenuW(menu, MF_POPUP, eng.0 as usize, w!("Voice engine"));
             }
+            let _ = AppendMenuW(menu, MF_POPUP, eng.0 as usize, w!("Voice engine"));
         }
         if voice_on {
             let sub = CreatePopupMenu().unwrap_or_default();
@@ -619,6 +628,13 @@ unsafe fn sync_voice_hotkey(hwnd: HWND) {
 }
 
 /// Flip a settings.ini boolean (read live by `gamepad_settings`).
+unsafe fn set_voice_enabled(hwnd: HWND, on: bool) {
+    if crate::config::gamepad_settings().voice_enabled != on {
+        toggle_setting_bool("voice_enabled", !on);
+    }
+    sync_voice_hotkey(hwnd);
+}
+
 fn toggle_setting_bool(key: &str, current: bool) {
     let next = if current { "false" } else { "true" };
     if let Err(e) = crate::config::set_gamepad_setting(key, next) {
