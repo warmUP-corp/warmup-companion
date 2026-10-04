@@ -148,6 +148,9 @@ pub struct GamepadSettings {
     pub prompt_userland_debug: bool,
     pub signin_hints: bool,
     pub guide_launch: bool,
+    /// Offline voice typing. When false, R3, Ctrl+Alt+V and the mic key do nothing,
+    /// the mic key on the keyboard shows disabled, and the speech engine is unloaded.
+    pub voice_enabled: bool,
     /// Master switch for gamepad-driven mouse control ("Enable gamepad cursor" in
     /// warmUP, pushed as `config.enabled`). When false the sticks and the touchpad
     /// stop moving/scrolling the OS cursor and A/B stop emitting OS clicks — button
@@ -175,6 +178,7 @@ impl Default for GamepadSettings {
             prompt_userland_debug: false,
             signin_hints: true,
             guide_launch: true,
+            voice_enabled: true,
             cursor_enabled: true,
             cursor_deadzone: 0.15,
             cursor_speed: 15.0,
@@ -328,6 +332,19 @@ pub fn gamepad_settings() -> GamepadSettings {
     settings
 }
 
+/// Offline voice typing. Default on, so an install that never set this keeps
+/// dictating. False shuts transcription off completely.
+pub fn voice_enabled() -> bool {
+    #[cfg(feature = "gamepad")]
+    {
+        gamepad_settings().voice_enabled
+    }
+    #[cfg(not(feature = "gamepad"))]
+    {
+        true
+    }
+}
+
 #[cfg(feature = "gamepad")]
 pub fn keyboard_theme() -> KeyboardTheme {
     let mut theme = KeyboardTheme::default();
@@ -369,12 +386,9 @@ fn apply_gamepad_settings_text(settings: &mut GamepadSettings, text: &str) {
             "prompt_userland_debug" => {
                 settings.prompt_userland_debug = parse_bool(value, settings.prompt_userland_debug)
             }
-            "signin_hints" => {
-                settings.signin_hints = parse_bool(value, settings.signin_hints)
-            }
-            "guide_launch" => {
-                settings.guide_launch = parse_bool(value, settings.guide_launch)
-            }
+            "signin_hints" => settings.signin_hints = parse_bool(value, settings.signin_hints),
+            "guide_launch" => settings.guide_launch = parse_bool(value, settings.guide_launch),
+            "voice_enabled" => settings.voice_enabled = parse_bool(value, settings.voice_enabled),
             "cursor_enabled" => {
                 settings.cursor_enabled = parse_bool(value, settings.cursor_enabled)
             }
@@ -597,9 +611,13 @@ const SETTINGS_TEMPLATE: &str = r#"# Warmup Companion settings. One `key = value
 # keyboard_sel_text = #FFFFFF
 # keyboard_border = #333333
 
-# Voice typing (offline whisper) is an opt-in install (-Speech). Recognition
-# language defaults to your Windows locale; override with the WARMUP_WHISPER_LANG
-# environment variable. Mic = your Windows default input device.
+# Voice typing (offline whisper or Parakeet) is an opt-in install (-Speech).
+# voice_enabled = false turns transcription off completely: R3, Ctrl+Alt+V and
+# the mic key do nothing, the mic key on the keyboard shows disabled, and the
+# speech engine unloads.
+# voice_enabled = true
+# Recognition language defaults to your Windows locale; override with the
+# WARMUP_WHISPER_LANG environment variable. Mic = your Windows default input device.
 # Dictation vocabulary: coding (built-in terminal/agent terms) | off | a comma list, e.g. coding, herdr, MyProject
 # vocabulary = coding
 "#;
@@ -640,7 +658,13 @@ pub fn set_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
         .into_iter()
         .map(|(k, v)| format!("{k}={v}\n"))
         .collect::<String>();
-    std::fs::write(&path, text).map_err(|e| format!("write {}: {e}", path.display()))
+    std::fs::write(&path, text).map_err(|e| format!("write {}: {e}", path.display()))?;
+    // Turning voice off must unload the engine now, not on the next R3 press.
+    #[cfg(windows)]
+    if key == "voice_enabled" {
+        crate::win::speech_input::enforce_voice_enabled();
+    }
+    Ok(())
 }
 
 #[cfg(feature = "gamepad")]
@@ -688,7 +712,8 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
         | "stop_when_game_active"
         | "prompt_userland_debug"
         | "signin_hints"
-        | "guide_launch" => match value.trim().to_ascii_lowercase().as_str() {
+        | "guide_launch"
+        | "voice_enabled" => match value.trim().to_ascii_lowercase().as_str() {
             "true" | "false" | "1" | "0" | "yes" | "no" | "on" | "off" => Ok(()),
             _ => Err(format!("{key} must be a boolean")),
         },
@@ -805,8 +830,14 @@ mod tests {
             assert_eq!(format_vocabulary(&v), raw);
         }
         assert_eq!(format_vocabulary(&parse_vocabulary(None)), "coding");
-        assert_eq!(format_vocabulary(&parse_vocabulary(Some("vocabulary = none"))), "off");
-        assert_eq!(format_vocabulary(&parse_vocabulary(Some("vocabulary ="))), "off");
+        assert_eq!(
+            format_vocabulary(&parse_vocabulary(Some("vocabulary = none"))),
+            "off"
+        );
+        assert_eq!(
+            format_vocabulary(&parse_vocabulary(Some("vocabulary ="))),
+            "off"
+        );
         assert_eq!(
             format_vocabulary(&parse_vocabulary(Some("vocabulary = herdr ,coding,HERDR"))),
             "coding, herdr"
@@ -858,7 +889,10 @@ mod tests {
     fn vk_layout_defaults_to_floating() {
         assert_eq!(parse_vk_layout_mode(None), VkLayoutMode::Floating);
         assert_eq!(parse_vk_layout_mode(Some("docked")), VkLayoutMode::Docked);
-        assert_eq!(parse_vk_layout_mode(Some(" Floating ")), VkLayoutMode::Floating);
+        assert_eq!(
+            parse_vk_layout_mode(Some(" Floating ")),
+            VkLayoutMode::Floating
+        );
     }
 
     #[cfg(feature = "gamepad")]
@@ -923,5 +957,22 @@ mod tests {
 
         apply_gamepad_settings_text(&mut settings, "cursor_enabled=false\ngamepad_cursor=true\n");
         assert!(!settings.cursor_enabled);
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn voice_enabled_defaults_on_and_can_be_turned_off() {
+        let mut settings = GamepadSettings::default();
+        assert!(settings.voice_enabled);
+
+        apply_gamepad_settings_text(&mut settings, "voice_enabled = false\n");
+        assert!(!settings.voice_enabled);
+        apply_gamepad_settings_text(&mut settings, "voice_enabled=off\n");
+        assert!(!settings.voice_enabled);
+        apply_gamepad_settings_text(&mut settings, "voice_enabled=on\n");
+        assert!(settings.voice_enabled);
+
+        assert!(validate_gamepad_setting("voice_enabled", "false").is_ok());
+        assert!(validate_gamepad_setting("voice_enabled", "nope").is_err());
     }
 }

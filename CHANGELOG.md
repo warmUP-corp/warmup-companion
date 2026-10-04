@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+## v0.8.1
+
+- Voice typing can be turned off completely. R3, Ctrl+Alt+V and the mic key do nothing, the mic key on the keyboard shows disabled, and any recording in progress is discarded instead of transcribed. The speech engine unloads. Turn it off in the tray (Voice typing), in Controller Center under General, or with `voice_enabled = false` in `settings.ini`.
+
 ## v0.7.3
 
 - New setting to hide the controller hints on the sign-in and lock screen ("Connect controller", "Press ... for keyboard", "Connected"). Turn it off in the tray (Sign-in controller hints), in Controller Center under General, or with `signin_hints = false` in `settings.ini`. The keyboard still opens from the pad when the hints are hidden.

@@ -765,7 +765,8 @@ impl GamepadPoll {
                 Self::service_signin_desktop(),
             ) && crate::config::gamepad_settings().guide_launch
             {
-                if self.last_launch.elapsed() >= GUIDE_LAUNCH_DEBOUNCE && crate::warmup_installed() {
+                if self.last_launch.elapsed() >= GUIDE_LAUNCH_DEBOUNCE && crate::warmup_installed()
+                {
                     self.last_launch = Instant::now();
                     self.backend.haptic_alert();
                     edges.push(VkLoopAction::LaunchWarmup);
@@ -774,16 +775,17 @@ impl GamepadPoll {
             }
             // R3 starts dictation even with the VK closed, so voice typing into the
             // focused app is a single click — no need to open the keyboard first.
+            // When voice typing is off the click does nothing.
             #[cfg(windows)]
             if change.button == Button::R3 && change.pressed && !native_vk_suppressed {
-                crate::vk_nav::start_voice_input();
-                self.backend.haptic_alert();
+                if crate::config::voice_enabled() {
+                    crate::vk_nav::start_voice_input();
+                    self.backend.haptic_alert();
+                }
                 continue;
             }
             #[cfg(windows)]
-            if matches!(change.button, Button::Lt | Button::Rt)
-                && !Self::service_signin_desktop()
-            {
+            if matches!(change.button, Button::Lt | Button::Rt) && !Self::service_signin_desktop() {
                 let chord_held = self.shot_lb_down && self.shot_rb_down;
                 if chord_held && change.pressed {
                     let window_only = change.button == Button::Lt;
@@ -1029,8 +1031,7 @@ impl GamepadPoll {
                     vk_nav::after_insert();
                     // A landed suggestion commit — a firmer confirm than a key tap.
                     self.backend.haptic_confirm();
-                } else {
-                    vk_nav::activate_selection();
+                } else if vk_nav::activate_selection() {
                     vk_nav::repeat_pressed(vk_nav::RepeatKey::Activate);
                     self.backend.haptic_tick();
                 }
@@ -1118,10 +1119,8 @@ impl GamepadPoll {
                 None
             }
             (Button::Lb, true) => {
-                match vk_nav::shoulder_nav(
-                    self.vk_select_down,
-                    crate::vk_predict::strip_engaged(),
-                ) {
+                match vk_nav::shoulder_nav(self.vk_select_down, crate::vk_predict::strip_engaged())
+                {
                     vk_nav::ShoulderNav::CycleSuggestions => {
                         if crate::vk_predict::cycle_prev() {
                             self.backend.haptic_tick();
@@ -1148,10 +1147,8 @@ impl GamepadPoll {
                 None
             }
             (Button::Rb, true) => {
-                match vk_nav::shoulder_nav(
-                    self.vk_select_down,
-                    crate::vk_predict::strip_engaged(),
-                ) {
+                match vk_nav::shoulder_nav(self.vk_select_down, crate::vk_predict::strip_engaged())
+                {
                     vk_nav::ShoulderNav::CycleSuggestions => {
                         if crate::vk_predict::cycle_next() {
                             self.backend.haptic_tick();
@@ -1188,9 +1185,11 @@ impl GamepadPoll {
                 None
             }
             (Button::R3, true) => {
-                vk_nav::start_voice_input();
-                vk_ui::request_repaint();
-                self.backend.haptic_alert();
+                if crate::config::voice_enabled() {
+                    vk_nav::start_voice_input();
+                    vk_ui::request_repaint();
+                    self.backend.haptic_alert();
+                }
                 None
             }
             (Button::Start, true) => {
@@ -1428,7 +1427,14 @@ where
         println!("  LT           → &123 symbols");
         println!("  RT           → shift");
         println!("  L3           → close keyboard");
-        println!("  R3           → voice input");
+        println!(
+            "  R3           → {}",
+            if crate::config::voice_enabled() {
+                "voice input"
+            } else {
+                "voice input is off"
+            }
+        );
         println!("Ctrl+C to stop.");
     } else {
         #[cfg(windows)]
@@ -1439,10 +1445,18 @@ where
     }
     let mut last_tick = Instant::now();
     let mut last_active = Instant::now();
+    let mut next_voice_check = Instant::now();
     while RUNNING.load(Ordering::SeqCst) {
         let now = Instant::now();
         let dt = now.duration_since(last_tick).as_secs_f32();
         last_tick = now;
+        // settings.ini edits do not go through set_gamepad_setting, so poll the
+        // switch and unload the engine within a second of it being turned off.
+        #[cfg(windows)]
+        if now >= next_voice_check {
+            next_voice_check = now + Duration::from_secs(1);
+            crate::win::speech_input::enforce_voice_enabled();
+        }
 
         // Publish the current controller connection state to the pipe server (#347).
         crate::pipe_server::publish_from_label(&poll.controller_label());

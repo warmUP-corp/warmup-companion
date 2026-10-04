@@ -29,14 +29,13 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, KillTimer, SendMessageW,
-    GetWindowTextLengthW, GetWindowTextW, MessageBoxW, IDOK, MB_DEFBUTTON2, MB_ICONWARNING,
-    MB_OKCANCEL, SetForegroundWindow, SetTimer, SetWindowPos,
-    SetWindowTextW, ShowWindow, BM_GETCHECK,
-    BM_SETCHECK, BS_AUTOCHECKBOX, HMENU, HWND_TOP, SM_CXSCREEN, SM_CYSCREEN, SWP_NOZORDER, SW_HIDE,
-    SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_CTLCOLORBTN,
-    WM_CTLCOLORSTATIC, WM_DESTROY, WM_HSCROLL, WM_SETFONT, WM_TIMER, WS_CAPTION, WS_CHILD,
-    WS_BORDER, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, GetWindowTextLengthW,
+    GetWindowTextW, KillTimer, MessageBoxW, SendMessageW, SetForegroundWindow, SetTimer,
+    SetWindowPos, SetWindowTextW, ShowWindow, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, HMENU,
+    HWND_TOP, IDOK, MB_DEFBUTTON2, MB_ICONWARNING, MB_OKCANCEL, SM_CXSCREEN, SM_CYSCREEN,
+    SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND,
+    WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_HSCROLL, WM_SETFONT, WM_TIMER, WS_BORDER,
+    WS_CAPTION, WS_CHILD, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use super::desktop_window::{self, DesktopApp, DesktopWindowThread};
@@ -176,7 +175,12 @@ fn items() -> Vec<Item> {
             "Show controller hints on the sign-in screen",
             "signin_hints",
         ),
-        check(0, "Guide / PS button opens warmUP when it is closed", "guide_launch"),
+        check(
+            0,
+            "Guide / PS button opens warmUP when it is closed",
+            "guide_launch",
+        ),
+        check(0, "Voice typing", "voice_enabled"),
         item(0, "Pause gamepad input", Kind::PausePoll),
         item(
             0,
@@ -237,6 +241,7 @@ fn current(item: &Item) -> (bool, i32) {
                 "auto_stop_on_game" => s.auto_stop_on_game,
                 "signin_hints" => s.signin_hints,
                 "guide_launch" => s.guide_launch,
+                "voice_enabled" => s.voice_enabled,
                 "natural_scroll" => s.natural_scroll,
                 "vk_mode" => {
                     crate::config::vk_layout_mode() == crate::config::VkLayoutMode::Floating
@@ -497,7 +502,13 @@ fn ui_show() {
                         scale,
                         body,
                     );
-                    if matches!(it.kind, Kind::Check { key: "run_mode", .. }) {
+                    if matches!(
+                        it.kind,
+                        Kind::Check {
+                            key: "run_mode",
+                            ..
+                        }
+                    ) {
                         let note = child(
                             hwnd,
                             w!("STATIC"),

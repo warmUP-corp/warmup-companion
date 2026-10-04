@@ -27,16 +27,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible, IsZoomed, KillTimer,
     PostThreadMessageW, SetTimer, SetWindowPos, ShowWindow, EVENT_SYSTEM_DESKTOPSWITCH,
     EVENT_SYSTEM_FOREGROUND, HMENU, HWND_NOTOPMOST, HWND_TOPMOST, MA_NOACTIVATE, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_MAXIMIZE,
-    SW_RESTORE, SW_SHOWNOACTIVATE, WINDOWPOS, WINEVENT_OUTOFCONTEXT, WM_DESTROY, WM_LBUTTONDOWN,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_MAXIMIZE, SW_RESTORE,
+    SW_SHOWNOACTIVATE, WINDOWPOS, WINEVENT_OUTOFCONTEXT, WM_DESTROY, WM_LBUTTONDOWN,
     WM_MOUSEACTIVATE, WM_PAINT, WM_TIMER, WM_WINDOWPOSCHANGING, WS_EX_NOACTIVATE,
     WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use super::desktop;
-use super::desktop_window::{
-    self, DesktopApp, DesktopWindowThread, WM_APP_REPAINT, WM_APP_SHOW,
-};
+use super::desktop_window::{self, DesktopApp, DesktopWindowThread, WM_APP_REPAINT, WM_APP_SHOW};
 use super::vk_log;
 pub use super::vk_renderer::VkPalette;
 use super::vk_renderer::{self, VkRenderer};
@@ -1077,11 +1075,12 @@ fn render_frame() {
                 },
                 pressed,
                 controller_label: controller_snapshot.name.trim(),
-                // Voice needs both a non-secure desktop (LocalSystem has no mic
-                // consent on Winlogon) and the optional whisper sidecar+model
-                // installed. Otherwise the mic key shows honestly disabled.
+                // Voice needs voice typing on, a non-secure desktop (LocalSystem
+                // has no mic consent on Winlogon), and the optional speech
+                // engine installed. Otherwise the mic key shows disabled.
                 voice_available: !crate::win::logon_focus::is_active()
-                    && crate::win::speech_input::available_cached(),
+                    && crate::win::speech_input::available_cached()
+                    && crate::config::voice_enabled(),
                 // Busy = the helper is alive (recording, or transcribing after stop,
                 // including auto-stop). The halo phase comes from the helper.
                 voice_active: phase_str.is_some(),
@@ -1215,7 +1214,11 @@ mod tests {
         assert_eq!(bottom_pad, side_pad);
     }
 
-    fn render_card_png(style: crate::config::VkStyle, sheet: bool, target_w: f32) -> (u32, u32, Vec<u8>) {
+    fn render_card_png(
+        style: crate::config::VkStyle,
+        sheet: bool,
+        target_w: f32,
+    ) -> (u32, u32, Vec<u8>) {
         let rows = vk_nav::rows_for_test();
         let (w1, _) = vk_renderer::grid_size(vk_renderer::REF_MON_W, &rows, style);
         let (p1, _) = vk_renderer::floating_pad(1.0, style);

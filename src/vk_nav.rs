@@ -237,7 +237,7 @@ fn build_web_layout(layer: Layer, lang_de: bool) -> Vec<KeyRow> {
     row_bottom.push(KeyCell::tri('.', ':', '=', layer));
     row_bottom.push(KeyCell::vk("Backspace", VK_BACK, SPAN_KEY));
 
-    let mic = crate::win::speech_input::available();
+    let mic = mic_key_wanted();
     let mut space = KeyCell::vk(
         "Space",
         VK_SPACE,
@@ -362,8 +362,34 @@ fn is_vk(action: &KeyAction, vk: VIRTUAL_KEY) -> bool {
     matches!(action, KeyAction::Vk(v) if *v == vk)
 }
 
+fn mic_key_wanted() -> bool {
+    // The key stays when voice typing is switched off, so the keyboard can show
+    // it disabled. It is omitted only when the speech engine was not installed.
+    crate::win::speech_input::available_cached()
+}
+
+/// Voice typing is off: the mic key is on the grid, but it must not press or start.
+fn voice_key_blocked(key: &KeyCell) -> bool {
+    matches!(key.action, KeyAction::VoiceInput) && !crate::config::voice_enabled()
+}
+
 pub fn rows_snapshot() -> Vec<KeyRow> {
-    NAV.lock().map(|n| n.rows.clone()).unwrap_or_default()
+    let Ok(mut nav) = NAV.lock() else {
+        return Vec::new();
+    };
+    // Speech can be installed while the keyboard is open. Add the mic key then.
+    // Turning voice typing off does not remove it; the renderer draws it disabled.
+    if !nav.rows.is_empty() {
+        let has = nav.rows.iter().any(|row| {
+            row.keys
+                .iter()
+                .any(|key| matches!(key.action, KeyAction::VoiceInput))
+        });
+        if has != mic_key_wanted() {
+            rebuild(&mut nav);
+        }
+    }
+    nav.rows.clone()
 }
 
 #[cfg(test)]
@@ -596,15 +622,23 @@ pub fn dpad_released(dir: Button) {
     }
 }
 
-pub fn activate_selection() {
+pub fn activate_selection() -> bool {
     if let Some(key) = selected_key() {
+        if voice_key_blocked(&key) {
+            return false;
+        }
         mark_pressed(selection());
         activate_key(&key);
+        return true;
     }
+    false
 }
 
 /// Fire a specific key (mouse/touch on the grid) and register it for press feedback.
 pub fn activate_at(pos: KeyPos, key: &KeyCell) {
+    if voice_key_blocked(key) {
+        return;
+    }
     mark_pressed(pos);
     activate_key(key);
 }
@@ -940,6 +974,13 @@ pub fn enter() {
 }
 
 pub fn start_voice_input() {
+    // Also the rising edge: an ini edit does not cancel an unload until the
+    // next poll, and R3 can start a helper that the old unload would then kill.
+    crate::win::speech_input::enforce_voice_enabled();
+    if !crate::config::voice_enabled() {
+        set_voice_input_active(false);
+        return;
+    }
     if crate::win::logon_focus::is_active() {
         crate::install::log_line("vk voice input ignored on Winlogon");
         return;
@@ -1323,22 +1364,10 @@ mod tests {
 
     #[test]
     fn shoulder_nav_picks_char_word_or_chips() {
-        assert_eq!(
-            shoulder_nav(false, false),
-            ShoulderNav::CaretChar
-        );
-        assert_eq!(
-            shoulder_nav(true, false),
-            ShoulderNav::CaretWord
-        );
-        assert_eq!(
-            shoulder_nav(false, true),
-            ShoulderNav::CycleSuggestions
-        );
-        assert_eq!(
-            shoulder_nav(true, true),
-            ShoulderNav::CaretWord
-        );
+        assert_eq!(shoulder_nav(false, false), ShoulderNav::CaretChar);
+        assert_eq!(shoulder_nav(true, false), ShoulderNav::CaretWord);
+        assert_eq!(shoulder_nav(false, true), ShoulderNav::CycleSuggestions);
+        assert_eq!(shoulder_nav(true, true), ShoulderNav::CaretWord);
     }
 
     #[test]

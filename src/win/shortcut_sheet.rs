@@ -106,11 +106,47 @@ pub static LEGEND: [SheetRow; 9] = [
     row(&[Text("Hold"), Button("SELECT")], "All shortcuts"),
 ];
 
+fn show_voice_shortcut() -> bool {
+    crate::config::voice_enabled()
+}
+
+/// Legend rows the keyboard actually draws. Dictate is omitted while voice
+/// typing is off, so the bar does not advertise a dead button.
+pub fn shown_legend() -> Vec<SheetRow> {
+    LEGEND
+        .iter()
+        .copied()
+        .filter(|row| row.label != "Dictate" || show_voice_shortcut())
+        .collect()
+}
+
+/// Shortcut sheet columns with the Dictate row removed while voice typing is off.
+pub fn shown_columns() -> [Vec<Line>; 3] {
+    let mut cols = columns();
+    if !show_voice_shortcut() {
+        for col in &mut cols {
+            col.retain(|line| match line {
+                Line::Row(row) => row.label != "Dictate",
+                _ => true,
+            });
+        }
+    }
+    cols
+}
+
+pub fn shown_line_count() -> usize {
+    shown_columns()
+        .iter()
+        .map(Vec::len)
+        .max()
+        .unwrap_or(1)
+        .max(1)
+}
+
 pub fn fit_legend(widths: &[f32], sep: f32, avail: f32) -> Vec<usize> {
     let mut kept: Vec<usize> = (0..widths.len()).collect();
     let total = |kept: &[usize]| {
-        kept.iter().map(|&i| widths[i]).sum::<f32>()
-            + sep * kept.len().saturating_sub(1) as f32
+        kept.iter().map(|&i| widths[i]).sum::<f32>() + sep * kept.len().saturating_sub(1) as f32
     };
     while kept.len() > 1 && total(&kept) > avail {
         kept.remove((kept.len() - 1) / 2);
@@ -256,7 +292,12 @@ mod tests {
             .collect();
         assert_eq!(
             without,
-            ["Clear field", "Switch layout", "Open warmUP", "Record (warmUP)"]
+            [
+                "Clear field",
+                "Switch layout",
+                "Open warmUP",
+                "Record (warmUP)"
+            ]
         );
         for c in &cols {
             for (i, l) in c.iter().enumerate() {
@@ -268,7 +309,11 @@ mod tests {
         let firsts: Vec<Line> = cols.iter().map(|c| c[0]).collect();
         assert_eq!(
             firsts,
-            [Line::Title("Keyboard"), Line::Blank, Line::Title("Keyboard closed")]
+            [
+                Line::Title("Keyboard"),
+                Line::Blank,
+                Line::Title("Keyboard closed")
+            ]
         );
     }
 
