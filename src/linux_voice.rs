@@ -91,7 +91,7 @@ impl Pill {
         layer.set_exclusive_zone(0);
         layer.set_margin(0, 40, 0, 0);
         layer.set_size(420, 104);
-        let pool = SlotPool::new(420 * 104 * 4 * 2, &shm).map_err(|error| error.to_string())?;
+        let pool = SlotPool::new(420 * 104 * 4 * 4, &shm).map_err(|error| error.to_string())?;
         Ok(Self {
             registry_state: RegistryState::new(globals),
             output_state: OutputState::new(globals, qh),

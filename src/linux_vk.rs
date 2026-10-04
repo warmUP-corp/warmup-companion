@@ -167,6 +167,18 @@ fn keyboard_loop(wake: UnixStream) -> Result<(), String> {
             break;
         }
         let _ = queue.dispatch_pending(&mut shell);
+        #[cfg(feature = "speech")]
+        if shell.configured {
+            let gen = crate::linux_nimbus::frame_generation();
+            let active = crate::linux_speech::visual_active();
+            if active && gen != shell.voice_gen {
+                shell.voice_gen = gen;
+                shell.dirty = true;
+            } else if !active && shell.voice_gen != 0 {
+                shell.voice_gen = 0;
+                shell.dirty = true;
+            }
+        }
         if shell.dirty && shell.configured && !shell.frame_pending {
             shell.draw(&qh);
         }
@@ -179,7 +191,11 @@ fn keyboard_loop(wake: UnixStream) -> Result<(), String> {
                 nix::poll::PollFd::new(guard.connection_fd(), nix::poll::PollFlags::POLLIN),
                 nix::poll::PollFd::new(wake.as_fd(), nix::poll::PollFlags::POLLIN),
             ];
-            let _ = nix::poll::poll(&mut fds, nix::poll::PollTimeout::from(500u16));
+            #[cfg(feature = "speech")]
+            let wait = if crate::linux_speech::visual_active() { 33u16 } else { 500 };
+            #[cfg(not(feature = "speech"))]
+            let wait = 500u16;
+            let _ = nix::poll::poll(&mut fds, nix::poll::PollTimeout::from(wait));
             (
                 fds[0].any().unwrap_or(false),
                 fds[1].any().unwrap_or(false),
@@ -230,6 +246,7 @@ struct Shell {
     conn: Connection,
     gpu: Option<gpu::Presenter>,
     gpu_failed: bool,
+    voice_gen: u64,
 }
 
 impl Shell {
@@ -288,6 +305,7 @@ impl Shell {
             conn,
             gpu: None,
             gpu_failed: false,
+            voice_gen: 0,
         };
         shell.apply_layout();
         Ok(shell)

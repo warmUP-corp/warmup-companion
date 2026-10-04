@@ -4,6 +4,7 @@
 
 - The on-screen keyboard is drawn on the GPU. The card stays on the graphics card, and moving the highlight uploads the selected key.
 - The voice cloud no longer waits for the graphics card to go idle. If a game is already using the GPU, that cloud frame is skipped so the game is not stalled.
+- The voice cloud on the mic key keeps moving while you dictate. It no longer waits for a D-pad move before the next frame is shown.
 - R3 dictation on Linux uses the same Parakeet voice engine as Windows. The nimbus cloud is drawn by a Vulkan shader on the GPU, on the mic key and in a pill, while you speak.
 - The on-screen keyboard highlight moves with the D-pad without redrawing the whole card or animating the ring across extra frames. The picture is the screen's logical size, so a fractional-scale display does not paint a larger buffer.
 - Controller Center opens from the Linux tray. The settings window runs in its own process, so the tray thread no longer has to host it.

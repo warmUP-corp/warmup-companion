@@ -82,6 +82,8 @@ pub fn ensure_running() {
                         *slot = Some((px, frame));
                     }
                     FRAME_GEN.fetch_add(1, Ordering::Relaxed);
+                    #[cfg(feature = "gamepad")]
+                    crate::linux_vk::request_repaint();
                 }
                 let rest = Duration::from_millis(33).saturating_sub(started.elapsed());
                 if !rest.is_zero() {
@@ -91,6 +93,9 @@ pub fn ensure_running() {
             if let Ok(mut slot) = frame_slot().lock() {
                 *slot = None;
             }
+            FRAME_GEN.fetch_add(1, Ordering::Relaxed);
+            #[cfg(feature = "gamepad")]
+            crate::linux_vk::request_repaint();
             ANIMATING.store(false, std::sync::atomic::Ordering::SeqCst);
         });
 }
