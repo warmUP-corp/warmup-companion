@@ -57,6 +57,8 @@ mod vk_geom;
 mod vk_key;
 mod vk_nav;
 mod vk_predict;
+#[cfg(feature = "gamepad")]
+mod vk_sheet;
 #[cfg(target_os = "linux")]
 mod linux_type;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]

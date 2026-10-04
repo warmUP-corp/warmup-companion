@@ -188,6 +188,7 @@ struct Shell {
     buffer: Option<Buffer>,
     ps5: bool,
     glide: draw::Glide,
+    placed: Option<(bool, u32, u32, i32)>,
 }
 
 impl Shell {
@@ -239,6 +240,7 @@ impl Shell {
             buffer: None,
             ps5: ps5_pad(),
             glide: draw::Glide::default(),
+            placed: None,
         };
         shell.apply_layout();
         Ok(shell)
@@ -247,15 +249,21 @@ impl Shell {
     fn apply_layout(&mut self) {
         let (output_w, output_h) = self.output_size();
         let (width, height) = desired_size(output_w, output_h);
+        let docked = matches!(vk_layout_mode(), VkLayoutMode::Docked);
+        let margin = if docked { 0 } else { draw::floating_bottom_margin(output_h) };
+        let key = (docked, width, height, margin);
+        if self.placed == Some(key) {
+            return;
+        }
+        self.placed = Some(key);
         self.logical_w = width;
         self.logical_h = height;
-        if matches!(vk_layout_mode(), VkLayoutMode::Docked) {
+        if docked {
             self.layer.set_anchor(Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
             self.layer.set_exclusive_zone(height as i32);
             self.layer.set_margin(0, 0, 0, 0);
             self.layer.set_size(0, height);
         } else {
-            let margin = draw::floating_bottom_margin(output_h);
             self.layer.set_anchor(Anchor::BOTTOM);
             self.layer.set_exclusive_zone(0);
             self.layer.set_margin(0, 0, margin, 0);
@@ -329,6 +337,7 @@ impl Shell {
             symbol,
             symbol_locked,
             floating,
+            sheet: crate::vk_sheet::shown(),
         };
         let Some(pixmap) = draw::draw(&frame, &mut self.fonts, &mut self.cache, &mut self.glide) else {
             return;
@@ -576,15 +585,21 @@ impl LayerShellHandler for Shell {
         configure: LayerSurfaceConfigure,
         _: u32,
     ) {
-        if configure.new_size.0 > 0 {
+        let docked = self.placed.is_some_and(|(docked, _, _, _)| docked);
+        let mut changed = !self.configured;
+        if docked && configure.new_size.0 > 0 && configure.new_size.0 != self.logical_w {
             self.logical_w = configure.new_size.0;
+            changed = true;
         }
-        if configure.new_size.1 > 0 {
+        if docked && configure.new_size.1 > 0 && configure.new_size.1 != self.logical_h {
             self.logical_h = configure.new_size.1;
+            changed = true;
         }
         self.configured = true;
-        self.dirty = true;
-        if !self.frame_pending {
+        if changed {
+            self.dirty = true;
+        }
+        if self.dirty && !self.frame_pending {
             self.draw(qh);
         }
     }

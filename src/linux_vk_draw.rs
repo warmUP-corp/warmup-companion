@@ -255,6 +255,7 @@ pub struct Frame {
     pub symbol: bool,
     pub symbol_locked: bool,
     pub floating: bool,
+    pub sheet: bool,
 }
 
 pub struct Glide {
@@ -503,6 +504,9 @@ pub fn draw(
         draw_strip(&mut pixmap, fonts, cache, &spec, &pal, strip, &rects, unit, scale, frame.ps5, strip_dy, strip_alpha);
     }
     draw_legend(&mut pixmap, fonts, cache, &spec, &pal, &rects, frame.logical_w, frame.logical_h, lu, scale, frame.ps5);
+    if frame.sheet {
+        draw_sheet(&mut pixmap, fonts, cache, &pal, frame.logical_w, frame.logical_h, lu, scale, frame.ps5);
+    }
     if let Some((x, y, w, h, radius)) = panel {
         clip_round(&mut pixmap, x, y, w, h, radius);
     }
@@ -671,6 +675,122 @@ fn draw_legend(
             Align::Left,
         );
         x += widths[index] + sep_w;
+    }
+}
+
+struct SheetItem {
+    title: bool,
+    parts: &'static [Leg],
+    label: &'static str,
+}
+
+fn sheet_item(title: bool, parts: &'static [Leg], label: &'static str) -> SheetItem {
+    SheetItem { title, parts, label }
+}
+
+fn draw_sheet(
+    pixmap: &mut Pixmap,
+    fonts: &mut FontSystem,
+    cache: &mut SwashCache,
+    pal: &Pal,
+    frame_w: f32,
+    frame_h: f32,
+    u: f32,
+    scale: f32,
+    ps5: bool,
+) {
+    let legend_top = frame_h - 60.0 * u;
+    round_rect(pixmap, 0.0, 0.0, frame_w * scale, legend_top * scale, 0.0, pal.bg, 255);
+    const L3: &[Leg] = &[Leg::Btn("L3")];
+    const R3: &[Leg] = &[Leg::Btn("R3")];
+    const TAP: &[Leg] = &[Leg::Word("Tap"), Leg::Btn("SELECT")];
+    const COPY: &[Leg] = &[Leg::Btn("SELECT"), Leg::Plus, Leg::Btn("X")];
+    const PASTE: &[Leg] = &[Leg::Btn("SELECT"), Leg::Plus, Leg::Btn("Y")];
+    const CLEAR: &[Leg] = &[Leg::Btn("SELECT"), Leg::Plus, Leg::Btn("B")];
+    const CARET: &[Leg] = &[Leg::Btn("LB"), Leg::Slash, Leg::Btn("RB")];
+    const JUMP: &[Leg] = &[Leg::Word("Hold"), Leg::Btn("SELECT"), Leg::Plus, Leg::Btn("LB"), Leg::Slash, Leg::Btn("RB")];
+    const SHIFT_K: &[Leg] = &[Leg::Btn("RT")];
+    const SYMBOLS: &[Leg] = &[Leg::Btn("LT")];
+    const LAYOUT: &[Leg] = &[Leg::Btn("X")];
+    const SHOT: &[Leg] = &[Leg::Btn("LB"), Leg::Plus, Leg::Btn("RB"), Leg::Plus, Leg::Btn("RT")];
+    const WINDOW: &[Leg] = &[Leg::Btn("LB"), Leg::Plus, Leg::Btn("RB"), Leg::Plus, Leg::Btn("LT")];
+    const OPEN: &[Leg] = &[Leg::Btn("SELECT"), Leg::Plus, Leg::Btn("LB"), Leg::Plus, Leg::Btn("X")];
+    const GAME_SHOT: &[Leg] = &[Leg::Word("Hold"), Leg::Btn("SELECT"), Leg::Plus, Leg::Btn("LB")];
+    const RECORD: &[Leg] = &[Leg::Word("Hold"), Leg::Btn("SELECT"), Leg::Plus, Leg::Btn("RB")];
+    const NONE: &[Leg] = &[];
+    let columns: [&[SheetItem]; 3] = [
+        &[
+            sheet_item(true, NONE, "Keyboard"),
+            sheet_item(false, L3, "Close keyboard"),
+            sheet_item(false, R3, "Dictate"),
+            sheet_item(false, TAP, "Suggestions"),
+            sheet_item(false, COPY, "Copy"),
+            sheet_item(false, PASTE, "Paste"),
+            sheet_item(false, CLEAR, "Clear field"),
+        ],
+        &[
+            sheet_item(true, NONE, ""),
+            sheet_item(false, CARET, "Move caret"),
+            sheet_item(false, JUMP, "Jump a word"),
+            sheet_item(false, SHIFT_K, "Shift"),
+            sheet_item(false, SYMBOLS, "Symbols"),
+            sheet_item(false, LAYOUT, "Switch layout"),
+        ],
+        &[
+            sheet_item(true, NONE, "Keyboard closed"),
+            sheet_item(false, SHOT, "Screenshot"),
+            sheet_item(false, WINDOW, "Window screenshot"),
+            sheet_item(false, OPEN, "Open warmUP"),
+            sheet_item(true, NONE, "In games"),
+            sheet_item(false, GAME_SHOT, "Screenshot"),
+            sheet_item(false, RECORD, "Record"),
+        ],
+    ];
+    let col_w = (frame_w - 36.0 * u) / 3.0;
+    let row_h = ((legend_top - 20.0 * u) / 8.0).clamp(28.0 * u, 40.0 * u);
+    let glyph = 22.0 * u;
+    for (ci, column) in columns.iter().enumerate() {
+        let x = 18.0 * u + ci as f32 * col_w;
+        for (ri, item) in column.iter().enumerate() {
+            let y = 12.0 * u + ri as f32 * row_h;
+            if item.title {
+                if !item.label.is_empty() {
+                    text_aligned(pixmap, fonts, cache, item.label, (x, y, x + col_w - 8.0, y + row_h), 16.0 * u * scale, Weight::SEMIBOLD, pal.text, 255, scale, Align::Left);
+                }
+                continue;
+            }
+            let mut cursor = x;
+            for (i, part) in item.parts.iter().enumerate() {
+                if i > 0 {
+                    cursor += 4.0 * u;
+                }
+                let w = match *part {
+                    Leg::Btn("SELECT") => 26.0 * u,
+                    Leg::Btn(_) => glyph,
+                    Leg::Word(word) => measure_label(fonts, word, 13.0 * u),
+                    Leg::Plus => measure_label(fonts, "+", 13.0 * u),
+                    Leg::Slash => measure_label(fonts, "/", 13.0 * u),
+                };
+                match *part {
+                    Leg::Btn(hint) => {
+                        if let Some(svg) = hint_svg(ps5, hint) {
+                            blit_svg(pixmap, svg, cursor, y, cursor + w, y + row_h, w, scale, None, 255);
+                        }
+                    }
+                    Leg::Word(_) | Leg::Plus | Leg::Slash => {
+                        let shown = match *part {
+                            Leg::Word(word) => word,
+                            Leg::Plus => "+",
+                            Leg::Slash => "/",
+                            Leg::Btn(_) => "",
+                        };
+                        text_aligned(pixmap, fonts, cache, shown, (cursor, y, cursor + w, y + row_h), 13.0 * u * scale, Weight::NORMAL, pal.text, (ALPHA_SECONDARY * 255.0) as u8, scale, Align::Left);
+                    }
+                }
+                cursor += w;
+            }
+            text_aligned(pixmap, fonts, cache, item.label, (cursor + 8.0 * u, y, x + col_w - 4.0, y + row_h), 15.0 * u * scale, Weight::NORMAL, pal.text, 255, scale, Align::Left);
+        }
     }
 }
 
@@ -888,6 +1008,7 @@ fn hint_svg(ps5: bool, hint: &str) -> Option<&'static str> {
     Some(match (ps5, hint) {
         (true, "A") => include_str!("../controller-icons/p5_face_cross_colored.svg"),
         (true, "B") => include_str!("../controller-icons/p5_face_circle_colored.svg"),
+        (true, "X") => include_str!("../controller-icons/p5_face_square_colored.svg"),
         (true, "Y") => include_str!("../controller-icons/p5_face_triangle_colored.svg"),
         (true, "L3") => include_str!("../controller-icons/p5_l3_click.svg"),
         (true, "SELECT") => include_str!("../controller-icons/p5_share.svg"),
@@ -899,6 +1020,7 @@ fn hint_svg(ps5: bool, hint: &str) -> Option<&'static str> {
         (true, "START") => include_str!("../controller-icons/p5_options.svg"),
         (false, "A") => include_str!("../controller-icons/x_face_a_colored.svg"),
         (false, "B") => include_str!("../controller-icons/x_face_b_colored.svg"),
+        (false, "X") => include_str!("../controller-icons/x_face_x_colored.svg"),
         (false, "Y") => include_str!("../controller-icons/x_face_y_colored.svg"),
         (false, "L3") => include_str!("../controller-icons/x_l3_click.svg"),
         (false, "SELECT") => include_str!("../controller-icons/x_menu_view.svg"),
@@ -991,38 +1113,42 @@ fn clip_round(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, radius: f32) 
     let data = pixmap.data_mut();
     let r = radius.max(0.0);
     for py in 0..height {
-        for px in 0..width {
-            if inside_round(px as f32 + 0.5, py as f32 + 0.5, x, y, w, h, r) {
-                continue;
-            }
-            let index = ((py as u32 * width as u32) + px as u32) as usize * 4;
-            data[index] = 0;
-            data[index + 1] = 0;
-            data[index + 2] = 0;
-            data[index + 3] = 0;
-        }
+        let (start, end) = row_inside(py, x, y, w, h, r, width);
+        clear_span(data, width, py, 0, start);
+        clear_span(data, width, py, end, width);
     }
 }
 
-fn inside_round(px: f32, py: f32, x: f32, y: f32, w: f32, h: f32, r: f32) -> bool {
-    if px < x || py < y || px > x + w || py > y + h {
-        return false;
+fn row_inside(py: i32, x: f32, y: f32, w: f32, h: f32, r: f32, width: i32) -> (i32, i32) {
+    let sample = py as f32 + 0.5;
+    if sample < y || sample > y + h {
+        return (0, 0);
     }
-    let r = r.min(w * 0.5).min(h * 0.5);
-    let (cx, cy) = if px < x + r && py < y + r {
-        (x + r, y + r)
-    } else if px > x + w - r && py < y + r {
-        (x + w - r, y + r)
-    } else if px < x + r && py > y + h - r {
-        (x + r, y + h - r)
-    } else if px > x + w - r && py > y + h - r {
-        (x + w - r, y + h - r)
-    } else {
-        return true;
-    };
-    let dx = px - cx;
-    let dy = py - cy;
-    dx * dx + dy * dy <= r * r
+    let mut inset = 0.0;
+    if sample < y + r {
+        let dy = y + r - sample;
+        let inner = (r * r - dy * dy).max(0.0).sqrt();
+        inset = r - inner;
+    } else if sample > y + h - r {
+        let dy = sample - (y + h - r);
+        let inner = (r * r - dy * dy).max(0.0).sqrt();
+        inset = r - inner;
+    }
+    let start = (x + inset).ceil() as i32;
+    let end = (x + w - inset).floor() as i32;
+    (start.clamp(0, width), end.clamp(0, width))
+}
+
+fn clear_span(data: &mut [u8], width: i32, py: i32, from: i32, to: i32) {
+    if to <= from || py < 0 {
+        return;
+    }
+    let row = (py as u32 * width as u32) as usize * 4;
+    let start = row + from.max(0) as usize * 4;
+    let end = row + to.max(from) as usize * 4;
+    if end <= data.len() {
+        data[start..end].fill(0);
+    }
 }
 
 fn text(
@@ -1150,18 +1276,49 @@ fn blit_svg(pixmap: &mut Pixmap, svg: &str, x0: f32, y0: f32, x1: f32, y1: f32, 
         return;
     }
     let px = (size * scale).round().max(8.0) as u32;
+    let Some(bytes) = cached_svg(svg, px, tint) else { return };
+    let cx = (x0 + x1) * 0.5 * scale;
+    let cy = (y0 + y1) * 0.5 * scale;
+    let dest_x = (cx - px as f32 * 0.5).round() as i32;
+    let dest_y = (cy - px as f32 * 0.5).round() as i32;
+    let fade = alpha as f32 / 255.0;
+    for row in 0..px {
+        for col in 0..px {
+            let index = ((row * px + col) * 4) as usize;
+            blend_premul(
+                pixmap,
+                dest_x + col as i32,
+                dest_y + row as i32,
+                (bytes[index] as f32 * fade).round() as u8,
+                (bytes[index + 1] as f32 * fade).round() as u8,
+                (bytes[index + 2] as f32 * fade).round() as u8,
+                (bytes[index + 3] as f32 * fade).round() as u8,
+            );
+        }
+    }
+}
+
+fn cached_svg(svg: &str, px: u32, tint: Option<Rgb>) -> Option<std::sync::Arc<Vec<u8>>> {
+    use std::sync::{Mutex, OnceLock};
+    type Key = (usize, usize, u32, u32);
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<Key, std::sync::Arc<Vec<u8>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let tint_key = tint.map(|c| (c.r as u32) << 16 | (c.g as u32) << 8 | c.b as u32).unwrap_or(0);
+    let key = (svg.as_ptr() as usize, svg.len(), px, tint_key);
+    if let Ok(guard) = cache.lock() {
+        if let Some(hit) = guard.get(&key) {
+            return Some(hit.clone());
+        }
+    }
     let factor = if tint.is_none() { 3u32 } else { 1u32 };
     let colored = if let Some(c) = tint {
         svg.replace("currentColor", &format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b))
     } else {
         svg.to_string()
     };
-    let Ok(tree) = resvg::usvg::Tree::from_data(colored.as_bytes(), &resvg::usvg::Options::default()) else { return };
+    let tree = resvg::usvg::Tree::from_data(colored.as_bytes(), &resvg::usvg::Options::default()).ok()?;
     let raster = px.saturating_mul(factor);
-    let mut icon = match resvg::tiny_skia::Pixmap::new(raster, raster) {
-        Some(icon) => icon,
-        None => return,
-    };
+    let mut icon = resvg::tiny_skia::Pixmap::new(raster, raster)?;
     let tw = tree.size().width().max(1.0);
     let th = tree.size().height().max(1.0);
     let s = raster as f32 / tw.max(th);
@@ -1172,36 +1329,33 @@ fn blit_svg(pixmap: &mut Pixmap, svg: &str, x0: f32, y0: f32, x1: f32, y1: f32, 
         resvg::tiny_skia::Transform::from_row(s, 0.0, 0.0, s, dx, dy),
         &mut icon.as_mut(),
     );
-    let cx = (x0 + x1) * 0.5 * scale;
-    let cy = (y0 + y1) * 0.5 * scale;
-    let dest_x = (cx - px as f32 * 0.5).round() as i32;
-    let dest_y = (cy - px as f32 * 0.5).round() as i32;
-    let fade = alpha as f32 / 255.0;
-    let bytes = icon.data();
+    let src = icon.data();
     let area = (factor * factor) as f32;
+    let mut bytes = vec![0u8; (px * px * 4) as usize];
     for row in 0..px {
         for col in 0..px {
             let mut acc = [0.0f32; 4];
             for sy in 0..factor {
                 for sx in 0..factor {
                     let index = (((row * factor + sy) * raster + col * factor + sx) * 4) as usize;
-                    acc[0] += bytes[index] as f32;
-                    acc[1] += bytes[index + 1] as f32;
-                    acc[2] += bytes[index + 2] as f32;
-                    acc[3] += bytes[index + 3] as f32;
+                    acc[0] += src[index] as f32;
+                    acc[1] += src[index + 1] as f32;
+                    acc[2] += src[index + 2] as f32;
+                    acc[3] += src[index + 3] as f32;
                 }
             }
-            blend_premul(
-                pixmap,
-                dest_x + col as i32,
-                dest_y + row as i32,
-                (acc[0] / area * fade).round() as u8,
-                (acc[1] / area * fade).round() as u8,
-                (acc[2] / area * fade).round() as u8,
-                (acc[3] / area * fade).round() as u8,
-            );
+            let out = ((row * px + col) * 4) as usize;
+            bytes[out] = (acc[0] / area).round() as u8;
+            bytes[out + 1] = (acc[1] / area).round() as u8;
+            bytes[out + 2] = (acc[2] / area).round() as u8;
+            bytes[out + 3] = (acc[3] / area).round() as u8;
         }
     }
+    let bytes = std::sync::Arc::new(bytes);
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(key, bytes.clone());
+    }
+    Some(bytes)
 }
 
 pub fn to_argb(pixmap: &Pixmap) -> Vec<u8> {
@@ -1252,9 +1406,14 @@ mod tests {
             symbol: false,
             symbol_locked: false,
             floating: true,
+            sheet: false,
         };
         let pixmap = draw(&frame, &mut fonts, &mut cache, &mut Glide::default()).expect("pixmap");
         assert!(pixmap.width() > 1000);
         assert!(pixmap.data().iter().any(|byte| *byte != 0));
+        let mut sheet = frame;
+        sheet.sheet = true;
+        let covered = draw(&sheet, &mut fonts, &mut cache, &mut Glide::default()).expect("sheet");
+        assert!(covered.data().iter().any(|byte| *byte != 0));
     }
 }

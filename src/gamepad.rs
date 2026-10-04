@@ -546,6 +546,8 @@ impl GamepadPoll {
             crate::vk_nav::reset_selection();
             crate::win::logon_focus::clear_cache();
         }
+        #[cfg(not(windows))]
+        crate::vk_sheet::set_shown(false);
     }
 
     pub fn on_vk_opened(&mut self) {
@@ -678,9 +680,11 @@ impl GamepadPoll {
                     edges.push(edge);
                 }
             }
-            #[cfg(windows)]
             if self.view_sheet.tick(Instant::now()) {
+                #[cfg(windows)]
                 crate::win::shortcut_sheet::set_shown(true);
+                #[cfg(not(windows))]
+                crate::vk_sheet::set_shown(true);
             }
             return Ok(edges);
         }
@@ -1111,6 +1115,8 @@ impl GamepadPoll {
                 if release.hide_sheet {
                     #[cfg(windows)]
                     crate::win::shortcut_sheet::set_shown(false);
+                    #[cfg(not(windows))]
+                    crate::vk_sheet::set_shown(false);
                 }
                 if release.tap {
                     // Web SELECT: jump into the suggestion strip when populated.
