@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Unelevated warmUP can close the companion over the existing pipe (`shut_down`). The service writes `C:\ProgramData\WarmupVk\companion-clean-exit` and stops itself. Kid Mode blocking refuses the request and stays running. Install/repair grants interactive users start and stop (`RP`+`WP`) on `WarmupVkSvc` via `sc sdset`.
+
 ## v0.8.1
 
 - Voice typing can be turned off completely. R3, Ctrl+Alt+V and the mic key do nothing, the mic key on the keyboard shows disabled, and any recording in progress is discarded instead of transcribed. The speech engine unloads. Turn it off in the tray (Voice engine → Off, or Voice typing before speech is installed), in Controller Center under General, or with `voice_enabled = false` in `settings.ini`.

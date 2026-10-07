@@ -254,6 +254,9 @@ pub struct NativeVkPayload {
     pub action: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ShutDownPayload {}
+
 /// Optional native keyboard theme colors. Each field is `#RRGGBB`; absent fields keep
 /// the companion's current dark/light default for that slot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -347,6 +350,7 @@ pub enum DownFrame {
     ParentalGuard(ParentalGuardPayload),
     LibraryWatch(LibraryWatchPayload),
     PlaySessionsAck(PlaySessionsAckPayload),
+    ShutDown(ShutDownPayload),
     #[serde(skip)]
     Unknown,
 }
@@ -389,7 +393,7 @@ impl DownFrame {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
             "hello" | "config" | "mode" | "rumble" | "led" | "companion_settings" | "native_vk"
-            | "parental_guard" | "library_watch" | "play_sessions_ack" => {
+            | "parental_guard" | "library_watch" | "play_sessions_ack" | "shut_down" => {
                 serde_json::from_str(line)
             }
             _ => Ok(Self::Unknown),
@@ -707,6 +711,26 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(json["type"], "play_sessions_ack");
         assert_eq!(DownFrame::parse_line(line.trim_end()).unwrap(), frame);
+    }
+
+    #[test]
+    fn shut_down_down_frame_is_empty_payload_ndjson() {
+        let frame = DownFrame::ShutDown(ShutDownPayload {});
+        let line = frame.to_ndjson_line();
+        assert_eq!(line, "{\"type\":\"shut_down\",\"payload\":{}}\n");
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["type"], "shut_down");
+        assert_eq!(json["payload"], serde_json::json!({}));
+        assert_eq!(DownFrame::parse_line(line.trim_end()).unwrap(), frame);
+        assert_eq!(PROTOCOL_VERSION, 6);
+        assert_eq!(
+            DownFrame::parse_line(r#"{"type":"shutdown","payload":{}}"#).unwrap(),
+            DownFrame::Unknown
+        );
+        assert_eq!(
+            DownFrame::parse_line(r#"{"type":"shut_down","payload":{"reason":"close"}}"#).unwrap(),
+            DownFrame::ShutDown(ShutDownPayload {})
+        );
     }
 
     #[test]

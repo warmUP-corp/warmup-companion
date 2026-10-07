@@ -15,6 +15,7 @@ const DESCRIPTION: &str =
 /// No spaces — `sc.exe` breaks on quoted paths under Program Files.
 pub const INSTALL_DIR: &str = r"C:\ProgramData\WarmupVk\bin";
 pub const DATA_DIR: &str = r"C:\ProgramData\WarmupVk";
+pub const CLEAN_EXIT_MARKER: &str = r"C:\ProgramData\WarmupVk\companion-clean-exit";
 const EXE_NAME: &str = "warmup-companion.exe";
 const LEGACY_EXE_NAME: &str = "warmup-vk-prototype.exe";
 const LOG_NAME: &str = "service.log";
@@ -191,15 +192,41 @@ pub fn run_stop() {
     }
 }
 
+pub fn write_clean_exit_marker() {
+    let path = Path::new(CLEAN_EXIT_MARKER);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    match fs::write(path, b"") {
+        Ok(()) => log_line("wrote companion-clean-exit marker"),
+        Err(e) => log_line(&format!("companion-clean-exit marker write failed: {e}")),
+    }
+}
+
 /// Escape hatch: ask the SCM to stop the service from inside the worker process
 /// (the debug overlay's F8). The worker runs under the duplicated Winlogon
 /// (LocalSystem) token, which has `SERVICE_STOP` rights, so a detached `sc stop`
 /// reaches the launcher's control handler — which tears the worker down. Spawned
 /// with `CREATE_NO_WINDOW` so no console flashes on the secure desktop.
 pub fn request_service_stop() {
+    write_clean_exit_marker();
     log_line("service stop requested (sc stop)");
     if let Err(e) = hidden_command("sc").args(["stop", SERVICE_NAME]).spawn() {
         log_line(&format!("sc stop spawn failed: {e}"));
+    }
+}
+
+pub fn run_grant_interactive_control() {
+    if let Err(e) = require_admin() {
+        eprintln!("grant-service-acl failed: {e}");
+        std::process::exit(1);
+    }
+    match grant_interactive_start_stop() {
+        Ok(()) => println!("Granted interactive users RP+WP on {SERVICE_NAME}."),
+        Err(e) => {
+            eprintln!("grant-service-acl failed: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -276,6 +303,7 @@ fn install_inner(debug_ui: bool, dev_exe: Option<&Path>) -> Result<(), String> {
     ]) {
         log_line(&format!("sc failure (auto-restart) config failed: {e}"));
     }
+    grant_interactive_start_stop()?;
     // LocalSystem (default) — required for winlogon / sign-in desktop.
     sc(&["start", SERVICE_NAME])?;
     verify_service_running()?;
@@ -413,10 +441,40 @@ enum StopOutcome {
     NotInstalled,
 }
 
+fn grant_interactive_start_stop() -> Result<(), String> {
+    let current = sc_sdshow()?;
+    let next = crate::service_acl::ensure_iu_rp_wp(&current);
+    if next == current {
+        log_line(&format!("{SERVICE_NAME} ACL already grants IU RP+WP"));
+        return Ok(());
+    }
+    sc(&["sdset", SERVICE_NAME, &next])?;
+    log_line(&format!("{SERVICE_NAME} ACL granted IU RP+WP"));
+    Ok(())
+}
+
+fn sc_sdshow() -> Result<String, String> {
+    let out = hidden_command("sc.exe")
+        .args(["sdshow", SERVICE_NAME])
+        .output()
+        .map_err(|e| format!("sc.exe sdshow: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        return Err(format!(
+            "sc sdshow {SERVICE_NAME} failed ({}): {stdout}{stderr}",
+            out.status
+        ));
+    }
+    crate::service_acl::sddl_from_sdshow(&stdout)
+        .ok_or_else(|| format!("sc sdshow {SERVICE_NAME}: no SDDL in output: {stdout}"))
+}
+
 /// Issue `sc stop`, then poll `sc query` until STOPPED or timeout.
 /// Avoids the race where `sc delete` runs before the worker child has fully exited
 /// and released its handle on the install dir exe.
 fn stop_service_blocking() -> Result<StopOutcome, String> {
+    write_clean_exit_marker();
     match query_service_state()? {
         Some(state) if state == "STOPPED" => return Ok(StopOutcome::AlreadyStopped),
         None => return Ok(StopOutcome::NotInstalled),
