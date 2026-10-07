@@ -1,4 +1,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "gamepad")]
+use std::sync::Mutex;
+#[cfg(feature = "gamepad")]
+use std::time::{Duration, Instant};
 
 use super::controller_tips::TipToken;
 use TipToken::{Button, Plus, Text};
@@ -7,9 +11,63 @@ pub const FADE_SECS: f32 = 0.15;
 
 static SHOWN: AtomicBool = AtomicBool::new(false);
 
+pub const HINT_RETIRE_OPENS: u32 = 3;
+
+#[cfg(feature = "gamepad")]
+static HINT_RETIRED: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+
 pub fn set_shown(on: bool) {
     if SHOWN.swap(on, Ordering::SeqCst) != on {
         super::vk_ui::request_repaint();
+        if on && sheet_open_counts() {
+            let _ = std::thread::Builder::new()
+                .name("sheet-opens".into())
+                .spawn(record_open);
+        }
+    }
+}
+
+fn sheet_open_counts() -> bool {
+    #[cfg(all(feature = "gamepad", not(test)))]
+    {
+        super::vk_ui::vk_look().tv_layout() && !hint_retired()
+    }
+    #[cfg(not(all(feature = "gamepad", not(test))))]
+    {
+        true
+    }
+}
+
+fn record_open() {
+    #[cfg(all(feature = "gamepad", not(test)))]
+    {
+        if !super::vk_ui::vk_look().tv_layout() {
+            return;
+        }
+        let opens = crate::config::gamepad_settings().vk_sheet_opens;
+        if opens < HINT_RETIRE_OPENS {
+            let _ = crate::config::set_gamepad_setting("vk_sheet_opens", &(opens + 1).to_string());
+            *HINT_RETIRED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
+}
+
+pub fn hint_retired() -> bool {
+    #[cfg(feature = "gamepad")]
+    {
+        let mut cache = HINT_RETIRED.lock().unwrap_or_else(|e| e.into_inner());
+        match *cache {
+            Some((at, value)) if at.elapsed() < Duration::from_millis(250) => value,
+            _ => {
+                let value = crate::config::gamepad_settings().vk_sheet_opens >= HINT_RETIRE_OPENS;
+                *cache = Some((Instant::now(), value));
+                value
+            }
+        }
+    }
+    #[cfg(not(feature = "gamepad"))]
+    {
+        false
     }
 }
 
@@ -60,6 +118,10 @@ pub static GROUPS: [SheetGroup; 3] = [
             row(&[Button("RT")], "Shift"),
             row(&[Button("LT")], "Symbols"),
             row(&[Button("X")], "Switch layout"),
+            row(
+                &[Button("SELECT"), Plus, Button("START")],
+                "Controller Center",
+            ),
         ],
     },
     SheetGroup {
@@ -94,6 +156,101 @@ pub static GROUPS: [SheetGroup; 3] = [
     },
 ];
 
+pub static SHEET_HINT: SheetRow = row(&[Text("Hold"), Button("SELECT")], "All shortcuts");
+
+#[cfg(not(feature = "vk-panels"))]
+const MODERN_EDITING: &[SheetRow] = &[
+    row(&[Button("SELECT"), Plus, Button("X")], "Copy"),
+    row(&[Button("SELECT"), Plus, Button("Y")], "Paste"),
+    row(&[Button("SELECT"), Plus, Button("B")], "Clear field"),
+];
+
+#[cfg(feature = "vk-panels")]
+const MODERN_EDITING: &[SheetRow] = &[
+    row(&[Button("SELECT"), Plus, Button("X")], "Copy"),
+    row(&[Button("SELECT"), Plus, Button("Y")], "Paste"),
+    row(&[Button("SELECT"), Plus, Button("A")], "Clipboard & emoji"),
+    row(&[Button("SELECT"), Plus, Button("B")], "Clear field"),
+];
+
+pub static MODERN_GROUPS: [SheetGroup; 6] = [
+    SheetGroup {
+        title: "Typing",
+        rows: &[
+            row(&[Button("A")], "Type"),
+            row(&[Button("B")], "Delete"),
+            row(&[Button("Y")], "Space"),
+            row(&[Button("START")], "Enter"),
+            row(&[Button("RT")], "Shift"),
+            row(&[Button("LT")], "Symbols"),
+        ],
+    },
+    SheetGroup {
+        title: "Editing",
+        rows: MODERN_EDITING,
+    },
+    SheetGroup {
+        title: "Cursor",
+        rows: &[
+            row(&[Button("LB"), SLASH, Button("RB")], "Move caret"),
+            row(
+                &[
+                    Text("Hold"),
+                    Button("SELECT"),
+                    Plus,
+                    Button("LB"),
+                    SLASH,
+                    Button("RB"),
+                ],
+                "Jump a word",
+            ),
+        ],
+    },
+    SheetGroup {
+        title: "Keyboard",
+        rows: &[
+            row(&[Text("Tap"), Button("SELECT")], "Suggestions"),
+            row(&[Button("R3")], "Dictate"),
+            row(&[Button("X")], "Switch layout"),
+            row(&[Button("L3")], "Close keyboard"),
+        ],
+    },
+    SheetGroup {
+        title: "Keyboard closed",
+        rows: &[
+            row(
+                &[Button("LB"), Plus, Button("RB"), Plus, Button("RT")],
+                "Screenshot",
+            ),
+            row(
+                &[Button("LB"), Plus, Button("RB"), Plus, Button("LT")],
+                "Window screenshot",
+            ),
+            row(
+                &[Button("SELECT"), Plus, Button("LB"), Plus, Button("X")],
+                "Open warmUP",
+            ),
+            row(
+                &[Button("SELECT"), Plus, Button("START")],
+                "Controller Center",
+            ),
+        ],
+    },
+    SheetGroup {
+        title: "In games",
+        rows: &[
+            row(
+                &[Text("Hold"), Button("SELECT"), Plus, Button("LB")],
+                "Screenshot",
+            ),
+            row(
+                &[Text("Hold"), Button("SELECT"), Plus, Button("RB")],
+                "Record (warmUP)",
+            ),
+        ],
+    },
+];
+
 pub static LEGEND: [SheetRow; 9] = [
     row(&[Button("A")], "Type"),
     row(&[Button("B")], "Delete"),
@@ -110,8 +267,6 @@ fn show_voice_shortcut() -> bool {
     crate::config::voice_enabled()
 }
 
-/// Legend rows the keyboard actually draws. Dictate is omitted while voice
-/// typing is off, so the bar does not advertise a dead button.
 pub fn shown_legend() -> Vec<SheetRow> {
     LEGEND
         .iter()
@@ -120,7 +275,15 @@ pub fn shown_legend() -> Vec<SheetRow> {
         .collect()
 }
 
-/// Shortcut sheet columns with the Dictate row removed while voice typing is off.
+pub fn shown_rows(group: &SheetGroup) -> Vec<SheetRow> {
+    group
+        .rows
+        .iter()
+        .copied()
+        .filter(|row| row.label != "Dictate" || show_voice_shortcut())
+        .collect()
+}
+
 pub fn shown_columns() -> [Vec<Line>; 3] {
     let mut cols = columns();
     if !show_voice_shortcut() {
@@ -197,7 +360,9 @@ pub fn fade_step(alpha: f32, on: bool, dt_secs: f32) -> f32 {
 pub fn buttons() -> impl Iterator<Item = &'static str> {
     GROUPS
         .iter()
+        .chain(MODERN_GROUPS.iter())
         .flat_map(|g| g.rows.iter())
+        .chain(std::iter::once(&SHEET_HINT))
         .flat_map(|r| r.keys.iter())
         .filter_map(|t| match t {
             Button(b) => Some(*b),
@@ -294,7 +459,7 @@ mod tests {
             without,
             [
                 "Clear field",
-                "Switch layout",
+                "Controller Center",
                 "Open warmUP",
                 "Record (warmUP)"
             ]
@@ -350,11 +515,76 @@ mod tests {
             "Screenshot",
             "Window screenshot",
             "Open warmUP",
+            "Controller Center",
             "Record (warmUP)",
         ] {
             assert!(labels.contains(&l), "{l}");
         }
         let paste = GROUPS[0].rows.iter().find(|r| r.label == "Paste").unwrap();
+        assert_eq!(paste.keys, &[Button("SELECT"), Plus, Button("Y")]);
+    }
+
+    #[test]
+    fn groups_are_sorted_into_six_tiles() {
+        let titles: Vec<&str> = MODERN_GROUPS.iter().map(|g| g.title).collect();
+        assert_eq!(
+            titles,
+            [
+                "Typing",
+                "Editing",
+                "Cursor",
+                "Keyboard",
+                "Keyboard closed",
+                "In games"
+            ]
+        );
+        assert!(MODERN_GROUPS.iter().all(|g| !g.rows.is_empty()));
+    }
+
+    #[test]
+    fn hint_points_at_the_sheet() {
+        assert_eq!(SHEET_HINT.label, "All shortcuts");
+        assert_eq!(SHEET_HINT.keys, &[Text("Hold"), Button("SELECT")]);
+    }
+
+    #[test]
+    fn modern_sheet_rows_match_the_mapped_shortcuts() {
+        let labels: Vec<&str> = MODERN_GROUPS
+            .iter()
+            .flat_map(|g| g.rows.iter())
+            .map(|r| r.label)
+            .collect();
+        for l in [
+            "Type",
+            "Delete",
+            "Space",
+            "Enter",
+            "Close keyboard",
+            "Dictate",
+            "Suggestions",
+            "Copy",
+            "Paste",
+            "Clear field",
+            "Move caret",
+            "Jump a word",
+            "Shift",
+            "Symbols",
+            "Switch layout",
+            "Screenshot",
+            "Window screenshot",
+            "Open warmUP",
+            "Controller Center",
+            "Record (warmUP)",
+        ] {
+            assert!(labels.contains(&l), "{l}");
+        }
+        #[cfg(feature = "vk-panels")]
+        assert!(labels.contains(&"Clipboard & emoji"));
+        let paste = MODERN_GROUPS[1]
+            .rows
+            .iter()
+            .find(|r| r.label == "Paste")
+            .unwrap();
         assert_eq!(paste.keys, &[Button("SELECT"), Plus, Button("Y")]);
     }
 }

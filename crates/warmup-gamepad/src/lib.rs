@@ -1,6 +1,6 @@
-use sdl3::GamepadSubsystem;
 use sdl3::gamepad::{Axis, Button as SdlButton, Gamepad, GamepadType};
 use sdl3::sys::gamepad::{SDL_GetGamepadFromID, SDL_GetGamepadTouchpadFinger, SDL_SetGamepadLED};
+use sdl3::GamepadSubsystem;
 use std::collections::HashMap;
 use std::ffi::c_char;
 use std::path::Path;
@@ -51,7 +51,9 @@ fn score_gamepad(gp: &Gamepad) -> i32 {
             let name = gp.name().unwrap_or_default().to_ascii_lowercase();
             if name.contains("dualsense") || name.contains("ps5") {
                 95
-            } else if name.contains("dualshock") || name.contains("ps4") || name.contains("playstation")
+            } else if name.contains("dualshock")
+                || name.contains("ps4")
+                || name.contains("playstation")
             {
                 85
             } else if name.contains("xbox") {
@@ -355,7 +357,8 @@ impl GamepadInput {
                 if pressed != was {
                     self.prev_buttons.insert(btn, pressed);
                     if let Some(button) = sdl_to_button(btn) {
-                        self.pending_button_changes.push(ButtonChange { button, pressed });
+                        self.pending_button_changes
+                            .push(ButtonChange { button, pressed });
                     }
                 }
             }
@@ -515,6 +518,20 @@ impl GamepadInput {
         let charging = state == 3 || state == 4; // CHARGING or CHARGED
         let wired = state == 2; // NO_BATTERY
         (pct, charging, wired)
+    }
+
+    pub fn connection_wired(&self) -> Option<bool> {
+        let id = self.active_gamepad.as_ref()?.id().ok()?;
+        let raw = unsafe { SDL_GetGamepadFromID(id) };
+        if raw.is_null() {
+            return None;
+        }
+        unsafe extern "C" {
+            fn SDL_GetGamepadConnectionState(
+                gamepad: *mut sdl3::sys::gamepad::SDL_Gamepad,
+            ) -> ::std::ffi::c_int;
+        }
+        wired_from_connection_state(unsafe { SDL_GetGamepadConnectionState(raw) })
     }
 
     /// Reads finger data from touchpad 0 and computes the relative movement delta of finger 0.
@@ -717,9 +734,25 @@ impl Drop for GamepadInput {
     }
 }
 
+pub fn wired_from_connection_state(state: i32) -> Option<bool> {
+    match state {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_state_maps_to_wired_or_wireless() {
+        assert_eq!(wired_from_connection_state(1), Some(true));
+        assert_eq!(wired_from_connection_state(2), Some(false));
+        assert_eq!(wired_from_connection_state(0), None);
+        assert_eq!(wired_from_connection_state(-1), None);
+    }
 
     #[test]
     fn guide_button_maps_to_guide() {

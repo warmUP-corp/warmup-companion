@@ -862,7 +862,7 @@ fn render_prompt(hwnd: HWND) {
     let bg = theme.bg.unwrap_or(DEFAULT_BG);
     let border = theme.border.or(theme.accent).unwrap_or(DEFAULT_BORDER);
     let text = theme.text.unwrap_or(DEFAULT_TEXT);
-    let style = crate::config::vk_style();
+    let style = super::vk_ui::vk_style();
     let visual = VISUAL_STATE.with(|state| state.get());
     let snapshot = crate::debug_state::snapshot();
     // Pill ⇄ card blend, and which pill (ready / no pad) sits under the card.

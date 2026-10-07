@@ -203,6 +203,12 @@ if ($DebugUi) {
 & $Exe @InstallArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+Write-Host "Granting interactive users start/stop on WarmupVkSvc..."
+& $Exe grant-service-acl
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "WARNING: could not grant IU RP+WP on WarmupVkSvc (sc sdset). Start/stop from unelevated warmUP will fail until this succeeds." -ForegroundColor Yellow
+}
+
 # Optional offline voice typing. Non-fatal: a download failure must not undo the
 # service install — the companion runs fine without it (Mic key just stays hidden).
 if ($Speech) {

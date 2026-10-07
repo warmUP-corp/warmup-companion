@@ -254,6 +254,9 @@ pub struct NativeVkPayload {
     pub action: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ShutDownPayload {}
+
 /// Optional native keyboard theme colors. Each field is `#RRGGBB`; absent fields keep
 /// the companion's current dark/light default for that slot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -347,6 +350,7 @@ pub enum DownFrame {
     ParentalGuard(ParentalGuardPayload),
     LibraryWatch(LibraryWatchPayload),
     PlaySessionsAck(PlaySessionsAckPayload),
+    ShutDown(ShutDownPayload),
     #[serde(skip)]
     Unknown,
 }
@@ -389,7 +393,7 @@ impl DownFrame {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
             "hello" | "config" | "mode" | "rumble" | "led" | "companion_settings" | "native_vk"
-            | "parental_guard" | "library_watch" | "play_sessions_ack" => {
+            | "parental_guard" | "library_watch" | "play_sessions_ack" | "shut_down" => {
                 serde_json::from_str(line)
             }
             _ => Ok(Self::Unknown),
@@ -656,6 +660,52 @@ mod tests {
     }
 
     #[test]
+    fn reply_hello_with_snapshot_round_trips() {
+        let config = ConfigPayload {
+            deadzone: 0.15,
+            sensitivity: 1.25,
+            acceleration_exp: 2.0,
+            scroll_sensitivity: 0.75,
+            enabled: true,
+            clicks_enabled: false,
+            led_color: None,
+            led_secondary_color: None,
+            led_effect: None,
+            led_brightness: None,
+            natural_scroll: true,
+            cursor_smoothing: 0.25,
+            keyboard_theme: None,
+            vk_mode: Some("floating".into()),
+        };
+        let settings = CompanionSettingsPayload {
+            sleep_on_game: Some(false),
+            auto_stop_on_game: Some(true),
+            userland_poll_paused: Some(false),
+            prompt_userland_debug: Some(true),
+        };
+        let reply = UpFrame::Hello(Hello {
+            protocol_version: PROTOCOL_VERSION,
+            config: Some(serde_json::to_value(&config).unwrap()),
+            mode: None,
+            companion_settings: Some(settings.clone()),
+            parental_guard: None,
+            library_watch: None,
+        });
+        let line = reply.to_ndjson_line();
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["payload"]["config"]["vkMode"], "floating");
+        assert_eq!(json["payload"]["config"]["naturalScroll"], true);
+        assert!(json["payload"]["config"].get("ledColor").is_none());
+        assert_eq!(json["payload"]["companionSettings"]["autoStopOnGame"], true);
+        let UpFrame::Hello(parsed) = UpFrame::parse_line(line.trim_end()).unwrap() else {
+            panic!("expected hello");
+        };
+        assert_eq!(parsed.companion_settings, Some(settings));
+        let parsed_config: ConfigPayload = serde_json::from_value(parsed.config.unwrap()).unwrap();
+        assert_eq!(parsed_config, config);
+    }
+
+    #[test]
     fn deprecated_protocol_versions_stay_supported() {
         assert!(is_supported_protocol_version(PROTOCOL_VERSION));
         assert!(is_supported_protocol_version(5));
@@ -707,6 +757,26 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(json["type"], "play_sessions_ack");
         assert_eq!(DownFrame::parse_line(line.trim_end()).unwrap(), frame);
+    }
+
+    #[test]
+    fn shut_down_down_frame_is_empty_payload_ndjson() {
+        let frame = DownFrame::ShutDown(ShutDownPayload {});
+        let line = frame.to_ndjson_line();
+        assert_eq!(line, "{\"type\":\"shut_down\",\"payload\":{}}\n");
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["type"], "shut_down");
+        assert_eq!(json["payload"], serde_json::json!({}));
+        assert_eq!(DownFrame::parse_line(line.trim_end()).unwrap(), frame);
+        assert_eq!(PROTOCOL_VERSION, 6);
+        assert_eq!(
+            DownFrame::parse_line(r#"{"type":"shutdown","payload":{}}"#).unwrap(),
+            DownFrame::Unknown
+        );
+        assert_eq!(
+            DownFrame::parse_line(r#"{"type":"shut_down","payload":{"reason":"close"}}"#).unwrap(),
+            DownFrame::ShutDown(ShutDownPayload {})
+        );
     }
 
     #[test]

@@ -56,6 +56,28 @@ pub fn publish_blocked(payload: ParentalBlockedPayload) {
     pipe_server::publish_parental_blocked(payload);
 }
 
+pub fn is_blocking_active() -> bool {
+    state().lock().map(|s| s.guard.enabled).unwrap_or(false)
+}
+
+pub fn log_refused_shutdown() {
+    let path = std::path::Path::new(r"C:\ProgramData\WarmupVk\parental-security.log");
+    if !path.is_file() {
+        return;
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!(
+        "{{\"kind\":\"shut-down-refused\",\"detail\":\"Kid Mode blocking is active\",\"ts\":{ts}}}\n"
+    );
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(path) {
+        use std::io::Write;
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 /// Re-export process snapshots so existing callers keep compiling.
 pub(crate) use process_guard::snapshot_processes_for_owner;
 

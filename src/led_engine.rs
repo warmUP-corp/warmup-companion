@@ -143,6 +143,10 @@ pub(crate) fn ensure_led_engine() {
                     // service restart. Sleep stays outside, so a persistent panic
                     // paces at 33ms instead of busy-spinning.
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        if crate::gamepad_backend::game_owns_controller() {
+                            last = None;
+                            return;
+                        }
                         let state = led_state().lock().map(|s| *s).unwrap_or_default();
                         let color = led_color_at(&state, start.elapsed().as_secs_f32());
                         if last != Some(color) {
@@ -196,6 +200,42 @@ pub(crate) fn apply_led_config(p: &crate::protocol::ConfigPayload) {
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn apply_led_choice(color: Option<&str>, effect: Option<&str>) {
+    if let Ok(mut st) = led_state().lock() {
+        if let Some(cref) = color.and_then(crate::config::parse_theme_color) {
+            st.r = (cref & 0xff) as u8;
+            st.g = ((cref >> 8) & 0xff) as u8;
+            st.b = ((cref >> 16) & 0xff) as u8;
+        }
+        if let Some(effect) = effect {
+            st.effect = LedEffect::parse(effect);
+        }
+    }
+    ensure_led_engine();
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn led_snapshot() -> LedState {
+    led_state().lock().map(|s| *s).unwrap_or_default()
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn restore_led(state: LedState) {
+    if let Ok(mut st) = led_state().lock() {
+        *st = state;
+    }
+}
+
+#[cfg(feature = "gamepad")]
+pub(crate) fn load_saved_led() {
+    let color = crate::config::raw_setting("led_color");
+    let effect = crate::config::raw_setting("led_effect");
+    if color.is_some() || effect.is_some() {
+        apply_led_choice(color.as_deref(), effect.as_deref());
+    }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn apply_led(p: &crate::protocol::LedPayload) {
     crate::install::log_line("pipe inbound led");
     let mut immediate = None;
@@ -233,8 +273,8 @@ pub(crate) fn apply_led(p: &crate::protocol::LedPayload) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gamepad_backend::PadCommand;
     use crate::device_commands::drain_device_commands;
+    use crate::gamepad_backend::PadCommand;
     use std::sync::{Mutex, OnceLock};
 
     static TEST_LED_LOCK: OnceLock<Mutex<()>> = OnceLock::new();

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub use warmup_gamepad::{Button, ButtonChange, GamepadInput, PollMode, TouchpadSample};
 
@@ -39,6 +39,7 @@ pub struct BatteryFrame {
     pub percent: i32,
     pub charging: bool,
     pub wired: bool,
+    pub usb: Option<bool>,
 }
 
 impl Default for BatteryFrame {
@@ -47,6 +48,7 @@ impl Default for BatteryFrame {
             percent: -1,
             charging: false,
             wired: false,
+            usb: None,
         }
     }
 }
@@ -100,6 +102,28 @@ fn effective_userland_poll_mode() -> PollMode {
         }
     }
     mode
+}
+
+fn sleep_on_game_cached() -> bool {
+    static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    match *cache {
+        Some((at, value)) if at.elapsed() < Duration::from_millis(500) => value,
+        _ => {
+            let value = crate::config::gamepad_settings().sleep_on_game;
+            *cache = Some((Instant::now(), value));
+            value
+        }
+    }
+}
+
+pub fn game_owns_controller() -> bool {
+    should_sleep_for_game(
+        crate::pipe_server::desktop_connected(),
+        crate::pipe_server::game_active(),
+        crate::pipe_server::launcher_foreground_nav(),
+        sleep_on_game_cached() && standalone_game_active_now(),
+    )
 }
 
 pub fn poll_mode_is_sleep() -> bool {
@@ -229,6 +253,7 @@ impl SdlBackend {
             percent,
             charging,
             wired,
+            usb: self.input.connection_wired(),
         };
     }
 }
@@ -397,38 +422,6 @@ fn sdl_thread_main(
     // Arm gyro on whatever pad is already open; re-armed on each hotplug below.
     let mut gyro_enabled = input.enable_gyro();
     while !stop.load(Ordering::Relaxed) {
-        // Apply queued writes (LED/rumble) first — they must run on this thread
-        // because it owns the pad. Drain the whole backlog, newest wins for LED.
-        let mut last_led = None;
-        while let Ok(cmd) = cmd_rx.try_recv() {
-            match cmd {
-                // No per-command log: animated LED effects (breathing/rainbow) push ~30
-                // commands/s — a log_line per write would be a disk write per frame.
-                PadCommand::Led { .. } => last_led = Some(cmd),
-                PadCommand::Rumble { strong, weak, ms } => {
-                    let pad = input
-                        .active_controller_name()
-                        .unwrap_or_else(|| "none".to_string());
-                    let ok = input.rumble(strong, weak, ms);
-                    crate::install::log_line(&format!(
-                        "SDL apply rumble full strong={strong} weak={weak} ms={ms} pad={pad} ok={ok}"
-                    ));
-                }
-                PadCommand::TriggerRumble { left, right, ms } => {
-                    let pad = input
-                        .active_controller_name()
-                        .unwrap_or_else(|| "none".to_string());
-                    let ok = input.trigger_rumble(left, right, ms);
-                    crate::install::log_line(&format!(
-                        "SDL apply rumble triggers left={left} right={right} ms={ms} pad={pad} ok={ok}"
-                    ));
-                }
-            }
-        }
-        if let Some(PadCommand::Led { r, g, b }) = last_led {
-            input.set_led(r, g, b);
-        }
-
         let mode = effective_userland_poll_mode();
         let connected_change = input.poll_events_with_mode(mode);
         if connected_change {
@@ -486,7 +479,35 @@ fn sdl_thread_main(
                 percent,
                 charging,
                 wired,
+                usb: input.connection_wired(),
             };
+        }
+        let mut last_led = None;
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                PadCommand::Led { .. } => last_led = Some(cmd),
+                PadCommand::Rumble { strong, weak, ms } => {
+                    let pad = input
+                        .active_controller_name()
+                        .unwrap_or_else(|| "none".to_string());
+                    let ok = input.rumble(strong, weak, ms);
+                    crate::install::log_line(&format!(
+                        "SDL apply rumble full strong={strong} weak={weak} ms={ms} pad={pad} ok={ok}"
+                    ));
+                }
+                PadCommand::TriggerRumble { left, right, ms } => {
+                    let pad = input
+                        .active_controller_name()
+                        .unwrap_or_else(|| "none".to_string());
+                    let ok = input.trigger_rumble(left, right, ms);
+                    crate::install::log_line(&format!(
+                        "SDL apply rumble triggers left={left} right={right} ms={ms} pad={pad} ok={ok}"
+                    ));
+                }
+            }
+        }
+        if let Some(PadCommand::Led { r, g, b }) = last_led {
+            input.set_led(r, g, b);
         }
         std::thread::sleep(Duration::from_millis(4));
     }
