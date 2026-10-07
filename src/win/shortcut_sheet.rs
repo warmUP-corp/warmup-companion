@@ -267,8 +267,6 @@ fn show_voice_shortcut() -> bool {
     crate::config::voice_enabled()
 }
 
-/// Legend rows the keyboard actually draws. Dictate is omitted while voice
-/// typing is off, so the bar does not advertise a dead button.
 pub fn shown_legend() -> Vec<SheetRow> {
     LEGEND
         .iter()
@@ -286,7 +284,6 @@ pub fn shown_rows(group: &SheetGroup) -> Vec<SheetRow> {
         .collect()
 }
 
-/// Shortcut sheet columns with the Dictate row removed while voice typing is off.
 pub fn shown_columns() -> [Vec<Line>; 3] {
     let mut cols = columns();
     if !show_voice_shortcut() {

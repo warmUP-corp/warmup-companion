@@ -485,8 +485,6 @@ fn sdl_thread_main(
         let mut last_led = None;
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
-                // No per-command log: animated LED effects (breathing/rainbow) push ~30
-                // commands/s — a log_line per write would be a disk write per frame.
                 PadCommand::Led { .. } => last_led = Some(cmd),
                 PadCommand::Rumble { strong, weak, ms } => {
                     let pad = input

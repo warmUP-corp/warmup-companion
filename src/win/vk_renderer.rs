@@ -3529,8 +3529,6 @@ impl VkRenderer {
         right: f32,
         alpha: f32,
     ) -> Result<(), String> {
-        // One snapshot. shown_legend() re-reads settings.ini, so a second call
-        // can shrink the list and panic on the last index.
         let legend = shortcut_sheet::shown_legend();
         let layout = self.layout_for_rows(&legend, style, family, u, left, right);
         let band = D2D_RECT_F {
