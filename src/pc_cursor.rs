@@ -12,6 +12,7 @@ use enigo::{Axis, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 const BASE_SPEED: f32 = 100.0;
 const BASE_SCROLL_SPEED: f32 = 20.0;
 const TOUCHPAD_PIXEL_SCALE: f32 = 1.5;
+const TOUCHPAD_WHEEL_PER_UNIT: f32 = 480.0;
 
 /// Reference resolution: sensitivity constants are tuned for
 /// 1080p and scaled by `actual/reference` per axis (`FUN_00422dd0`).
@@ -64,6 +65,8 @@ pub struct PcCursor {
     /// EMA-smoothed cursor delta carried between frames (cursor_smoothing).
     smooth_dx: f32,
     smooth_dy: f32,
+    wheel_rem_x: f32,
+    wheel_rem_y: f32,
 }
 
 impl PcCursor {
@@ -93,6 +96,8 @@ impl PcCursor {
             right_held: false,
             smooth_dx: 0.0,
             smooth_dy: 0.0,
+            wheel_rem_x: 0.0,
+            wheel_rem_y: 0.0,
         }
     }
 
@@ -112,6 +117,8 @@ impl PcCursor {
             right_held: false,
             smooth_dx: 0.0,
             smooth_dy: 0.0,
+            wheel_rem_x: 0.0,
+            wheel_rem_y: 0.0,
         }
     }
 
@@ -242,6 +249,49 @@ impl PcCursor {
         }
     }
 
+    pub fn scroll_touchpad(&mut self, dx: f32, dy: f32) {
+        let settings = crate::config::gamepad_settings();
+        if !settings.cursor_enabled {
+            self.wheel_rem_x = 0.0;
+            self.wheel_rem_y = 0.0;
+            return;
+        }
+        let (h, v) = touchpad_wheel(dx, dy, settings.scroll_speed, settings.natural_scroll);
+        let total_x = h + self.wheel_rem_x;
+        let total_y = v + self.wheel_rem_y;
+        let (int_x, int_y) = (total_x as i32, total_y as i32);
+        self.wheel_rem_x = total_x - int_x as f32;
+        self.wheel_rem_y = total_y - int_y as f32;
+        if int_x != 0 || int_y != 0 {
+            self.dispatch(Cmd::Wheel(int_x, int_y));
+        }
+    }
+
+    pub fn click(&mut self, button: crate::touchpad_gestures::MouseButton) {
+        use crate::touchpad_gestures::MouseButton;
+        if !crate::config::gamepad_settings().cursor_enabled {
+            return;
+        }
+        match button {
+            MouseButton::Left if !self.left_held => {
+                self.dispatch(Cmd::ButtonDown);
+                self.dispatch(Cmd::ButtonUp);
+            }
+            MouseButton::Right if !self.right_held => {
+                self.dispatch(Cmd::RButtonDown);
+                self.dispatch(Cmd::RButtonUp);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn desktop_swipe(&mut self, swipe: crate::touchpad_gestures::Swipe) {
+        if !crate::config::gamepad_settings().cursor_enabled {
+            return;
+        }
+        self.dispatch(Cmd::Swipe(swipe));
+    }
+
     /// Drive the left mouse button as a real HOLD, edge-tracked
     /// (DOWN on press-edge, UP on release-edge) instead of an
     /// instant click. Giving XAML/LogonUI a genuine press duration is what makes
@@ -327,6 +377,28 @@ fn apply_cmd(enigo: &mut Enigo, cmd: Cmd) {
         Cmd::EnterTap => {
             let _ = enigo.key(Key::Return, Direction::Click);
         }
+        Cmd::Wheel(h, v) => {
+            #[cfg(windows)]
+            send_wheel(h, v);
+            #[cfg(not(windows))]
+            let _ = (h, v);
+        }
+        Cmd::Swipe(swipe) => {
+            use crate::touchpad_gestures::Swipe;
+            let (mods, key): (&[Key], Key) = match swipe {
+                Swipe::Left => (&[Key::Control, Key::Meta], Key::LeftArrow),
+                Swipe::Right => (&[Key::Control, Key::Meta], Key::RightArrow),
+                Swipe::Up => (&[Key::Meta], Key::Tab),
+                Swipe::Down => (&[Key::Meta], Key::Other(0x44)),
+            };
+            for m in mods {
+                let _ = enigo.key(*m, Direction::Press);
+            }
+            let _ = enigo.key(key, Direction::Click);
+            for m in mods.iter().rev() {
+                let _ = enigo.key(*m, Direction::Release);
+            }
+        }
         Cmd::Screenshot { window_only } => {
             #[cfg(windows)]
             copy_screen_to_clipboard(window_only);
@@ -334,8 +406,41 @@ fn apply_cmd(enigo: &mut Enigo, cmd: Cmd) {
     }
 }
 
+fn touchpad_wheel(dx: f32, dy: f32, speed: f32, natural: bool) -> (f32, f32) {
+    let k = speed * TOUCHPAD_WHEEL_PER_UNIT;
+    let sign = if natural { -1.0 } else { 1.0 };
+    (sign * dx * k, -sign * dy * k)
+}
+
 #[cfg(windows)]
-fn copy_screen_to_clipboard(window_only: bool) {
+fn send_wheel(h: i32, v: i32) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_WHEEL, MOUSEINPUT,
+    };
+    let make = |flags, data: i32| INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                mouseData: data as u32,
+                dwFlags: flags,
+                ..Default::default()
+            },
+        },
+    };
+    let mut inputs = Vec::with_capacity(2);
+    if v != 0 {
+        inputs.push(make(MOUSEEVENTF_WHEEL, v));
+    }
+    if h != 0 {
+        inputs.push(make(MOUSEEVENTF_HWHEEL, h));
+    }
+    if !inputs.is_empty() {
+        unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn copy_screen_to_clipboard(window_only: bool) {
     use windows::Win32::Foundation::RECT;
     use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
     use windows::Win32::Graphics::Gdi::{
@@ -512,6 +617,8 @@ enum Cmd {
     RButtonDown,
     RButtonUp,
     EnterTap,
+    Wheel(i32, i32),
+    Swipe(crate::touchpad_gestures::Swipe),
     Screenshot { window_only: bool },
 }
 
@@ -587,6 +694,22 @@ fn stick_delta(
     let norm_y = stick_y / magnitude;
     let speed = accelerated * sensitivity * BASE_SPEED * dt_secs;
     (norm_x * speed, -norm_y * speed)
+}
+
+#[cfg(test)]
+mod touchpad_wheel_tests {
+    use super::touchpad_wheel;
+
+    #[test]
+    fn touchpad_wheel_follows_scroll_direction_setting() {
+        let (h, v) = touchpad_wheel(0.1, -0.1, 5.0, false);
+        assert!(v > 0.0 && h > 0.0);
+        let (h, v) = touchpad_wheel(0.1, -0.1, 5.0, true);
+        assert!(v < 0.0 && h < 0.0);
+        let (_, slow) = touchpad_wheel(0.0, 0.1, 1.0, false);
+        let (_, fast) = touchpad_wheel(0.0, 0.1, 10.0, false);
+        assert!(fast.abs() > slow.abs());
+    }
 }
 
 #[cfg(test)]

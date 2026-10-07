@@ -1,12 +1,20 @@
 #[cfg(feature = "gamepad")]
 pub mod controller_center;
+#[cfg(feature = "gamepad")]
+mod mono_ui;
+#[cfg(feature = "gamepad")]
+pub(crate) mod tray_menu;
+#[cfg(feature = "gamepad")]
+pub(crate) mod quick_menu;
+#[cfg(feature = "gamepad")]
+mod quick_menu_sys;
 pub mod controller_tips;
 pub mod debug_overlay;
 pub mod desktop;
 pub mod desktop_window;
 pub mod game_detect;
 pub mod logon_focus;
-mod monitor;
+pub mod monitor;
 pub mod native_keyboard;
 mod nimbus_orb;
 pub mod prompt_overlay;

@@ -9,8 +9,9 @@
 
 use crate::gamepad_backend::PadCommand;
 use crate::protocol::{
-    AxisPayload, BatteryPayload, ButtonPayload, CompanionSettingsPayload, ConnectionPayload,
-    ModeSnapshot, ParentalBlockedPayload, ParentalGuardPayload, RumblePayload, TouchpadPayload,
+    AxisPayload, BatteryPayload, ButtonPayload, CompanionSettingsPayload, ConfigPayload,
+    ConnectionPayload, KeyboardThemePayload, ModeSnapshot, ParentalBlockedPayload,
+    ParentalGuardPayload, RumblePayload, TouchpadPayload,
 };
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -32,9 +33,9 @@ static BROWSER_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// True while a warmUP desktop client has completed the pipe handshake.
 static DESKTOP_CONNECTED: AtomicBool = AtomicBool::new(false);
 
-pub(crate) use crate::tracking_owner::{tracking_owner_from_process, TrackingOwner};
-pub(crate) use crate::led_engine::apply_led;
 pub use crate::device_commands::drain_device_commands;
+pub(crate) use crate::led_engine::apply_led;
+pub(crate) use crate::tracking_owner::{tracking_owner_from_process, TrackingOwner};
 
 /// Coalesced visual-cursor hint accumulated since the last send: `(dx, dy, dirty)`.
 static CURSOR_ACC: OnceLock<Mutex<(f64, f64, bool)>> = OnceLock::new();
@@ -104,6 +105,11 @@ fn set_native_vk_request(p: &crate::protocol::NativeVkPayload) {
     NATIVE_VK_REQUEST.store(v, Ordering::Relaxed);
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn request_native_vk(open: bool) {
+    NATIVE_VK_REQUEST.store(if open { 1 } else { 2 }, Ordering::Relaxed);
+}
+
 /// Take the pending desktop VK request, if any. `Some(true)` = open, `Some(false)` = close.
 pub fn take_native_vk_request() -> Option<bool> {
     match NATIVE_VK_REQUEST.swap(0, Ordering::Relaxed) {
@@ -167,6 +173,28 @@ pub fn publish_battery(percent: i32, charging: bool, wired: bool) {
     }
 }
 
+static PAD_USB: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn publish_usb(usb: Option<bool>) {
+    PAD_USB.store(
+        match usb {
+            None => 0,
+            Some(true) => 1,
+            Some(false) => 2,
+        },
+        Ordering::Relaxed,
+    );
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn current_usb() -> Option<bool> {
+    match PAD_USB.load(Ordering::Relaxed) {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
+}
+
 /// Publish the latest raw stick snapshot (read by the server, sent throttled).
 pub fn publish_axis(left_x: f32, left_y: f32, right_x: f32, right_y: f32) {
     if let Ok(mut a) = axis_slot().lock() {
@@ -188,7 +216,7 @@ pub fn publish_touchpad(payload: TouchpadPayload) {
 
 /// Current battery snapshot, if any has been published.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn current_battery() -> Option<BatteryPayload> {
+pub(crate) fn current_battery() -> Option<BatteryPayload> {
     battery_slot().lock().ok().and_then(|b| *b)
 }
 
@@ -208,37 +236,168 @@ fn take_touchpad() -> Option<TouchpadPayload> {
     t.0.clone()
 }
 
-/// Apply a pushed `config`: write through to the companion's cursor settings (read live by
-/// `pc_cursor`) and set the clicks-enabled mode. Maps desktop fields → companion params.
+#[derive(Debug, Clone, PartialEq)]
+struct ConfigChanges {
+    settings: Vec<(&'static str, String)>,
+    keyboard_theme: Option<KeyboardThemePayload>,
+    led: ConfigPayload,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SettingsSync {
+    config_baseline: Option<ConfigPayload>,
+    companion_baseline: CompanionSettingsPayload,
+}
+
+fn bool_setting(v: bool) -> String {
+    if v { "true" } else { "false" }.to_string()
+}
+
+fn take_changed_flag(next: Option<bool>, base: &mut Option<bool>) -> Option<bool> {
+    let v = next?;
+    if *base == Some(v) {
+        return None;
+    }
+    *base = Some(v);
+    Some(v)
+}
+
 #[cfg_attr(not(windows), allow(dead_code))]
-fn apply_config(p: &crate::protocol::ConfigPayload) {
+impl SettingsSync {
+    fn new(companion_baseline: CompanionSettingsPayload) -> Self {
+        Self {
+            config_baseline: None,
+            companion_baseline,
+        }
+    }
+
+    fn config(&mut self, p: &ConfigPayload) -> ConfigChanges {
+        let mut changes = ConfigChanges {
+            settings: Vec::new(),
+            keyboard_theme: None,
+            led: p.clone(),
+        };
+        let Some(prev) = self.config_baseline.replace(p.clone()) else {
+            return changes;
+        };
+        let s = &mut changes.settings;
+        if prev.enabled != p.enabled {
+            s.push(("cursor_enabled", bool_setting(p.enabled)));
+        }
+        if prev.deadzone != p.deadzone {
+            s.push(("cursor_deadzone", p.deadzone.to_string()));
+        }
+        if prev.sensitivity != p.sensitivity {
+            s.push(("cursor_speed", p.sensitivity.to_string()));
+        }
+        if prev.acceleration_exp != p.acceleration_exp {
+            s.push(("cursor_accel", p.acceleration_exp.to_string()));
+        }
+        if prev.scroll_sensitivity != p.scroll_sensitivity {
+            s.push(("scroll_speed", p.scroll_sensitivity.to_string()));
+        }
+        if prev.natural_scroll != p.natural_scroll {
+            s.push(("natural_scroll", bool_setting(p.natural_scroll)));
+        }
+        if prev.cursor_smoothing != p.cursor_smoothing {
+            s.push((
+                "cursor_smoothing",
+                p.cursor_smoothing.clamp(0.0, 0.9).to_string(),
+            ));
+        }
+        if let Some(mode) = &p.vk_mode {
+            if prev.vk_mode.as_ref() != Some(mode) {
+                s.push(("vk_mode", mode.clone()));
+            }
+        }
+        if p.keyboard_theme.is_some() && p.keyboard_theme != prev.keyboard_theme {
+            changes.keyboard_theme = p.keyboard_theme.clone();
+        }
+        if prev.led_color == p.led_color {
+            changes.led.led_color = None;
+        }
+        if prev.led_secondary_color == p.led_secondary_color {
+            changes.led.led_secondary_color = None;
+        }
+        if prev.led_effect == p.led_effect {
+            changes.led.led_effect = None;
+        }
+        if prev.led_brightness == p.led_brightness {
+            changes.led.led_brightness = None;
+        }
+        changes
+    }
+
+    fn companion_settings(&mut self, p: &CompanionSettingsPayload) -> CompanionSettingsPayload {
+        let base = &mut self.companion_baseline;
+        CompanionSettingsPayload {
+            sleep_on_game: take_changed_flag(p.sleep_on_game, &mut base.sleep_on_game),
+            auto_stop_on_game: take_changed_flag(p.auto_stop_on_game, &mut base.auto_stop_on_game),
+            userland_poll_paused: take_changed_flag(
+                p.userland_poll_paused,
+                &mut base.userland_poll_paused,
+            ),
+            prompt_userland_debug: take_changed_flag(
+                p.prompt_userland_debug,
+                &mut base.prompt_userland_debug,
+            ),
+        }
+    }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn companion_snapshot() -> (ConfigPayload, CompanionSettingsPayload) {
+    let g = crate::config::gamepad_settings();
+    let vk_mode = match crate::config::vk_layout_mode() {
+        crate::config::VkLayoutMode::Docked => "docked",
+        crate::config::VkLayoutMode::Floating => "floating",
+    };
+    let config = ConfigPayload {
+        deadzone: g.cursor_deadzone,
+        sensitivity: g.cursor_speed,
+        acceleration_exp: g.cursor_accel,
+        scroll_sensitivity: g.scroll_speed,
+        enabled: g.cursor_enabled,
+        clicks_enabled: clicks_enabled(),
+        led_color: None,
+        led_secondary_color: None,
+        led_effect: None,
+        led_brightness: None,
+        natural_scroll: g.natural_scroll,
+        cursor_smoothing: g.cursor_smoothing,
+        keyboard_theme: None,
+        vk_mode: Some(vk_mode.to_string()),
+    };
+    let settings = CompanionSettingsPayload {
+        sleep_on_game: Some(g.sleep_on_game),
+        auto_stop_on_game: Some(g.auto_stop_on_game),
+        userland_poll_paused: Some(crate::config::read_userland_poll_paused()),
+        prompt_userland_debug: Some(crate::config::prompt_userland_debug()),
+    };
+    (config, settings)
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn apply_config(sync: &mut SettingsSync, p: &ConfigPayload) {
     CLICKS_ENABLED.store(p.clicks_enabled, Ordering::Relaxed);
-    // "Enable gamepad cursor" master switch. Persisted like the feel settings so the
-    // choice survives a companion restart and still applies while warmUP is not running.
-    let _ = crate::config::set_gamepad_setting(
-        "cursor_enabled",
-        if p.enabled { "true" } else { "false" },
-    );
-    let _ = crate::config::set_gamepad_setting("cursor_deadzone", &p.deadzone.to_string());
-    let _ = crate::config::set_gamepad_setting("cursor_speed", &p.sensitivity.to_string());
-    let _ = crate::config::set_gamepad_setting("cursor_accel", &p.acceleration_exp.to_string());
-    let _ = crate::config::set_gamepad_setting("scroll_speed", &p.scroll_sensitivity.to_string());
-    let _ = crate::config::set_gamepad_setting(
-        "natural_scroll",
-        if p.natural_scroll { "true" } else { "false" },
-    );
-    // Clamp below the 0.95 setting ceiling; pc_cursor clamps again at apply time.
-    let _ = crate::config::set_gamepad_setting(
-        "cursor_smoothing",
-        &p.cursor_smoothing.clamp(0.0, 0.9).to_string(),
-    );
-    if let Some(theme) = &p.keyboard_theme {
+    let first = sync.config_baseline.is_none();
+    let changes = sync.config(p);
+    if first {
+        crate::install::log_line("pipe config: first frame seeds baseline, settings not applied");
+    } else if !changes.settings.is_empty() || changes.keyboard_theme.is_some() {
+        let mut keys: Vec<&str> = changes.settings.iter().map(|(k, _)| *k).collect();
+        if changes.keyboard_theme.is_some() {
+            keys.push("keyboard_theme");
+        }
+        crate::install::log_line(&format!("pipe config applied: {}", keys.join(",")));
+    }
+    for (key, value) in &changes.settings {
+        let _ = crate::config::set_gamepad_setting(key, value);
+    }
+    if let Some(theme) = &changes.keyboard_theme {
         let _ = crate::config::set_keyboard_theme(&keyboard_theme_from_payload(theme));
     }
-    if let Some(mode) = &p.vk_mode {
-        let _ = crate::config::set_gamepad_setting("vk_mode", mode);
-    }
-    crate::led_engine::apply_led_config(p);
+    crate::led_engine::apply_led_config(&changes.led);
 }
 
 /// Queue a one-shot rumble command from an inbound `rumble` frame.
@@ -326,7 +485,24 @@ fn clear_desktop_mode() {
 
 /// Apply companion-local settings pushed by warmUP (protocol v4 `companion_settings` frame).
 #[cfg_attr(not(windows), allow(dead_code))]
-fn apply_companion_settings(p: &CompanionSettingsPayload) {
+fn apply_companion_settings(sync: &mut SettingsSync, p: &CompanionSettingsPayload) {
+    let p = sync.companion_settings(p);
+    if p == CompanionSettingsPayload::default() {
+        return;
+    }
+    let keys: Vec<&str> = [
+        ("sleep_on_game", p.sleep_on_game),
+        ("auto_stop_on_game", p.auto_stop_on_game),
+        ("prompt_userland_debug", p.prompt_userland_debug),
+        ("userland_poll_paused", p.userland_poll_paused),
+    ]
+    .into_iter()
+    .filter_map(|(k, v)| v.map(|_| k))
+    .collect();
+    crate::install::log_line(&format!(
+        "pipe companion_settings applied: {}",
+        keys.join(",")
+    ));
     if let Some(v) = p.sleep_on_game {
         let _ =
             crate::config::set_gamepad_setting("sleep_on_game", if v { "true" } else { "false" });
@@ -560,10 +736,11 @@ pub fn spawn() {}
 mod server {
     use super::{
         apply_companion_settings, apply_config, apply_led, apply_library_watch, apply_mode,
-        apply_parental_guard, apply_play_sessions_ack, apply_rumble, clear_desktop_mode, current,
-        current_axis, current_battery, drain_buttons, drain_parental_blocked, inbound_frame_ready,
-        reset_button_stream, set_native_vk_request, take_cursor_moved, take_touchpad,
-        tracking_owner_from_process, TrackingOwner, DESKTOP_CONNECTED,
+        apply_parental_guard, apply_play_sessions_ack, apply_rumble, clear_desktop_mode,
+        companion_snapshot, current, current_axis, current_battery, drain_buttons,
+        drain_parental_blocked, inbound_frame_ready, reset_button_stream, set_native_vk_request,
+        take_cursor_moved, take_touchpad, tracking_owner_from_process, SettingsSync, TrackingOwner,
+        DESKTOP_CONNECTED,
     };
     use crate::protocol::{
         is_supported_protocol_version, AxisPayload, BatteryPayload, ConnectionPayload, DownFrame,
@@ -687,10 +864,10 @@ mod server {
             return;
         };
         DESKTOP_CONNECTED.store(true, Ordering::Relaxed);
-        if let Ok(issued_session_ids) = handshake(pipe, &identity) {
+        if let Ok((issued_session_ids, sync)) = handshake(pipe, &identity) {
             // Drop edges queued before this client connected (stale to it).
             reset_button_stream();
-            stream(pipe, &identity.owner, issued_session_ids);
+            stream(pipe, &identity.owner, issued_session_ids, sync);
         }
         DESKTOP_CONNECTED.store(false, Ordering::Relaxed);
         clear_desktop_mode();
@@ -721,22 +898,17 @@ mod server {
     }
 
     /// Read the client `hello`, reject unsupported versions, reply with the negotiated version.
-    fn handshake(pipe: HANDLE, identity: &ClientIdentity) -> std::io::Result<HashSet<String>> {
+    fn handshake(
+        pipe: HANDLE,
+        identity: &ClientIdentity,
+    ) -> std::io::Result<(HashSet<String>, SettingsSync)> {
         let line = read_line(pipe)?;
         let protocol_version;
         match DownFrame::parse_line(line.trim_end()) {
             Ok(DownFrame::Hello(h)) if is_supported_protocol_version(h.protocol_version) => {
                 protocol_version = h.protocol_version;
-                if let Some(config) = h.config {
-                    if let Ok(p) = serde_json::from_value(config) {
-                        apply_config(&p);
-                    }
-                }
                 if let Some(mode) = h.mode {
                     apply_mode(&mode);
-                }
-                if let Some(settings) = h.companion_settings {
-                    apply_companion_settings(&settings);
                 }
                 if let Some(guard) = h.parental_guard {
                     apply_parental_guard(&guard);
@@ -753,11 +925,13 @@ mod server {
             }
             _ => return Err(io_err("hello rejected: missing or invalid hello frame")),
         }
+        let (config_snapshot, settings_snapshot) = companion_snapshot();
+        let sync = SettingsSync::new(settings_snapshot.clone());
         let reply = UpFrame::Hello(Hello {
             protocol_version,
-            config: None,
+            config: serde_json::to_value(config_snapshot).ok(),
             mode: None,
-            companion_settings: None,
+            companion_settings: Some(settings_snapshot),
             parental_guard: None,
             library_watch: None,
         });
@@ -766,10 +940,10 @@ mod server {
         {
             crate::playtime_tracker::on_desktop_connected(&identity.owner);
             if protocol_version == PROTOCOL_VERSION {
-                return flush_play_sessions(pipe, &identity.owner);
+                return flush_play_sessions(pipe, &identity.owner).map(|issued| (issued, sync));
             }
         }
-        Ok(HashSet::new())
+        Ok((HashSet::new(), sync))
     }
 
     /// Push any closed offline sessions to warmUP immediately after handshake.
@@ -796,7 +970,12 @@ mod server {
     /// Full-duplex session: drain inbound `config` (non-blocking), and write button edges
     /// (low latency), `cursor_moved` hints (throttled), and connection snapshots (on change
     /// plus a keepalive so a dropped idle client is noticed via the write error).
-    fn stream(pipe: HANDLE, owner: &TrackingOwner, mut issued_session_ids: HashSet<String>) {
+    fn stream(
+        pipe: HANDLE,
+        owner: &TrackingOwner,
+        mut issued_session_ids: HashSet<String>,
+        mut sync: SettingsSync,
+    ) {
         let mut last: Option<ConnectionPayload> = None;
         let mut last_battery: Option<BatteryPayload> = None;
         let mut last_axis: Option<AxisPayload> = None;
@@ -806,7 +985,7 @@ mod server {
         let mut last_cursor_write = Instant::now();
         loop {
             // Inbound config — never block the writer; only read a line that is fully buffered.
-            if drain_inbound_config(pipe, owner, &mut issued_session_ids).is_err() {
+            if drain_inbound_config(pipe, owner, &mut issued_session_ids, &mut sync).is_err() {
                 return;
             }
             for edge in drain_buttons() {
@@ -883,6 +1062,7 @@ mod server {
         pipe: HANDLE,
         owner: &TrackingOwner,
         issued_session_ids: &mut HashSet<String>,
+        sync: &mut SettingsSync,
     ) -> std::io::Result<()> {
         while peek_has_newline(pipe)? {
             let line = read_line(pipe)?;
@@ -891,11 +1071,11 @@ mod server {
                 continue;
             }
             match DownFrame::parse_line(trimmed) {
-                Ok(DownFrame::Config(p)) => apply_config(&p),
+                Ok(DownFrame::Config(p)) => apply_config(sync, &p),
                 Ok(DownFrame::Mode(p)) => apply_mode(&p),
                 Ok(DownFrame::Rumble(p)) => apply_rumble(&p),
                 Ok(DownFrame::Led(p)) => apply_led(&p),
-                Ok(DownFrame::CompanionSettings(p)) => apply_companion_settings(&p),
+                Ok(DownFrame::CompanionSettings(p)) => apply_companion_settings(sync, &p),
                 Ok(DownFrame::NativeVk(p)) => set_native_vk_request(&p),
                 Ok(DownFrame::ParentalGuard(p)) => apply_parental_guard(&p),
                 Ok(DownFrame::LibraryWatch(p)) => apply_library_watch(owner, &p),
@@ -1141,5 +1321,131 @@ mod tests {
         });
         assert!(!warmup_launch_allowed());
         assert!(native_vk_suppressed());
+    }
+
+    fn sample_config() -> ConfigPayload {
+        ConfigPayload {
+            deadzone: 0.1,
+            sensitivity: 1.0,
+            acceleration_exp: 2.0,
+            scroll_sensitivity: 1.0,
+            enabled: true,
+            clicks_enabled: true,
+            led_color: Some("#ff0000".into()),
+            led_secondary_color: Some("#0000ff".into()),
+            led_effect: Some("solid".into()),
+            led_brightness: Some(0.5),
+            natural_scroll: false,
+            cursor_smoothing: 0.3,
+            keyboard_theme: None,
+            vk_mode: Some("docked".into()),
+        }
+    }
+
+    fn sample_settings() -> CompanionSettingsPayload {
+        CompanionSettingsPayload {
+            sleep_on_game: Some(true),
+            auto_stop_on_game: Some(false),
+            userland_poll_paused: Some(false),
+            prompt_userland_debug: Some(false),
+        }
+    }
+
+    #[test]
+    fn first_config_frame_seeds_baseline_and_passes_led() {
+        let mut sync = SettingsSync::new(sample_settings());
+        let p = sample_config();
+        let changes = sync.config(&p);
+        assert!(changes.settings.is_empty());
+        assert!(changes.keyboard_theme.is_none());
+        assert_eq!(changes.led, p);
+        assert_eq!(sync.config_baseline, Some(p));
+    }
+
+    #[test]
+    fn later_config_frame_writes_only_changed_fields() {
+        let mut sync = SettingsSync::new(sample_settings());
+        let p = sample_config();
+        sync.config(&p);
+        let mut next = p.clone();
+        next.sensitivity = 1.5;
+        let changes = sync.config(&next);
+        assert_eq!(changes.settings, vec![("cursor_speed", "1.5".to_string())]);
+        assert!(changes.keyboard_theme.is_none());
+        assert_eq!(changes.led.led_color, None);
+        assert_eq!(changes.led.led_secondary_color, None);
+        assert_eq!(changes.led.led_effect, None);
+        assert_eq!(changes.led.led_brightness, None);
+        assert!(sync.config(&next).settings.is_empty());
+    }
+
+    #[test]
+    fn changed_led_fields_pass_through_and_others_clear() {
+        let mut sync = SettingsSync::new(sample_settings());
+        sync.config(&sample_config());
+        let mut next = sample_config();
+        next.led_effect = Some("rainbow".into());
+        let changes = sync.config(&next);
+        assert!(changes.settings.is_empty());
+        assert_eq!(changes.led.led_effect.as_deref(), Some("rainbow"));
+        assert_eq!(changes.led.led_color, None);
+        assert_eq!(changes.led.led_brightness, None);
+    }
+
+    #[test]
+    fn changed_theme_and_vk_mode_are_reported() {
+        let mut sync = SettingsSync::new(sample_settings());
+        sync.config(&sample_config());
+        let theme = KeyboardThemePayload {
+            background: Some("#101010".into()),
+            key: None,
+            accent: None,
+            text: None,
+            selected_text: None,
+            border: None,
+        };
+        let mut next = sample_config();
+        next.vk_mode = Some("floating".into());
+        next.keyboard_theme = Some(theme.clone());
+        next.cursor_smoothing = 0.95;
+        let changes = sync.config(&next);
+        assert_eq!(
+            changes.settings,
+            vec![
+                ("cursor_smoothing", 0.9f32.to_string()),
+                ("vk_mode", "floating".to_string()),
+            ]
+        );
+        assert_eq!(changes.keyboard_theme, Some(theme));
+        let again = sync.config(&next);
+        assert!(again.settings.is_empty());
+        assert!(again.keyboard_theme.is_none());
+        let mut absent = next.clone();
+        absent.vk_mode = None;
+        assert!(sync.config(&absent).settings.is_empty());
+    }
+
+    #[test]
+    fn companion_settings_apply_only_differences_from_baseline() {
+        let mut sync = SettingsSync::new(sample_settings());
+        assert_eq!(
+            sync.companion_settings(&sample_settings()),
+            CompanionSettingsPayload::default()
+        );
+        let mut next = sample_settings();
+        next.auto_stop_on_game = Some(true);
+        next.sleep_on_game = None;
+        assert_eq!(
+            sync.companion_settings(&next),
+            CompanionSettingsPayload {
+                auto_stop_on_game: Some(true),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            sync.companion_settings(&next),
+            CompanionSettingsPayload::default()
+        );
+        assert_eq!(sync.companion_baseline.sleep_on_game, Some(true));
     }
 }

@@ -656,6 +656,52 @@ mod tests {
     }
 
     #[test]
+    fn reply_hello_with_snapshot_round_trips() {
+        let config = ConfigPayload {
+            deadzone: 0.15,
+            sensitivity: 1.25,
+            acceleration_exp: 2.0,
+            scroll_sensitivity: 0.75,
+            enabled: true,
+            clicks_enabled: false,
+            led_color: None,
+            led_secondary_color: None,
+            led_effect: None,
+            led_brightness: None,
+            natural_scroll: true,
+            cursor_smoothing: 0.25,
+            keyboard_theme: None,
+            vk_mode: Some("floating".into()),
+        };
+        let settings = CompanionSettingsPayload {
+            sleep_on_game: Some(false),
+            auto_stop_on_game: Some(true),
+            userland_poll_paused: Some(false),
+            prompt_userland_debug: Some(true),
+        };
+        let reply = UpFrame::Hello(Hello {
+            protocol_version: PROTOCOL_VERSION,
+            config: Some(serde_json::to_value(&config).unwrap()),
+            mode: None,
+            companion_settings: Some(settings.clone()),
+            parental_guard: None,
+            library_watch: None,
+        });
+        let line = reply.to_ndjson_line();
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["payload"]["config"]["vkMode"], "floating");
+        assert_eq!(json["payload"]["config"]["naturalScroll"], true);
+        assert!(json["payload"]["config"].get("ledColor").is_none());
+        assert_eq!(json["payload"]["companionSettings"]["autoStopOnGame"], true);
+        let UpFrame::Hello(parsed) = UpFrame::parse_line(line.trim_end()).unwrap() else {
+            panic!("expected hello");
+        };
+        assert_eq!(parsed.companion_settings, Some(settings));
+        let parsed_config: ConfigPayload = serde_json::from_value(parsed.config.unwrap()).unwrap();
+        assert_eq!(parsed_config, config);
+    }
+
+    #[test]
     fn deprecated_protocol_versions_stay_supported() {
         assert!(is_supported_protocol_version(PROTOCOL_VERSION));
         assert!(is_supported_protocol_version(5));

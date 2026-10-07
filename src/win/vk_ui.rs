@@ -38,14 +38,17 @@ use super::desktop_window::{self, DesktopApp, DesktopWindowThread, WM_APP_REPAIN
 use super::vk_log;
 pub use super::vk_renderer::VkPalette;
 use super::vk_renderer::{self, VkRenderer};
+#[cfg(feature = "vk-panels")]
+pub(crate) use super::vk_renderer::vk_panels;
 
 /// Live keyboard palette (OS dark/light defaults, then `settings.ini` overrides).
 pub fn theme_palette() -> VkPalette {
-    vk_palette(is_dark_theme(), crate::config::vk_style())
+    vk_palette(is_dark_theme(), vk_style())
 }
 
 const WINDOW_CLASS: windows::core::PCWSTR = w!("WarmupXboxVkWindow");
 
+const VK_KB_REF_H: f32 = 384.0;
 /// Re-assert topmost while visible (shell search/task UI also uses HWND_TOPMOST).
 const VK_ZORDER_TIMER_ID: usize = 1;
 const VK_ZORDER_TIMER_MS: u32 = 200;
@@ -57,6 +60,13 @@ const VK_HIDE_ANIMATION_MS: u64 = 130;
 /// Foreground-app reflow easing when the keyboard docks / undocks (was an instant
 /// snap). ponytail: fixed duration; tune if it feels slow on open.
 const APP_REFLOW_MS: u64 = 150;
+
+static HINT_SHOWN_AT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+const HINT_VISIBLE_SECS: u64 = 3;
+static SHEET_GROWN: AtomicBool = AtomicBool::new(false);
+static STYLE_CACHE: std::sync::Mutex<Option<(Instant, vk_renderer::VkLook)>> =
+    std::sync::Mutex::new(None);
+const STYLE_CACHE_TTL: Duration = Duration::from_millis(250);
 
 static VK_VISIBLE: AtomicBool = AtomicBool::new(false);
 static UI_THREAD_ID: AtomicU32 = AtomicU32::new(0);
@@ -70,13 +80,27 @@ static LAST_REFLOW_HWND: AtomicIsize = AtomicIsize::new(0);
 /// Class background brush colour (dark default; per-paint theme overrides it).
 const BG_FILL: u32 = 0x001f1f1f;
 const MONO_ACCENT_TONE: f32 = 0.7;
+const MODERN_ACTION_TONE: f32 = 0.08;
+const MODERN_ENTER_TONE: f32 = 0.14;
+const MODERN_MOD_TONE: f32 = 0.2;
+const MODERN_DIM_TONE: f32 = 0.8;
 
-fn vk_palette(dark: bool, style: crate::config::VkStyle) -> VkPalette {
-    let mut pal = vk_renderer::style_palette(style, dark);
+pub(crate) fn vk_palette(dark: bool, style: crate::config::VkStyle) -> VkPalette {
+    themed_palette(
+        vk_renderer::style_palette(style, dark),
+        style,
+        crate::config::keyboard_theme(),
+    )
+}
+
+pub(crate) fn themed_palette(
+    mut pal: VkPalette,
+    style: crate::config::VkStyle,
+    theme: crate::config::KeyboardTheme,
+) -> VkPalette {
     if style == crate::config::VkStyle::Modern {
-        return pal;
+        return modern_themed_palette(pal, theme);
     }
-    let theme = crate::config::keyboard_theme();
     if style == crate::config::VkStyle::Mono {
         if let Some(v) = theme.accent {
             pal.accent = vk_renderer::mix_color(v, pal.key, MONO_ACCENT_TONE);
@@ -114,9 +138,45 @@ fn vk_palette(dark: bool, style: crate::config::VkStyle) -> VkPalette {
     pal
 }
 
+fn modern_themed_palette(mut pal: VkPalette, theme: crate::config::KeyboardTheme) -> VkPalette {
+    use vk_renderer::mix_color;
+    if let Some(v) = theme.bg {
+        pal.bg = v;
+    }
+    if let Some(v) = theme.text {
+        pal.text = v;
+        pal.enter_text = v;
+        pal.text_dim = mix_color(v, pal.bg, MODERN_DIM_TONE);
+    }
+    if let Some(v) = theme.sel_text {
+        pal.sel_text = v;
+    }
+    if let Some(v) = theme.accent {
+        pal.accent = v;
+        pal.sel_ring = v;
+        pal.chip_sel = v;
+    }
+    if let Some(v) = theme.key {
+        pal.key = v;
+        pal.key_action = mix_color(pal.text, v, MODERN_ACTION_TONE);
+    }
+    if theme.key.is_some() || theme.accent.is_some() {
+        if let Some(tint) = theme.accent.or(pal.mod_tint.map(|(_, bar)| bar)) {
+            pal.key_enter = mix_color(tint, pal.key, MODERN_ENTER_TONE);
+            pal.mod_tint = Some((mix_color(tint, pal.key, MODERN_MOD_TONE), tint));
+        }
+    }
+    if let Some(v) = theme.border {
+        pal.border = v;
+        pal.panel_stroke = v;
+        pal.panel_stroke_alpha = 1.0;
+    }
+    pal
+}
+
 /// Dark flag, read live from the OS theme.
 /// `HKCU\...\Themes\Personalize\AppsUseLightTheme` (0 = dark). Defaults to dark.
-fn is_dark_theme() -> bool {
+pub(crate) fn is_dark_theme() -> bool {
     unsafe {
         let mut val: u32 = 0;
         let mut sz = std::mem::size_of::<u32>() as u32;
@@ -180,6 +240,8 @@ struct UiState {
     /// Foreground app window we shrank to make room for the keyboard, and its
     /// original rect to restore on hide.
     reserved: Option<(HWND, windows::Win32::Foundation::RECT, bool)>,
+    monitor: Option<windows::Win32::Foundation::RECT>,
+    placed_tv: bool,
 }
 
 thread_local! {
@@ -188,6 +250,8 @@ thread_local! {
             hwnd: None,
             renderer: None,
             reserved: None,
+            monitor: None,
+            placed_tv: false,
         })
     };
     /// WinEvent hooks installed on the UI thread (drained on pump exit).
@@ -261,6 +325,8 @@ pub fn request_repaint() {
 pub fn tick_dpad_hold(now: Instant) -> bool {
     let moved = vk_nav::tick_dpad_hold(now);
     let repeated = vk_nav::tick_key_repeat(now);
+    #[cfg(feature = "vk-panels")]
+    let repeated = vk_panels::tick(now) || repeated;
     if moved || repeated {
         request_repaint();
         true
@@ -378,6 +444,11 @@ fn ui_show(attach: VkAttach) {
         }
     }
     vk_nav::reset_selection();
+    UI.with(|ui| {
+        let mut state = ui.borrow_mut();
+        state.monitor = Some(unsafe { target_monitor_rect() });
+        state.placed_tv = vk_look().tv_layout();
+    });
     unsafe {
         show_and_place(hwnd);
         // Shrink the previously-focused app so the keyboard doesn't cover it.
@@ -408,6 +479,8 @@ fn ui_repaint() {
 }
 
 fn ui_hide() {
+    #[cfg(feature = "vk-panels")]
+    vk_panels::close();
     // Read the HWND only; destroy_vk_window owns clearing state + dropping the renderer
     // so teardown order (renderer before DestroyWindow) stays correct.
     let hwnd = UI.with(|ui| ui.borrow().hwnd);
@@ -423,6 +496,7 @@ fn ui_hide() {
     }
     VK_HWND.store(0, Ordering::Release);
     VK_VISIBLE.store(false, Ordering::SeqCst);
+    SHEET_GROWN.store(false, Ordering::SeqCst);
     super::shortcut_sheet::set_shown(false);
     vk_log::log("WarmupXboxVkWindow hidden");
 }
@@ -698,6 +772,13 @@ unsafe extern "system" fn vk_wndproc(
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
+            #[cfg(feature = "vk-panels")]
+            if vk_panels::is_open() {
+                return LRESULT(0);
+            }
+            if super::shortcut_sheet::shown() && vk_look().tv_layout() {
+                return LRESULT(0);
+            }
             let x = (lparam.0 & 0xFFFF) as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i32;
             if let Some(slot) = strip_hit_test(hwnd, x, y) {
@@ -771,6 +852,24 @@ fn window_ex_style() -> windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE
     WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP
 }
 
+pub(crate) fn vk_look() -> vk_renderer::VkLook {
+    if let Some((at, look)) = *STYLE_CACHE.lock().unwrap_or_else(|e| e.into_inner()) {
+        if at.elapsed() < STYLE_CACHE_TTL {
+            return look;
+        }
+    }
+    let look = vk_renderer::VkLook {
+        style: crate::config::vk_style(),
+        tv: unsafe { super::monitor::is_active_monitor_tv() },
+    };
+    *STYLE_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), look));
+    look
+}
+
+pub(crate) fn vk_style() -> crate::config::VkStyle {
+    vk_look().style
+}
+
 unsafe fn target_monitor_rect() -> windows::Win32::Foundation::RECT {
     super::monitor::active_monitor_rect()
 }
@@ -780,25 +879,45 @@ unsafe fn ui_scale() -> f32 {
 }
 
 unsafe fn top_inset() -> f32 {
-    vk_renderer::strip_band_height(ui_scale(), crate::config::vk_style())
+    vk_renderer::strip_band_height(ui_scale(), vk_look())
 }
 
 fn legend_shown() -> bool {
-    !crate::win::logon_focus::is_active()
+    if !vk_look().tv_layout() {
+        return !crate::win::logon_focus::is_active();
+    }
+    HINT_SHOWN_AT
+        .lock()
+        .ok()
+        .and_then(|t| *t)
+        .is_some_and(|t| t.elapsed() < Duration::from_secs(HINT_VISIBLE_SECS))
+        && !crate::win::logon_focus::is_active()
         && crate::config::gamepad_settings().vk_side_tips
         && !super::shortcut_sheet::hint_retired()
+}
+
+unsafe fn bottom_inset() -> f32 {
+    let look = vk_look();
+    if !look.tv_layout() && legend_shown() {
+        vk_renderer::legend_band_height(ui_scale(), look)
+    } else {
+        0.0
+    }
 }
 
 ///
 /// - **Docked**: full monitor width along the bottom edge.
 /// - **Floating**: a compact, horizontally-centred card; the band is the card's top chrome.
 unsafe fn vk_dock_rect() -> (i32, i32, i32, i32) {
-    let m = target_monitor_rect();
+    vk_dock_rect_in(target_monitor_rect())
+}
+
+unsafe fn vk_dock_rect_in(m: windows::Win32::Foundation::RECT) -> (i32, i32, i32, i32) {
     let full_w = (m.right - m.left).max(1);
     let full_h = (m.bottom - m.top).max(1);
     let h = docked_base_h(full_h);
     match crate::config::vk_layout_mode() {
-        crate::config::VkLayoutMode::Floating => floating_card_rect(top_inset()),
+        crate::config::VkLayoutMode::Floating => floating_card_rect(m, top_inset()),
         crate::config::VkLayoutMode::Docked => (m.left, m.bottom - h, full_w, h),
     }
 }
@@ -807,22 +926,19 @@ unsafe fn vk_dock_rect() -> (i32, i32, i32, i32) {
 /// the keys at docked scale; its height = `chrome + key block + 2 * pad`, so a
 /// smaller `chrome` (collapsed strip) makes a genuinely shorter card. Bottom edge
 /// stays put (y moves down as it shrinks) so the keys don't jump.
-unsafe fn floating_card_rect(chrome: f32) -> (i32, i32, i32, i32) {
-    let m = target_monitor_rect();
+unsafe fn floating_card_rect(
+    m: windows::Win32::Foundation::RECT,
+    chrome: f32,
+) -> (i32, i32, i32, i32) {
     let full_w = (m.right - m.left).max(1);
     let full_h = (m.bottom - m.top).max(1);
     let rows = vk_nav::rows_snapshot();
     let scale_w = vk_scale_w();
-    let style = crate::config::vk_style();
-    let (grid_w, block_h) = vk_renderer::grid_size(scale_w, &rows, style);
-    let (pad_x, pad_y) = vk_renderer::floating_pad(ui_scale(), style);
-    let (w, card_h) = floating_card_size(grid_w, block_h, chrome, pad_x, pad_y);
-    let side = if legend_shown() {
-        (vk_renderer::side_tips_extent(ui_scale(), style) * 2.0).round() as i32
-    } else {
-        0
-    };
-    let w = (w + side).min(full_w);
+    let look = vk_look();
+    let (grid_w, block_h) = vk_renderer::grid_size(scale_w, &rows, look);
+    let (pad_x, pad_y) = vk_renderer::floating_pad(ui_scale(), look);
+    let (w, card_h) = floating_card_size(grid_w, block_h, chrome, bottom_inset(), pad_x, pad_y);
+    let w = w.min(full_w);
     let card_h = card_h.clamp(100, full_h);
     let margin = (((full_h as f32) * 0.04).round() as i32).clamp(28, 80);
     let x = m.left + (full_w - w) / 2;
@@ -840,12 +956,13 @@ fn floating_card_size(
     grid_w: f32,
     block_h: f32,
     chrome: f32,
+    legend: f32,
     pad_x: f32,
     pad_y: f32,
 ) -> (i32, i32) {
     (
         (grid_w + pad_x * 2.0).round() as i32,
-        (chrome + block_h + pad_y * 2.0).ceil() as i32,
+        (chrome + block_h + pad_y * 2.0 + legend).ceil() as i32,
     )
 }
 
@@ -854,9 +971,14 @@ unsafe fn target_monitor_dpi_scale() -> f32 {
 }
 
 unsafe fn docked_base_h(full_h: i32) -> i32 {
-    let style = crate::config::vk_style();
+    let look = vk_look();
+    if !look.tv_layout() {
+        let h = VK_KB_REF_H * target_monitor_dpi_scale() * crate::config::vk_bar_scale();
+        let extra = top_inset() - vk_renderer::STRIP_BAND_H + bottom_inset();
+        return ((h + extra).round() as i32).clamp(160, full_h);
+    }
     let rows = vk_nav::rows_snapshot();
-    let h = vk_renderer::dock_height_for_full_keys(vk_scale_w(), &rows, top_inset(), style);
+    let h = vk_renderer::dock_height_for_full_keys(vk_scale_w(), &rows, top_inset(), look);
     (h.round() as i32).clamp(160, full_h)
 }
 
@@ -923,15 +1045,19 @@ struct SheetMove {
     grow: bool,
 }
 
-unsafe fn sheet_window_move(hwnd: HWND, sheet_on: bool) -> Option<SheetMove> {
+unsafe fn sheet_window_move(
+    hwnd: HWND,
+    sheet_on: bool,
+    monitor: Option<windows::Win32::Foundation::RECT>,
+) -> Option<SheetMove> {
     if !VK_VISIBLE.load(Ordering::SeqCst) {
         return None;
     }
+    let m = monitor.unwrap_or_else(|| target_monitor_rect());
     let rect = if sheet_on {
-        let m = target_monitor_rect();
         (m.left, m.top, m.right - m.left, m.bottom - m.top)
     } else {
-        vk_dock_rect()
+        vk_dock_rect_in(m)
     };
     let mut r = windows::Win32::Foundation::RECT::default();
     let _ = GetWindowRect(hwnd, &mut r);
@@ -942,6 +1068,7 @@ unsafe fn sheet_window_move(hwnd: HWND, sheet_on: bool) -> Option<SheetMove> {
 }
 
 unsafe fn apply_sheet_move(hwnd: HWND, m: &SheetMove) {
+    SHEET_GROWN.store(m.grow, Ordering::SeqCst);
     let (x, y, w, h) = m.rect;
     let _ = SetWindowPos(
         hwnd,
@@ -955,6 +1082,10 @@ unsafe fn apply_sheet_move(hwnd: HWND, m: &SheetMove) {
 }
 
 unsafe fn show_and_place(hwnd: HWND) {
+    SHEET_GROWN.store(false, Ordering::SeqCst);
+    if let Ok(mut t) = HINT_SHOWN_AT.lock() {
+        *t = Some(Instant::now());
+    }
     let (x, y, outer_w, outer_h) = vk_dock_rect();
     let start_y = y + outer_h;
     // Never activate. The VK window is NOACTIVATE and shown without
@@ -1064,20 +1195,31 @@ fn render_frame() {
             crate::config::vk_layout_mode(),
             crate::config::VkLayoutMode::Floating
         );
-        let style = crate::config::vk_style();
+        let look = vk_look();
+        let style = look.style;
         let candidates = crate::vk_predict::strip(
-            vk_renderer::strip_slots(style),
+            vk_renderer::strip_slots(look),
             style == crate::config::VkStyle::Mono,
         );
         let scale = unsafe { ui_scale() };
-        let top_inset = vk_renderer::strip_band_height(scale, style);
+        let top_inset = vk_renderer::strip_band_height(scale, look);
+        let tv_layout = look.tv_layout();
+        let look_flipped = state.placed_tv != tv_layout;
+        let monitor = state.monitor;
+        if VK_VISIBLE.load(Ordering::SeqCst) {
+            state.placed_tv = tv_layout;
+        }
 
         let Some(renderer) = state.renderer.as_mut() else {
             return;
         };
         unsafe {
             let sheet_on = super::shortcut_sheet::shown();
-            let sheet_move = sheet_window_move(hwnd, sheet_on);
+            let sheet_move = if tv_layout || look_flipped || SHEET_GROWN.load(Ordering::SeqCst) {
+                sheet_window_move(hwnd, sheet_on && tv_layout, monitor)
+            } else {
+                None
+            };
             let resized = match &sheet_move {
                 Some(m) if m.grow => renderer.resize_to(m.rect.2 as u32, m.rect.3 as u32),
                 Some(m) => {
@@ -1140,6 +1282,7 @@ fn render_frame() {
                 voice_level: crate::win::speech_input::voice_level(),
                 ui_scale: scale,
                 style,
+                tv: look.tv,
                 shortcut_sheet: sheet_on,
                 legend: legend_shown(),
             };
@@ -1180,10 +1323,10 @@ pub fn wait_until_visible(timeout: Duration) -> bool {
 }
 
 fn strip_hit_test(hwnd: HWND, x: i32, y: i32) -> Option<usize> {
-    let style = crate::config::vk_style();
+    let look = vk_look();
     let strip = crate::vk_predict::strip(
-        vk_renderer::strip_slots(style),
-        style == crate::config::VkStyle::Mono,
+        vk_renderer::strip_slots(look),
+        look.style == crate::config::VkStyle::Mono,
     )?;
     let mut client = windows::Win32::Foundation::RECT::default();
     unsafe {
@@ -1192,11 +1335,11 @@ fn strip_hit_test(hwnd: HWND, x: i32, y: i32) -> Option<usize> {
     let rows = vk_nav::rows_snapshot();
     vk_renderer::strip_hit_slot(
         client.right as f32,
-        client.bottom as f32,
+        client.bottom as f32 - unsafe { bottom_inset() },
         unsafe { vk_scale_w() },
         &rows,
         unsafe { top_inset() },
-        style,
+        look,
         &strip.visible,
         x as f32,
         y as f32,
@@ -1213,9 +1356,9 @@ fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<(vk_nav::KeyPos, KeyCell)> {
     let top_inset = unsafe { top_inset() };
     let scale_w = unsafe { vk_scale_w() };
     let cw = client.right as f32;
-    let ch = client.bottom as f32;
-    let style = crate::config::vk_style();
-    for kr in vk_renderer::key_rects(cw, ch, scale_w, &rows, top_inset, style) {
+    let ch = client.bottom as f32 - unsafe { bottom_inset() };
+    let look = vk_look();
+    for kr in vk_renderer::key_rects(cw, ch, scale_w, &rows, top_inset, look) {
         if xf >= kr.left && xf < kr.right && yf >= kr.top && yf < kr.bottom {
             return rows
                 .get(kr.pos.row)
@@ -1230,6 +1373,56 @@ fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<(vk_nav::KeyPos, KeyCell)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modern_palette_follows_the_keyboard_theme() {
+        let modern = crate::config::VkStyle::Modern;
+        for dark in [true, false] {
+            let base = vk_renderer::style_palette(modern, dark);
+            let plain = themed_palette(base, modern, crate::config::KeyboardTheme::default());
+            assert_eq!(plain, base);
+            let theme = crate::config::KeyboardTheme {
+                bg: Some(0x00102030),
+                key: Some(0x00405060),
+                accent: Some(0x0000A0FF),
+                text: Some(0x00F0F0F0),
+                sel_text: Some(0x00000000),
+                border: Some(0x00808080),
+            };
+            let pal = themed_palette(base, modern, theme);
+            assert_eq!(pal.bg, 0x00102030);
+            assert_eq!(pal.key, 0x00405060);
+            assert_eq!(pal.accent, 0x0000A0FF);
+            assert_eq!(pal.chip_sel, 0x0000A0FF);
+            assert_eq!(pal.text, 0x00F0F0F0);
+            assert_eq!(pal.sel_text, 0x00000000);
+            assert_eq!(pal.border, 0x00808080);
+            for (field, themed, default) in [
+                ("key_action", pal.key_action, base.key_action),
+                ("key_enter", pal.key_enter, base.key_enter),
+                ("text_dim", pal.text_dim, base.text_dim),
+            ] {
+                assert_ne!(themed, default, "{field}");
+            }
+            let (fill, bar) = pal.mod_tint.expect("modern keeps a modifier tint");
+            assert_eq!(bar, 0x0000A0FF);
+            assert_ne!(Some((fill, bar)), base.mod_tint);
+            let key_only = themed_palette(
+                base,
+                modern,
+                crate::config::KeyboardTheme {
+                    key: Some(0x00405060),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(key_only.accent, base.accent);
+            assert_eq!(
+                key_only.mod_tint.map(|(_, bar)| bar),
+                base.mod_tint.map(|(_, bar)| bar)
+            );
+            assert_ne!(key_only.key_enter, base.key_enter);
+        }
+    }
 
     #[test]
     fn key_scale_follows_display_scaling_not_pixels() {
@@ -1255,9 +1448,11 @@ mod tests {
         // Key block 1000x300 under a 67px chrome band with 18px padding: the
         // renderer centres the block below the chrome, so the card must carry
         // 2*pad vertically to leave exactly `pad` at the bottom and both sides.
-        let (w, h) = floating_card_size(1000.0, 300.0, 67.0, 18.0, 18.0);
+        let (w, h) = floating_card_size(1000.0, 300.0, 67.0, 0.0, 18.0, 18.0);
         assert_eq!(w, 1036);
         assert_eq!(h, 67 + 300 + 36);
+        let (w2, h2) = floating_card_size(1000.0, 300.0, 67.0, 40.0, 18.0, 18.0);
+        assert_eq!((w2, h2), (w, h + 40));
         let bottom_pad = (h as f32 - 67.0 - 300.0) / 2.0;
         let side_pad = (w as f32 - 1000.0) / 2.0;
         assert_eq!(bottom_pad, side_pad);
@@ -1268,18 +1463,20 @@ mod tests {
         sheet: bool,
         target_w: f32,
     ) -> (u32, u32, Vec<u8>) {
-        let rows = vk_nav::modern_rows_for_test();
+        let rows = if style == crate::config::VkStyle::Modern {
+            vk_nav::modern_rows_for_test()
+        } else {
+            vk_nav::rows_for_test()
+        };
         let (w1, _) = vk_renderer::grid_size(vk_renderer::REF_MON_W, &rows, style);
         let (p1, _) = vk_renderer::floating_pad(1.0, style);
-        let side1 = vk_renderer::side_tips_extent(1.0, style) * 2.0;
-        let scale = target_w / (w1 + p1 * 2.0 + side1);
+        let scale = target_w / (w1 + p1 * 2.0);
         let scale_w = vk_renderer::REF_MON_W * scale;
         let (grid_w, block_h) = vk_renderer::grid_size(scale_w, &rows, style);
         let (pad_x, pad_y) = vk_renderer::floating_pad(scale, style);
         let chrome = vk_renderer::strip_band_height(scale, style);
-        let side = vk_renderer::side_tips_extent(scale, style) * 2.0;
-        let (w, h) = floating_card_size(grid_w, block_h, chrome, pad_x, pad_y);
-        let w = w + side.round() as i32;
+        let legend = vk_renderer::legend_band_height(scale, style);
+        let (w, h) = floating_card_size(grid_w, block_h, chrome, legend, pad_x, pad_y);
         let pal = vk_renderer::style_palette(style, true);
         let strip = crate::vk_predict::StripState {
             visible: ["I", "The", "I'm", "Thanks", "Hi", "It", "We"]
@@ -1308,6 +1505,7 @@ mod tests {
             voice_level: 0.0,
             ui_scale: scale,
             style,
+            tv: false,
             shortcut_sheet: sheet,
             legend: true,
         };
@@ -1355,6 +1553,21 @@ mod tests {
                     };
                     write_png(&dir.join(name), w, h, &px);
                 }
+                let (fw, fh) = if sheet { (1600, 546) } else { (1600, 80) };
+                let (w, h, px) = unsafe {
+                    let mut r = vk_renderer::VkRenderer::offscreen(fw, fh).expect("offscreen");
+                    r.render_design(style, sheet).expect("design frame")
+                };
+                assert_eq!((w, h), (fw, fh));
+                if let Some(dir) = &dir {
+                    let name = match (style, sheet) {
+                        (crate::config::VkStyle::Mono, false) => "legend-frame-mono.png",
+                        (crate::config::VkStyle::Mono, true) => "sheet-frame-mono.png",
+                        (_, false) => "legend-frame.png",
+                        (_, true) => "sheet-frame.png",
+                    };
+                    write_png(&dir.join(name), w, h, &px);
+                }
             }
         }
     }
@@ -1369,10 +1582,7 @@ mod tests {
         let (grid_w, block_h) = vk_renderer::grid_size(scale_w, &rows, style);
         let (pad_x, pad_y) = vk_renderer::floating_pad(scale, style);
         let chrome = vk_renderer::strip_band_height(scale, style);
-        let (w, h) = floating_card_size(grid_w, block_h, chrome, pad_x, pad_y);
-        let side = (vk_renderer::side_tips_extent(scale, style) * 2.0).round() as i32;
-        assert!(side > 0);
-        let w = w + side;
+        let (w, h) = floating_card_size(grid_w, block_h, chrome, 0.0, pad_x, pad_y);
         let pal = vk_renderer::style_palette(style, true);
         let strip = crate::vk_predict::StripState {
             visible: ["The", "Thanks", "I'm", "Hi", "It"]
@@ -1402,6 +1612,7 @@ mod tests {
             voice_level: 0.0,
             ui_scale: scale,
             style,
+            tv: false,
             shortcut_sheet: false,
             legend: true,
         };
@@ -1416,18 +1627,43 @@ mod tests {
         }
         let docked = vk_renderer::VkFrame {
             floating: false,
+            candidates: None,
             ..frame
         };
         let (dw, dh, dpx) = unsafe {
             let mut r = vk_renderer::VkRenderer::offscreen(1920, h).expect("offscreen");
             r.render_bgra(&docked).expect("render docked")
         };
-        let at = |x: u32, y: u32| &dpx[((y * dw + x) * 4) as usize..][..3];
-        let visible = at(1600, dh - 40) != at(5, 5);
+        let hidden = unsafe {
+            let mut r = vk_renderer::VkRenderer::offscreen(1920, h).expect("offscreen");
+            r.render_bgra(&vk_renderer::VkFrame {
+                legend: false,
+                ..docked
+            })
+            .expect("render docked")
+            .2
+        };
+        let visible = hidden != dpx;
         if let Some(dir) = std::env::var_os("VK_LEGEND_PNG_DIR").map(std::path::PathBuf::from) {
             write_png(&dir.join("modern-docked.png"), dw, dh, &dpx);
         }
         assert!(visible, "docked shortcut hint is visible");
+        let with_words = vk_renderer::VkFrame {
+            candidates: Some(&strip),
+            ..docked
+        };
+        let render_docked = |f: &vk_renderer::VkFrame| unsafe {
+            let mut r = vk_renderer::VkRenderer::offscreen(1920, h).expect("offscreen");
+            r.render_bgra(f).expect("render docked").2
+        };
+        assert_eq!(
+            render_docked(&with_words),
+            render_docked(&vk_renderer::VkFrame {
+                legend: false,
+                ..with_words
+            }),
+            "hint pill is skipped while suggestions show"
+        );
         let locked = vk_renderer::VkFrame {
             modifiers: vk_renderer::VkModifiers {
                 shift: true,

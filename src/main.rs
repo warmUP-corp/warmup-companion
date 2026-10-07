@@ -40,6 +40,10 @@ mod predict_ngram;
 mod vk_commit;
 #[cfg(windows)]
 mod image_paste;
+#[cfg(all(windows, feature = "vk-panels"))]
+mod clipboard_history;
+#[cfg(all(windows, feature = "vk-panels"))]
+mod emoji_data;
 #[cfg(windows)]
 mod vk_nav;
 #[cfg(windows)]
@@ -70,6 +74,8 @@ mod parental_guard;
 mod parental_store;
 #[cfg(feature = "gamepad")]
 mod pc_cursor;
+#[cfg(feature = "gamepad")]
+mod touchpad_gestures;
 #[cfg(windows)]
 mod predict_dict;
 #[cfg(all(windows, feature = "gamepad"))]
@@ -666,6 +672,13 @@ fn main() {
     #[cfg(all(windows, feature = "gamepad"))]
     if args.iter().any(|a| a == "--controller-center") {
         win::controller_center::show();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+    }
+    #[cfg(all(windows, feature = "gamepad"))]
+    if args.iter().any(|a| a == "--quick-menu") {
+        win::quick_menu::show();
         loop {
             std::thread::sleep(std::time::Duration::from_secs(60));
         }

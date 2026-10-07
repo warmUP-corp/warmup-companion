@@ -1,7 +1,9 @@
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{BOOL, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, HDC, HMONITOR,
-    MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    CreateDCW, DeleteDC, EnumDisplayMonitors, GetDeviceCaps, GetMonitorInfoW, MonitorFromPoint,
+    MonitorFromWindow, HDC, HMONITOR, HORZRES, HORZSIZE, LOGPIXELSX, LOGPIXELSY, MONITORINFO,
+    MONITORINFOEXW, MONITOR_DEFAULTTONEAREST, VERTRES, VERTSIZE,
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -10,6 +12,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 const FIT_SLOP: i32 = 96;
+const TV_DIAGONAL_INCH_MIN: f32 = 40.0;
+const TV_ASPECT_MAX: f32 = 2.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DisplayKind {
+    Tv,
+    Auto,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScreenRect {
@@ -108,6 +118,179 @@ pub unsafe fn active_monitor() -> (HMONITOR, RECT) {
             bottom: chosen.bottom,
         },
     )
+}
+
+fn diagonal_inches_from_mm(width_mm: i32, height_mm: i32) -> f32 {
+    if width_mm <= 0 || height_mm <= 0 {
+        return 0.0;
+    }
+    let w = width_mm as f32;
+    let h = height_mm as f32;
+    (w * w + h * h).sqrt() / 25.4
+}
+
+fn gdi_synthesised_mm(pixels: i32, log_pixels: i32) -> Option<i32> {
+    if pixels <= 0 || log_pixels <= 0 {
+        return None;
+    }
+    Some(((pixels as f64) * 25.4 / (log_pixels as f64)).round() as i32)
+}
+
+fn physical_size_mm(
+    width_mm: i32,
+    height_mm: i32,
+    horz_res: i32,
+    vert_res: i32,
+    log_pixels_x: i32,
+    log_pixels_y: i32,
+) -> Option<(i32, i32)> {
+    if width_mm <= 0 || height_mm <= 0 {
+        return None;
+    }
+    if let (Some(syn_w), Some(syn_h)) = (
+        gdi_synthesised_mm(horz_res, log_pixels_x),
+        gdi_synthesised_mm(vert_res, log_pixels_y),
+    ) {
+        if (width_mm - syn_w).abs() <= 1 && (height_mm - syn_h).abs() <= 1 {
+            return None;
+        }
+    }
+    Some((width_mm, height_mm))
+}
+
+fn physical_diagonal_inches(
+    width_mm: i32,
+    height_mm: i32,
+    horz_res: i32,
+    vert_res: i32,
+    log_pixels_x: i32,
+    log_pixels_y: i32,
+) -> Option<f32> {
+    let (w, h) = physical_size_mm(
+        width_mm,
+        height_mm,
+        horz_res,
+        vert_res,
+        log_pixels_x,
+        log_pixels_y,
+    )?;
+    let d = diagonal_inches_from_mm(w, h);
+    (d > 0.0).then_some(d)
+}
+
+fn is_tv_diagonal(diagonal_inches: f32) -> bool {
+    diagonal_inches >= TV_DIAGONAL_INCH_MIN
+}
+
+fn is_tv(width_mm: i32, height_mm: i32) -> bool {
+    if width_mm <= 0 || height_mm <= 0 {
+        return false;
+    }
+    let aspect = width_mm as f32 / height_mm as f32;
+    is_tv_diagonal(diagonal_inches_from_mm(width_mm, height_mm)) && aspect <= TV_ASPECT_MAX
+}
+
+fn display_kind_for_biggest(sizes: &[(i32, i32)]) -> DisplayKind {
+    let biggest = sizes.iter().copied().max_by(|a, b| {
+        diagonal_inches_from_mm(a.0, a.1)
+            .partial_cmp(&diagonal_inches_from_mm(b.0, b.1))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    match biggest {
+        Some((w, h)) if is_tv(w, h) => DisplayKind::Tv,
+        _ => DisplayKind::Auto,
+    }
+}
+
+unsafe extern "system" fn collect_size(
+    hmonitor: HMONITOR,
+    _hdc: HDC,
+    _rect: *mut RECT,
+    data: LPARAM,
+) -> BOOL {
+    let out = &mut *(data.0 as *mut Vec<(i32, i32)>);
+    if let Some(size) = size_from_device_caps(hmonitor) {
+        out.push(size);
+    }
+    BOOL(1)
+}
+
+pub unsafe fn detect_display_once() {
+    if crate::config::raw_setting("vk_display").is_some() {
+        return;
+    }
+    let mut sizes: Vec<(i32, i32)> = Vec::new();
+    let _ = EnumDisplayMonitors(
+        HDC::default(),
+        None,
+        Some(collect_size),
+        LPARAM(&mut sizes as *mut Vec<(i32, i32)> as isize),
+    );
+    let kind = display_kind_for_biggest(&sizes);
+    let writes = first_start_settings(kind, |key| crate::config::raw_setting(key).is_some());
+    for (key, value) in writes {
+        if let Err(e) = crate::config::set_gamepad_setting(key, value) {
+            crate::install::log_line(&format!("display detect: persist {key} failed: {e}"));
+        }
+    }
+}
+
+fn first_start_settings(
+    kind: DisplayKind,
+    present: impl Fn(&str) -> bool,
+) -> Vec<(&'static str, &'static str)> {
+    let mut writes: Vec<(&'static str, &'static str)> = match kind {
+        DisplayKind::Tv => vec![
+            ("vk_mode", "floating"),
+            ("vk_bar_scale", "1.0"),
+            ("vk_display", "tv"),
+        ],
+        DisplayKind::Auto => vec![("vk_display", "auto")],
+    };
+    writes.retain(|(key, _)| !present(key));
+    writes
+}
+
+unsafe fn is_tv_monitor(hmonitor: HMONITOR) -> bool {
+    size_from_device_caps(hmonitor).is_some_and(|(w, h)| is_tv(w, h))
+}
+
+pub unsafe fn is_active_monitor_tv() -> bool {
+    match crate::config::vk_display() {
+        crate::config::VkDisplay::Tv => true,
+        crate::config::VkDisplay::Desk => false,
+        crate::config::VkDisplay::Auto => is_tv_monitor(active_monitor().0),
+    }
+}
+
+unsafe fn size_from_device_caps(hmonitor: HMONITOR) -> Option<(i32, i32)> {
+    let mut info = MONITORINFOEXW::default();
+    info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+    if !GetMonitorInfoW(
+        hmonitor,
+        &mut info as *mut MONITORINFOEXW as *mut MONITORINFO,
+    )
+    .as_bool()
+    {
+        return None;
+    }
+    let hdc = CreateDCW(
+        PCWSTR::null(),
+        PCWSTR::from_raw(info.szDevice.as_ptr()),
+        PCWSTR::null(),
+        None,
+    );
+    if hdc.is_invalid() {
+        return None;
+    }
+    let w = GetDeviceCaps(hdc, HORZSIZE);
+    let h = GetDeviceCaps(hdc, VERTSIZE);
+    let horz_res = GetDeviceCaps(hdc, HORZRES);
+    let vert_res = GetDeviceCaps(hdc, VERTRES);
+    let log_pixels_x = GetDeviceCaps(hdc, LOGPIXELSX);
+    let log_pixels_y = GetDeviceCaps(hdc, LOGPIXELSY);
+    let _ = DeleteDC(hdc);
+    physical_size_mm(w, h, horz_res, vert_res, log_pixels_x, log_pixels_y)
 }
 
 pub unsafe fn dpi_scale(hmonitor: HMONITOR) -> f32 {
@@ -286,5 +469,67 @@ mod tests {
             bottom: 1088,
         };
         assert!(foreground_fits_monitor(window, mon));
+    }
+
+    #[test]
+    fn tv_threshold_is_forty_inch_diagonal() {
+        assert!(!is_tv_diagonal(39.9));
+        assert!(is_tv_diagonal(40.0));
+        assert!(is_tv_diagonal(65.0));
+        assert!(!is_tv_diagonal(27.0));
+        assert!(is_tv(914, 514));
+        assert!(!is_tv(510, 287));
+        assert_eq!(diagonal_inches_from_mm(0, 500), 0.0);
+        assert_eq!(display_kind_for_biggest(&[]), DisplayKind::Auto);
+        assert_eq!(
+            display_kind_for_biggest(&[(510, 287), (598, 336)]),
+            DisplayKind::Auto
+        );
+        assert_eq!(
+            display_kind_for_biggest(&[(510, 287), (1218, 685)]),
+            DisplayKind::Tv
+        );
+    }
+
+    #[test]
+    fn ultrawide_desk_is_not_a_tv() {
+        assert!(is_tv_diagonal(diagonal_inches_from_mm(1200, 340)));
+        assert!(!is_tv(1200, 340));
+        assert_eq!(display_kind_for_biggest(&[(1200, 340)]), DisplayKind::Auto);
+        assert!(is_tv(1218, 685));
+    }
+
+    #[test]
+    fn synthesised_gdi_size_is_unknown() {
+        assert_eq!(
+            physical_diagonal_inches(1016, 572, 3840, 2160, 96, 96),
+            None
+        );
+        let real = physical_diagonal_inches(1218, 685, 3840, 2160, 96, 96);
+        assert!(real.is_some_and(|d| (d - 55.0).abs() < 0.5));
+        assert_eq!(physical_diagonal_inches(0, 0, 3840, 2160, 96, 96), None);
+        assert_eq!(physical_diagonal_inches(0, 500, 1920, 1080, 96, 96), None);
+    }
+
+    #[test]
+    fn tv_first_start_defaults_to_floating_full_size_without_overwriting() {
+        assert_eq!(
+            first_start_settings(DisplayKind::Tv, |_| false),
+            [
+                ("vk_mode", "floating"),
+                ("vk_bar_scale", "1.0"),
+                ("vk_display", "tv")
+            ]
+        );
+        assert_eq!(
+            first_start_settings(DisplayKind::Tv, |key| key == "vk_mode"),
+            [("vk_bar_scale", "1.0"), ("vk_display", "tv")]
+        );
+        assert_eq!(first_start_settings(DisplayKind::Tv, |_| true), []);
+        assert_eq!(
+            first_start_settings(DisplayKind::Auto, |_| false),
+            [("vk_display", "auto")]
+        );
+        assert_eq!(first_start_settings(DisplayKind::Auto, |_| true), []);
     }
 }

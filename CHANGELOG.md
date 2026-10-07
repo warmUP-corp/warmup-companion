@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## v0.9.0
+
+- **New Controller Center.** Rebuilt in the mono keyboard look and coloured by your keyboard theme: General, Mouse, Keyboard and Controller tabs with toggles, sliders and keyboard-style preview cards for Keyboard style and Display. It works with the mouse, the keyboard and the controller (D-pad, A select, B back, L1/R1 tabs). Apply saves and closes, Cancel discards. The window has a taskbar icon.
+- Open or close the Controller Center with **Create + Options** (View + Menu on Xbox) or **Ctrl+Alt+C**. Not on the sign-in screen or during a game.
+- While the Controller Center is open, the controller only drives that window: no mouse cursor, clicks, keyboard, dictation or warmUP navigation. An open keyboard closes when it opens.
+- Controller tab: live stick and button view, the real connection type (USB or Bluetooth), battery, Test rumble, and a Lightbar picker (eight colours or Off, Solid / Breathing / Rainbow) that previews live and is kept across restarts.
+- Reset the current tab to defaults with Triangle / Y, Ctrl+R or the Reset hint (applies on Apply). General has Export, Import and Reset all: Import and Reset all back up `settings.ini` first, Reset all restores the shipped settings and keeps your keyboard colours and custom words.
+- **Quick menu.** Hold PS / Guide for half a second (a short press still opens warmUP): now playing with media controls, volume and brightness sliders, audio output, screenshot, record clip, app switcher, show desktop, close window, keyboard, dictate, magnifier, Controller Center, lock, and a Power submenu (sleep, restart, shut down, sign out; restart and shut down ask once more).
+- **New tray menu** in the same mono style, with submenus, keyboard shortcuts shown, and controller navigation.
+- **Touchpad as a trackpad.** Tap to click, two-finger tap for right click, two-finger scroll with a short glide, tap-and-drag, and hold the pad click and swipe to switch desktops (left/right), open Task View (up) or show the desktop (down). Turn off with `touchpad_gestures = false` or `touchpad_tap_click = false` in `settings.ini`.
+- Opening warmUP no longer overwrites the companion's settings. The companion sends its own settings to warmUP when warmUP connects, and only applies settings warmUP actually changes; older warmUP builds can no longer reset them either.
+- Modern keyboard style, with layout, sizes and the shortcut sheet shared across styles.
+- TV mode enlarges every keyboard style to the TV layout: bigger keys and text, a number row, larger suggestions, a shortcut hint above the keys and a full-screen shortcut sheet. Your keyboard style and colours stay as they are. Pick Auto, TV or Desk under Keyboard ▸ Display in the tray (`vk_display` in `settings.ini`). On first start warmUP picks TV or Desk from the biggest connected screen.
 - Games that set the DualSense / DS4 lightbar keep their colour. While a game owns the controller the companion stops writing to the pad (lightbar and warmUP haptics) and restores warmUP's colour when you return to warmUP or the game ends.
 
 ## v0.8.1

@@ -27,6 +27,8 @@ pub enum KeyAction {
     PredictNext,
     /// Start background Windows speech recognition.
     VoiceInput,
+    #[cfg(feature = "vk-panels")]
+    Panel,
 }
 
 #[derive(Clone)]
@@ -113,6 +115,7 @@ struct NavState {
     /// QWERTZ letter rows (web `de-DE` language toggle on L3).
     lang_de: bool,
     voice_input: bool,
+    tv_layout: bool,
     rows: Vec<KeyRow>,
     #[cfg(feature = "gamepad")]
     hold_button: Option<Button>,
@@ -136,6 +139,7 @@ static NAV: Mutex<NavState> = Mutex::new(NavState {
     last_symbol_at: None,
     lang_de: false,
     voice_input: false,
+    tv_layout: false,
     rows: Vec::new(),
     #[cfg(feature = "gamepad")]
     hold_button: None,
@@ -238,10 +242,12 @@ fn build_web_layout(layer: Layer, lang_de: bool) -> Vec<KeyRow> {
     row_bottom.push(KeyCell::vk("Backspace", VK_BACK, SPAN_KEY));
 
     let mic = mic_key_wanted();
+    let panel = panel_key_wanted();
+    let panel_cut = if panel { 0.5 } else { 0.0 };
     let mut space = KeyCell::vk(
         "Space",
         VK_SPACE,
-        if mic { SPAN_SPACE - 1.0 } else { SPAN_SPACE },
+        if mic { SPAN_SPACE - 1.0 } else { SPAN_SPACE } - panel_cut,
     );
     // Language badge on the space bar (web shows ENG/DE next to the L3 hint).
     space.sublabel = Some(if lang_de { "DE" } else { "ENG" }.to_string());
@@ -254,10 +260,14 @@ fn build_web_layout(layer: Layer, lang_de: bool) -> Vec<KeyRow> {
     if mic {
         row_utility.push(KeyCell::named("Mic", KeyAction::VoiceInput, SPAN_KEY));
     }
+    #[cfg(feature = "vk-panels")]
+    if panel {
+        row_utility.push(KeyCell::named("\u{263A}", KeyAction::Panel, SPAN_KEY));
+    }
     row_utility.extend([
         KeyCell::ch('-'),
         KeyCell::ch('_'),
-        KeyCell::vk("Enter", VK_RETURN, SPAN_ENTER),
+        KeyCell::vk("Enter", VK_RETURN, SPAN_ENTER - panel_cut),
     ]);
 
     let mut rows = vec![
@@ -310,19 +320,42 @@ fn build_modern_layout(layer: Layer, lang_de: bool) -> Vec<KeyRow> {
         key.sublabel = None;
     }
     if let Some(last) = rows[1].keys.last_mut() {
-        *last = KeyCell::tri('@', '@', '*', layer);
+        *last = KeyCell::tri(',', '@', '*', layer);
         last.sublabel = None;
     }
     if let Some(dot) = rows[2].keys.iter_mut().rev().nth(1) {
-        *dot = KeyCell::tri('.', '.', ',', layer);
+        *dot = KeyCell::tri('.', '.', '=', layer);
         dot.sublabel = None;
     }
     rows.insert(0, KeyRow { keys: numbers });
     rows
 }
 
+#[cfg(not(test))]
+fn tv_layout_wanted() -> bool {
+    crate::win::vk_ui::vk_look().tv_layout()
+}
+
+#[cfg(test)]
+fn tv_layout_wanted() -> bool {
+    false
+}
+
 fn rebuild(nav: &mut NavState) {
-    nav.rows = build_modern_layout(nav.layer, nav.lang_de);
+    let tv_layout = tv_layout_wanted();
+    if nav.tv_layout != tv_layout && !nav.rows.is_empty() {
+        nav.pos.row = if tv_layout {
+            nav.pos.row + 1
+        } else {
+            nav.pos.row.saturating_sub(1)
+        };
+    }
+    nav.tv_layout = tv_layout;
+    nav.rows = if tv_layout {
+        build_modern_layout(nav.layer, nav.lang_de)
+    } else {
+        build_web_layout(nav.layer, nav.lang_de)
+    };
     clamp_pos(nav);
 }
 
@@ -354,7 +387,6 @@ pub fn reset_selection() {
         nav.one_shot_symbol = false;
         nav.last_shift_at = None;
         nav.last_symbol_at = None;
-        nav.pos = KeyPos { row: 2, col: 1 };
         #[cfg(feature = "gamepad")]
         {
             nav.hold_button = None;
@@ -364,7 +396,13 @@ pub fn reset_selection() {
         nav.repeat_key = None;
         nav.repeat_deadline = None;
         nav.last_press = None;
+        nav.rows.clear();
         rebuild(&mut nav);
+        nav.pos = KeyPos {
+            row: if nav.tv_layout { 2 } else { 1 },
+            col: 1,
+        };
+        clamp_pos(&mut nav);
     }
     crate::vk_predict::reset();
 }
@@ -402,6 +440,9 @@ fn mark_pressed_action(matches: impl Fn(&KeyAction) -> bool) {
 }
 
 pub fn flash_shoulder(right: bool) {
+    if !tv_layout_wanted() {
+        return;
+    }
     if right {
         mark_pressed_action(|a| matches!(a, KeyAction::PredictNext));
     } else {
@@ -410,11 +451,29 @@ pub fn flash_shoulder(right: bool) {
 }
 
 pub fn flash_voice() {
+    if !tv_layout_wanted() {
+        return;
+    }
     mark_pressed_action(|a| matches!(a, KeyAction::VoiceInput));
 }
 
 fn is_vk(action: &KeyAction, vk: VIRTUAL_KEY) -> bool {
     matches!(action, KeyAction::Vk(v) if *v == vk)
+}
+
+#[cfg(all(feature = "vk-panels", not(test)))]
+fn panel_key_wanted() -> bool {
+    !crate::win::logon_focus::is_active()
+}
+
+#[cfg(all(feature = "vk-panels", test))]
+fn panel_key_wanted() -> bool {
+    true
+}
+
+#[cfg(not(feature = "vk-panels"))]
+fn panel_key_wanted() -> bool {
+    false
 }
 
 fn mic_key_wanted() -> bool {
@@ -440,7 +499,7 @@ pub fn rows_snapshot() -> Vec<KeyRow> {
                 .iter()
                 .any(|key| matches!(key.action, KeyAction::VoiceInput))
         });
-        if has != mic_key_wanted() {
+        if has != mic_key_wanted() || nav.tv_layout != tv_layout_wanted() {
             rebuild(&mut nav);
         }
     }
@@ -833,6 +892,8 @@ pub fn activate_key(key: &KeyCell) {
             request_ui_repaint();
         }
         KeyAction::VoiceInput => start_voice_input(),
+        #[cfg(feature = "vk-panels")]
+        KeyAction::Panel => crate::win::vk_ui::vk_panels::toggle(),
     }
 }
 
@@ -1095,7 +1156,7 @@ fn refocus_after_nav_move() {
 }
 
 /// Build a virtual-key down (or up) `INPUT`.
-fn vk_event(vk: VIRTUAL_KEY, up: bool) -> INPUT {
+pub(crate) fn vk_event(vk: VIRTUAL_KEY, up: bool) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
@@ -1390,7 +1451,7 @@ mod press_feedback_tests {
             .filter_map(|k| k.sublabel.as_deref())
             .collect();
         assert_eq!(corners, "!@#$%^&*()");
-        assert_eq!(rows[2].keys.last().map(|k| k.label.as_str()), Some("@"));
+        assert_eq!(rows[2].keys.last().map(|k| k.label.as_str()), Some(","));
         assert_eq!(
             rows[3].keys.iter().rev().nth(1).map(|k| k.label.as_str()),
             Some(".")
@@ -1401,6 +1462,42 @@ mod press_feedback_tests {
         let symbols = build_modern_layout(Layer::Symbol, false);
         assert_eq!(symbols[0].keys[0].label, "!");
         assert_eq!(symbols[0].keys[0].sublabel.as_deref(), Some("1"));
+        assert_eq!(
+            symbols[3].keys.iter().rev().nth(1).map(|k| k.label.as_str()),
+            Some("=")
+        );
+    }
+
+    fn typed_chars(rows: &[KeyRow]) -> Vec<char> {
+        rows.iter()
+            .flat_map(|row| row.keys.iter())
+            .filter_map(|key| match key.action {
+                KeyAction::Char(c) => Some(c),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tv_layout_reaches_every_printable_ascii_from_the_desk_layout() {
+        let mut desk = std::collections::BTreeSet::new();
+        let mut tv = std::collections::BTreeSet::new();
+        for lang_de in [false, true] {
+            for layer in [Layer::Lower, Layer::Upper, Layer::Symbol] {
+                for c in typed_chars(&build_web_layout(layer, lang_de)) {
+                    if (' '..='~').contains(&c) {
+                        desk.insert(c);
+                    }
+                }
+                for c in typed_chars(&build_modern_layout(layer, lang_de)) {
+                    if (' '..='~').contains(&c) {
+                        tv.insert(c);
+                    }
+                }
+            }
+        }
+        let missing: String = desk.difference(&tv).copied().collect();
+        assert!(missing.is_empty(), "{missing}");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "warmup-companion"
-version = "0.8.1"
+version = "0.9.0"
 edition = "2021"
 build = "build.rs"
 
@@ -8,6 +8,7 @@ build = "build.rs"
 default = ["service", "parakeet"]
 gamepad = ["dep:warmup-gamepad", "dep:enigo", "dep:ctrlc"]
 service = ["gamepad", "speech", "dep:windows-service"]
+vk-panels = ["gamepad"]
 # Offline mic dictation: cpal capture in-process, whisper.cpp (whisper-cli.exe)
 # as an optional downloaded sidecar. The Mic key is hidden unless the runner AND
 # a model are present on disk, so speech is a true opt-in install.
@@ -78,6 +79,17 @@ windows = { version = "0.58", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Input_XboxController",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_Devices_Display",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_System_Power",
+    "Win32_System_Shutdown",
+    "Win32_System_Wmi",
+    "Win32_System_Ole",
     "Win32_UI_WindowsAndMessaging",
     "Foundation",
     "Foundation_Collections",
