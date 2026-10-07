@@ -102,6 +102,20 @@ fn effective_userland_poll_mode() -> PollMode {
     mode
 }
 
+/// Whether a running game owns the controller right now (same signal as the Sleep poll mode,
+/// without the manual pause). While true the companion must not write to the pad: every SDL
+/// output report on a DualSense / DS4 carries SDL's cached lightbar colour, so any LED or
+/// rumble write would overwrite the colour the game set.
+pub fn game_owns_controller() -> bool {
+    let settings = crate::config::gamepad_settings();
+    should_sleep_for_game(
+        crate::pipe_server::desktop_connected(),
+        crate::pipe_server::game_active(),
+        crate::pipe_server::launcher_foreground_nav(),
+        settings.sleep_on_game && standalone_game_active_now(),
+    )
+}
+
 pub fn poll_mode_is_sleep() -> bool {
     effective_userland_poll_mode() == PollMode::Sleep
 }

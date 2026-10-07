@@ -262,7 +262,13 @@ impl Backend {
     /// Apply queued device-write commands (LED/rumble) from inbound IPC frames.
     fn apply_device_commands(&mut self) {
         use crate::gamepad_backend::PadCommand;
-        for cmd in crate::pipe_server::drain_device_commands() {
+        let cmds = crate::pipe_server::drain_device_commands();
+        // The game owns the lightbar and motors; the LED engine re-applies warmUP's colour
+        // once control comes back, so dropping queued writes here loses nothing.
+        if crate::gamepad_backend::game_owns_controller() {
+            return;
+        }
+        for cmd in cmds {
             match cmd {
                 PadCommand::Led { r, g, b } => self.set_led(r, g, b),
                 PadCommand::Rumble { strong, weak, ms } => self.rumble(strong, weak, ms),

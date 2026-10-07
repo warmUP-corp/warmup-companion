@@ -143,6 +143,13 @@ pub(crate) fn ensure_led_engine() {
                     // service restart. Sleep stays outside, so a persistent panic
                     // paces at 33ms instead of busy-spinning.
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        // Hands off while a game owns the pad, so a game that drives the
+                        // lightbar itself keeps its colour. Forget the last write so warmUP's
+                        // colour is re-applied as soon as control comes back.
+                        if crate::gamepad_backend::game_owns_controller() {
+                            last = None;
+                            return;
+                        }
                         let state = led_state().lock().map(|s| *s).unwrap_or_default();
                         let color = led_color_at(&state, start.elapsed().as_secs_f32());
                         if last != Some(color) {

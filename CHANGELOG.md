@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Games that set the DualSense / DS4 lightbar keep their colour. While a game owns the controller the companion stops writing to the pad (lightbar and warmUP haptics) and restores warmUP's colour when you return to warmUP or the game ends.
+
 ## v0.8.1
 
 - Voice typing can be turned off completely. R3, Ctrl+Alt+V and the mic key do nothing, the mic key on the keyboard shows disabled, and any recording in progress is discarded instead of transcribed. The speech engine unloads. Turn it off in the tray (Voice engine → Off, or Voice typing before speech is installed), in Controller Center under General, or with `voice_enabled = false` in `settings.ini`.
