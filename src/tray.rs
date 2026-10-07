@@ -75,6 +75,8 @@ const MENU_SIGNIN_HINTS: usize = 1021;
 const MENU_UNLOAD_VOICE: usize = 1022;
 const MENU_VOICE_ENABLED: usize = 1023;
 const MENU_VOICE_OFF: usize = 1024;
+const MENU_STYLE_MODERN: usize = 1025;
+const MENU_SIDE_TIPS: usize = 1026;
 /// Mic device i is `MENU_MIC_BASE + i` (capped at 32 devices in the menu).
 const MENU_MIC_BASE: usize = 1100;
 /// Global hotkey id for "toggle voice dictation" (Ctrl+Alt+V).
@@ -305,6 +307,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 MENU_VK_FLOATING => toggle_vk_mode(),
                 MENU_STYLE_NORMAL => set_vk_style("normal"),
                 MENU_STYLE_MONO => set_vk_style("mono"),
+                MENU_STYLE_MODERN => set_vk_style("modern"),
+                MENU_SIDE_TIPS => toggle_setting_bool(
+                    "vk_side_tips",
+                    crate::config::gamepad_settings().vk_side_tips,
+                ),
                 MENU_EDIT_SETTINGS => edit_settings(),
                 MENU_ENGINE_WHISPER => {
                     crate::win::speech_input::set_engine("whisper");
@@ -315,10 +322,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     set_voice_enabled(hwnd, true);
                 }
                 MENU_MIC_DEFAULT => crate::win::speech_input::set_mic_choice(""),
-                MENU_VOICE_ENABLED => set_voice_enabled(
-                    hwnd,
-                    !crate::config::gamepad_settings().voice_enabled,
-                ),
+                MENU_VOICE_ENABLED => {
+                    set_voice_enabled(hwnd, !crate::config::gamepad_settings().voice_enabled)
+                }
                 MENU_VOICE_OFF => set_voice_enabled(hwnd, false),
                 MENU_UNLOAD_VOICE => {
                     let _ = std::thread::Builder::new()
@@ -432,7 +438,21 @@ unsafe fn show_menu(hwnd: HWND) {
                 MENU_STYLE_MONO,
                 w!("Mono"),
             );
+            let _ = AppendMenuW(
+                style_menu,
+                chk(style == crate::config::VkStyle::Modern),
+                MENU_STYLE_MODERN,
+                w!("Modern"),
+            );
             let _ = AppendMenuW(kb, MF_POPUP, style_menu.0 as usize, w!("Keyboard style"));
+            if style == crate::config::VkStyle::Modern {
+                let _ = AppendMenuW(
+                    kb,
+                    chk(gs.vk_side_tips),
+                    MENU_SIDE_TIPS,
+                    w!("Show tips beside keyboard"),
+                );
+            }
         }
         let _ = AppendMenuW(menu, MF_POPUP, kb.0 as usize, w!("Keyboard"));
     }

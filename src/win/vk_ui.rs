@@ -46,7 +46,6 @@ pub fn theme_palette() -> VkPalette {
 
 const WINDOW_CLASS: windows::core::PCWSTR = w!("WarmupXboxVkWindow");
 
-const VK_KB_REF_H: f32 = 384.0;
 /// Re-assert topmost while visible (shell search/task UI also uses HWND_TOPMOST).
 const VK_ZORDER_TIMER_ID: usize = 1;
 const VK_ZORDER_TIMER_MS: u32 = 200;
@@ -74,6 +73,9 @@ const MONO_ACCENT_TONE: f32 = 0.7;
 
 fn vk_palette(dark: bool, style: crate::config::VkStyle) -> VkPalette {
     let mut pal = vk_renderer::style_palette(style, dark);
+    if style == crate::config::VkStyle::Modern {
+        return pal;
+    }
     let theme = crate::config::keyboard_theme();
     if style == crate::config::VkStyle::Mono {
         if let Some(v) = theme.accent {
@@ -783,14 +785,8 @@ unsafe fn top_inset() -> f32 {
 
 fn legend_shown() -> bool {
     !crate::win::logon_focus::is_active()
-}
-
-unsafe fn bottom_inset() -> f32 {
-    if legend_shown() {
-        vk_renderer::legend_band_height(ui_scale(), crate::config::vk_style())
-    } else {
-        0.0
-    }
+        && crate::config::gamepad_settings().vk_side_tips
+        && !super::shortcut_sheet::hint_retired()
 }
 
 ///
@@ -820,8 +816,13 @@ unsafe fn floating_card_rect(chrome: f32) -> (i32, i32, i32, i32) {
     let style = crate::config::vk_style();
     let (grid_w, block_h) = vk_renderer::grid_size(scale_w, &rows, style);
     let (pad_x, pad_y) = vk_renderer::floating_pad(ui_scale(), style);
-    let (w, card_h) = floating_card_size(grid_w, block_h, chrome, bottom_inset(), pad_x, pad_y);
-    let w = w.min(full_w);
+    let (w, card_h) = floating_card_size(grid_w, block_h, chrome, pad_x, pad_y);
+    let side = if legend_shown() {
+        (vk_renderer::side_tips_extent(ui_scale(), style) * 2.0).round() as i32
+    } else {
+        0
+    };
+    let w = (w + side).min(full_w);
     let card_h = card_h.clamp(100, full_h);
     let margin = (((full_h as f32) * 0.04).round() as i32).clamp(28, 80);
     let x = m.left + (full_w - w) / 2;
@@ -839,13 +840,12 @@ fn floating_card_size(
     grid_w: f32,
     block_h: f32,
     chrome: f32,
-    legend: f32,
     pad_x: f32,
     pad_y: f32,
 ) -> (i32, i32) {
     (
         (grid_w + pad_x * 2.0).round() as i32,
-        (chrome + block_h + pad_y * 2.0 + legend).ceil() as i32,
+        (chrome + block_h + pad_y * 2.0).ceil() as i32,
     )
 }
 
@@ -854,9 +854,10 @@ unsafe fn target_monitor_dpi_scale() -> f32 {
 }
 
 unsafe fn docked_base_h(full_h: i32) -> i32 {
-    let h = VK_KB_REF_H * target_monitor_dpi_scale() * crate::config::vk_bar_scale();
-    let extra = top_inset() - vk_renderer::STRIP_BAND_H + bottom_inset();
-    ((h + extra).round() as i32).clamp(160, full_h)
+    let style = crate::config::vk_style();
+    let rows = vk_nav::rows_snapshot();
+    let h = vk_renderer::dock_height_for_full_keys(vk_scale_w(), &rows, top_inset(), style);
+    (h.round() as i32).clamp(160, full_h)
 }
 
 fn key_scale(dpi_scale: f32, bar_scale: f32) -> f32 {
@@ -915,6 +916,42 @@ unsafe fn start_timers(hwnd: HWND) {
 unsafe fn stop_timers(hwnd: HWND) {
     let _ = KillTimer(hwnd, VK_ZORDER_TIMER_ID);
     let _ = KillTimer(hwnd, VK_RENDER_TIMER_ID);
+}
+
+struct SheetMove {
+    rect: (i32, i32, i32, i32),
+    grow: bool,
+}
+
+unsafe fn sheet_window_move(hwnd: HWND, sheet_on: bool) -> Option<SheetMove> {
+    if !VK_VISIBLE.load(Ordering::SeqCst) {
+        return None;
+    }
+    let rect = if sheet_on {
+        let m = target_monitor_rect();
+        (m.left, m.top, m.right - m.left, m.bottom - m.top)
+    } else {
+        vk_dock_rect()
+    };
+    let mut r = windows::Win32::Foundation::RECT::default();
+    let _ = GetWindowRect(hwnd, &mut r);
+    ((r.left, r.top, r.right - r.left, r.bottom - r.top) != rect).then_some(SheetMove {
+        rect,
+        grow: sheet_on,
+    })
+}
+
+unsafe fn apply_sheet_move(hwnd: HWND, m: &SheetMove) {
+    let (x, y, w, h) = m.rect;
+    let _ = SetWindowPos(
+        hwnd,
+        HWND::default(),
+        x,
+        y,
+        w,
+        h,
+        SWP_NOACTIVATE | SWP_NOZORDER,
+    );
 }
 
 unsafe fn show_and_place(hwnd: HWND) {
@@ -1039,7 +1076,18 @@ fn render_frame() {
             return;
         };
         unsafe {
-            if let Err(e) = renderer.resize(hwnd) {
+            let sheet_on = super::shortcut_sheet::shown();
+            let sheet_move = sheet_window_move(hwnd, sheet_on);
+            let resized = match &sheet_move {
+                Some(m) if m.grow => renderer.resize_to(m.rect.2 as u32, m.rect.3 as u32),
+                Some(m) => {
+                    let _ = renderer.present_clear();
+                    apply_sheet_move(hwnd, m);
+                    renderer.resize(hwnd)
+                }
+                None => renderer.resize(hwnd),
+            };
+            if let Err(e) = resized {
                 vk_log::log(&format!("renderer resize: {e}"));
             }
             let pal = vk_palette(is_dark_theme(), style);
@@ -1092,11 +1140,14 @@ fn render_frame() {
                 voice_level: crate::win::speech_input::voice_level(),
                 ui_scale: scale,
                 style,
-                shortcut_sheet: super::shortcut_sheet::shown(),
+                shortcut_sheet: sheet_on,
                 legend: legend_shown(),
             };
             if let Err(e) = renderer.draw(&frame) {
                 vk_log::log(&format!("renderer draw: {e}"));
+            }
+            if let Some(m) = sheet_move.as_ref().filter(|m| m.grow) {
+                apply_sheet_move(hwnd, m);
             }
         }
     });
@@ -1141,7 +1192,7 @@ fn strip_hit_test(hwnd: HWND, x: i32, y: i32) -> Option<usize> {
     let rows = vk_nav::rows_snapshot();
     vk_renderer::strip_hit_slot(
         client.right as f32,
-        client.bottom as f32 - unsafe { bottom_inset() },
+        client.bottom as f32,
         unsafe { vk_scale_w() },
         &rows,
         unsafe { top_inset() },
@@ -1162,7 +1213,7 @@ fn hit_test(hwnd: HWND, x: i32, y: i32) -> Option<(vk_nav::KeyPos, KeyCell)> {
     let top_inset = unsafe { top_inset() };
     let scale_w = unsafe { vk_scale_w() };
     let cw = client.right as f32;
-    let ch = client.bottom as f32 - unsafe { bottom_inset() };
+    let ch = client.bottom as f32;
     let style = crate::config::vk_style();
     for kr in vk_renderer::key_rects(cw, ch, scale_w, &rows, top_inset, style) {
         if xf >= kr.left && xf < kr.right && yf >= kr.top && yf < kr.bottom {
@@ -1204,11 +1255,9 @@ mod tests {
         // Key block 1000x300 under a 67px chrome band with 18px padding: the
         // renderer centres the block below the chrome, so the card must carry
         // 2*pad vertically to leave exactly `pad` at the bottom and both sides.
-        let (w, h) = floating_card_size(1000.0, 300.0, 67.0, 0.0, 18.0, 18.0);
+        let (w, h) = floating_card_size(1000.0, 300.0, 67.0, 18.0, 18.0);
         assert_eq!(w, 1036);
         assert_eq!(h, 67 + 300 + 36);
-        let (w2, h2) = floating_card_size(1000.0, 300.0, 67.0, 40.0, 18.0, 18.0);
-        assert_eq!((w2, h2), (w, h + 40));
         let bottom_pad = (h as f32 - 67.0 - 300.0) / 2.0;
         let side_pad = (w as f32 - 1000.0) / 2.0;
         assert_eq!(bottom_pad, side_pad);
@@ -1219,16 +1268,18 @@ mod tests {
         sheet: bool,
         target_w: f32,
     ) -> (u32, u32, Vec<u8>) {
-        let rows = vk_nav::rows_for_test();
+        let rows = vk_nav::modern_rows_for_test();
         let (w1, _) = vk_renderer::grid_size(vk_renderer::REF_MON_W, &rows, style);
         let (p1, _) = vk_renderer::floating_pad(1.0, style);
-        let scale = target_w / (w1 + p1 * 2.0);
+        let side1 = vk_renderer::side_tips_extent(1.0, style) * 2.0;
+        let scale = target_w / (w1 + p1 * 2.0 + side1);
         let scale_w = vk_renderer::REF_MON_W * scale;
         let (grid_w, block_h) = vk_renderer::grid_size(scale_w, &rows, style);
         let (pad_x, pad_y) = vk_renderer::floating_pad(scale, style);
         let chrome = vk_renderer::strip_band_height(scale, style);
-        let legend = vk_renderer::legend_band_height(scale, style);
-        let (w, h) = floating_card_size(grid_w, block_h, chrome, legend, pad_x, pad_y);
+        let side = vk_renderer::side_tips_extent(scale, style) * 2.0;
+        let (w, h) = floating_card_size(grid_w, block_h, chrome, pad_x, pad_y);
+        let w = w + side.round() as i32;
         let pal = vk_renderer::style_palette(style, true);
         let strip = crate::vk_predict::StripState {
             visible: ["I", "The", "I'm", "Thanks", "Hi", "It", "We"]
@@ -1304,22 +1355,106 @@ mod tests {
                     };
                     write_png(&dir.join(name), w, h, &px);
                 }
-                let (fw, fh) = if sheet { (1600, 546) } else { (1600, 80) };
-                let (w, h, px) = unsafe {
-                    let mut r = vk_renderer::VkRenderer::offscreen(fw, fh).expect("offscreen");
-                    r.render_design(style, sheet).expect("design frame")
-                };
-                assert_eq!((w, h), (fw, fh));
-                if let Some(dir) = &dir {
-                    let name = match (style, sheet) {
-                        (crate::config::VkStyle::Mono, false) => "legend-frame-mono.png",
-                        (crate::config::VkStyle::Mono, true) => "sheet-frame-mono.png",
-                        (_, false) => "legend-frame.png",
-                        (_, true) => "sheet-frame.png",
-                    };
-                    write_png(&dir.join(name), w, h, &px);
-                }
             }
+        }
+    }
+
+    #[test]
+    fn modern_card_renders_chips_and_side_tips() {
+        let style = crate::config::VkStyle::Modern;
+        let rows = vk_nav::modern_rows_for_test();
+        assert_eq!(rows.len(), 5);
+        let scale = 1.0;
+        let scale_w = vk_renderer::REF_MON_W * scale;
+        let (grid_w, block_h) = vk_renderer::grid_size(scale_w, &rows, style);
+        let (pad_x, pad_y) = vk_renderer::floating_pad(scale, style);
+        let chrome = vk_renderer::strip_band_height(scale, style);
+        let (w, h) = floating_card_size(grid_w, block_h, chrome, pad_x, pad_y);
+        let side = (vk_renderer::side_tips_extent(scale, style) * 2.0).round() as i32;
+        assert!(side > 0);
+        let w = w + side;
+        let pal = vk_renderer::style_palette(style, true);
+        let strip = crate::vk_predict::StripState {
+            visible: ["The", "Thanks", "I'm", "Hi", "It"]
+                .iter()
+                .map(|w| w.to_string())
+                .collect(),
+            highlight_slot: 1,
+            engaged: true,
+        };
+        assert_eq!(vk_renderer::strip_slots(style), 5);
+        let frame = vk_renderer::VkFrame {
+            pal: &pal,
+            rows: &rows,
+            sel: vk_nav::KeyPos { row: 1, col: 0 },
+            key_glyph,
+            key_hint,
+            top_inset: chrome,
+            scale_w,
+            candidates: Some(&strip),
+            floating: true,
+            modifiers: vk_renderer::VkModifiers::default(),
+            pressed: None,
+            controller_label: "DualSense Wireless Controller",
+            voice_available: true,
+            voice_active: false,
+            voice_phase: vk_renderer::VoicePhase::Listening,
+            voice_level: 0.0,
+            ui_scale: scale,
+            style,
+            shortcut_sheet: false,
+            legend: true,
+        };
+        let (w, h, px) = unsafe {
+            let mut r = vk_renderer::VkRenderer::offscreen(w as u32, h as u32).expect("offscreen");
+            r.render_bgra(&frame).expect("render")
+        };
+        let corner = &px[..4];
+        assert_eq!(corner[3], 0);
+        if let Some(dir) = std::env::var_os("VK_LEGEND_PNG_DIR").map(std::path::PathBuf::from) {
+            write_png(&dir.join("modern.png"), w, h, &px);
+        }
+        let docked = vk_renderer::VkFrame {
+            floating: false,
+            ..frame
+        };
+        let (dw, dh, dpx) = unsafe {
+            let mut r = vk_renderer::VkRenderer::offscreen(1920, h).expect("offscreen");
+            r.render_bgra(&docked).expect("render docked")
+        };
+        let at = |x: u32, y: u32| &dpx[((y * dw + x) * 4) as usize..][..3];
+        let visible = at(1600, dh - 40) != at(5, 5);
+        if let Some(dir) = std::env::var_os("VK_LEGEND_PNG_DIR").map(std::path::PathBuf::from) {
+            write_png(&dir.join("modern-docked.png"), dw, dh, &dpx);
+        }
+        assert!(visible, "docked shortcut hint is visible");
+        let locked = vk_renderer::VkFrame {
+            modifiers: vk_renderer::VkModifiers {
+                shift: true,
+                caps: true,
+                symbol: false,
+                symbol_locked: false,
+            },
+            ..docked
+        };
+        let (lw, lh, lpx) = unsafe {
+            let mut r = vk_renderer::VkRenderer::offscreen(1920, h).expect("offscreen");
+            r.render_bgra(&locked).expect("render locked")
+        };
+        if let Some(dir) = std::env::var_os("VK_LEGEND_PNG_DIR").map(std::path::PathBuf::from) {
+            write_png(&dir.join("modern-shift.png"), lw, lh, &lpx);
+        }
+        let sheet = vk_renderer::VkFrame {
+            shortcut_sheet: true,
+            ..docked
+        };
+        let (sw, sh, spx) = unsafe {
+            let mut r = vk_renderer::VkRenderer::offscreen(1920, 1080).expect("offscreen");
+            r.render_bgra(&sheet).expect("render sheet")
+        };
+        assert_eq!((sw, sh), (1920, 1080));
+        if let Some(dir) = std::env::var_os("VK_LEGEND_PNG_DIR").map(std::path::PathBuf::from) {
+            write_png(&dir.join("modern-sheet.png"), sw, sh, &spx);
         }
     }
 
