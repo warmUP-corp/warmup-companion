@@ -719,6 +719,16 @@ fn inbound_frame_ready(peeked: &[u8], available: u32) -> bool {
     peeked.contains(&b'\n') || available as usize > peeked.len()
 }
 
+#[cfg(test)]
+fn pipe_shutdown_refused(kid_mode_blocking: bool) -> bool {
+    kid_mode_blocking
+}
+
+#[cfg(test)]
+fn parental_security_log_writable(path: &std::path::Path) -> bool {
+    path.is_file()
+}
+
 /// Start the pipe server on its own thread. No-op on non-Windows (there the desktop
 /// owns input in-process, so there is no companion to serve).
 #[cfg(windows)]
@@ -1086,6 +1096,7 @@ mod server {
                             .retain(|external_id| !p.external_ids.contains(external_id));
                     }
                 }
+                Ok(DownFrame::ShutDown(_)) => handle_shut_down(),
                 // A malformed known-type frame is a contract break (e.g. the rumble
                 // durationMs mismatch) — log it instead of dropping silently.
                 Err(e) => {
@@ -1135,6 +1146,20 @@ mod server {
             }
         }
         String::from_utf8(out).map_err(|_| io_err("hello not valid UTF-8"))
+    }
+
+    fn handle_shut_down() {
+        #[cfg(feature = "gamepad")]
+        {
+            if crate::parental_guard::is_blocking_active() {
+                crate::install::log_line("pipe shut_down refused: Kid Mode blocking is active");
+                crate::parental_guard::log_refused_shutdown();
+                return;
+            }
+        }
+        crate::install::request_service_stop();
+        #[cfg(feature = "gamepad")]
+        crate::gamepad::request_stop();
     }
 
     fn write_all(pipe: HANDLE, mut buf: &[u8]) -> std::io::Result<()> {
@@ -1249,6 +1274,26 @@ mod tests {
             }
         ));
         assert!(matches!(cmds[1], PadCommand::Led { r: 7, g: 8, b: 9 }));
+    }
+
+    #[test]
+    fn pipe_shutdown_is_refused_only_when_kid_mode_blocks() {
+        assert!(!pipe_shutdown_refused(false));
+        assert!(pipe_shutdown_refused(true));
+    }
+
+    #[test]
+    fn parental_security_log_is_used_only_when_the_file_exists() {
+        let missing = std::path::Path::new("no-such-parental-security.log");
+        assert!(!parental_security_log_writable(missing));
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "warmup-parental-security-{}.log",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"").unwrap();
+        assert!(parental_security_log_writable(&path));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

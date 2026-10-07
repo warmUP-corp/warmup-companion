@@ -83,6 +83,7 @@ Notes:
 | `companion_settings` | `{ sleepOnGame?: bool, autoStopOnGame?: bool, userlandPollPaused?: bool, promptUserlandDebug?: bool }` | companion-local runtime/settings control |
 | `library_watch` | `{ enabled: bool, games: [{ gameId, exeStems: string[], installDirPrefixes: string[] }] }` | offline playtime tracking (v6) |
 | `play_sessions_ack` | `{ externalIds: string[] }` | offline playtime tracking (v6) |
+| `shut_down` | `{}` | ask the companion to stop itself (WAR-42); additive on v6 |
 
 ### `GamepadConfig` payload
 
@@ -158,6 +159,28 @@ Sleep mode also reads LB for one companion-local action: hold Back + LB together
 take one full-screen screenshot (with a rumble). It fires once per hold; release either button to
 arm it again. LB is never forwarded while sleeping, and Back is still forwarded as above.
 
+### `shut_down` request (WAR-42)
+
+Additive on protocol v6. Old companions ignore an unknown `type` and keep running. Do **not** bump `protocolVersion` for this frame.
+
+warmUP (desktop, not elevated) sends one NDJSON line after a successful `hello`. Exact wire form, including the empty payload object and the trailing newline:
+
+```
+{"type":"shut_down","payload":{}}\n
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `type` | yes | exactly `shut_down` (snake_case). Not `shutdown`. |
+| `payload` | yes | empty object `{}`. Extra camelCase fields are ignored. |
+
+No up-frame ack. Behavior:
+
+1. If Kid Mode blocking is active (`parental_guard.enabled` from the last `parental_guard` / `hello` snapshot), the companion **refuses** the request and stays running. It logs the refusal to the service log. If `C:\ProgramData\WarmupVk\parental-security.log` already exists, it appends one JSON line: `{"kind":"shut-down-refused","detail":"Kid Mode blocking is active","ts":<unix_secs>}`.
+2. Otherwise the companion writes the clean-exit marker `C:\ProgramData\WarmupVk\companion-clean-exit` first (mtime is what warmUP's Kid Mode watchdog treats as a graceful stop; 30s window), then asks SCM to stop `WarmupVkSvc` (`sc stop` from the LocalSystem worker). The service process exits; the client sees the pipe drop.
+
+`Restart App` / updates must not send this frame. Use it only for "Close Companion with warmUP".
+
 The companion maps cursor/scroll tuning fields to its internal names per the golden fixture's `configFieldMapping` (`sensitivity->cursor_speed`, `accelerationExp->cursor_accel`, `deadzone->cursor_deadzone`, `scrollSensitivity->scroll_speed`).
 
 `keyboardTheme` is optional, and each color inside it is optional. Colors are `#RRGGBB`;
@@ -173,6 +196,7 @@ fields keep the native keyboard's current dark/light default for that color slot
 - While native VK input is unsuppressed (Windows desktop), L3/R3 edges stay local to the companion and are not also emitted as launcher `button` frames. This prevents the same shortcut from opening the keyboard/dictation and the minimized launcher's dock/topbar. Foreground launcher navigation still receives L3/R3; Guide forwarding is unchanged.
 - `axis` is an additive v4-compatible up-frame; old desktop clients ignore it as unknown, old companions simply omit it.
 - `led` is an additive v4-compatible down-frame for one-shot test writes; old companions ignore it as unknown.
+- `shut_down` is an additive v6-compatible down-frame for unelevated companion stop. Old companions ignore it as unknown; Kid Mode blocking refuses it and keeps the service running.
 - Additive fields may stay on the current protocol when both directions are default/unknown-field tolerant.
 - Breaking changes to the pipe name, framing, `hello` shape, or required frame `payload` fields bump it.
 - An unsupported version is resolved by the server closing the connection; the client surfaces a "companion update required" state rather than interpreting unknown frames.

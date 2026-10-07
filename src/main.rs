@@ -12,6 +12,8 @@ mod tracking_owner;
 /// Companion IPC wire frames (#347). Pure serde; used by the pipe server and tests.
 #[allow(dead_code)]
 mod protocol;
+#[allow(dead_code)]
+mod service_acl;
 mod sentry_telemetry;
 mod symbols;
 mod time_util;

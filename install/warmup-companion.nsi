@@ -149,6 +149,13 @@ Section "!Warmup Companion service (required)" SEC_MAIN
     Abort
   ${EndIf}
 
+  DetailPrint "Granting interactive start/stop on ${SERVICE}..."
+  nsExec::ExecToLog '"$INSTDIR\warmup-companion.exe" grant-service-acl'
+  Pop $0
+  ${If} $0 != 0
+    DetailPrint "WARNING: could not grant IU RP+WP on ${SERVICE} (exit $0)."
+  ${EndIf}
+
   SetShellVarContext all
   CreateShortCut "$SMPROGRAMS\Warmup Companion.lnk" "$INSTDIR\warmup-companion.exe" "wake" "$INSTDIR\icon.ico" 0 SW_SHOWMINIMIZED
 

@@ -16,6 +16,7 @@
 - Modern keyboard style, with layout, sizes and the shortcut sheet shared across styles.
 - TV mode enlarges every keyboard style to the TV layout: bigger keys and text, a number row, larger suggestions, a shortcut hint above the keys and a full-screen shortcut sheet. Your keyboard style and colours stay as they are. Pick Auto, TV or Desk under Keyboard ▸ Display in the tray (`vk_display` in `settings.ini`). On first start warmUP picks TV or Desk from the biggest connected screen.
 - Games that set the DualSense / DS4 lightbar keep their colour. While a game owns the controller the companion stops writing to the pad (lightbar and warmUP haptics) and restores warmUP's colour when you return to warmUP or the game ends.
+- Unelevated warmUP can close the companion over the existing pipe (`shut_down`). The service writes `C:\ProgramData\WarmupVk\companion-clean-exit` and stops itself. Kid Mode blocking refuses the request and stays running. Install/repair grants interactive users start and stop (`RP`+`WP`) on `WarmupVkSvc` via `sc sdset`.
 
 ## v0.8.1
 

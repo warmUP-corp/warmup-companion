@@ -58,6 +58,10 @@ pub fn dispatch_install_or_service(args: &[String]) {
             crate::install::run_stop();
             std::process::exit(0);
         }
+        Some("grant-service-acl") => {
+            crate::install::run_grant_interactive_control();
+            std::process::exit(0);
+        }
         Some("restore-keyboard") | Some("restore-native-keyboard") => {
             crate::win::native_keyboard::restore_auto_invoke();
             crate::win::native_keyboard::ensure_search_service_running();
