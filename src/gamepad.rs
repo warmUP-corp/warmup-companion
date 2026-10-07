@@ -637,9 +637,13 @@ impl GamepadPoll {
         }
 
         #[cfg(windows)]
-        if crate::config::service_mode() {
+        {
             let name = self.backend.controller_label();
-            let input = self.backend.live_input_summary();
+            let input = if crate::config::service_mode() {
+                self.backend.live_input_summary()
+            } else {
+                String::new()
+            };
             crate::debug_state::set_gamepad(self.backend.is_connected(), name, input);
         }
 
@@ -1119,6 +1123,7 @@ impl GamepadPoll {
                 None
             }
             (Button::Lb, true) => {
+                vk_nav::flash_shoulder(false);
                 match vk_nav::shoulder_nav(self.vk_select_down, crate::vk_predict::strip_engaged())
                 {
                     vk_nav::ShoulderNav::CycleSuggestions => {
@@ -1147,6 +1152,7 @@ impl GamepadPoll {
                 None
             }
             (Button::Rb, true) => {
+                vk_nav::flash_shoulder(true);
                 match vk_nav::shoulder_nav(self.vk_select_down, crate::vk_predict::strip_engaged())
                 {
                     vk_nav::ShoulderNav::CycleSuggestions => {
@@ -1187,6 +1193,7 @@ impl GamepadPoll {
             (Button::R3, true) => {
                 if crate::config::voice_enabled() {
                     vk_nav::start_voice_input();
+                    vk_nav::flash_voice();
                     vk_ui::request_repaint();
                     self.backend.haptic_alert();
                 }

@@ -65,12 +65,14 @@ pub enum VkStyle {
     #[default]
     Normal,
     Mono,
+    Modern,
 }
 
 #[cfg(feature = "gamepad")]
 pub fn parse_vk_style(raw: Option<&str>) -> VkStyle {
     match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
         Some("mono" | "apple") => VkStyle::Mono,
+        Some("modern" | "tv") => VkStyle::Modern,
         _ => VkStyle::Normal,
     }
 }
@@ -151,6 +153,8 @@ pub struct GamepadSettings {
     /// Offline voice typing. When false, R3, Ctrl+Alt+V and the mic key do nothing,
     /// the mic key on the keyboard shows disabled, and the speech engine is unloaded.
     pub voice_enabled: bool,
+    pub vk_side_tips: bool,
+    pub vk_sheet_opens: u32,
     /// Master switch for gamepad-driven mouse control ("Enable gamepad cursor" in
     /// warmUP, pushed as `config.enabled`). When false the sticks and the touchpad
     /// stop moving/scrolling the OS cursor and A/B stop emitting OS clicks — button
@@ -179,6 +183,8 @@ impl Default for GamepadSettings {
             signin_hints: true,
             guide_launch: true,
             voice_enabled: true,
+            vk_side_tips: true,
+            vk_sheet_opens: 0,
             cursor_enabled: true,
             cursor_deadzone: 0.15,
             cursor_speed: 15.0,
@@ -389,6 +395,10 @@ fn apply_gamepad_settings_text(settings: &mut GamepadSettings, text: &str) {
             "signin_hints" => settings.signin_hints = parse_bool(value, settings.signin_hints),
             "guide_launch" => settings.guide_launch = parse_bool(value, settings.guide_launch),
             "voice_enabled" => settings.voice_enabled = parse_bool(value, settings.voice_enabled),
+            "vk_side_tips" => settings.vk_side_tips = parse_bool(value, settings.vk_side_tips),
+            "vk_sheet_opens" => {
+                settings.vk_sheet_opens = value.parse().unwrap_or(settings.vk_sheet_opens)
+            }
             "cursor_enabled" => {
                 settings.cursor_enabled = parse_bool(value, settings.cursor_enabled)
             }
@@ -713,7 +723,8 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
         | "prompt_userland_debug"
         | "signin_hints"
         | "guide_launch"
-        | "voice_enabled" => match value.trim().to_ascii_lowercase().as_str() {
+        | "voice_enabled"
+        | "vk_side_tips" => match value.trim().to_ascii_lowercase().as_str() {
             "true" | "false" | "1" | "0" | "yes" | "no" | "on" | "off" => Ok(()),
             _ => Err(format!("{key} must be a boolean")),
         },
@@ -738,9 +749,14 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
             "docked" | "floating" => Ok(()),
             _ => Err("vk_mode must be docked or floating".to_string()),
         },
+        "vk_sheet_opens" => value
+            .trim()
+            .parse::<u32>()
+            .map(|_| ())
+            .map_err(|_| "vk_sheet_opens must be a whole number".to_string()),
         "vk_style" => match value.trim().to_ascii_lowercase().as_str() {
-            "normal" | "mono" | "refined" | "apple" => Ok(()),
-            _ => Err("vk_style must be normal or mono".to_string()),
+            "normal" | "mono" | "refined" | "apple" | "modern" | "tv" => Ok(()),
+            _ => Err("vk_style must be normal, mono or modern".to_string()),
         },
         "vk_bar_scale" => value
             .parse::<f32>()
@@ -907,6 +923,15 @@ mod tests {
         assert!(validate_gamepad_setting("vk_style", "refined").is_ok());
         assert!(validate_gamepad_setting("vk_style", "Normal").is_ok());
         assert!(validate_gamepad_setting("vk_style", "ios").is_err());
+        assert_eq!(parse_vk_style(Some("Modern")), VkStyle::Modern);
+        assert!(validate_gamepad_setting("vk_style", "modern").is_ok());
+        assert!(validate_gamepad_setting("vk_side_tips", "off").is_ok());
+        assert!(validate_gamepad_setting("vk_sheet_opens", "3").is_ok());
+        assert!(validate_gamepad_setting("vk_sheet_opens", "-1").is_err());
+        let mut settings = GamepadSettings::default();
+        assert_eq!(settings.vk_sheet_opens, 0);
+        apply_gamepad_settings_text(&mut settings, "vk_sheet_opens=2\n");
+        assert_eq!(settings.vk_sheet_opens, 2);
     }
 
     #[cfg(feature = "gamepad")]

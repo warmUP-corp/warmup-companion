@@ -278,8 +278,51 @@ fn build_web_layout(layer: Layer, lang_de: bool) -> Vec<KeyRow> {
     rows
 }
 
+const NUMBER_SHIFTED: [char; 10] = ['!', '@', '#', '$', '%', '^', '&', '*', '(', ')'];
+const MODERN_TOP_SYMBOLS: [char; 10] = ['~', '`', '|', '\\', '{', '}', '[', ']', '<', '>'];
+
+fn number_key(digit: char, shifted: char, layer: Layer) -> KeyCell {
+    let (c, corner) = if layer == Layer::Symbol {
+        (shifted, digit)
+    } else {
+        (digit, shifted)
+    };
+    KeyCell {
+        label: c.to_string(),
+        sublabel: Some(corner.to_string()),
+        action: KeyAction::Char(c),
+        span: 1.0,
+    }
+}
+
+fn build_modern_layout(layer: Layer, lang_de: bool) -> Vec<KeyRow> {
+    let mut rows = build_web_layout(layer, lang_de);
+    let numbers = TOP_SYMBOLS
+        .iter()
+        .zip(NUMBER_SHIFTED)
+        .map(|(&d, s)| number_key(d, s, layer))
+        .collect();
+    for (key, sym) in rows[0].keys.iter_mut().zip(MODERN_TOP_SYMBOLS) {
+        if layer == Layer::Symbol {
+            key.label = sym.to_string();
+            key.action = KeyAction::Char(sym);
+        }
+        key.sublabel = None;
+    }
+    if let Some(last) = rows[1].keys.last_mut() {
+        *last = KeyCell::tri('@', '@', '*', layer);
+        last.sublabel = None;
+    }
+    if let Some(dot) = rows[2].keys.iter_mut().rev().nth(1) {
+        *dot = KeyCell::tri('.', '.', ',', layer);
+        dot.sublabel = None;
+    }
+    rows.insert(0, KeyRow { keys: numbers });
+    rows
+}
+
 fn rebuild(nav: &mut NavState) {
-    nav.rows = build_web_layout(nav.layer, nav.lang_de);
+    nav.rows = build_modern_layout(nav.layer, nav.lang_de);
     clamp_pos(nav);
 }
 
@@ -311,7 +354,7 @@ pub fn reset_selection() {
         nav.one_shot_symbol = false;
         nav.last_shift_at = None;
         nav.last_symbol_at = None;
-        nav.pos = KeyPos { row: 1, col: 1 };
+        nav.pos = KeyPos { row: 2, col: 1 };
         #[cfg(feature = "gamepad")]
         {
             nav.hold_button = None;
@@ -358,6 +401,18 @@ fn mark_pressed_action(matches: impl Fn(&KeyAction) -> bool) {
     }
 }
 
+pub fn flash_shoulder(right: bool) {
+    if right {
+        mark_pressed_action(|a| matches!(a, KeyAction::PredictNext));
+    } else {
+        mark_pressed_action(|a| matches!(a, KeyAction::PredictPrev));
+    }
+}
+
+pub fn flash_voice() {
+    mark_pressed_action(|a| matches!(a, KeyAction::VoiceInput));
+}
+
 fn is_vk(action: &KeyAction, vk: VIRTUAL_KEY) -> bool {
     matches!(action, KeyAction::Vk(v) if *v == vk)
 }
@@ -395,6 +450,11 @@ pub fn rows_snapshot() -> Vec<KeyRow> {
 #[cfg(test)]
 pub fn rows_for_test() -> Vec<KeyRow> {
     build_web_layout(Layer::Lower, false)
+}
+
+#[cfg(test)]
+pub fn modern_rows_for_test() -> Vec<KeyRow> {
+    build_modern_layout(Layer::Lower, false)
 }
 
 pub fn selected_key() -> Option<KeyCell> {
@@ -1316,6 +1376,31 @@ mod press_feedback_tests {
             let key = key_at(pos);
             assert!(is_vk(&key.action, vk), "{label}: got {:?}", key.label);
         }
+    }
+
+    #[test]
+    fn modern_layout_has_a_number_row_with_shifted_corners() {
+        let rows = build_modern_layout(Layer::Lower, false);
+        assert_eq!(rows.len(), 5);
+        let labels: String = rows[0].keys.iter().map(|k| k.label.as_str()).collect();
+        assert_eq!(labels, "1234567890");
+        let corners: String = rows[0]
+            .keys
+            .iter()
+            .filter_map(|k| k.sublabel.as_deref())
+            .collect();
+        assert_eq!(corners, "!@#$%^&*()");
+        assert_eq!(rows[2].keys.last().map(|k| k.label.as_str()), Some("@"));
+        assert_eq!(
+            rows[3].keys.iter().rev().nth(1).map(|k| k.label.as_str()),
+            Some(".")
+        );
+        for row in &rows[1..4] {
+            assert!(row.keys.iter().all(|k| k.sublabel.is_none()));
+        }
+        let symbols = build_modern_layout(Layer::Symbol, false);
+        assert_eq!(symbols[0].keys[0].label, "!");
+        assert_eq!(symbols[0].keys[0].sublabel.as_deref(), Some("1"));
     }
 
     #[test]
