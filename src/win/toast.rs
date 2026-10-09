@@ -68,7 +68,7 @@ fn show(xml: &str) -> Result<(), String> {
         .map_err(|e| format!("LoadXml: {e}"))?;
     let toast = ToastNotification::CreateToastNotification(&doc)
         .map_err(|e| format!("CreateToastNotification: {e}"))?;
-    let notifier = ToastNotificationManager::CreateToastNotifierWithId(h!("warmUP.Companion"))
+    let notifier = ToastNotificationManager::CreateToastNotifierWithId(h!("warmUP.CompanionApp"))
         .map_err(|e| format!("CreateToastNotifierWithId: {e}"))?;
     notifier.Show(&toast).map_err(|e| format!("Show: {e}"))?;
     Ok(())
@@ -90,15 +90,35 @@ fn file_uri(path: &str) -> String {
 
 fn register_aumid() {
     set_hkcu_string(
-        r"Software\Classes\AppUserModelId\warmUP.Companion",
+        r"Software\Classes\AppUserModelId\warmUP.CompanionApp",
         Some("DisplayName"),
         "warmUP",
     );
-    set_hkcu_string(
-        r"Software\Classes\AppUserModelId\warmUP.Companion",
-        Some("IconUri"),
-        r"C:\ProgramData\WarmupVk\bin\icon.ico",
-    );
+    if let Some(icon) = write_icon_png() {
+        set_hkcu_string(
+            r"Software\Classes\AppUserModelId\warmUP.CompanionApp",
+            Some("IconUri"),
+            &icon.display().to_string(),
+        );
+    }
+}
+
+fn write_icon_png() -> Option<std::path::PathBuf> {
+    const ICO: &[u8] = include_bytes!("../../assets/icon.ico");
+    let u16_at = |o: usize| u16::from_le_bytes([ICO[o], ICO[o + 1]]) as usize;
+    let u32_at = |o: usize| u32::from_le_bytes(ICO[o..o + 4].try_into().unwrap()) as usize;
+    let (size, offset) = (0..u16_at(4))
+        .map(|i| 6 + 16 * i)
+        .map(|e| (u32_at(e + 8), u32_at(e + 12)))
+        .max_by_key(|(size, _)| *size)?;
+    let png = ICO.get(offset..offset + size)?;
+    let dir = std::path::Path::new(&std::env::var_os("LOCALAPPDATA")?).join("WarmupVk");
+    let path = dir.join("toast-icon.png");
+    if std::fs::read(&path).ok().as_deref() != Some(png) {
+        std::fs::create_dir_all(&dir).ok()?;
+        std::fs::write(&path, png).ok()?;
+    }
+    Some(path)
 }
 
 fn set_hkcu_string(subkey: &str, name: Option<&str>, data: &str) {
