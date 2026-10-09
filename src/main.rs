@@ -680,13 +680,6 @@ fn main() {
             std::thread::sleep(std::time::Duration::from_secs(60));
         }
     }
-    #[cfg(all(windows, feature = "gamepad"))]
-    if args.iter().any(|a| a == "--quick-menu") {
-        win::quick_menu::show();
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(60));
-        }
-    }
 
     let use_real_win32 = args.iter().any(|a| a == "--real")
         || env::var_os("WARMUP_REAL_VK").is_some_and(|v| v != "0");

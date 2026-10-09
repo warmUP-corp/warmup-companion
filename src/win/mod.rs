@@ -5,11 +5,7 @@ mod mono_ui;
 #[cfg(feature = "gamepad")]
 pub(crate) mod tray_menu;
 #[cfg(feature = "gamepad")]
-pub(crate) mod quick_menu;
-#[cfg(feature = "gamepad")]
 pub(crate) mod update_window;
-#[cfg(feature = "gamepad")]
-mod quick_menu_sys;
 pub mod controller_tips;
 pub mod debug_overlay;
 pub mod desktop;

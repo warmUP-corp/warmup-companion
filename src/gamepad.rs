@@ -428,8 +428,6 @@ pub struct GamepadPoll {
     center_held: Vec<Button>,
     pad_down: Vec<Button>,
     #[cfg(windows)]
-    guide_hold: crate::win::quick_menu::GuideHold,
-    #[cfg(windows)]
     last_input_desktop: Option<String>,
     #[cfg(windows)]
     last_desktop_watch: Option<(String, String)>,
@@ -605,8 +603,6 @@ impl GamepadPoll {
             center_owned: false,
             center_held: Vec::new(),
             pad_down: Vec::new(),
-            #[cfg(windows)]
-            guide_hold: Default::default(),
             #[cfg(windows)]
             last_input_desktop: None,
             #[cfg(windows)]
@@ -889,15 +885,6 @@ impl GamepadPoll {
         if let Some(edge) = desktop_reopen {
             edges.push(edge);
         }
-        #[cfg(windows)]
-        let changes = {
-            let allowed = !sleeping && !game_owns_input && !Self::service_signin_desktop();
-            let (changes, open) = self.guide_hold.rewrite(changes, allowed, Instant::now());
-            if open {
-                crate::win::quick_menu::show();
-            }
-            changes
-        };
         for change in changes {
             if forward_only_while_sleeping(sleeping, change.button) {
                 if change.button != Button::Lb {

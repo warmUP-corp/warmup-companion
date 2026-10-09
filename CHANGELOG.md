@@ -8,6 +8,7 @@
 - New update window in the Controller Center style: release notes and size, then download progress, SHA-256 verification against the release checksum and a silent install. Works with the controller (A / B, D-pad), mouse and keyboard. Hide it with B while it downloads.
 - Tray **Updates** submenu: Install update / Check for updates, What's new, Check automatically and the last check time. The tray header shows the new version and the Updates row gets a dot while an update is waiting.
 - Turn the daily check off in the tray (Updates → Check automatically) or with `update_check = false` in `settings.ini`.
+- The Quick menu (hold PS / Guide) is removed for now. PS / Guide opens warmUP on press again.
 
 ## v0.9.1
 

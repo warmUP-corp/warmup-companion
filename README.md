@@ -19,7 +19,6 @@ Type anywhere in Windows with the controller already in your hands. warmUP Compa
 - Offers local English word suggestions without reading text from the focused app.
 - Supports optional offline voice typing with Whisper.cpp or NVIDIA Parakeet.
 - Sleeps controller input while a game is active, then wakes for desktop use.
-- Quick menu on a long press of PS / Guide: volume, brightness, media, screenshot, app switcher, lock and power.
 - Controller Center to change every setting with the controller, mouse or keyboard.
 - Uses the DualSense / DualShock 4 touchpad as a trackpad: tap to click, two-finger scroll, desktop swipes.
 
@@ -39,11 +38,11 @@ Hold **Create + Options** (View + Menu on Xbox) or press **Ctrl+Alt+C** to open 
 | --- | --- | --- |
 | ![Controller Center, General tab](assets/promo/controller-center-general.png) | ![Controller Center, Keyboard tab](assets/promo/controller-center-keyboard.png) | ![Controller Center, Controller tab](assets/promo/controller-center-controller.png) |
 
-### Quick menu and tray
+### Tray
 
-| Quick menu (hold PS / Guide) | Tray menu |
-| --- | --- |
-| ![Quick menu with the Power submenu open](assets/promo/quick-menu.png) | ![Tray menu with the Keyboard submenu open](assets/promo/tray-menu.png) |
+| Tray menu |
+| --- |
+| ![Tray menu with the Keyboard submenu open](assets/promo/tray-menu.png) |
 
 ---
 
@@ -74,7 +73,6 @@ No Steam setup is required. To try the sign-in path after confirming normal desk
 | Right stick | Right stick | Scroll |
 | <img src="controller-icons/x_face_a_colored.svg" alt="A" width="28" align="middle"> | <img src="controller-icons/p5_face_cross_colored.svg" alt="Cross" width="28" align="middle"> | Click |
 | <img src="controller-icons/x_l3_click.svg" alt="L3" width="28" align="middle"> | <img src="controller-icons/p5_l3_click.svg" alt="L3" width="28" align="middle"> | Open the keyboard |
-| Hold Guide | Hold PS | Quick menu |
 | <img src="controller-icons/x_menu_view.svg" alt="View" width="28" align="middle"> + <img src="controller-icons/x_menu_menu.svg" alt="Menu" width="28" align="middle"> | <img src="controller-icons/p5_share.svg" alt="Create" width="28" align="middle"> + <img src="controller-icons/p5_options.svg" alt="Options" width="28" align="middle"> | Open or close the Controller Center |
 | – | Touchpad tap / two-finger tap | Left click / right click |
 | – | Touchpad two-finger drag | Scroll |
