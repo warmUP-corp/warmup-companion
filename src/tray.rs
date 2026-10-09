@@ -77,6 +77,9 @@ const MENU_SIDE_TIPS: usize = 1026;
 const MENU_DISPLAY_AUTO: usize = 1027;
 const MENU_DISPLAY_TV: usize = 1028;
 const MENU_DISPLAY_DESK: usize = 1029;
+const MENU_UPDATE: usize = 1030;
+const MENU_UPDATE_AUTO: usize = 1031;
+const MENU_UPDATE_NOTES: usize = 1032;
 /// Mic device i is `MENU_MIC_BASE + i` (capped at 32 devices in the menu).
 const MENU_MIC_BASE: usize = 1100;
 /// Global hotkey id for "toggle voice dictation" (Ctrl+Alt+V).
@@ -96,6 +99,7 @@ pub fn spawn() {
     let _ = std::thread::Builder::new()
         .name("warmup-tray".into())
         .spawn(tray_thread);
+    crate::updater::spawn_auto_check();
 }
 
 fn tray_thread() {
@@ -329,6 +333,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     crate::config::gamepad_settings().vk_side_tips,
                 ),
                 MENU_EDIT_SETTINGS => edit_settings(),
+                MENU_UPDATE => crate::updater::open(),
+                MENU_UPDATE_NOTES => crate::updater::open_release_page(),
+                MENU_UPDATE_AUTO => toggle_setting_bool(
+                    "update_check",
+                    crate::config::gamepad_settings().update_check,
+                ),
                 MENU_ENGINE_WHISPER => {
                     crate::win::speech_input::set_engine("whisper");
                     set_voice_enabled(hwnd, true);
@@ -512,6 +522,25 @@ fn menu_entries() -> Vec<crate::win::tray_menu::Entry> {
             root.push(Entry::submenu("Microphone", mics));
         }
     }
+
+    let available = crate::updater::available_version();
+    let mut updates = match &available {
+        Some(v) => vec![
+            Entry::command(format!("Install update v{v}…"), MENU_UPDATE),
+            Entry::command("What's new", MENU_UPDATE_NOTES),
+        ],
+        None => vec![Entry::command("Check for updates", MENU_UPDATE)],
+    };
+    updates.push(Entry::Separator);
+    updates.push(Entry::toggle(
+        "Check automatically",
+        MENU_UPDATE_AUTO,
+        gs.update_check,
+    ));
+    if let Some(at) = crate::updater::snapshot().last_checked {
+        updates.push(Entry::command(format!("Last checked {at}"), 0).disabled(true));
+    }
+    root.push(Entry::submenu("Updates", updates).with_dot(available.is_some()));
 
     root.push(Entry::submenu(
         "Diagnostics",

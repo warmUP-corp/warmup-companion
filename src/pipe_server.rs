@@ -105,11 +105,6 @@ fn set_native_vk_request(p: &crate::protocol::NativeVkPayload) {
     NATIVE_VK_REQUEST.store(v, Ordering::Relaxed);
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
-pub(crate) fn request_native_vk(open: bool) {
-    NATIVE_VK_REQUEST.store(if open { 1 } else { 2 }, Ordering::Relaxed);
-}
-
 /// Take the pending desktop VK request, if any. `Some(true)` = open, `Some(false)` = close.
 pub fn take_native_vk_request() -> Option<bool> {
     match NATIVE_VK_REQUEST.swap(0, Ordering::Relaxed) {

@@ -154,6 +154,7 @@ pub struct GamepadSettings {
     pub prompt_userland_debug: bool,
     pub signin_hints: bool,
     pub guide_launch: bool,
+    pub update_check: bool,
     /// Offline voice typing. When false, R3, Ctrl+Alt+V and the mic key do nothing,
     /// the mic key on the keyboard shows disabled, and the speech engine is unloaded.
     pub voice_enabled: bool,
@@ -188,6 +189,7 @@ impl Default for GamepadSettings {
             prompt_userland_debug: false,
             signin_hints: true,
             guide_launch: true,
+            update_check: true,
             voice_enabled: true,
             vk_side_tips: true,
             vk_sheet_opens: 0,
@@ -402,6 +404,7 @@ fn apply_gamepad_settings_text(settings: &mut GamepadSettings, text: &str) {
             }
             "signin_hints" => settings.signin_hints = parse_bool(value, settings.signin_hints),
             "guide_launch" => settings.guide_launch = parse_bool(value, settings.guide_launch),
+            "update_check" => settings.update_check = parse_bool(value, settings.update_check),
             "voice_enabled" => settings.voice_enabled = parse_bool(value, settings.voice_enabled),
             "vk_side_tips" => settings.vk_side_tips = parse_bool(value, settings.vk_side_tips),
             "vk_sheet_opens" => {
@@ -605,6 +608,9 @@ const SETTINGS_TEMPLATE: &str = r#"# Warmup Companion settings. One `key = value
 
 # Guide (Xbox) / PS button opens warmUP when it is closed (true|false)
 # guide_launch = true
+
+# Check GitHub once a day for a newer Warmup Companion release (true|false)
+# update_check = true
 
 # Gamepad cursor master switch (true|false). False parks stick/touchpad cursor
 # movement, scrolling and A/B OS clicks; the pad still navigates warmUP via d-pad.
@@ -872,6 +878,7 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
         | "prompt_userland_debug"
         | "signin_hints"
         | "guide_launch"
+        | "update_check"
         | "voice_enabled"
         | "vk_side_tips" => match value.trim().to_ascii_lowercase().as_str() {
             "true" | "false" | "1" | "0" | "yes" | "no" | "on" | "off" => Ok(()),

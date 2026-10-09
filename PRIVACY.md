@@ -16,7 +16,17 @@ Warmup Companion is designed for local input, not text collection.
 - It does not upload prediction context or personal dictionary words.
 - It does not enable prediction on UAC, lock, or sign-in surfaces.
 - It does not send telemetry unless Sentry is configured with
-  `WARMUP_SENTRY_DSN`.
+  `WARMUP_SENTRY_DSN`. The daily update check is described below.
+
+## Update Checks
+
+Once a day the companion asks the GitHub API for the latest Warmup Companion
+release (`api.github.com/repos/warmUP-corp/warmup-companion/releases/latest`).
+The request carries only a `warmup-companion/<version>` user agent. When you
+choose Install, the installer and its `.sha256` file are downloaded from the
+same GitHub release, the checksum is verified, and the installer runs silently.
+Turn the check off in the tray (Updates → Check automatically) or with
+`update_check = false` in `settings.ini`.
 
 ## Password Fields
 

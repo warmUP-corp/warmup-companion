@@ -8,6 +8,16 @@ pub fn dispatch_install_or_service(args: &[String]) {
         crate::win::toast::show_screenshot_toast(path, copied);
         std::process::exit(0);
     }
+    if let Some(i) = args.iter().position(|a| a == "--update-toast-helper") {
+        let version = args.get(i + 1).map(String::as_str).unwrap_or_default();
+        crate::win::toast::show_update_toast(version);
+        std::process::exit(0);
+    }
+    #[cfg(feature = "gamepad")]
+    if let Some(i) = args.iter().position(|a| a == "--update-url") {
+        crate::updater::signal_from_url(args.get(i + 1).map(String::as_str).unwrap_or_default());
+        std::process::exit(0);
+    }
     // Mic recognition runs here, as the real logged-in user (the worker spawns us
     // via CreateProcessAsUserW). Short-lived: recognize until silence, then exit.
     if args.iter().any(|a| a == "--speech-helper") {

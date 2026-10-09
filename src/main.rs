@@ -33,6 +33,8 @@ mod service;
 mod service_worker;
 #[cfg(all(windows, feature = "gamepad"))]
 mod tray;
+#[cfg(all(windows, feature = "gamepad"))]
+mod updater;
 
 #[cfg(windows)]
 mod debug_state;
@@ -674,13 +676,6 @@ fn main() {
     #[cfg(all(windows, feature = "gamepad"))]
     if args.iter().any(|a| a == "--controller-center") {
         win::controller_center::show();
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(60));
-        }
-    }
-    #[cfg(all(windows, feature = "gamepad"))]
-    if args.iter().any(|a| a == "--quick-menu") {
-        win::quick_menu::show();
         loop {
             std::thread::sleep(std::time::Duration::from_secs(60));
         }

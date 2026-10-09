@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v0.9.2
+
+- **Updates from inside the companion.** The companion checks GitHub once a day (15 seconds after start, retrying after 10 minutes if offline) and shows a Windows notification with **Install** and **Later** when a newer release is out.
+- New update window in the Controller Center style: release notes and size, then download progress, SHA-256 verification against the release checksum and a silent install. Works with the controller (A / B, D-pad), mouse and keyboard. Hide it with B while it downloads.
+- Tray **Updates** submenu: Install update / Check for updates, What's new, Check automatically and the last check time. The tray header shows the new version and the Updates row gets a dot while an update is waiting.
+- Turn the daily check off in the tray (Updates → Check automatically) or with `update_check = false` in `settings.ini`.
+- The Quick menu (hold PS / Guide) is removed for now. PS / Guide opens warmUP on press again.
+
 ## v0.9.1
 
 - The keyboard now shows above the Start menu and Windows Search, so you can type a search with the controller. The companion process gets UI Access from the service, the same layer the Windows touch keyboard uses.
