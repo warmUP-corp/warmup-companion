@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v0.9.1
+
+- The keyboard now shows above the Start menu and Windows Search, so you can type a search with the controller. The companion process gets UI Access from the service, the same layer the Windows touch keyboard uses.
+
 ## v0.9.0
 
 - **New Controller Center.** Rebuilt in the mono keyboard look and coloured by your keyboard theme: General, Mouse, Keyboard and Controller tabs with toggles, sliders and keyboard-style preview cards for Keyboard style and Display. It works with the mouse, the keyboard and the controller (D-pad, A select, B back, L1/R1 tabs). Apply saves and closes, Cancel discards. The window has a taskbar icon.
