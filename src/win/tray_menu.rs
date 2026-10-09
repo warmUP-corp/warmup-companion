@@ -58,6 +58,7 @@ pub(crate) enum Entry {
         mark: Mark,
         icon: Option<Icon>,
         disabled: bool,
+        dot: bool,
         cmd: usize,
         sub: Vec<Entry>,
     },
@@ -96,6 +97,7 @@ impl Entry {
             mark,
             icon: None,
             disabled: false,
+            dot: false,
             cmd,
             sub: Vec::new(),
         }
@@ -108,9 +110,17 @@ impl Entry {
             mark: Mark::None,
             icon: None,
             disabled: false,
+            dot: false,
             cmd: 0,
             sub,
         }
+    }
+
+    pub(crate) fn with_dot(mut self, on: bool) -> Self {
+        if let Entry::Item { dot, .. } = &mut self {
+            *dot = on;
+        }
+        self
     }
 
     pub(crate) fn with_accel(mut self, text: impl Into<String>) -> Self {
@@ -365,6 +375,7 @@ struct Menu {
     origin: (f32, f32),
     theme: Theme,
     status: (bool, String),
+    update: Option<String>,
     gfx: Option<Gfx>,
     widths: Vec<f32>,
     ticks: u32,
@@ -482,6 +493,7 @@ pub(crate) fn open(mut spec: Spec) {
             origin: (0.0, 0.0),
             theme: current_theme(),
             status: super::controller_center::pad_status(),
+            update: crate::updater::available_version().map(|v| format!("v{v}")),
             gfx: Gfx::new().ok(),
             widths: Vec::new(),
             ticks: 0,
@@ -685,6 +697,29 @@ unsafe fn draw_header(m: &Menu, g: &mut Gfx, r: Rect) {
         DIM_ALPHA,
         Align::Left,
     );
+    if let Some(v) = &m.update {
+        let tw = g.measure(v, 12.0, true);
+        let pw = 10.0 + 12.0 + 6.0 + tw + 10.0;
+        let pill = rect(r.x + r.w - 10.0 - pw, r.y + 14.0, pw, 24.0);
+        g.fill(pill, 12.0, t.accent, 0.15);
+        g.icon(
+            Icon::Download,
+            rect(pill.x + 10.0, pill.y + 6.0, 12.0, 12.0),
+            t.accent,
+            1.0,
+            s,
+        );
+        g.text(
+            v,
+            rect(pill.x + 28.0, pill.y, tw + 4.0, pill.h),
+            12.0,
+            true,
+            t.accent,
+            1.0,
+            Align::Left,
+        );
+        return;
+    }
     let tw = g.measure(&m.status.1, 12.0, false);
     let pw = 10.0 + 8.0 + 6.0 + tw + 10.0;
     let pill = rect(r.x + r.w - 10.0 - pw, r.y + 14.0, pw, 24.0);
@@ -746,6 +781,7 @@ unsafe fn draw_panel(m: &Menu, g: &mut Gfx, level: usize) {
                 mark,
                 icon,
                 disabled,
+                dot,
                 sub,
                 ..
             } => {
@@ -795,6 +831,9 @@ unsafe fn draw_panel(m: &Menu, g: &mut Gfx, level: usize) {
                         DIM_ALPHA,
                         Align::Right,
                     );
+                }
+                if *dot {
+                    g.circle(accel_right - 4.0, r.y + r.h / 2.0, 4.0, t.accent);
                 }
                 if !sub.is_empty() {
                     g.icon(

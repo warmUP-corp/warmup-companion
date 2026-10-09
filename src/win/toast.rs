@@ -30,6 +30,38 @@ pub fn show_screenshot_toast(path: &str, copied: bool) {
     std::thread::sleep(std::time::Duration::from_secs(1));
 }
 
+pub fn show_update_toast(version: &str) {
+    register_aumid();
+    register_update_protocol();
+    let xml = format!(
+        r#"<toast activationType="protocol" launch="warmup-companion:update?open" duration="long"><visual><binding template="ToastGeneric"><text>{title}</text><text>{body}</text></binding></visual><actions><action content="Install" activationType="protocol" arguments="warmup-companion:update?install"/><action content="Later" activationType="system" arguments="dismiss"/></actions></toast>"#,
+        title = xml_escape(&format!("Warmup Companion v{version} is available")),
+        body = xml_escape("Install it now, or later from the tray under Updates."),
+    );
+    if let Err(e) = show(&xml) {
+        crate::install::log_line(&format!("update toast: {e}"));
+    }
+    std::thread::sleep(std::time::Duration::from_secs(1));
+}
+
+fn register_update_protocol() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let command = format!("\"{}\" --update-url \"%1\"", exe.display());
+    for (key, name, data) in [
+        (r"Software\Classes\warmup-companion", None, "URL:warmUP Companion"),
+        (r"Software\Classes\warmup-companion", Some("URL Protocol"), ""),
+        (
+            r"Software\Classes\warmup-companion\shell\open\command",
+            None,
+            command.as_str(),
+        ),
+    ] {
+        set_hkcu_string(key, name, data);
+    }
+}
+
 fn show(xml: &str) -> Result<(), String> {
     let doc = XmlDocument::new().map_err(|e| format!("XmlDocument::new: {e}"))?;
     doc.LoadXml(&HSTRING::from(xml))
@@ -57,19 +89,32 @@ fn file_uri(path: &str) -> String {
 }
 
 fn register_aumid() {
+    set_hkcu_string(
+        r"Software\Classes\AppUserModelId\warmUP.Companion",
+        Some("DisplayName"),
+        "warmUP",
+    );
+    set_hkcu_string(
+        r"Software\Classes\AppUserModelId\warmUP.Companion",
+        Some("IconUri"),
+        r"C:\ProgramData\WarmupVk\bin\icon.ico",
+    );
+}
+
+fn set_hkcu_string(subkey: &str, name: Option<&str>, data: &str) {
     use windows::core::PCWSTR;
     use windows::Win32::System::Registry::{
-        RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
-        KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ,
+        RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE,
+        REG_OPTION_NON_VOLATILE, REG_SZ,
     };
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    let subkey_w = wide(r"Software\Classes\AppUserModelId\warmUP.Companion");
-    let value_w = wide("DisplayName");
-    let data_w = wide("warmUP");
+    let subkey_w = wide(subkey);
+    let name_w = name.map(wide);
+    let data_w = wide(data);
 
     unsafe {
         let mut hkey = HKEY::default();
@@ -85,18 +130,15 @@ fn register_aumid() {
             None,
         );
         if rc.0 != 0 {
-            crate::install::log_line(&format!("screenshot toast: AUMID key open failed rc={}", rc.0));
+            crate::install::log_line(&format!("toast: open {subkey} failed rc={}", rc.0));
             return;
         }
-        let bytes =
-            std::slice::from_raw_parts(data_w.as_ptr().cast::<u8>(), data_w.len() * 2);
-        let rc = RegSetValueExW(hkey, PCWSTR(value_w.as_ptr()), 0, REG_SZ, Some(bytes));
+        let bytes = std::slice::from_raw_parts(data_w.as_ptr().cast::<u8>(), data_w.len() * 2);
+        let value = name_w.as_ref().map_or(PCWSTR::null(), |n| PCWSTR(n.as_ptr()));
+        let rc = RegSetValueExW(hkey, value, 0, REG_SZ, Some(bytes));
         let _ = RegCloseKey(hkey);
         if rc.0 != 0 {
-            crate::install::log_line(&format!(
-                "screenshot toast: AUMID DisplayName set failed rc={}",
-                rc.0
-            ));
+            crate::install::log_line(&format!("toast: set {subkey} failed rc={}", rc.0));
         }
     }
 }

@@ -33,6 +33,8 @@ mod service;
 mod service_worker;
 #[cfg(all(windows, feature = "gamepad"))]
 mod tray;
+#[cfg(all(windows, feature = "gamepad"))]
+mod updater;
 
 #[cfg(windows)]
 mod debug_state;
