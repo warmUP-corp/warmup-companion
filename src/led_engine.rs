@@ -137,6 +137,7 @@ pub(crate) fn ensure_led_engine() {
             .spawn(|| {
                 let start = Instant::now();
                 let mut last: Option<(u8, u8, u8)> = None;
+                let mut released = false;
                 loop {
                     // Guard the body so a panic (push failure, future logic) can't
                     // silently kill the LED thread and freeze the lightbar until a
@@ -148,6 +149,15 @@ pub(crate) fn ensure_led_engine() {
                             return;
                         }
                         let state = led_state().lock().map(|s| *s).unwrap_or_default();
+                        if state.effect == LedEffect::Off {
+                            if !released {
+                                crate::device_commands::push_device_command(PadCommand::LedRelease);
+                                released = true;
+                            }
+                            last = None;
+                            return;
+                        }
+                        released = false;
                         let color = led_color_at(&state, start.elapsed().as_secs_f32());
                         if last != Some(color) {
                             crate::device_commands::push_device_command(PadCommand::Led {
@@ -248,9 +258,7 @@ pub(crate) fn apply_led(p: &crate::protocol::LedPayload) {
                 st.b = p.b;
                 immediate = Some(led_color_at(&st, 0.0));
             }
-            LedEffect::Off => {
-                immediate = Some((0, 0, 0));
-            }
+            LedEffect::Off => {}
             LedEffect::Breathing | LedEffect::Gradient => {
                 st.r = p.r;
                 st.g = p.g;
@@ -389,9 +397,7 @@ mod tests {
         });
 
         let cmds = drain_device_commands();
-        assert!(cmds
-            .iter()
-            .any(|cmd| matches!(cmd, PadCommand::Led { r: 0, g: 0, b: 0 })));
+        assert!(!cmds.iter().any(|cmd| matches!(cmd, PadCommand::Led { .. })));
         let st = *led_state().lock().unwrap();
         assert_eq!(st.effect, LedEffect::Off);
         assert_eq!(led_color_at(&st, 0.0), (0, 0, 0));

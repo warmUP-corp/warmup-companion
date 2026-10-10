@@ -59,6 +59,7 @@ impl Default for BatteryFrame {
 #[derive(Clone, Copy, Debug)]
 pub enum PadCommand {
     Led { r: u8, g: u8, b: u8 },
+    LedRelease,
     Rumble { strong: f32, weak: f32, ms: u32 },
     TriggerRumble { left: f32, right: f32, ms: u32 },
 }
@@ -195,6 +196,7 @@ pub trait GamepadBackend {
     }
     /// Set the lightbar/LED colour. No-op if the pad has no LED.
     fn set_led(&mut self, _r: u8, _g: u8, _b: u8) {}
+    fn release_led(&mut self) {}
     /// Fire a main rumble effect (`strong`/`weak` in 0..=1).
     fn rumble(&mut self, _strong: f32, _weak: f32, _duration_ms: u32) {}
     /// Fire a trigger (adaptive) rumble effect (`left`/`right` in 0..=1).
@@ -281,6 +283,10 @@ impl GamepadBackend for SdlBackend {
 
     fn set_led(&mut self, r: u8, g: u8, b: u8) {
         self.input.set_led(r, g, b);
+    }
+
+    fn release_led(&mut self) {
+        self.input.release_led();
     }
 
     fn rumble(&mut self, strong: f32, weak: f32, duration_ms: u32) {
@@ -485,7 +491,7 @@ fn sdl_thread_main(
         let mut last_led = None;
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
-                PadCommand::Led { .. } => last_led = Some(cmd),
+                PadCommand::Led { .. } | PadCommand::LedRelease => last_led = Some(cmd),
                 PadCommand::Rumble { strong, weak, ms } => {
                     let pad = input
                         .active_controller_name()
@@ -506,8 +512,10 @@ fn sdl_thread_main(
                 }
             }
         }
-        if let Some(PadCommand::Led { r, g, b }) = last_led {
-            input.set_led(r, g, b);
+        match last_led {
+            Some(PadCommand::Led { r, g, b }) => input.set_led(r, g, b),
+            Some(PadCommand::LedRelease) => input.release_led(),
+            _ => {}
         }
         std::thread::sleep(Duration::from_millis(4));
     }
@@ -569,6 +577,10 @@ impl GamepadBackend for SdlThreadBackend {
 
     fn set_led(&mut self, r: u8, g: u8, b: u8) {
         self.send_cmd(PadCommand::Led { r, g, b });
+    }
+
+    fn release_led(&mut self) {
+        self.send_cmd(PadCommand::LedRelease);
     }
 
     fn rumble(&mut self, strong: f32, weak: f32, duration_ms: u32) {
