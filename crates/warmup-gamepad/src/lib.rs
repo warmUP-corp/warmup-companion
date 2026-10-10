@@ -447,6 +447,28 @@ impl GamepadInput {
 
     /// Returns the SDL3-detected controller type as a canonical string.
     /// Uses `sdl3_type_to_str(gamepad.type())` — no name heuristic needed.
+    pub fn release_led(&mut self) {
+        let Some(ref gp) = self.active_gamepad else {
+            return;
+        };
+        let Ok(id) = gp.id() else { return };
+        let raw = unsafe { SDL_GetGamepadFromID(id) };
+        if raw.is_null() {
+            return;
+        }
+        unsafe extern "C" {
+            fn SDL_SetGamepadPlayerIndex(
+                gamepad: *mut sdl3::sys::gamepad::SDL_Gamepad,
+                player_index: ::std::ffi::c_int,
+            ) -> bool;
+        }
+        unsafe {
+            SDL_SetGamepadPlayerIndex(raw, -1);
+            SDL_SetGamepadPlayerIndex(raw, 0);
+        }
+        self.led_player_cleared_for = None;
+    }
+
     pub fn active_controller_type(&self) -> &'static str {
         self.active_gamepad
             .as_ref()

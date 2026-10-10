@@ -308,6 +308,14 @@ impl Backend {
         }
     }
 
+    fn release_led(&mut self) {
+        match self {
+            Backend::Sdl(be) => be.release_led(),
+            #[cfg(windows)]
+            Backend::XInput(be) => be.release_led(),
+        }
+    }
+
     fn rumble(&mut self, strong: f32, weak: f32, duration_ms: u32) {
         match self {
             Backend::Sdl(b) => b.rumble(strong, weak, duration_ms),
@@ -333,11 +341,13 @@ impl Backend {
             return;
         }
         if crate::gamepad_backend::game_owns_controller() {
-            if let Some(led) = cmds.iter().rev().find_map(|cmd| match *cmd {
-                PadCommand::Led { r, g, b } => Some((r, g, b)),
+            match cmds.iter().rev().find_map(|cmd| match *cmd {
+                PadCommand::Led { r, g, b } => Some(Some((r, g, b))),
+                PadCommand::LedRelease => Some(None),
                 _ => None,
             }) {
-                *held = Some(led);
+                Some(led) => *held = led,
+                None => {}
             }
             return;
         }
@@ -347,6 +357,7 @@ impl Backend {
         for cmd in cmds {
             match cmd {
                 PadCommand::Led { r, g, b } => self.set_led(r, g, b),
+                PadCommand::LedRelease => self.release_led(),
                 PadCommand::Rumble { strong, weak, ms } => self.rumble(strong, weak, ms),
                 PadCommand::TriggerRumble { left, right, ms } => {
                     self.trigger_rumble(left, right, ms)

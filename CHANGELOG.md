@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Lightbar "off" now hands the DualSense / DS4 lightbar back to the controller's own player-indicator lighting instead of switching it black, and the companion stops writing the lightbar while it is off. warmUP sends "off" whenever its Custom lightbar switch is off (the new default).
+
 ## v0.9.2
 
 - **Updates from inside the companion.** The companion checks GitHub once a day (15 seconds after start, retrying after 10 minutes if offline) and shows a Windows notification with **Install** and **Later** when a newer release is out.
