@@ -28,7 +28,7 @@ use super::types::{
     SecureMsg, VK_PAD_A, VK_PAD_B, VK_PAD_DPAD_DOWN, VK_PAD_DPAD_LEFT, VK_PAD_DPAD_RIGHT,
     VK_PAD_DPAD_UP, VK_PAD_LSHOULDER, VK_PAD_RSHOULDER, VK_PAD_X, VK_PAD_Y,
 };
-use super::{INJECT_HOLD_ACTIVE, INJECT_HOLD_TICKS};
+use super::{HID_PAD_PRESENT, INJECT_HOLD_ACTIVE, INJECT_HOLD_TICKS, XBOX_PAD_PRESENT};
 
 pub(crate) fn key_to_mask(vk: u16) -> Option<u16> {
     Some(match vk {
@@ -204,7 +204,10 @@ pub(crate) fn poll_xinput_tick(state: &mut PollState) {
     // path, which is the reliable secure-desktop source for Xbox.
     let merge = crate::config::gamepad_settings().multi_controller;
     let pad_slots = connected;
+    let xbox_present = !state.xusb.is_empty() || pad_slots.contains(&true);
+    XBOX_PAD_PRESENT.store(if xbox_present { 2 } else { 1 }, Ordering::Relaxed);
     let hid_count = state.hid_readers.len();
+    HID_PAD_PRESENT.store(if hid_count > 0 { 2 } else { 1 }, Ordering::Relaxed);
     let hid_on = (merge && hid_count > 0) || hid_is_authoritative(hid_count, state.xusb.len());
     if hid_on {
         connected[0] = true;
