@@ -641,11 +641,7 @@ pub fn run(args: &[String]) -> i32 {
             let _ = t.show(LPARAM(0));
         }
     }
-    let code = rx.recv().unwrap_or(EXIT_CANCELLED);
-    if let Ok(mut guard) = slot.lock() {
-        *guard = None;
-    }
-    code
+    rx.recv().unwrap_or(EXIT_CANCELLED)
 }
 
 fn ui_show() {
@@ -785,7 +781,7 @@ fn window_title(mode: Mode) -> &'static str {
 }
 
 fn ui_hide() {
-    if let Some(ui) = UI.with(|u| u.borrow_mut().take()) {
+    if let Some(ui) = UI.with(|u| u.try_borrow_mut().ok().and_then(|mut b| b.take())) {
         unsafe {
             let _ = KillTimer(ui.hwnd, TIMER_ID);
             let _ = DestroyWindow(ui.hwnd);
