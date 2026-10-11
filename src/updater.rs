@@ -24,6 +24,10 @@ const LATEST_URL: &str =
 const DOWNLOAD_PREFIX: &str = "https://github.com/warmUP-corp/warmup-companion/releases/download/";
 const PAGE_PREFIX: &str = "https://github.com/warmUP-corp/warmup-companion/releases/";
 const SETUP_NAME: &str = "warmup-companion-setup.exe";
+const LAUNCHER_FEED: &str =
+    "https://github.com/warmUP-corp/warmup-releases/releases/latest/download/latest.json";
+const LAUNCHER_PREFIX: &str = "https://github.com/warmUP-corp/warmup-releases/";
+const LAUNCHER_PAGE: &str = "https://github.com/warmUP-corp/warmup-releases/releases/latest";
 pub(crate) const CURRENT: &str = env!("CARGO_PKG_VERSION");
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(15);
 const RETRY_AFTER: Duration = Duration::from_secs(10 * 60);
@@ -178,13 +182,41 @@ pub(crate) fn open_release_page() {
     let Some(page) = snapshot().release.map(|r| r.page) else {
         return;
     };
+    open_url(&page);
+}
+
+pub(crate) fn open_url(page: &str) {
     let explorer = Path::new(r"C:\Windows\explorer.exe");
     match crate::win::speech_input::spawn_as_user(explorer, &format!("\"{page}\"")) {
         Ok(h) => unsafe {
             let _ = CloseHandle(h);
         },
-        Err(e) => log(&format!("open release page failed: {e}")),
+        Err(e) => log(&format!("open {page} failed: {e}")),
     }
+}
+
+pub(crate) fn download_launcher() {
+    spawn("launcher-download", || match launcher_url() {
+        Ok(url) => open_url(&url),
+        Err(e) => {
+            log(&format!("launcher: {e}"));
+            open_url(LAUNCHER_PAGE);
+        }
+    });
+}
+
+fn launcher_url() -> Result<String, String> {
+    let json: serde_json::Value = serde_json::from_str(&get_string(LAUNCHER_FEED)?)
+        .map_err(|e| format!("bad latest.json: {e}"))?;
+    ["windows-x86_64", "windows-x86_64-nsis"]
+        .iter()
+        .find_map(|k| {
+            json["platforms"][*k]["url"]
+                .as_str()
+                .filter(|u| u.starts_with(LAUNCHER_PREFIX) && u.ends_with(".exe"))
+        })
+        .map(str::to_string)
+        .ok_or_else(|| "latest.json has no Windows installer on GitHub".to_string())
 }
 
 fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {

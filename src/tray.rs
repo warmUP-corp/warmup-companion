@@ -80,6 +80,7 @@ const MENU_DISPLAY_DESK: usize = 1029;
 const MENU_UPDATE: usize = 1030;
 const MENU_UPDATE_AUTO: usize = 1031;
 const MENU_UPDATE_NOTES: usize = 1032;
+const MENU_GET_LAUNCHER: usize = 1033;
 /// Mic device i is `MENU_MIC_BASE + i` (capped at 32 devices in the menu).
 const MENU_MIC_BASE: usize = 1100;
 /// Global hotkey id for "toggle voice dictation" (Ctrl+Alt+V).
@@ -335,6 +336,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 MENU_EDIT_SETTINGS => edit_settings(),
                 MENU_UPDATE => crate::updater::open(),
                 MENU_UPDATE_NOTES => crate::updater::open_release_page(),
+                MENU_GET_LAUNCHER => crate::updater::download_launcher(),
                 MENU_UPDATE_AUTO => toggle_setting_bool(
                     "update_check",
                     crate::config::gamepad_settings().update_check,
@@ -561,6 +563,10 @@ fn menu_entries() -> Vec<crate::win::tray_menu::Entry> {
         MENU_UNINSTALL,
     ));
     root.push(Entry::Separator);
+    if !launcher_installed() {
+        root.push(Entry::promo("Get warmUP Game Launcher", MENU_GET_LAUNCHER));
+        root.push(Entry::Separator);
+    }
     root.push(Entry::command("Exit", MENU_EXIT));
     root
 }
@@ -722,6 +728,12 @@ fn installed_uninstaller() -> Option<PathBuf> {
         std::env::var_os("ProgramW6432").or_else(|| std::env::var_os("ProgramFiles"))?;
     let path = installed_uninstaller_path(Path::new(&program_files));
     path.is_file().then_some(path)
+}
+
+pub(crate) fn launcher_installed() -> bool {
+    std::env::var_os("ProgramW6432")
+        .or_else(|| std::env::var_os("ProgramFiles"))
+        .is_some_and(|p| Path::new(&p).join("warmUP").join("warmup.exe").is_file())
 }
 
 unsafe fn uninstall(hwnd: HWND) {

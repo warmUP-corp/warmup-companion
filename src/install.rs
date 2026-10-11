@@ -34,8 +34,12 @@ const TEST_SERVICE_NAMES: &[&str] = &[
     "WarmupVkTest6",
 ];
 
+pub fn install_service(debug_ui: bool) -> Result<(), String> {
+    install_inner(debug_ui, None)
+}
+
 pub fn run_install(debug_ui: bool) {
-    if let Err(e) = install_inner(debug_ui, None) {
+    if let Err(e) = install_service(debug_ui) {
         eprintln!("install failed: {e}");
         std::process::exit(1);
     }
@@ -67,6 +71,10 @@ pub fn run_install_dev(path: &Path) {
     println!("Installed Warmup Companion in DEV mode.");
     println!("Trusted DEV client: {}", path.display());
     println!("Log: {DATA_DIR}\\{LOG_NAME}");
+}
+
+pub fn uninstall_service() -> Result<(), String> {
+    uninstall_inner()
 }
 
 pub fn run_uninstall() {

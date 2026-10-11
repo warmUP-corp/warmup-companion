@@ -59,6 +59,7 @@ pub(crate) enum Entry {
         icon: Option<Icon>,
         disabled: bool,
         dot: bool,
+        promo: bool,
         cmd: usize,
         sub: Vec<Entry>,
     },
@@ -98,6 +99,7 @@ impl Entry {
             icon: None,
             disabled: false,
             dot: false,
+            promo: false,
             cmd,
             sub: Vec::new(),
         }
@@ -111,9 +113,18 @@ impl Entry {
             icon: None,
             disabled: false,
             dot: false,
+            promo: false,
             cmd: 0,
             sub,
         }
+    }
+
+    pub(crate) fn promo(label: impl Into<String>, cmd: usize) -> Self {
+        let mut e = Self::command(label, cmd).with_icon(Icon::Logo);
+        if let Entry::Item { promo, .. } = &mut e {
+            *promo = true;
+        }
+        e
     }
 
     pub(crate) fn with_dot(mut self, on: bool) -> Self {
@@ -232,6 +243,13 @@ pub(crate) fn item_row_width(label_w: f32, accel_w: Option<f32>, sub: bool) -> f
         + accel_w.map_or(0.0, |a| 16.0 + a)
         + if sub { 10.0 + 16.0 } else { 0.0 }
         + 10.0
+}
+
+const PROMO_TINT: u32 = 0x00FF5C7C;
+const PROMO_BADGE: &str = "FREE";
+
+unsafe fn promo_badge_w(g: &mut Gfx) -> f32 {
+    g.measure(PROMO_BADGE, 10.0, true) + 14.0
 }
 
 pub(crate) fn header_row_width(title_w: f32, status_w: f32) -> f32 {
@@ -548,9 +566,17 @@ unsafe fn measure_panel(g: &mut Gfx, m: &Menu, entries: &[Entry], min: f32) -> f
                 rows.push(header_row_width(title, g.measure(&m.status.1, 12.0, false)));
             }
             Entry::Item {
-                label, accel, sub, ..
+                label,
+                accel,
+                sub,
+                promo,
+                ..
             } => {
-                let accel_w = accel.as_deref().map(|a| g.measure(a, 12.0, false));
+                let accel_w = if *promo {
+                    Some(promo_badge_w(g))
+                } else {
+                    accel.as_deref().map(|a| g.measure(a, 12.0, false))
+                };
                 rows.push(item_row_width(
                     g.measure(label, 14.0, false),
                     accel_w,
@@ -782,9 +808,13 @@ unsafe fn draw_panel(m: &Menu, g: &mut Gfx, level: usize) {
                 icon,
                 disabled,
                 dot,
+                promo,
                 sub,
                 ..
             } => {
+                if *promo {
+                    g.gradient(r, 8.0, PROMO_TINT, (0.20, 0.08), false);
+                }
                 let indicator = rect(r.x + 10.0, r.y + 10.0, 16.0, 16.0);
                 match (mark, icon) {
                     (Mark::Check, _) => g.icon(Icon::Check, indicator, t.accent, 1.0, s),
@@ -803,7 +833,11 @@ unsafe fn draw_panel(m: &Menu, g: &mut Gfx, level: usize) {
                 } else {
                     (t.text, 1.0)
                 };
-                let accel_w = accel.as_deref().map(|a| g.measure(a, 12.0, false));
+                let accel_w = if *promo {
+                    Some(promo_badge_w(g))
+                } else {
+                    accel.as_deref().map(|a| g.measure(a, 12.0, false))
+                };
                 let reserve = item_row_width(0.0, accel_w, !sub.is_empty()) - 36.0;
                 let label_w = (r.w - 36.0 - reserve).max(0.0);
                 let shown = ellipsize(label, label_w, |t| g.measure(t, 14.0, false));
@@ -830,6 +864,19 @@ unsafe fn draw_panel(m: &Menu, g: &mut Gfx, level: usize) {
                         t.dim,
                         DIM_ALPHA,
                         Align::Right,
+                    );
+                }
+                if let (true, Some(bw)) = (*promo, accel_w) {
+                    let pill = rect(accel_right - bw, r.y + (r.h - 18.0) / 2.0, bw, 18.0);
+                    g.fill(pill, 9.0, PROMO_TINT, 1.0);
+                    g.text(
+                        PROMO_BADGE,
+                        pill,
+                        10.0,
+                        true,
+                        0x00FF_FFFF,
+                        1.0,
+                        Align::Center,
                     );
                 }
                 if *dot {
