@@ -367,6 +367,7 @@ struct JobState {
     needs_admin: bool,
     hide: bool,
     exit: Option<i32>,
+    progress: Option<f32>,
 }
 
 impl JobState {
@@ -382,6 +383,7 @@ impl JobState {
             needs_admin: false,
             hide: false,
             exit: None,
+            progress: None,
         }
     }
 }
@@ -1338,9 +1340,10 @@ fn run_preview_job(voice: bool, model: Model, installed: bool) {
     });
 }
 
-fn powershell(script: &Path, args: &[&str]) -> std::io::Result<std::process::ExitStatus> {
+fn powershell(script: &Path, args: &[&str], title: &str) -> std::io::Result<std::process::ExitStatus> {
+    use std::io::BufRead;
     use std::os::windows::process::CommandExt;
-    Command::new("powershell.exe")
+    let mut child = Command::new("powershell.exe")
         .args([
             "-NoLogo",
             "-NoProfile",
@@ -1354,10 +1357,31 @@ fn powershell(script: &Path, args: &[&str]) -> std::io::Result<std::process::Exi
         .arg(script)
         .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
-        .status()
+        .spawn()?;
+    if let Some(out) = child.stdout.take() {
+        for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+            if let Some((pct, detail)) = parse_progress(&line) {
+                job_update(|j| {
+                    j.progress = Some(pct);
+                    j.status = format!("Downloading {title} \u{00B7} {detail}");
+                });
+            }
+        }
+    }
+    let status = child.wait();
+    job_update(|j| j.progress = None);
+    status
+}
+
+fn parse_progress(line: &str) -> Option<(f32, String)> {
+    let (label, rest) = line.trim().split_once(": ")?;
+    let (pct, sizes) = rest.split_once("% (")?;
+    let pct: f32 = pct.trim().parse().ok()?;
+    let sizes = sizes.trim_end_matches(')').replace('/', " / ");
+    Some(((pct / 100.0).clamp(0.0, 1.0), format!("{label} {sizes}")))
 }
 
 fn run_install_job(voice: bool, model: Model, installed: bool) {
@@ -1400,11 +1424,11 @@ fn run_install_job(voice: bool, model: Model, installed: bool) {
             None
         } else {
             let script = dir.join("Get-WarmupParakeet.ps1");
-            voice_script(&script, &[])
+            voice_script(&script, &[], model.title())
         }
     } else {
         let script = dir.join("Get-WarmupSpeech.ps1");
-        let note = voice_script(&script, &["-Model", model.id()]);
+        let note = voice_script(&script, &["-Model", model.id()], model.title());
         if note.is_none() {
             let _ = std::fs::write(speech.join("engine.txt"), "whisper");
         }
@@ -1426,14 +1450,14 @@ fn run_install_job(voice: bool, model: Model, installed: bool) {
     });
 }
 
-fn voice_script(script: &Path, args: &[&str]) -> Option<String> {
+fn voice_script(script: &Path, args: &[&str], title: &str) -> Option<String> {
     if !script.is_file() {
         return Some(format!(
             "Voice typing was not set up because {} is missing. Companion works fine without it.",
             script.display()
         ));
     }
-    match powershell(script, args) {
+    match powershell(script, args, title) {
         Ok(st) if st.success() => None,
         Ok(st) => Some(format!(
             "Voice typing could not be downloaded (exit {}). Companion works fine without it. Add it later by running {}.",
@@ -2276,6 +2300,12 @@ unsafe fn draw_progress(ui: &Ui, g: &mut Gfx, title: &str, sub: &str, rows: &[(S
     match job.phase {
         Phase::Done => g.fill(track, 3.0, LAV, 1.0),
         Phase::Failed => {}
+        _ if job.progress.is_some() => {
+            let w = CW * job.progress.unwrap_or(0.0);
+            if w > 0.0 {
+                g.fill(rect(CX, track.y, w.max(6.0), 6.0), 3.0, LAV, 1.0);
+            }
+        }
         _ => {
             let t = (ui.started.elapsed().as_secs_f32() * 0.6).fract();
             let seg = CW * 0.3;

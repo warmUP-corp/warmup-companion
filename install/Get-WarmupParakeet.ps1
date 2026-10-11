@@ -71,7 +71,7 @@ function Save-WithProgress {
                 $out.Write($buf, 0, $n); $sofar += $n
                 if ($total -gt 0) {
                     $pct = [int](100 * $sofar / $total)
-                    if ($pct -ge $lastPct + 5) {
+                    if ($pct -ge $lastPct + 1) {
                         Write-Host ("  {0}: {1}% ({2:n0}/{3:n0} MB)" -f $Label, $pct, ($sofar / 1MB), ($total / 1MB))
                         $lastPct = $pct
                     }
