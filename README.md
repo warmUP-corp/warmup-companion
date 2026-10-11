@@ -173,3 +173,23 @@ cargo check
 - [Domain glossary](CONTEXT.md)
 - [IPC protocol](docs/companion-ipc-protocol.md)
 - [Release process](docs/RELEASES.md)
+
+## FAQ
+
+### Is this an alternative to Gopher360, JoyToKey, or Controller Companion?
+
+Yes, for using a controller as a mouse and keyboard on the Windows desktop. Left stick moves the pointer, right stick scrolls, A / Cross left-clicks, and B / Circle right-clicks. L3 opens the on-screen keyboard. It is open source, installs from GitHub Releases, and does not need Steam.
+
+It is not a per-game remapper. Companion does not assign controller buttons to arbitrary keys inside games.
+
+### How does it compare to the Windows 11 Gamepad keyboard?
+
+Windows 11 has a built-in Gamepad keyboard. Companion draws its own on-screen keyboard and injects keys with Win32 `SendInput`, including on UAC prompts, the lock screen, and the sign-in screen.
+
+### When does another tool fit better?
+
+Use JoyToKey, reWASD, or Steam Input when you need to remap controller buttons to keys or macros inside a game. Game sleep is on by default here: companion mouse and keyboard input stop while a fullscreen game is active.
+
+### Why does setup install a Windows service?
+
+Secure-desktop input is not available to a normal desktop application. The installer adds `WarmupVkSvc` under LocalSystem so the companion can type at UAC, lock, and sign-in. Read the [privacy policy](PRIVACY.md) and [security policy](SECURITY.md) before installing.
