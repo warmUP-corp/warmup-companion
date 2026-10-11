@@ -13,7 +13,7 @@ mod secure_poll;
 mod types;
 mod xinput_poll;
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU8, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -40,6 +40,18 @@ pub(crate) static LOGON_FG_HWND: AtomicIsize = AtomicIsize::new(0);
 /// long enough for its keys to land. Decremented once per ~8ms poll tick.
 pub(crate) static INJECT_HOLD_TICKS: AtomicU32 = AtomicU32::new(0);
 pub(crate) static INJECT_HOLD_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub(crate) static XBOX_PAD_PRESENT: AtomicU8 = AtomicU8::new(0);
+
+pub fn xbox_pad_present() -> Option<bool> {
+    match XBOX_PAD_PRESENT.load(Ordering::Relaxed) {
+        0 => None,
+        v => Some(v == 2),
+    }
+}
+
+pub fn clear_xbox_pad_present() {
+    XBOX_PAD_PRESENT.store(0, Ordering::Relaxed);
+}
 /// Poll ticks to suppress the reclaim per committed key (~8ms each ⇒ ~48ms).
 const INJECT_HOLD_WINDOW: u32 = 6;
 

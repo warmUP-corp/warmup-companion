@@ -1981,7 +1981,12 @@ mod engine {
         // background thread and start capturing/animating immediately; join before use.
         let pk_ready = if use_parakeet() {
             log("speech: waiting for parakeet server (background)");
-            Some(std::thread::spawn(parakeet::wait_ready))
+            Some(
+                std::thread::Builder::new()
+                    .name("warmup-parakeet-ready".into())
+                    .spawn(parakeet::wait_ready)
+                    .map_err(|e| format!("spawn parakeet wait: {e}"))?,
+            )
         } else {
             if let Err(e) = ensure_server() {
                 if !crate::config::voice_enabled() {

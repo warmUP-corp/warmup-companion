@@ -4,6 +4,8 @@
 //! `ERROR_BUSY` (0x800700AA). State is **per-thread** (VK UI thread attaches separately).
 
 use std::cell::RefCell;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::HANDLE;
@@ -55,7 +57,7 @@ pub fn attach_named(name: &str) -> Result<(), String> {
         "default" | "winlogon" => name,
         other => return Err(format!("unknown desktop: {other}")),
     };
-    unsafe {
+    let result = unsafe {
         let station = open_station()?;
         let desktop = wide(desktop_name);
         let h_desktop = OpenDesktopW(
@@ -69,11 +71,15 @@ pub fn attach_named(name: &str) -> Result<(), String> {
             station,
             desktop: h_desktop,
         })
+    };
+    if result.is_ok() {
+        invalidate_input_desktop_cache();
     }
+    result
 }
 
 pub fn attach_input() -> Result<(), String> {
-    unsafe {
+    let result = unsafe {
         let station = open_station()?;
         let h_desktop = OpenInputDesktop(
             DESKTOP_CONTROL_FLAGS(0),
@@ -85,11 +91,25 @@ pub fn attach_input() -> Result<(), String> {
             station,
             desktop: h_desktop,
         })
+    };
+    if result.is_ok() {
+        invalidate_input_desktop_cache();
     }
+    result
 }
 
+static INPUT_DESKTOP_CACHE: Mutex<Option<(Instant, String)>> = Mutex::new(None);
+const INPUT_DESKTOP_CACHE_TTL: Duration = Duration::from_millis(500);
+
 pub fn input_desktop_name() -> Result<String, String> {
-    unsafe {
+    if let Ok(cache) = INPUT_DESKTOP_CACHE.lock() {
+        if let Some((at, name)) = cache.as_ref() {
+            if at.elapsed() < INPUT_DESKTOP_CACHE_TTL {
+                return Ok(name.clone());
+            }
+        }
+    }
+    let name = unsafe {
         let station = open_station()?;
         let h_desktop = OpenInputDesktop(
             DESKTOP_CONTROL_FLAGS(0),
@@ -103,7 +123,17 @@ pub fn input_desktop_name() -> Result<String, String> {
         let name = desktop_name(h_desktop).unwrap_or_else(|| "?".into());
         let _ = CloseDesktop(h_desktop);
         let _ = CloseWindowStation(station);
-        Ok(name)
+        name
+    };
+    if let Ok(mut cache) = INPUT_DESKTOP_CACHE.lock() {
+        *cache = Some((Instant::now(), name.clone()));
+    }
+    Ok(name)
+}
+
+fn invalidate_input_desktop_cache() {
+    if let Ok(mut cache) = INPUT_DESKTOP_CACHE.lock() {
+        *cache = None;
     }
 }
 
