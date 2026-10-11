@@ -84,6 +84,10 @@ pub(crate) struct PollState {
     pub last_slot_err_log: Instant,
     pub prev_trigger_left: bool,
     pub prev_trigger_right: bool,
+    pub last_axes_sent: Option<(f32, f32, f32, f32)>,
+    pub merged_buttons: u16,
+    pub prev_xbox_activity: u32,
+    pub prev_hid_activity: u32,
 }
 
 pub(crate) enum SecureMsg {

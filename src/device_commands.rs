@@ -30,7 +30,7 @@ where
     let mut last_led = None;
     for cmd in cmds {
         match cmd {
-            PadCommand::Led { .. } => last_led = Some(cmd),
+            PadCommand::Led { .. } | PadCommand::LedRelease => last_led = Some(cmd),
             _ => out.push(cmd),
         }
     }

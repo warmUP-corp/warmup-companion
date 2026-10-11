@@ -66,11 +66,13 @@ Each maps to an existing webview event; the desktop re-emits the `payload` uncha
 | `axis` | `gamepad:axis` | `{ leftX: f32, leftY: f32, rightX: f32, rightY: f32 }` |
 | `touchpad` | `gamepad:touchpad` | `{ fingers: [{ index: u8, down: bool, x: f32, y: f32, pressure: f32 }] }` |
 | `play_sessions` | _(desktop ingest only)_ | `{ sessions: [{ externalId, gameId, startedAt, endedAt, durationMinutes }] }` |
+| `settings_changed` | _(desktop ingest only)_ | `{ config: GamepadConfig, companionSettings: CompanionSettings }` |
 
 Notes:
 - `connection.controllerType` / `button.controllerType`: `"xbox" | "playstation" | "switch" | "generic"` (existing desktop vocabulary).
 - `battery.percent`: `0–100`, or `-1` when the controller reports no level. `wired` = no internal battery.
 - `cursor_moved` / `axis` / `touchpad` are throttled by the companion (≈100 ms) exactly as the desktop poll thread does today.
+- `settings_changed` is additive on v6 (do **not** bump `protocolVersion`). The companion emits it when `C:\ProgramData\WarmupVk\settings.ini` (or runtime status) changes on disk — e.g. Controller Center or tray edits. A background thread watches the parent directories with `FindFirstChangeNotification` (no mtime polling); the pipe loop only loads an atomic generation counter. External changes are drained before inbound frames each pass. Pipe-originated writes also wake the watcher, but the companion suppresses the echo when the snapshot still matches its SettingsSync baseline. `config` is the companion snapshot (`keyboardTheme` omitted / `null`; `enabled` and `cursorEnabled` both mirror ini `cursor_enabled`); absent optional LED fields mean “not set in ini”.
 
 ## Down frames (desktop → companion)
 
@@ -96,6 +98,7 @@ camelCase, matching the desktop serde shape:
   "accelerationExp": 2.0,
   "scrollSensitivity": 5.0,
   "enabled": true,
+  "cursorEnabled": true,
   "launcherToggleButton": "GUIDE",
   "triggerRumbleEnabled": false,
   "triggerRumbleMagnitude": 0.5,
@@ -117,9 +120,22 @@ camelCase, matching the desktop serde shape:
 }
 ```
 
+`enabled` is the runtime cursor mask on the wire (stick-nav / game leak). It is not the persisted preference when `cursorEnabled` is present.
+`cursorEnabled` is the real desktop cursor toggle; the companion persists it to ini `cursor_enabled`. Absent `cursorEnabled` (older desktops) keeps the legacy mapping from wire `enabled` → ini. Companion snapshots set both to the ini value.
 `ledEffect` accepts `"solid"`, `"breathing"`, `"rainbow"`, `"gradient"`, or `"off"`.
 `gradient` smoothly cycles between `ledColor` and `ledSecondaryColor`.
 `ledBrightness` is a `0.0`-`1.0` multiplier applied to all companion-driven LED writes.
+
+Persisted lightbar keys in `C:\ProgramData\WarmupVk\settings.ini` (shared with warmUP):
+
+| ini key | config field | notes |
+|---|---|---|
+| `led_color` | `ledColor` | `#RRGGBB` |
+| `led_secondary_color` | `ledSecondaryColor` | `#RRGGBB` (gradient) |
+| `led_effect` | `ledEffect` | `solid` / `breathing` / `rainbow` / `gradient` / `off` |
+| `led_brightness` | `ledBrightness` | `0.0`–`1.0` |
+
+Inbound `config` frames persist these when they change (after the first seeding frame). Companion UI / tray writes go through the same keys; startup restores colour, secondary, effect, and brightness from the ini.
 
 Added in v3: `keyboardTheme.border` (key outline, derived desktop-side from `key` to match the
 webview VK) and `vkMode` (`"docked"` | `"floating"`; floating renders a compact panel near the
@@ -197,6 +213,7 @@ fields keep the native keyboard's current dark/light default for that color slot
 - `axis` is an additive v4-compatible up-frame; old desktop clients ignore it as unknown, old companions simply omit it.
 - `led` is an additive v4-compatible down-frame for one-shot test writes; old companions ignore it as unknown.
 - `shut_down` is an additive v6-compatible down-frame for unelevated companion stop. Old companions ignore it as unknown; Kid Mode blocking refuses it and keeps the service running.
+- `settings_changed` is an additive v6-compatible up-frame for companion→desktop settings sync when the shared ini changes locally. Old desktops ignore it as unknown.
 - Additive fields may stay on the current protocol when both directions are default/unknown-field tolerant.
 - Breaking changes to the pipe name, framing, `hello` shape, or required frame `payload` fields bump it.
 - An unsupported version is resolved by the server closing the connection; the client surfaces a "companion update required" state rather than interpreting unknown frames.

@@ -1,9 +1,14 @@
 use sdl3::gamepad::{Axis, Button as SdlButton, Gamepad, GamepadType};
-use sdl3::sys::gamepad::{SDL_GetGamepadFromID, SDL_GetGamepadTouchpadFinger, SDL_SetGamepadLED};
+use sdl3::sys::gamepad::{
+    SDL_GetGamepadFromID, SDL_GetGamepadPath, SDL_GetGamepadProduct, SDL_GetGamepadTouchpadFinger,
+    SDL_GetGamepadVendor, SDL_SetGamepadLED,
+};
 use sdl3::GamepadSubsystem;
+use std::cell::Cell;
 use std::collections::HashMap;
-use std::ffi::c_char;
+use std::ffi::{c_char, CStr};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 /// SDL3 trigger press threshold: SDL3 range is 0..=32767; 50% ≈ 16383.
 const TRIGGER_THRESHOLD: i16 = 16_383;
@@ -22,23 +27,6 @@ fn set_controller_feature_hints() {
     set_sdl_hint(b"SDL_JOYSTICK_HIDAPI\0", b"1\0");
     set_sdl_hint(b"SDL_JOYSTICK_HIDAPI_PS5\0", b"1\0");
     set_sdl_hint(b"SDL_JOYSTICK_ENHANCED_REPORTS\0", b"1\0");
-}
-
-/// When several pads are plugged in, prefer PlayStation / Xbox over generic HID.
-fn open_preferred_gamepad(gc_sub: &GamepadSubsystem) -> Option<Gamepad> {
-    let ids: Vec<_> = gc_sub.gamepads().unwrap_or_default();
-    let mut best: Option<(i32, Gamepad)> = None;
-    for id in ids {
-        let Ok(gp) = gc_sub.open(id) else {
-            continue;
-        };
-        let score = score_gamepad(&gp);
-        let replace = best.as_ref().map(|(s, _)| score > *s).unwrap_or(true);
-        if replace {
-            best = Some((score, gp));
-        }
-    }
-    best.map(|(_, gp)| gp)
 }
 
 fn score_gamepad(gp: &Gamepad) -> i32 {
@@ -232,6 +220,55 @@ pub struct TouchpadSample {
     pub pressure: f32,
 }
 
+const STICK_ACTIVITY: i32 = 16_000;
+
+unsafe extern "C" {
+    fn SDL_RumbleGamepadTriggers(
+        gamepad: *mut sdl3::sys::gamepad::SDL_Gamepad,
+        left_rumble: u16,
+        right_rumble: u16,
+        duration_ms: u32,
+    ) -> bool;
+}
+
+struct Pad {
+    gp: Gamepad,
+    id: u32,
+    activity: u32,
+}
+
+fn pad_raw(gp: &Gamepad) -> Option<*mut sdl3::sys::gamepad::SDL_Gamepad> {
+    let raw = unsafe { SDL_GetGamepadFromID(gp.id().ok()?) };
+    (!raw.is_null()).then_some(raw)
+}
+
+fn activity_mask(gp: &Gamepad) -> u32 {
+    let mut mask = 0u32;
+    for (i, &btn) in TRACKED_BUTTONS.iter().enumerate() {
+        if gp.button(btn) {
+            mask |= 1 << i;
+        }
+    }
+    let base = TRACKED_BUTTONS.len();
+    let axes = [
+        gp.axis(Axis::TriggerLeft) > TRIGGER_THRESHOLD,
+        gp.axis(Axis::TriggerRight) > TRIGGER_THRESHOLD,
+        stick_magnitude(gp.axis(Axis::LeftX), gp.axis(Axis::LeftY)) > STICK_ACTIVITY,
+        stick_magnitude(gp.axis(Axis::RightX), gp.axis(Axis::RightY)) > STICK_ACTIVITY,
+    ];
+    for (i, on) in axes.into_iter().enumerate() {
+        if on {
+            mask |= 1 << (base + i);
+        }
+    }
+    mask
+}
+
+fn stick_magnitude(x: i16, y: i16) -> i32 {
+    let (x, y) = (x as f32, y as f32);
+    (x * x + y * y).sqrt() as i32
+}
+
 /// Tracks gamepad state using SDL3 and provides button change detection.
 ///
 /// Holds the SDL context and gamepad subsystem to keep them alive for the duration of the
@@ -239,7 +276,9 @@ pub struct TouchpadSample {
 pub struct GamepadInput {
     _sdl: sdl3::Sdl,
     gc_sub: GamepadSubsystem,
-    active_gamepad: Option<Gamepad>,
+    pads: Vec<Pad>,
+    primary: Option<u32>,
+    merge: bool,
     prev_buttons: HashMap<SdlButton, bool>,
     prev_trigger_left: bool,
     prev_trigger_right: bool,
@@ -251,11 +290,12 @@ pub struct GamepadInput {
     /// Pad instance whose SDL player-index lightbar override has been cleared. The clear
     /// itself sends an output report, so doing it on every `set_led` call makes animated
     /// LED effects (breathing/rainbow at ~30 Hz) visibly flicker — clear once per pad.
-    led_player_cleared_for: Option<u32>,
+    led_player_cleared_for: Vec<u32>,
+    last_hotplug_scan: Instant,
+    bt_battery: Cell<Option<(u32, Instant, Option<i32>)>>,
 }
 
 impl GamepadInput {
-    /// Initialise SDL3, load the community game controller DB, and open the first available pad.
     pub fn new(db_path: &Path) -> Result<Self, String> {
         set_controller_feature_hints();
         let sdl = sdl3::init().map_err(|e| format!("Failed to init SDL3: {e}"))?;
@@ -270,19 +310,12 @@ impl GamepadInput {
             }
         }
 
-        let active_gamepad = open_preferred_gamepad(&gc_sub);
-        if let Some(ref gp) = active_gamepad {
-            eprintln!(
-                "[gamepad] SDL3: active pad {} ({})",
-                gp.name().unwrap_or_else(|| "?".to_string()),
-                sdl3_type_to_str(gp.r#type())
-            );
-        }
-
         let mut input = Self {
             _sdl: sdl,
             gc_sub,
-            active_gamepad,
+            pads: Vec::new(),
+            primary: None,
+            merge: true,
             prev_buttons: HashMap::with_capacity(TRACKED_BUTTONS.len()),
             prev_trigger_left: false,
             prev_trigger_right: false,
@@ -290,11 +323,128 @@ impl GamepadInput {
             touchpad_samples: Vec::new(),
             poll_mode: PollMode::Full,
             prev_touchpad_pos: None,
-            led_player_cleared_for: None,
+            led_player_cleared_for: Vec::new(),
+            last_hotplug_scan: Instant::now(),
+            bt_battery: Cell::new(None),
         };
+        input.open_new_pads();
         // Baseline all buttons to suppress press storms on startup (Xbox triggers at rest = pressed).
         input.sync_prev_buttons_to_current();
         Ok(input)
+    }
+
+    pub fn set_merge(&mut self, merge: bool) {
+        if self.merge == merge {
+            return;
+        }
+        self.merge = merge;
+        if !merge {
+            self.primary = self.best_scored_pad();
+        }
+        self.sync_prev_buttons_to_current();
+    }
+
+    fn active(&self) -> Option<&Gamepad> {
+        let id = self.primary?;
+        self.pads.iter().find(|p| p.id == id).map(|p| &p.gp)
+    }
+
+    fn inputs(&self) -> impl Iterator<Item = &Gamepad> {
+        let primary = self.primary;
+        let merge = self.merge;
+        self.pads
+            .iter()
+            .filter(move |p| merge || Some(p.id) == primary)
+            .map(|p| &p.gp)
+    }
+
+    fn merged_button(&self, btn: SdlButton) -> bool {
+        self.inputs().any(|gp| gp.button(btn))
+    }
+
+    fn merged_trigger(&self, axis: Axis) -> bool {
+        self.inputs()
+            .map(|gp| gp.axis(axis))
+            .max()
+            .is_some_and(|v| v > TRIGGER_THRESHOLD)
+    }
+
+    fn merged_stick(&self, x: Axis, y: Axis) -> (i16, i16) {
+        self.inputs()
+            .map(|gp| (gp.axis(x), gp.axis(y)))
+            .max_by_key(|&(x, y)| stick_magnitude(x, y))
+            .unwrap_or((0, 0))
+    }
+
+    fn best_scored_pad(&self) -> Option<u32> {
+        self.pads
+            .iter()
+            .max_by_key(|p| score_gamepad(&p.gp))
+            .map(|p| p.id)
+    }
+
+    fn open_new_pads(&mut self) -> bool {
+        let mut added = false;
+        for id in self.gc_sub.gamepads().unwrap_or_default() {
+            let raw: u32 = id.into();
+            if self.pads.iter().any(|p| p.id == raw) {
+                continue;
+            }
+            let Ok(gp) = self.gc_sub.open(id) else {
+                continue;
+            };
+            eprintln!(
+                "[gamepad] SDL3: connected {} ({})",
+                gp.name().unwrap_or_else(|| "?".to_string()),
+                sdl3_type_to_str(gp.r#type())
+            );
+            let activity = activity_mask(&gp);
+            self.pads.push(Pad {
+                gp,
+                id: raw,
+                activity,
+            });
+            added = true;
+        }
+        if added && self.active().is_none() {
+            self.primary = self.best_scored_pad();
+        }
+        added
+    }
+
+    fn drop_disconnected_pads(&mut self) -> bool {
+        let before = self.pads.len();
+        self.pads.retain(|p| p.gp.connected());
+        if self.pads.len() == before {
+            return false;
+        }
+        let ids: Vec<u32> = self.pads.iter().map(|p| p.id).collect();
+        self.led_player_cleared_for.retain(|id| ids.contains(id));
+        if self.active().is_none() {
+            self.primary = self.best_scored_pad();
+            self.prev_touchpad_pos = None;
+        }
+        true
+    }
+
+    fn update_primary(&mut self) {
+        let mut newest = None;
+        for pad in self.pads.iter_mut() {
+            let mask = activity_mask(&pad.gp);
+            if mask & !pad.activity != 0 {
+                newest = Some(pad.id);
+            }
+            pad.activity = mask;
+        }
+        if !self.merge {
+            return;
+        }
+        if let Some(id) = newest {
+            if self.primary != Some(id) {
+                self.primary = Some(id);
+                self.prev_touchpad_pos = None;
+            }
+        }
     }
 
     /// Updates SDL3 controller state, detects hotplug, and captures button/trigger changes.
@@ -306,85 +456,67 @@ impl GamepadInput {
     /// Updates SDL3 controller state according to a userland polling mode.
     pub fn poll_events_with_mode(&mut self, mode: PollMode) -> bool {
         self.gc_sub.update();
-        let mut any_change = false;
 
         if self.poll_mode != mode {
             self.poll_mode = mode;
             self.sync_prev_buttons_to_current();
         }
 
-        // Detect disconnection.
-        if let Some(ref gp) = self.active_gamepad {
-            if !gp.connected() {
-                self.active_gamepad = None;
-                self.pending_button_changes.clear();
-                self.prev_buttons.clear();
-                self.prev_trigger_left = false;
-                self.prev_trigger_right = false;
-                self.prev_touchpad_pos = None;
-                any_change = true;
-            }
+        let had_pads = !self.pads.is_empty();
+        let mut any_change = self.drop_disconnected_pads();
+        if self.last_hotplug_scan.elapsed() >= Duration::from_millis(1000) {
+            self.last_hotplug_scan = Instant::now();
+            any_change |= self.open_new_pads();
         }
 
-        // Detect new connection when no pad is active.
-        if self.active_gamepad.is_none() {
-            if let Some(gp) = open_preferred_gamepad(&self.gc_sub) {
-                eprintln!(
-                    "[gamepad] SDL3: connected {} ({})",
-                    gp.name().unwrap_or_else(|| "?".to_string()),
-                    sdl3_type_to_str(gp.r#type())
-                );
-                self.active_gamepad = Some(gp);
-                any_change = true;
-            }
-        }
-
-        if any_change {
+        if any_change && (!had_pads || self.pads.is_empty()) {
             // Reset baseline to prevent press-storm on reconnect.
             self.sync_prev_buttons_to_current();
             return true;
         }
 
-        // Poll button state changes on the active pad.
-        if let Some(ref gp) = self.active_gamepad {
-            let tracked = match mode {
-                PollMode::Full => TRACKED_BUTTONS,
-                PollMode::Sleep => SLEEP_TRACKED_BUTTONS,
-            };
-            for &btn in tracked {
-                let pressed = gp.button(btn);
-                let was = self.prev_buttons.get(&btn).copied().unwrap_or(false);
-                if pressed != was {
-                    self.prev_buttons.insert(btn, pressed);
-                    if let Some(button) = sdl_to_button(btn) {
-                        self.pending_button_changes
-                            .push(ButtonChange { button, pressed });
-                    }
+        if self.pads.is_empty() {
+            return any_change;
+        }
+        self.update_primary();
+
+        let tracked = match mode {
+            PollMode::Full => TRACKED_BUTTONS,
+            PollMode::Sleep => SLEEP_TRACKED_BUTTONS,
+        };
+        for &btn in tracked {
+            let pressed = self.merged_button(btn);
+            let was = self.prev_buttons.get(&btn).copied().unwrap_or(false);
+            if pressed != was {
+                self.prev_buttons.insert(btn, pressed);
+                if let Some(button) = sdl_to_button(btn) {
+                    self.pending_button_changes
+                        .push(ButtonChange { button, pressed });
                 }
             }
-            if mode == PollMode::Sleep {
-                return false;
-            }
-            // Synthesise LT/RT from trigger axes.
-            let lt_pressed = gp.axis(Axis::TriggerLeft) > TRIGGER_THRESHOLD;
-            let rt_pressed = gp.axis(Axis::TriggerRight) > TRIGGER_THRESHOLD;
-            if lt_pressed != self.prev_trigger_left {
-                self.prev_trigger_left = lt_pressed;
-                self.pending_button_changes.push(ButtonChange {
-                    button: Button::Lt,
-                    pressed: lt_pressed,
-                });
-            }
-            if rt_pressed != self.prev_trigger_right {
-                self.prev_trigger_right = rt_pressed;
-                self.pending_button_changes.push(ButtonChange {
-                    button: Button::Rt,
-                    pressed: rt_pressed,
-                });
-            }
+        }
+        if mode == PollMode::Sleep {
+            return any_change;
+        }
+        // Synthesise LT/RT from trigger axes.
+        let lt_pressed = self.merged_trigger(Axis::TriggerLeft);
+        let rt_pressed = self.merged_trigger(Axis::TriggerRight);
+        if lt_pressed != self.prev_trigger_left {
+            self.prev_trigger_left = lt_pressed;
+            self.pending_button_changes.push(ButtonChange {
+                button: Button::Lt,
+                pressed: lt_pressed,
+            });
+        }
+        if rt_pressed != self.prev_trigger_right {
+            self.prev_trigger_right = rt_pressed;
+            self.pending_button_changes.push(ButtonChange {
+                button: Button::Rt,
+                pressed: rt_pressed,
+            });
         }
 
-        false
+        any_change
     }
 
     /// Baseline button state from current SDL3 values; clears pending changes.
@@ -394,38 +526,39 @@ impl GamepadInput {
         self.prev_trigger_left = false;
         self.prev_trigger_right = false;
         self.prev_touchpad_pos = None;
-        if let Some(ref gp) = self.active_gamepad {
-            for &btn in TRACKED_BUTTONS {
-                self.prev_buttons.insert(btn, gp.button(btn));
-            }
-            self.prev_trigger_left = gp.axis(Axis::TriggerLeft) > TRIGGER_THRESHOLD;
-            self.prev_trigger_right = gp.axis(Axis::TriggerRight) > TRIGGER_THRESHOLD;
+        if self.pads.is_empty() {
+            return;
         }
+        for &btn in TRACKED_BUTTONS {
+            let pressed = self.merged_button(btn);
+            self.prev_buttons.insert(btn, pressed);
+        }
+        self.prev_trigger_left = self.merged_trigger(Axis::TriggerLeft);
+        self.prev_trigger_right = self.merged_trigger(Axis::TriggerRight);
     }
 
     /// Returns `(left_x, left_y, right_x, right_y)` normalized to `-1.0..=1.0`.
     pub fn axes(&self) -> (f32, f32, f32, f32) {
-        let Some(ref gp) = self.active_gamepad else {
-            return (0.0, 0.0, 0.0, 0.0);
-        };
         const NORM: f32 = 32767.0;
+        let (lx, ly) = self.merged_stick(Axis::LeftX, Axis::LeftY);
+        let (rx, ry) = self.merged_stick(Axis::RightX, Axis::RightY);
         // SDL3 Y axes: up = negative. Negate so callers (cursor, scroll) receive up = positive.
         (
-            gp.axis(Axis::LeftX) as f32 / NORM,
-            -(gp.axis(Axis::LeftY) as f32 / NORM),
-            gp.axis(Axis::RightX) as f32 / NORM,
-            -(gp.axis(Axis::RightY) as f32 / NORM),
+            lx as f32 / NORM,
+            -(ly as f32 / NORM),
+            rx as f32 / NORM,
+            -(ry as f32 / NORM),
         )
     }
 
     /// Pressed buttons and non-idle sticks for debug overlays.
     pub fn live_input_summary(&self) -> String {
-        let Some(ref gp) = self.active_gamepad else {
+        if self.pads.is_empty() {
             return String::new();
-        };
+        }
         let mut pressed = Vec::new();
         for &btn in TRACKED_BUTTONS {
-            if gp.button(btn) {
+            if self.merged_button(btn) {
                 if let Some(b) = sdl_to_button(btn) {
                     pressed.push(b.as_str());
                 }
@@ -442,14 +575,32 @@ impl GamepadInput {
 
     /// Returns the name of the active controller as reported by SDL3, if any.
     pub fn active_controller_name(&self) -> Option<String> {
-        self.active_gamepad.as_ref()?.name()
+        self.active()?.name()
     }
 
     /// Returns the SDL3-detected controller type as a canonical string.
     /// Uses `sdl3_type_to_str(gamepad.type())` — no name heuristic needed.
+    pub fn release_led(&mut self) {
+        unsafe extern "C" {
+            fn SDL_SetGamepadPlayerIndex(
+                gamepad: *mut sdl3::sys::gamepad::SDL_Gamepad,
+                player_index: ::std::ffi::c_int,
+            ) -> bool;
+        }
+        for pad in &self.pads {
+            let Some(raw) = pad_raw(&pad.gp) else {
+                continue;
+            };
+            unsafe {
+                SDL_SetGamepadPlayerIndex(raw, -1);
+                SDL_SetGamepadPlayerIndex(raw, 0);
+            }
+        }
+        self.led_player_cleared_for.clear();
+    }
+
     pub fn active_controller_type(&self) -> &'static str {
-        self.active_gamepad
-            .as_ref()
+        self.active()
             .map(|gp| sdl3_type_to_str(gp.r#type()))
             .unwrap_or("generic")
     }
@@ -459,14 +610,6 @@ impl GamepadInput {
     /// Clears SDL3's automatic player-index lightbar color first so the custom color is not
     /// overwritten by SDL3's internal player-assignment logic (relevant for DualSense / DS4).
     pub fn set_led(&mut self, r: u8, g: u8, b: u8) {
-        let Some(ref gp) = self.active_gamepad else {
-            return;
-        };
-        let Ok(id) = gp.id() else { return };
-        let raw = unsafe { SDL_GetGamepadFromID(id) };
-        if raw.is_null() {
-            return;
-        }
         unsafe extern "C" {
             // Setting player index to -1 removes SDL3's automatic player-indicator color so
             // SDL_SetGamepadLED can take full control of the DualSense / DS4 lightbar.
@@ -475,17 +618,21 @@ impl GamepadInput {
                 player_index: ::std::ffi::c_int,
             ) -> bool;
         }
-        // The player-index clear sends its own output report; repeating it on every LED
-        // write makes ~30 Hz animated effects flicker. Clear once per pad instance.
-        let raw_id = id.into();
-        if self.led_player_cleared_for != Some(raw_id) {
-            unsafe {
-                SDL_SetGamepadPlayerIndex(raw, -1);
+        for pad in &self.pads {
+            let Some(raw) = pad_raw(&pad.gp) else {
+                continue;
+            };
+            // The player-index clear sends its own output report; repeating it on every LED
+            // write makes ~30 Hz animated effects flicker. Clear once per pad instance.
+            if !self.led_player_cleared_for.contains(&pad.id) {
+                unsafe {
+                    SDL_SetGamepadPlayerIndex(raw, -1);
+                }
+                self.led_player_cleared_for.push(pad.id);
             }
-            self.led_player_cleared_for = Some(raw_id);
-        }
-        unsafe {
-            SDL_SetGamepadLED(raw, r, g, b);
+            unsafe {
+                SDL_SetGamepadLED(raw, r, g, b);
+            }
         }
     }
 
@@ -494,16 +641,9 @@ impl GamepadInput {
     /// Returns `(percent, charging, wired)` where `percent` is 0–100 or −1 when unknown.
     /// `charging` is true while plugged in and not yet full; `wired` means no internal battery.
     pub fn battery(&self) -> (i32, bool, bool) {
-        let Some(ref gp) = self.active_gamepad else {
+        let Some(raw) = self.active().and_then(pad_raw) else {
             return (-1, false, false);
         };
-        let Ok(id) = gp.id() else {
-            return (-1, false, false);
-        };
-        let raw = unsafe { SDL_GetGamepadFromID(id) };
-        if raw.is_null() {
-            return (-1, false, false);
-        }
         // Declare SDL_GetGamepadPowerInfo inline to avoid importing SDL_PowerState across sdl3_sys versions.
         // SDL_PowerState maps to c_int; values: ERROR=-1, UNKNOWN=0, ON_BATTERY=1, NO_BATTERY=2,
         // CHARGING=3, CHARGED=4.
@@ -515,17 +655,50 @@ impl GamepadInput {
         }
         let mut pct: std::ffi::c_int = -1;
         let state = unsafe { SDL_GetGamepadPowerInfo(raw, &mut pct) };
-        let charging = state == 3 || state == 4; // CHARGING or CHARGED
-        let wired = state == 2; // NO_BATTERY
-        (pct, charging, wired)
+        let xbox_wired =
+            self.active_controller_type() == "xbox" && self.connection_wired() == Some(true);
+        let (pct, charging, wired) = map_power_info(state, pct, xbox_wired);
+        if wired || self.active_controller_type() == "playstation" {
+            return (pct, charging, wired);
+        }
+        match self.bluetooth_battery() {
+            Some(bt) => (bt, charging, false),
+            None => (pct, charging, wired),
+        }
+    }
+
+    fn bluetooth_battery(&self) -> Option<i32> {
+        let id = self.primary?;
+        if let Some((cached_id, at, value)) = self.bt_battery.get() {
+            if cached_id == id && at.elapsed() < BT_BATTERY_TTL {
+                return value;
+            }
+        }
+        let value = self
+            .active()
+            .and_then(pad_raw)
+            .and_then(|raw| {
+                let path = unsafe { SDL_GetGamepadPath(raw) };
+                (!path.is_null())
+                    .then(|| {
+                        unsafe { CStr::from_ptr(path) }
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                    .and_then(|path| bluetooth_address(&path))
+                    .or_else(|| {
+                        let (vid, pid) =
+                            unsafe { (SDL_GetGamepadVendor(raw), SDL_GetGamepadProduct(raw)) };
+                        hid_bluetooth_address(vid, pid)
+                    })
+            })
+            .and_then(|addr| pnp_battery_percent(&addr));
+        self.bt_battery.set(Some((id, Instant::now(), value)));
+        value
     }
 
     pub fn connection_wired(&self) -> Option<bool> {
-        let id = self.active_gamepad.as_ref()?.id().ok()?;
-        let raw = unsafe { SDL_GetGamepadFromID(id) };
-        if raw.is_null() {
-            return None;
-        }
+        let raw = self.active().and_then(pad_raw)?;
         unsafe extern "C" {
             fn SDL_GetGamepadConnectionState(
                 gamepad: *mut sdl3::sys::gamepad::SDL_Gamepad,
@@ -548,7 +721,7 @@ impl GamepadInput {
 
         // Collect the data we need while holding the immutable borrow on active_gamepad.
         let (id, num_fingers) = {
-            let Some(ref gp) = self.active_gamepad else {
+            let Some(gp) = self.active() else {
                 self.prev_touchpad_pos = None;
                 return (None, &self.touchpad_samples);
             };
@@ -632,7 +805,10 @@ impl GamepadInput {
 
     /// Fires a rumble effect on the active gamepad. Returns false if unsupported or no pad.
     pub fn rumble(&mut self, strong: f32, weak: f32, duration_ms: u32) -> bool {
-        let Some(ref mut gp) = self.active_gamepad else {
+        let Some(id) = self.primary else {
+            return false;
+        };
+        let Some(gp) = self.pads.iter_mut().find(|p| p.id == id).map(|p| &mut p.gp) else {
             return false;
         };
         let strong_u16 = (strong.clamp(0.0, 1.0) * u16::MAX as f32) as u16;
@@ -647,30 +823,21 @@ impl GamepadInput {
     /// SDL uses **duration 0** to stop ongoing effects; call this on app shutdown so motors
     /// do not stay on after the process exits.
     pub fn stop_rumble_effects(&mut self) {
-        self.rumble(0.0, 0.0, 0);
-        self.trigger_rumble(0.0, 0.0, 0);
+        for pad in self.pads.iter_mut() {
+            let _ = pad.gp.set_rumble(0, 0, 0);
+            if let Some(raw) = pad_raw(&pad.gp) {
+                unsafe { SDL_RumbleGamepadTriggers(raw, 0, 0, 0) };
+            }
+        }
     }
 
     /// Fires a rumble effect on the trigger (adaptive) motors.
     /// Only supported on controllers with per-trigger haptics (e.g. DualSense, Xbox Series).
     pub fn trigger_rumble(&mut self, left: f32, right: f32, duration_ms: u32) -> bool {
-        let Some(ref gp) = self.active_gamepad else {
+        let Some(raw) = self.active().and_then(pad_raw) else {
             return false;
         };
-        let Ok(id) = gp.id() else { return false };
-        let raw = unsafe { SDL_GetGamepadFromID(id) };
-        if raw.is_null() {
-            return false;
-        }
         // SDL3: SDL_RumbleGamepadTriggers(gamepad, left_rumble_u16, right_rumble_u16, duration_ms)
-        unsafe extern "C" {
-            fn SDL_RumbleGamepadTriggers(
-                gamepad: *mut sdl3::sys::gamepad::SDL_Gamepad,
-                left_rumble: u16,
-                right_rumble: u16,
-                duration_ms: u32,
-            ) -> bool;
-        }
         let left_u16 = (left.clamp(0.0, 1.0) * u16::MAX as f32) as u16;
         let right_u16 = (right.clamp(0.0, 1.0) * u16::MAX as f32) as u16;
         unsafe { SDL_RumbleGamepadTriggers(raw, left_u16, right_u16, duration_ms.min(30_000)) }
@@ -680,14 +847,6 @@ impl GamepadInput {
     /// Must be called once after connect before `read_gyro` returns data.
     /// Returns `true` if the controller supports gyro and it was enabled.
     pub fn enable_gyro(&self) -> bool {
-        let Some(ref gp) = self.active_gamepad else {
-            return false;
-        };
-        let Ok(id) = gp.id() else { return false };
-        let raw = unsafe { SDL_GetGamepadFromID(id) };
-        if raw.is_null() {
-            return false;
-        }
         // SDL_SensorType: SDL_SENSOR_GYRO = 2
         unsafe extern "C" {
             fn SDL_SetGamepadSensorEnabled(
@@ -696,7 +855,11 @@ impl GamepadInput {
                 enabled: bool,
             ) -> bool;
         }
-        unsafe { SDL_SetGamepadSensorEnabled(raw, 2, true) }
+        let mut any = false;
+        for raw in self.pads.iter().filter_map(|p| pad_raw(&p.gp)) {
+            any |= unsafe { SDL_SetGamepadSensorEnabled(raw, 2, true) };
+        }
+        any
     }
 
     /// Reads the current gyroscope angular velocity (rad/s).
@@ -704,12 +867,7 @@ impl GamepadInput {
     /// yaw around Y, and roll around Z.
     /// Returns `None` when no gamepad is connected or the sensor is unavailable.
     pub fn read_gyro(&self) -> Option<(f32, f32, f32)> {
-        let gp = self.active_gamepad.as_ref()?;
-        let id = gp.id().ok()?;
-        let raw = unsafe { SDL_GetGamepadFromID(id) };
-        if raw.is_null() {
-            return None;
-        }
+        let raw = self.active().and_then(pad_raw)?;
         unsafe extern "C" {
             fn SDL_GetGamepadSensorData(
                 gamepad: *mut sdl3::sys::gamepad::SDL_Gamepad,
@@ -732,6 +890,111 @@ impl Drop for GamepadInput {
     fn drop(&mut self) {
         self.stop_rumble_effects();
     }
+}
+
+pub fn map_power_info(state: i32, pct: i32, xbox_wired: bool) -> (i32, bool, bool) {
+    let charging = state == 3 || state == 4;
+    let pct = if (0..=100).contains(&pct) { pct } else { -1 };
+    match state {
+        2 => (-1, false, true),
+        1 | 3 | 4 if xbox_wired => (-1, charging, true),
+        1 | 3 | 4 => (pct, charging, false),
+        _ => (pct, false, false),
+    }
+}
+
+const BT_BATTERY_TTL: Duration = Duration::from_secs(30);
+
+fn bluetooth_address(path: &str) -> Option<String> {
+    path.split(['&', '#', '\\', '_'])
+        .find(|t| t.len() == 12 && t.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(|t| t.to_ascii_uppercase())
+}
+
+#[cfg(windows)]
+fn present_device_ids(enumerator: &str) -> Vec<String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        CM_Get_Device_ID_ListW, CM_Get_Device_ID_List_SizeW, CM_GETIDLIST_FILTER_ENUMERATOR,
+        CM_GETIDLIST_FILTER_PRESENT, CR_SUCCESS,
+    };
+    let flags = CM_GETIDLIST_FILTER_ENUMERATOR | CM_GETIDLIST_FILTER_PRESENT;
+    let filter: Vec<u16> = enumerator.encode_utf16().chain([0]).collect();
+    let mut len = 0u32;
+    if unsafe { CM_Get_Device_ID_List_SizeW(&mut len, PCWSTR(filter.as_ptr()), flags) }
+        != CR_SUCCESS
+    {
+        return Vec::new();
+    }
+    let mut list = vec![0u16; len as usize];
+    if unsafe { CM_Get_Device_ID_ListW(PCWSTR(filter.as_ptr()), &mut list, flags) } != CR_SUCCESS {
+        return Vec::new();
+    }
+    list.split(|&c| c == 0)
+        .filter(|id| !id.is_empty())
+        .map(String::from_utf16_lossy)
+        .collect()
+}
+
+#[cfg(windows)]
+fn hid_bluetooth_address(vid: u16, pid: u16) -> Option<String> {
+    let needle = format!("VID_{vid:04X}&PID_{pid:04X}");
+    let mut addrs: Vec<String> = present_device_ids("HID")
+        .into_iter()
+        .map(|id| id.to_ascii_uppercase())
+        .filter(|id| id.contains("00805F9B34FB") && id.contains(&needle))
+        .filter_map(|id| bluetooth_address(&id))
+        .collect();
+    addrs.dedup();
+    match addrs.as_slice() {
+        [addr] => Some(addr.clone()),
+        _ => None,
+    }
+}
+
+#[cfg(windows)]
+fn pnp_battery_percent(addr: &str) -> Option<i32> {
+    use windows::core::{GUID, PCWSTR};
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        CM_Get_DevNode_PropertyW, CM_Locate_DevNodeW, CM_LOCATE_DEVNODE_NORMAL, CR_SUCCESS,
+    };
+    use windows::Win32::Devices::Properties::{DEVPROPKEY, DEVPROPTYPE, DEVPROP_TYPE_BYTE};
+    const KEY: DEVPROPKEY = DEVPROPKEY {
+        fmtid: GUID::from_u128(0x104ea319_6ee2_4701_bd47_8ddbf425bbe5),
+        pid: 2,
+    };
+    let ids = present_device_ids("BTHLE")
+        .into_iter()
+        .chain(present_device_ids("BTHENUM"));
+    for id in ids.filter(|id| id.to_ascii_uppercase().contains(addr)) {
+        let id: Vec<u16> = id.encode_utf16().chain([0]).collect();
+        let mut node = 0u32;
+        if unsafe { CM_Locate_DevNodeW(&mut node, PCWSTR(id.as_ptr()), CM_LOCATE_DEVNODE_NORMAL) }
+            != CR_SUCCESS
+        {
+            continue;
+        }
+        let mut ty = DEVPROPTYPE(0);
+        let mut value = 0u8;
+        let mut size = 1u32;
+        let ok = unsafe {
+            CM_Get_DevNode_PropertyW(node, &KEY, &mut ty, Some(&mut value), &mut size, 0)
+        } == CR_SUCCESS;
+        if ok && ty == DEVPROP_TYPE_BYTE && size == 1 && value <= 100 {
+            return Some(value as i32);
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn hid_bluetooth_address(_vid: u16, _pid: u16) -> Option<String> {
+    None
+}
+
+#[cfg(not(windows))]
+fn pnp_battery_percent(_addr: &str) -> Option<i32> {
+    None
 }
 
 pub fn wired_from_connection_state(state: i32) -> Option<bool> {

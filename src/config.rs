@@ -154,6 +154,7 @@ pub struct GamepadSettings {
     pub prompt_userland_debug: bool,
     pub signin_hints: bool,
     pub guide_launch: bool,
+    pub multi_controller: bool,
     pub update_check: bool,
     /// Offline voice typing. When false, R3, Ctrl+Alt+V and the mic key do nothing,
     /// the mic key on the keyboard shows disabled, and the speech engine is unloaded.
@@ -189,6 +190,7 @@ impl Default for GamepadSettings {
             prompt_userland_debug: false,
             signin_hints: true,
             guide_launch: true,
+            multi_controller: true,
             update_check: true,
             voice_enabled: true,
             vk_side_tips: true,
@@ -325,7 +327,7 @@ pub fn userland_gamepad_poll_mode() -> warmup_gamepad::PollMode {
 }
 
 #[cfg(feature = "gamepad")]
-pub fn gamepad_settings() -> GamepadSettings {
+fn gamepad_settings_uncached() -> GamepadSettings {
     let mut settings = GamepadSettings::default();
     if let Some(text) = settings_path().and_then(|p| std::fs::read_to_string(p).ok()) {
         apply_gamepad_settings_text(&mut settings, &text);
@@ -345,6 +347,35 @@ pub fn gamepad_settings() -> GamepadSettings {
         settings.auto_stop_on_game = parse_bool(&raw, settings.auto_stop_on_game);
     }
 
+    settings
+}
+
+#[cfg(feature = "gamepad")]
+pub fn invalidate_gamepad_settings_cache() {
+    if let Ok(mut cache) = GAMEPAD_SETTINGS_CACHE.lock() {
+        *cache = None;
+    }
+}
+
+#[cfg(feature = "gamepad")]
+static GAMEPAD_SETTINGS_CACHE: std::sync::Mutex<
+    Option<(std::time::Instant, GamepadSettings)>,
+> = std::sync::Mutex::new(None);
+
+#[cfg(feature = "gamepad")]
+pub fn gamepad_settings() -> GamepadSettings {
+    const TTL: std::time::Duration = std::time::Duration::from_millis(100);
+    if let Ok(cache) = GAMEPAD_SETTINGS_CACHE.lock() {
+        if let Some((at, settings)) = cache.as_ref() {
+            if at.elapsed() < TTL {
+                return *settings;
+            }
+        }
+    }
+    let settings = gamepad_settings_uncached();
+    if let Ok(mut cache) = GAMEPAD_SETTINGS_CACHE.lock() {
+        *cache = Some((std::time::Instant::now(), settings));
+    }
     settings
 }
 
@@ -404,6 +435,9 @@ fn apply_gamepad_settings_text(settings: &mut GamepadSettings, text: &str) {
             }
             "signin_hints" => settings.signin_hints = parse_bool(value, settings.signin_hints),
             "guide_launch" => settings.guide_launch = parse_bool(value, settings.guide_launch),
+            "multi_controller" => {
+                settings.multi_controller = parse_bool(value, settings.multi_controller)
+            }
             "update_check" => settings.update_check = parse_bool(value, settings.update_check),
             "voice_enabled" => settings.voice_enabled = parse_bool(value, settings.voice_enabled),
             "vk_side_tips" => settings.vk_side_tips = parse_bool(value, settings.vk_side_tips),
@@ -609,6 +643,9 @@ const SETTINGS_TEMPLATE: &str = r#"# Warmup Companion settings. One `key = value
 # Guide (Xbox) / PS button opens warmUP when it is closed (true|false)
 # guide_launch = true
 
+# Every connected controller drives input at the same time; false uses one pad (true|false)
+# multi_controller = true
+
 # Check GitHub once a day for a newer Warmup Companion release (true|false)
 # update_check = true
 
@@ -798,6 +835,7 @@ pub fn set_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
     let tmp = path.with_extension("ini.tmp");
     std::fs::write(&tmp, text).map_err(|e| format!("write {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("rename to {}: {e}", path.display()))?;
+    invalidate_gamepad_settings_cache();
     // Turning voice off must unload the engine now, not on the next R3 press.
     #[cfg(windows)]
     if key == "voice_enabled" {
@@ -878,6 +916,7 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
         | "prompt_userland_debug"
         | "signin_hints"
         | "guide_launch"
+        | "multi_controller"
         | "update_check"
         | "voice_enabled"
         | "vk_side_tips" => match value.trim().to_ascii_lowercase().as_str() {
@@ -901,9 +940,16 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
         | "keyboard_border" => parse_theme_color(value)
             .map(|_| ())
             .ok_or_else(|| format!("{key} must be a #RRGGBB color")),
-        "led_color" => parse_theme_color(value)
+        "led_color" | "led_secondary_color" => parse_theme_color(value)
             .map(|_| ())
-            .ok_or_else(|| "led_color must be a #RRGGBB color".to_string()),
+            .ok_or_else(|| format!("{key} must be a #RRGGBB color")),
+        "led_brightness" => value
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|v| (0.0..=1.0).contains(v))
+            .map(|_| ())
+            .ok_or_else(|| "led_brightness must be between 0.0 and 1.0".to_string()),
         "led_effect" => match value.trim().to_ascii_lowercase().as_str() {
             "solid" | "breathing" | "rainbow" | "gradient" | "off" => Ok(()),
             _ => Err("led_effect must be solid, breathing, rainbow, gradient or off".to_string()),

@@ -1,7 +1,6 @@
 //! XInput DLL load, keystroke mapping, and secure-thread poll tick.
 
 use std::sync::atomic::Ordering;
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use windows::core::PCSTR;
@@ -16,7 +15,9 @@ use windows::Win32::UI::Input::XboxController::{
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
 use crate::hid_gamepad::PadSample;
-use crate::pad_decode::{norm_thumb, trigger_edges, LEFT_DEADZONE, RIGHT_DEADZONE};
+use crate::pad_decode::{
+    norm_thumb, trigger_edges, LEFT_DEADZONE, RIGHT_DEADZONE, TRIGGER_PRESS_THRESH,
+};
 use crate::xusb_ioctl::XusbDevice;
 
 use super::raw_hid::report_hex;
@@ -157,7 +158,7 @@ pub(crate) fn poll_xinput_tick(state: &mut PollState) {
         if state.xusb.is_empty() {
             if let Some(get_keystroke) = state.get_keystroke {
                 state.keystroke_events +=
-                    secure_poll_keystrokes(&state.tx, get_keystroke, slot, &mut state.prev_buttons);
+                    secure_poll_keystrokes(get_keystroke, slot, &mut state.prev_buttons);
             }
         }
     }
@@ -201,13 +202,12 @@ pub(crate) fn poll_xinput_tick(state: &mut PollState) {
     // HID is authoritative for PlayStation/non-XUSB pads. Xbox controllers can
     // also surface Raw Input HID devices; do not let that shadow the direct XUSB
     // path, which is the reliable secure-desktop source for Xbox.
-    let hid_authoritative = hid_is_authoritative(state.hid_readers.len(), state.xusb.len());
-    if hid_authoritative {
+    let merge = crate::config::gamepad_settings().multi_controller;
+    let pad_slots = connected;
+    let hid_count = state.hid_readers.len();
+    let hid_on = (merge && hid_count > 0) || hid_is_authoritative(hid_count, state.xusb.len());
+    if hid_on {
         connected[0] = true;
-    }
-    if hid_authoritative != state.hid_active_prev {
-        state.hid_active_prev = hid_authoritative;
-        let _ = state.tx.send(SecureMsg::HidActive(hid_authoritative));
     }
 
     if INJECT_HOLD_ACTIVE.load(Ordering::Relaxed) {
@@ -220,16 +220,15 @@ pub(crate) fn poll_xinput_tick(state: &mut PollState) {
 
         INJECT_HOLD_ACTIVE.store(false, Ordering::Relaxed);
         state.last_xusb = None;
-        for (slot, prev) in state.prev_buttons.iter_mut().enumerate() {
-            if *prev != 0 {
-                let old = *prev;
-                *prev = 0;
-                let _ = state.tx.send(SecureMsg::Buttons {
-                    slot: slot as u32,
-                    prev: old,
-                    cur: 0,
-                });
-            }
+        state.prev_buttons = [0; 4];
+        if state.merged_buttons != 0 {
+            let old = state.merged_buttons;
+            state.merged_buttons = 0;
+            let _ = state.tx.send(SecureMsg::Buttons {
+                slot: report_slot(state),
+                prev: old,
+                cur: 0,
+            });
         }
         let _ = state.tx.send(SecureMsg::Axes((0.0, 0.0, 0.0, 0.0)));
         return;
@@ -358,66 +357,92 @@ pub(crate) fn poll_xinput_tick(state: &mut PollState) {
         let _ = state.tx.send(SecureMsg::Slots(connected));
     }
 
-    let slot = match state.active_slot {
-        Some(slot) if connected[slot as usize] => Some(slot),
+    let xbox_slot = match state.active_slot {
+        Some(slot) if pad_slots[slot as usize] => Some(slot),
         _ => {
-            state.active_slot = (0..SLOTS).find(|i| connected[*i as usize]);
+            state.active_slot = (0..SLOTS).find(|i| pad_slots[*i as usize]);
             state.active_slot
         }
     };
+    let xbox = xbox_slot
+        .filter(|_| merge || !hid_on)
+        .map(|slot| xbox_sample(state, &states, slot));
+    let hid = hid_on.then_some(state.last_hid);
 
-    let Some(slot) = slot else {
+    if xbox.is_none() && hid.is_none() {
         if state.last_no_pad.elapsed() >= Duration::from_secs(15) {
             state.last_no_pad = Instant::now();
             let _ = state.tx.send(SecureMsg::NoController);
         }
         return;
-    };
-
-    if hid_authoritative && slot == 0 {
-        let prev = state.prev_buttons[0];
-        let buttons = state.last_hid.buttons;
-        if prev != buttons {
-            state.prev_buttons[0] = buttons;
-            let _ = state.tx.send(SecureMsg::Buttons {
-                slot: 0,
-                prev,
-                cur: buttons,
-            });
-        }
-        let mut trig = Vec::new();
-        trigger_edges(
-            &mut state.prev_trigger_left,
-            &mut state.prev_trigger_right,
-            state.last_hid.lt,
-            state.last_hid.rt,
-            &mut trig,
-        );
-        for edge in trig {
-            let _ = state.tx.send(SecureMsg::Trigger(edge));
-        }
-        let _ = state.tx.send(SecureMsg::Axes((
-            state.last_hid.lx,
-            state.last_hid.ly,
-            state.last_hid.rx,
-            state.last_hid.ry,
-        )));
-        return;
     }
 
-    // The DLL state may be absent (slot connected only via the direct XUSB read,
-    // which the foreground gate doesn't touch) — default to neutral, never panic.
-    let pad = states[slot as usize].unwrap_or_default();
+    let xbox_new = xbox.map_or(0, |s| {
+        let bits = activity_bits(&s);
+        let new = bits & !state.prev_xbox_activity;
+        state.prev_xbox_activity = bits;
+        new
+    });
+    let hid_new = hid.map_or(0, |s| {
+        let bits = activity_bits(&s);
+        let new = bits & !state.prev_hid_activity;
+        state.prev_hid_activity = bits;
+        new
+    });
+    let hid_label = match (xbox.is_some(), hid.is_some()) {
+        (false, _) => true,
+        (true, false) => false,
+        _ if hid_new != 0 && xbox_new == 0 => true,
+        _ if xbox_new != 0 && hid_new == 0 => false,
+        _ => state.hid_active_prev,
+    };
+    if hid_label != state.hid_active_prev {
+        state.hid_active_prev = hid_label;
+        let _ = state.tx.send(SecureMsg::HidActive(hid_label));
+    }
 
-    // Authoritative input source. On the secure desktop the DLL `pad` reads
-    // neutral (btn=0) even while our anchor holds foreground — the invisible anchor
-    // does not actually grant LogonUI's input rights — so the XUSB-direct read is
-    // the only source that carries live buttons there. Prefer XUSB whenever a pad
-    // is open; fall back to the DLL only when no XUSB pad is present. (During an
-    // inject burst the anchor yields foreground for ~48ms and XUSB may briefly
-    // freeze, but the user is not navigating then, so that is harmless.)
-    let xusb = state.last_xusb.clone().filter(|_| !state.xusb.is_empty());
-    let (buttons, lx, ly, rx, ry, lt, rt) = match &xusb {
+    let merged = merge_samples(xbox, hid);
+
+    let mut trig = Vec::new();
+    trigger_edges(
+        &mut state.prev_trigger_left,
+        &mut state.prev_trigger_right,
+        merged.lt,
+        merged.rt,
+        &mut trig,
+    );
+    for edge in trig {
+        let _ = state.tx.send(SecureMsg::Trigger(edge));
+    }
+
+    let prev = state.merged_buttons;
+    if prev != merged.buttons {
+        state.merged_buttons = merged.buttons;
+        let _ = state.tx.send(SecureMsg::Buttons {
+            slot: report_slot(state),
+            prev,
+            cur: merged.buttons,
+        });
+    }
+
+    let axes = (merged.lx, merged.ly, merged.rx, merged.ry);
+    if state.last_axes_sent != Some(axes) {
+        state.last_axes_sent = Some(axes);
+        let _ = state.tx.send(SecureMsg::Axes(axes));
+    }
+}
+
+fn report_slot(state: &PollState) -> u32 {
+    if state.hid_active_prev {
+        0
+    } else {
+        state.active_slot.unwrap_or(0)
+    }
+}
+
+fn xbox_sample(state: &PollState, states: &[Option<XINPUT_GAMEPAD>; 4], slot: u32) -> PadSample {
+    let xusb = state.last_xusb.as_ref().filter(|_| !state.xusb.is_empty());
+    let (buttons, lx, ly, rx, ry, lt, rt) = match xusb {
         Some(r) => (
             r.buttons,
             r.thumb_lx,
@@ -427,60 +452,70 @@ pub(crate) fn poll_xinput_tick(state: &mut PollState) {
             r.left_trigger,
             r.right_trigger,
         ),
-        None => (
-            pad.wButtons.0,
-            pad.sThumbLX,
-            pad.sThumbLY,
-            pad.sThumbRX,
-            pad.sThumbRY,
-            pad.bLeftTrigger,
-            pad.bRightTrigger,
-        ),
+        None => {
+            let pad = states[slot as usize].unwrap_or_default();
+            (
+                pad.wButtons.0 | state.prev_buttons[slot as usize],
+                pad.sThumbLX,
+                pad.sThumbLY,
+                pad.sThumbRX,
+                pad.sThumbRY,
+                pad.bLeftTrigger,
+                pad.bRightTrigger,
+            )
+        }
     };
-
-    let mut trig = Vec::new();
-    trigger_edges(
-        &mut state.prev_trigger_left,
-        &mut state.prev_trigger_right,
+    PadSample {
+        buttons,
         lt,
         rt,
-        &mut trig,
-    );
-    for edge in trig {
-        let _ = state.tx.send(SecureMsg::Trigger(edge));
+        lx: norm_thumb(lx, LEFT_DEADZONE),
+        ly: norm_thumb(ly, LEFT_DEADZONE),
+        rx: norm_thumb(rx, RIGHT_DEADZONE),
+        ry: norm_thumb(ry, RIGHT_DEADZONE),
     }
+}
 
-    // Button edges from the authoritative source — handles press AND release, so it
-    // owns `prev_buttons` outright (the foreground-gated keystroke path is skipped
-    // above whenever an XUSB pad is open).
-    let idx = slot as usize;
-    let prev = state.prev_buttons[idx];
-    if prev != buttons {
-        state.prev_buttons[idx] = buttons;
-        let _ = state.tx.send(SecureMsg::Buttons {
-            slot,
-            prev,
-            cur: buttons,
-        });
-    }
+fn activity_bits(s: &PadSample) -> u32 {
+    let flags = [
+        s.lt > TRIGGER_PRESS_THRESH,
+        s.rt > TRIGGER_PRESS_THRESH,
+        s.lx.hypot(s.ly) > 0.5,
+        s.rx.hypot(s.ry) > 0.5,
+    ];
+    flags
+        .into_iter()
+        .enumerate()
+        .fold(s.buttons as u32, |acc, (i, on)| {
+            acc | ((on as u32) << (16 + i))
+        })
+}
 
-    let stick_active = lx.abs() > LEFT_DEADZONE || ly.abs() > LEFT_DEADZONE;
-    let axes = if stick_active {
-        (
-            norm_thumb(lx, LEFT_DEADZONE),
-            norm_thumb(ly, LEFT_DEADZONE),
-            norm_thumb(rx, RIGHT_DEADZONE),
-            norm_thumb(ry, RIGHT_DEADZONE),
-        )
-    } else {
-        (
-            state.last_hid.lx,
-            state.last_hid.ly,
-            state.last_hid.rx,
-            state.last_hid.ry,
-        )
+fn merge_samples(a: Option<PadSample>, b: Option<PadSample>) -> PadSample {
+    let (a, b) = match (a, b) {
+        (Some(a), Some(b)) => (a, b),
+        (Some(s), None) | (None, Some(s)) => return s,
+        (None, None) => return PadSample::default(),
     };
-    let _ = state.tx.send(SecureMsg::Axes(axes));
+    let (lx, ly) = if b.lx.hypot(b.ly) > a.lx.hypot(a.ly) {
+        (b.lx, b.ly)
+    } else {
+        (a.lx, a.ly)
+    };
+    let (rx, ry) = if b.rx.hypot(b.ry) > a.rx.hypot(a.ry) {
+        (b.rx, b.ry)
+    } else {
+        (a.rx, a.ry)
+    };
+    PadSample {
+        buttons: a.buttons | b.buttons,
+        lt: a.lt.max(b.lt),
+        rt: a.rt.max(b.rt),
+        lx,
+        ly,
+        rx,
+        ry,
+    }
 }
 
 pub(crate) fn hid_is_authoritative(hid_device_count: usize, xusb_device_count: usize) -> bool {
@@ -489,7 +524,6 @@ pub(crate) fn hid_is_authoritative(hid_device_count: usize, xusb_device_count: u
 
 #[allow(dead_code)]
 fn secure_poll_keystrokes(
-    tx: &mpsc::Sender<SecureMsg>,
     get_keystroke: XInputGetKeystrokeFn,
     slot: u32,
     prev_buttons: &mut [u16; 4],
@@ -502,9 +536,7 @@ fn secure_poll_keystrokes(
             break;
         }
         if err != ERROR_SUCCESS {
-            let _ = tx.send(SecureMsg::Error(format!(
-                "XInputGetKeystroke({slot}) error {err}"
-            )));
+            service_log(&format!("XInputGetKeystroke({slot}) error {err}"));
             break;
         }
         events += 1;
@@ -526,7 +558,6 @@ fn secure_poll_keystrokes(
                 "HID secure: keystroke slot {slot} vk=0x{:04x} -> 0x{cur:04x}",
                 key.virtual_key
             ));
-            let _ = tx.send(SecureMsg::Buttons { slot, prev, cur });
         }
     }
     events

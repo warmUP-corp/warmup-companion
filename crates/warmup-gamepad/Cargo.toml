@@ -6,3 +6,6 @@ description = "SDL3 gamepad input (shared with warmUP; keep in sync with warmUp/
 
 [dependencies]
 sdl3 = { version = "0.17", features = ["build-from-source-static"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Properties"] }

@@ -288,6 +288,8 @@ pub struct ConfigPayload {
     pub acceleration_exp: f32,
     pub scroll_sensitivity: f32,
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_enabled: Option<bool>,
     pub clicks_enabled: bool,
     /// Lightbar/LED colour `#RRGGBB` for pads with an LED (DualSense / DS4).
     /// Absent leaves the current colour untouched.
@@ -315,6 +317,13 @@ pub struct ConfigPayload {
     pub vk_mode: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsChangedPayload {
+    pub config: ConfigPayload,
+    pub companion_settings: CompanionSettingsPayload,
+}
+
 /// Up frames (companion → desktop). This slice (#347) knows `hello` + `connection`;
 /// any other frame type deserializes to [`UpFrame::Unknown`] so the client tolerates
 /// frames added by later slices.
@@ -330,6 +339,7 @@ pub enum UpFrame {
     Touchpad(TouchpadPayload),
     ParentalBlocked(ParentalBlockedPayload),
     PlaySessions(PlaySessionsPayload),
+    SettingsChanged(SettingsChangedPayload),
     /// A frame whose `type` this slice does not know (added by a later slice).
     /// Never serialized; produced only by [`UpFrame::parse_line`].
     #[serde(skip)]
@@ -379,7 +389,9 @@ impl UpFrame {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
             "hello" | "connection" | "button" | "cursor_moved" | "axis" | "battery"
-            | "touchpad" | "parental_blocked" | "play_sessions" => serde_json::from_str(line),
+            | "touchpad" | "parental_blocked" | "play_sessions" | "settings_changed" => {
+                serde_json::from_str(line)
+            }
             _ => Ok(Self::Unknown),
         }
     }
@@ -460,6 +472,7 @@ mod tests {
             acceleration_exp: 2.0,
             scroll_sensitivity: 5.0,
             enabled: true,
+            cursor_enabled: Some(true),
             clicks_enabled: false,
             led_color: Some("#b6a0ff".into()),
             led_secondary_color: Some("#4c7b99".into()),
@@ -667,6 +680,7 @@ mod tests {
             acceleration_exp: 2.0,
             scroll_sensitivity: 0.75,
             enabled: true,
+            cursor_enabled: Some(true),
             clicks_enabled: false,
             led_color: None,
             led_secondary_color: None,
