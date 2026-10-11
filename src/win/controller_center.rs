@@ -74,6 +74,13 @@ const TABS: [(&str, Icon); 4] = [
 const PAD_BUTTONS: [&str; 10] = ["A", "B", "X", "Y", "LB", "RB", "LT", "RT", "L3", "R3"];
 
 const APP_ICO: &[u8] = include_bytes!("../../assets/icon.ico");
+const HERO_PNG: &[u8] = include_bytes!("../../assets/controller-center/launcher-hero.png");
+const PROMO: Rect = rect(TAB_X, 404.0, TAB_W, 216.0);
+const PROMO_ART_H: f32 = 96.0;
+const PROMO_BUTTON: Rect = rect(TAB_X + 12.0, 404.0 + 216.0 - 44.0, TAB_W - 24.0, 32.0);
+const PROMO_FILL: u32 = 0x002E2C2C;
+const PROMO_BUTTON_FILL: u32 = 0x003C3A3A;
+const PROMO_SUB: &str = "All your games in one library, built for the controller.";
 
 fn ico_entry(bytes: &[u8], want: u32) -> Option<(usize, usize)> {
     let count = u16::from_le_bytes([*bytes.get(4)?, *bytes.get(5)?]) as usize;
@@ -989,6 +996,7 @@ enum Target {
     ResetAll,
     Cancel,
     Apply,
+    Promo,
 }
 
 impl Target {
@@ -1272,6 +1280,7 @@ struct Ui {
     reset_hint: std::cell::Cell<Rect>,
     confirm: Option<(Pending, bool)>,
     toast: Option<(String, Instant)>,
+    promo: Option<(i32, i32, Vec<u8>)>,
 }
 
 thread_local! {
@@ -1449,6 +1458,7 @@ fn ui_show() {
             reset_hint: std::cell::Cell::new(rect(0.0, 0.0, 0.0, 0.0)),
             confirm: None,
             toast: None,
+            promo: promo_art(scale),
         };
         UI.with(|u| *u.borrow_mut() = Some(ui));
         with_ui(|ui| {
@@ -1460,6 +1470,31 @@ fn ui_show() {
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
     }
+}
+
+fn promo_art(scale: f32) -> Option<(i32, i32, Vec<u8>)> {
+    if crate::tray::launcher_installed() {
+        return None;
+    }
+    let (w, h) = (
+        (TAB_W * scale).round() as u32,
+        (PROMO_ART_H * scale).round() as u32,
+    );
+    cover_bgra(HERO_PNG, w, h, 12.0 * scale).map(|px| (w as i32, h as i32, px))
+}
+
+fn wrap_lines(g: &mut Gfx, text: &str, px: f32, max_w: f32) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        match lines.last_mut() {
+            Some(line) if unsafe { g.measure(&format!("{line} {word}"), px, false) } <= max_w => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(word.to_string()),
+        }
+    }
+    lines
 }
 
 fn ui_hide() {
@@ -1620,10 +1655,27 @@ fn staged_vocabulary(coding: bool, words: &str) -> crate::config::Vocabulary {
     vocab
 }
 
+fn tab_count(ui: &Ui) -> usize {
+    TABS.len() + ui.promo.is_some() as usize
+}
+
+fn tab_stop(ui: &Ui) -> usize {
+    if ui.focus == Target::Promo {
+        TABS.len()
+    } else {
+        ui.tab
+    }
+}
+
 fn switch_tab(ui: &mut Ui, tab: usize) {
-    ui.tab = tab % TABS.len();
-    ui.focus = focus_order(ui.tab, &ui.items, ui.led_open)[0];
     ui.drag = None;
+    let tab = tab % tab_count(ui);
+    if tab == TABS.len() {
+        ui.focus = Target::Promo;
+        return;
+    }
+    ui.tab = tab;
+    ui.focus = focus_order(ui.tab, &ui.items, ui.led_open)[0];
 }
 
 fn adjust(ui: &mut Ui, delta: i32) -> bool {
@@ -1689,6 +1741,7 @@ fn activate(ui: &mut Ui, target: Target) -> After {
             }
         }
         Target::Cancel => return After::Close,
+        Target::Promo => crate::updater::download_launcher(),
         _ => {}
     }
     After::Stay
@@ -1703,7 +1756,10 @@ fn navigate(ui: &mut Ui, nav: Nav) {
     if delta != 0 && adjust(ui, delta) {
         return;
     }
-    let order = focus_order(ui.tab, &ui.items, ui.led_open);
+    let mut order = focus_order(ui.tab, &ui.items, ui.led_open);
+    if ui.promo.is_some() {
+        order.push(Target::Promo);
+    }
     ui.focus = step_focus(&order, ui.focus, nav);
 }
 
@@ -1741,6 +1797,10 @@ fn click(ui: &mut Ui, x: f32, y: f32) -> After {
     if ui.reset_hint.get().contains(x, y) {
         reset_tab(ui);
         return After::Stay;
+    }
+    if ui.promo.is_some() && PROMO_BUTTON.contains(x, y) {
+        ui.focus = Target::Promo;
+        return activate(ui, Target::Promo);
     }
     for t in [Target::Cancel, Target::Apply] {
         if (if t == Target::Cancel { CANCEL } else { APPLY }).contains(x, y) {
@@ -1815,8 +1875,9 @@ fn key_down(ui: &mut Ui, vk: u16) -> After {
         v if v == VK_ESCAPE.0 => return After::Close,
         0x52 if ctrl => reset_tab(ui),
         v if v == VK_TAB.0 && ctrl => {
-            let n = TABS.len();
-            switch_tab(ui, if shift { ui.tab + n - 1 } else { ui.tab + 1 });
+            let n = tab_count(ui);
+            let at = tab_stop(ui);
+            switch_tab(ui, if shift { at + n - 1 } else { at + 1 });
         }
         v if v == VK_TAB.0 => navigate(ui, if shift { Nav::Up } else { Nav::Down }),
         v if v == VK_UP.0 => navigate(ui, Nav::Up),
@@ -1902,8 +1963,8 @@ fn tick(ui: &mut Ui) -> (bool, After) {
             }
             "B" => return (dirty, After::Close),
             "Y" => reset_tab(ui),
-            "LB" => switch_tab(ui, ui.tab + TABS.len() - 1),
-            "RB" => switch_tab(ui, ui.tab + 1),
+            "LB" => switch_tab(ui, tab_stop(ui) + tab_count(ui) - 1),
+            "RB" => switch_tab(ui, tab_stop(ui) + 1),
             other => {
                 if let Some(nav) = pad_nav(other) {
                     navigate(ui, nav);
@@ -2001,7 +2062,7 @@ unsafe fn draw_window(ui: &Ui, g: &mut Gfx) {
 
     for (i, (name, icon)) in TABS.iter().enumerate() {
         let r = tab_rect(i);
-        let sel = i == ui.tab;
+        let sel = i == tab_stop(ui);
         g.fill(r, 12.0, if sel { t.hi } else { t.tile }, 1.0);
         if sel {
             g.ring(r, 12.0, 2.0, t.ring, 1.0);
@@ -2021,6 +2082,10 @@ unsafe fn draw_window(ui: &Ui, g: &mut Gfx) {
             a,
             Align::Left,
         );
+    }
+
+    if let Some((w, h, px)) = &ui.promo {
+        draw_promo(ui, g, *w, *h, px);
     }
 
     for (target, r) in rows(ui.tab, &ui.items, ui.led_open) {
@@ -2093,6 +2158,69 @@ unsafe fn draw_window(ui: &Ui, g: &mut Gfx) {
     if let Some((pending, on_ok)) = &ui.confirm {
         draw_confirm(ui, g, pending, *on_ok);
     }
+}
+
+unsafe fn draw_promo(ui: &Ui, g: &mut Gfx, w: i32, h: i32, px: &[u8]) {
+    let t = ui.theme;
+    let c = PROMO;
+    g.fill(c, 12.0, PROMO_FILL, 1.0);
+    let art = rect(c.x, c.y, c.w, PROMO_ART_H);
+    if let Ok(bmp) = g.bitmap(w, h, px) {
+        g.rt.DrawBitmap(
+            &bmp,
+            Some(&art.d2d()),
+            1.0,
+            windows::Win32::Graphics::Direct2D::D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+            None,
+        );
+    }
+    g.gradient(
+        rect(art.x, art.y + art.h * 0.4, art.w, art.h * 0.6 + 1.0),
+        0.0,
+        PROMO_FILL,
+        (0.0, 1.0),
+        true,
+    );
+    let text_x = c.x + 12.0;
+    let text_w = c.w - 24.0;
+    g.text(
+        "warmUP Game Launcher",
+        rect(text_x, art.y + art.h + 2.0, text_w, 16.0),
+        12.0,
+        true,
+        0x00FF_FFFF,
+        1.0,
+        Align::Left,
+    );
+    for (i, line) in wrap_lines(g, PROMO_SUB, 10.5, text_w)
+        .iter()
+        .take(3)
+        .enumerate()
+    {
+        g.text(
+            line,
+            rect(text_x, art.y + art.h + 22.0 + i as f32 * 14.0, text_w, 14.0),
+            10.5,
+            false,
+            0x00FF_FFFF,
+            DIM_ALPHA,
+            Align::Left,
+        );
+    }
+    let b = PROMO_BUTTON;
+    g.fill(b, 8.0, PROMO_BUTTON_FILL, 1.0);
+    if ui.focus == Target::Promo {
+        g.ring(c, 12.0, 2.0, t.ring, 1.0);
+    }
+    g.text(
+        "Get it free",
+        b,
+        12.0,
+        true,
+        0x00FF_FFFF,
+        1.0,
+        Align::Center,
+    );
 }
 
 unsafe fn draw_confirm(ui: &Ui, g: &mut Gfx, pending: &Pending, on_reset: bool) {
@@ -2596,7 +2724,7 @@ unsafe fn draw_row(ui: &Ui, g: &mut Gfx, target: Target, r: Rect) {
                 Align::Left,
             );
         }
-        Target::Cancel | Target::Apply => {}
+        Target::Cancel | Target::Apply | Target::Promo => {}
     }
 }
 
@@ -2703,6 +2831,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 if let Some(g) = ui.gfx.as_mut() {
                     g.icons.clear();
                 }
+                ui.promo = promo_art(ui.scale);
                 paint(ui);
             });
             LRESULT(0)

@@ -4,13 +4,14 @@ use windows::core::{w, HSTRING};
 use windows::Foundation::Numerics::Matrix3x2;
 use windows::Win32::Foundation::{HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_POINT_2F, D2D_RECT_F,
-    D2D_SIZE_U,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT,
+    D2D_POINT_2F, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap, ID2D1DCRenderTarget, ID2D1Factory, ID2D1SolidColorBrush,
     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
+    D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_FEATURE_LEVEL_DEFAULT, D2D1_GAMMA_2_2, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
     D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
     D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
 };
@@ -304,6 +305,57 @@ pub(crate) fn logo_bgra(px: u32, tint: u32) -> Option<Vec<u8>> {
     Some(out)
 }
 
+pub(crate) fn cover_bgra(png_bytes: &[u8], w: u32, h: u32, radius: f32) -> Option<Vec<u8>> {
+    let mut reader = png::Decoder::new(std::io::Cursor::new(png_bytes))
+        .read_info()
+        .ok()?;
+    let mut data = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut data).ok()?;
+    let ch = match info.color_type {
+        png::ColorType::Rgb => 3,
+        png::ColorType::Rgba => 4,
+        _ => return None,
+    };
+    let (sw, sh) = (info.width as usize, info.height as usize);
+    let k = (sw as f32 / w as f32).min(sh as f32 / h as f32);
+    let (ox, oy) = (
+        (sw as f32 - w as f32 * k) / 2.0,
+        (sh as f32 - h as f32 * k) / 2.0,
+    );
+    let mask = rect(0.0, 0.0, w as f32, h as f32 + radius);
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    for ty in 0..h {
+        for tx in 0..w {
+            if !rounded_inside(tx as f32 + 0.5, ty as f32 + 0.5, mask, radius) {
+                out.extend_from_slice(&[0, 0, 0, 0]);
+                continue;
+            }
+            let (x0, y0) = (ox + tx as f32 * k, oy + ty as f32 * k);
+            let mut sum = [0.0f32; 4];
+            let mut n = 0.0;
+            for sy in (y0.floor() as usize)..((y0 + k).ceil() as usize).min(sh) {
+                for sx in (x0.floor() as usize)..((x0 + k).ceil() as usize).min(sw) {
+                    let p = &data[(sy * sw + sx) * ch..];
+                    let a = if ch == 4 { p[3] as f32 / 255.0 } else { 1.0 };
+                    sum[0] += p[2] as f32 * a;
+                    sum[1] += p[1] as f32 * a;
+                    sum[2] += p[0] as f32 * a;
+                    sum[3] += a;
+                    n += 1.0;
+                }
+            }
+            let n = f32::max(n, 1.0);
+            out.extend_from_slice(&[
+                (sum[0] / n).round() as u8,
+                (sum[1] / n).round() as u8,
+                (sum[2] / n).round() as u8,
+                (sum[3] / n * 255.0).round() as u8,
+            ]);
+        }
+    }
+    Some(out)
+}
+
 pub(crate) struct Gfx {
     pub(crate) dwrite: IDWriteFactory,
     pub(crate) fonts: IDWriteFontCollection,
@@ -500,6 +552,61 @@ impl Gfx {
                 radiusY: radius,
             },
             &self.brush,
+        );
+    }
+
+    pub(crate) unsafe fn gradient(
+        &self,
+        r: Rect,
+        radius: f32,
+        c: u32,
+        alpha: (f32, f32),
+        vertical: bool,
+    ) {
+        let stops = [
+            D2D1_GRADIENT_STOP {
+                position: 0.0,
+                color: color(c, alpha.0),
+            },
+            D2D1_GRADIENT_STOP {
+                position: 1.0,
+                color: color(c, alpha.1),
+            },
+        ];
+        let Ok(stops) =
+            self.rt
+                .CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)
+        else {
+            return;
+        };
+        let end = if vertical {
+            D2D_POINT_2F {
+                x: r.x,
+                y: r.y + r.h,
+            }
+        } else {
+            D2D_POINT_2F {
+                x: r.x + r.w,
+                y: r.y,
+            }
+        };
+        let Ok(brush) = self.rt.CreateLinearGradientBrush(
+            &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                startPoint: D2D_POINT_2F { x: r.x, y: r.y },
+                endPoint: end,
+            },
+            None,
+            &stops,
+        ) else {
+            return;
+        };
+        self.rt.FillRoundedRectangle(
+            &D2D1_ROUNDED_RECT {
+                rect: r.d2d(),
+                radiusX: radius,
+                radiusY: radius,
+            },
+            &brush,
         );
     }
 

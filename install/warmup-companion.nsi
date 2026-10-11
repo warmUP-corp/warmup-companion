@@ -1,10 +1,7 @@
 ; warmup-companion.nsi - NSIS installer for Warmup Companion (WarmupVkSvc).
 ;
-; The heavy lifting (copying the service binary to C:\ProgramData\WarmupVk\bin
-; and creating + starting the WarmupVkSvc service) is done by the binary itself
-; via `warmup-companion.exe install` / `uninstall`. This installer just lays the
-; binary and trust docs down, runs those subcommands, and registers an
-; Add/Remove Programs entry. Supports silent install/uninstall with /S.
+; Interactive installs launch the mono_ui setup wizard
+; (`warmup-companion.exe setup`). Silent /S keeps the section defaults below.
 ;
 ; Build (from the repo root):
 ;   makensis install\warmup-companion.nsi
@@ -42,16 +39,11 @@ SetDatablockOptimize on
 
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
-!include "nsDialogs.nsh"
 !include "Sections.nsh"
 
 Var ModelChoice
 Var ParakeetPresent
-Var RbTiny
-Var RbBase
-Var RbSmall
-Var RbMedium
-Var RbParakeet
+Var InteractiveUI
 
 Name "${APPNAME} Setup"
 BrandingText "warmUP"
@@ -60,7 +52,7 @@ OutFile "${SRCROOT}\target\warmup-companion-setup.exe"
 ; that exact path as a legacy install and purges it (taskkill /F /IM ...), which
 ; would kill the install process itself. See install.rs remove_legacy_install_artifacts.
 InstallDir "$PROGRAMFILES64\WarmupCompanion"
-RequestExecutionLevel admin       ; service install needs admin; elevate the whole installer
+RequestExecutionLevel admin
 ShowInstDetails hide
 ShowUninstDetails hide
 
@@ -75,30 +67,17 @@ VIAddVersionKey "LegalCopyright"  "${COMPANY}"
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\WarmupCompanion"
 
 !define MUI_ABORTWARNING
-!define MUI_WELCOMEPAGE_TITLE "Install ${APPNAME}"
-!define MUI_WELCOMEPAGE_TEXT "Warmup Companion adds secure controller input for sign-in, lock, and UAC screens. The service starts with Windows and runs locally.$\r$\n$\r$\nOffline Parakeet voice typing is selected by default and downloads a local speech model. You can clear it on the features page."
-!define MUI_COMPONENTSPAGE_TEXT_TOP "Choose the features to install. The Warmup Companion service is required. Offline Parakeet voice typing is selected by default and downloads a local model."
-!define MUI_COMPONENTSPAGE_TEXT_BOTTOM "You can change voice-typing models later from the installed scripts or tray menu."
-!define MUI_FINISHPAGE_TITLE "Continue with the warmUP Game Launcher"
-!define MUI_FINISHPAGE_TEXT "Warmup Companion is installed and running.$\r$\n$\r$\nBring your PC games together in one controller-friendly home. Browse, launch, and manage your library with Companion ready for sign-in, UAC, and offline voice typing.$\r$\n$\r$\nGet the launcher below and start playing."
-!define MUI_UNCONFIRMPAGE_TEXT_TOP "This removes the service, installer files, and optional offline voice models. Logs and diagnostics are kept under C:\ProgramData\WarmupVk so they remain available for troubleshooting."
-!define MUI_UNFINISHPAGE_TITLE "${APPNAME} was removed"
-!define MUI_UNFINISHPAGE_TEXT "The service and installed files were removed. Existing logs and diagnostics remain under C:\ProgramData\WarmupVk."
 !define MUI_ICON "${SRCROOT}\assets\icon.ico"
 !define MUI_UNICON "${SRCROOT}\assets\icon.ico"
 !define MUI_HEADERIMAGE
 !define MUI_HEADERIMAGE_BITMAP "${SRCROOT}\assets\installer\header.bmp"
 !define MUI_WELCOMEFINISHPAGE_BITMAP "${SRCROOT}\assets\installer\welcome.bmp"
 !define MUI_UNWELCOMEFINISHPAGE_BITMAP "${SRCROOT}\assets\installer\welcome.bmp"
-!insertmacro MUI_PAGE_WELCOME
-!insertmacro MUI_PAGE_LICENSE "${SRCROOT}\LICENSE"
-!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipComponentsIfParakeet
-!insertmacro MUI_PAGE_COMPONENTS
-Page custom ModelPageShow ModelPageLeave
+!define MUI_UNCONFIRMPAGE_TEXT_TOP "This removes the service, installer files, and optional offline voice models. Logs and diagnostics are kept under C:\ProgramData\WarmupVk so they remain available for troubleshooting."
+!define MUI_UNFINISHPAGE_TITLE "${APPNAME} was removed"
+!define MUI_UNFINISHPAGE_TEXT "The service and installed files were removed. Existing logs and diagnostics remain under C:\ProgramData\WarmupVk."
+
 !insertmacro MUI_PAGE_INSTFILES
-!define MUI_FINISHPAGE_LINK "Get the warmUP Game Launcher"
-!define MUI_FINISHPAGE_LINK_LOCATION "${WEBSITE}"
-!insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
@@ -107,9 +86,8 @@ Page custom ModelPageShow ModelPageLeave
 !insertmacro MUI_LANGUAGE "English"
 
 Section "!Warmup Companion service (required)" SEC_MAIN
-  SectionIn RO                    ; always installed; user can't uncheck the service
-  SetRegView 64                   ; write the uninstall key to the native 64-bit hive
-  ; Keep a copy of the binary + trust docs in the app dir.
+  SectionIn RO
+  SetRegView 64
   SetOutPath "$INSTDIR"
   File "${BIN}"
   File "${SRCROOT}\install\Get-WarmupSpeech.ps1"
@@ -120,46 +98,54 @@ Section "!Warmup Companion service (required)" SEC_MAIN
   File "${SRCROOT}\LICENSE"
   File "/oname=icon.ico" "${SRCROOT}\assets\icon.ico"
 
-  ; Trust docs also live next to the data dir (parity with Install-WarmupVk.ps1).
   SetOutPath "${DATADIR}"
   File "${SRCROOT}\README.md"
   File "${SRCROOT}\PRIVACY.md"
   File "${SRCROOT}\SECURITY.md"
   File "${SRCROOT}\LICENSE"
-  ; The tray process starts during service install and reads this path once.
-  ; Put the icon in place first so it never falls back to the generic app icon.
   SetOutPath "${DATADIR}\bin"
   File "/oname=icon.ico" "${SRCROOT}\assets\icon.ico"
 
-  ; Register + start the service. This self-copies the exe to
-  ; C:\ProgramData\WarmupVk\bin and creates WarmupVkSvc (LocalSystem, auto-start).
-  DetailPrint "Stopping stale ${APPNAME} processes..."
-  nsExec::ExecToLog 'taskkill /F /IM warmup-companion.exe'
-  Pop $0
-  nsExec::ExecToLog 'taskkill /F /IM warmup-vk-prototype.exe'
-  Pop $0
+  ${If} $InteractiveUI == "1"
+    DetailPrint "Opening warmUP Companion Setup..."
+    nsExec::Exec '"$INSTDIR\warmup-companion.exe" setup'
+    Pop $0
+    ${If} $0 == 2
+      DetailPrint "Setup cancelled."
+      Call RemovePayload
+      Abort
+    ${ElseIf} $0 != 0
+      IfSilent +2
+      MessageBox MB_ICONSTOP|MB_OK "Setup failed (exit $0). See ${DATADIR}\service.log." /SD IDOK
+      Abort
+    ${EndIf}
+  ${Else}
+    DetailPrint "Stopping stale ${APPNAME} processes..."
+    nsExec::ExecToLog 'taskkill /F /IM warmup-companion.exe'
+    Pop $0
+    nsExec::ExecToLog 'taskkill /F /IM warmup-vk-prototype.exe'
+    Pop $0
 
-  DetailPrint "Installing the ${SERVICE} service..."
-  nsExec::ExecToLog '"$INSTDIR\warmup-companion.exe" install'
-  Pop $0
-  ${If} $0 != 0
-    ; In /S mode, skip the dialog and fail without leaving a blocking popup.
-    IfSilent +2
-    MessageBox MB_ICONSTOP|MB_OK "Service install failed (exit $0). See ${DATADIR}\service.log." /SD IDOK
-    Abort
-  ${EndIf}
+    DetailPrint "Installing the ${SERVICE} service..."
+    nsExec::ExecToLog '"$INSTDIR\warmup-companion.exe" install'
+    Pop $0
+    ${If} $0 != 0
+      IfSilent +2
+      MessageBox MB_ICONSTOP|MB_OK "Service install failed (exit $0). See ${DATADIR}\service.log." /SD IDOK
+      Abort
+    ${EndIf}
 
-  DetailPrint "Granting interactive start/stop on ${SERVICE}..."
-  nsExec::ExecToLog '"$INSTDIR\warmup-companion.exe" grant-service-acl'
-  Pop $0
-  ${If} $0 != 0
-    DetailPrint "WARNING: could not grant IU RP+WP on ${SERVICE} (exit $0)."
+    DetailPrint "Granting interactive start/stop on ${SERVICE}..."
+    nsExec::ExecToLog '"$INSTDIR\warmup-companion.exe" grant-service-acl'
+    Pop $0
+    ${If} $0 != 0
+      DetailPrint "WARNING: could not grant IU RP+WP on ${SERVICE} (exit $0)."
+    ${EndIf}
   ${EndIf}
 
   SetShellVarContext all
   CreateShortCut "$SMPROGRAMS\Warmup Companion.lnk" "$INSTDIR\warmup-companion.exe" "wake" "$INSTDIR\icon.ico" 0 SW_SHOWMINIMIZED
 
-  ; Add/Remove Programs entry + uninstaller.
   WriteUninstaller "$INSTDIR\uninstall.exe"
   WriteRegStr   HKLM "${UNINSTKEY}" "DisplayName"          "${APPNAME}"
   WriteRegStr   HKLM "${UNINSTKEY}" "DisplayVersion"       "${APPVERSION}"
@@ -174,11 +160,9 @@ Section "!Warmup Companion service (required)" SEC_MAIN
 SectionEnd
 
 Section /o "Offline voice typing (recommended)" SEC_SPEECH
-  ; Selected by default. Downloads the chosen engine into ${DATADIR}\speech;
-  ; the Mic key on the on-screen keyboard appears only once it's present
-  ; (src\win\speech_input.rs::available). Recognition is fully local, no cloud.
-  ; The model page sets $ModelChoice to a whisper size or "parakeet".
-  ; The app binary always includes Parakeet support; this only downloads data.
+  ${If} $InteractiveUI == "1"
+    Return
+  ${EndIf}
   ${If} $ModelChoice == "parakeet"
     ${If} $ParakeetPresent == "1"
       DetailPrint "Parakeet voice typing is already installed."
@@ -205,6 +189,21 @@ Section /o "Offline voice typing (recommended)" SEC_SPEECH
   ${EndIf}
 SectionEnd
 
+Function RemovePayload
+  ${If} ${FileExists} "$INSTDIR\uninstall.exe"
+    Return
+  ${EndIf}
+  Delete "$INSTDIR\warmup-companion.exe"
+  Delete "$INSTDIR\Get-WarmupSpeech.ps1"
+  Delete "$INSTDIR\Get-WarmupParakeet.ps1"
+  Delete "$INSTDIR\README.md"
+  Delete "$INSTDIR\PRIVACY.md"
+  Delete "$INSTDIR\SECURITY.md"
+  Delete "$INSTDIR\LICENSE"
+  Delete "$INSTDIR\icon.ico"
+  RMDir "$INSTDIR"
+FunctionEnd
+
 Function DetectParakeet
   StrCpy $ParakeetPresent "0"
   ${If} ${FileExists} "${DATADIR}\speech\parakeet\vocab.txt"
@@ -216,100 +215,19 @@ Function DetectParakeet
   ${EndIf}
 FunctionEnd
 
-Function SkipComponentsIfParakeet
-  ${If} $ParakeetPresent == "1"
-    Abort
-  ${EndIf}
-FunctionEnd
-
 Function .onInit
-  ; Keep the default consistent in interactive and silent installs. Silent mode
-  ; skips the component and model pages, so it cannot rely on page selections.
   Call DetectParakeet
   StrCpy $ModelChoice "parakeet"
   SectionSetFlags ${SEC_SPEECH} ${SF_SELECTED}
-FunctionEnd
-
-LangString DESC_MAIN   ${LANG_ENGLISH} "The Warmup Companion service (sign-in / lock / UAC gamepad keyboard). Required."
-LangString DESC_SPEECH ${LANG_ENGLISH} "Fully offline voice typing, selected by default. Downloads your chosen engine (whisper.cpp model, or NVIDIA Parakeet ~670 MB) to ${DATADIR}\speech. The on-screen Mic key stays hidden unless this is installed. No cloud; recognition runs locally."
-!insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
-  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_MAIN}   $(DESC_MAIN)
-  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_SPEECH} $(DESC_SPEECH)
-!insertmacro MUI_FUNCTION_DESCRIPTION_END
-
-; Custom page: pick the whisper model — shown only if voice typing is selected.
-Function ModelPageShow
-  ${If} $ParakeetPresent == "1"
-    StrCpy $ModelChoice "parakeet"
-    Abort
-  ${EndIf}
-  SectionGetFlags ${SEC_SPEECH} $0
-  IntOp $0 $0 & ${SF_SELECTED}
-  ${If} $0 == 0
-    Abort                          ; voice typing not chosen — skip this page
-  ${EndIf}
-
-  !insertmacro MUI_HEADER_TEXT "Voice engine" "Choose the offline speech engine to download."
-  nsDialogs::Create 1018
-  Pop $0
-  ${If} $0 == error
-    Abort
-  ${EndIf}
-
-  ${NSD_CreateLabel} 0 0 100% 22u "Whisper sizes: bigger = more accurate but slower/larger. Parakeet (NVIDIA) is a faster, multilingual alternative. All run fully offline; you can switch later from the tray."
-  Pop $1
-  ${NSD_CreateRadioButton} 8u 28u 95% 12u "Whisper Tiny  -  ~75 MB, fastest"
-  Pop $RbTiny
-  ${NSD_CreateRadioButton} 8u 42u 95% 12u "Whisper Base  -  ~142 MB"
-  Pop $RbBase
-  ${NSD_CreateRadioButton} 8u 56u 95% 12u "Whisper Small  -  ~466 MB, better accuracy"
-  Pop $RbSmall
-  ${NSD_CreateRadioButton} 8u 70u 95% 12u "Whisper Medium  -  ~1.5 GB, best accuracy"
-  Pop $RbMedium
-  ${NSD_CreateRadioButton} 8u 88u 95% 12u "Parakeet (NVIDIA)  -  ~670 MB, fast multilingual (recommended)"
-  Pop $RbParakeet
-
-  ${If} $ModelChoice == "tiny"
-    ${NSD_Check} $RbTiny
-  ${ElseIf} $ModelChoice == "base"
-    ${NSD_Check} $RbBase
-  ${ElseIf} $ModelChoice == "small"
-    ${NSD_Check} $RbSmall
-  ${ElseIf} $ModelChoice == "parakeet"
-    ${NSD_Check} $RbParakeet
-  ${Else}
-    ${NSD_Check} $RbParakeet
-  ${EndIf}
-  nsDialogs::Show
-FunctionEnd
-
-Function ModelPageLeave
-  ${NSD_GetState} $RbTiny $0
-  ${If} $0 == ${BST_CHECKED}
-    StrCpy $ModelChoice "tiny"
-    Return
-  ${EndIf}
-  ${NSD_GetState} $RbSmall $0
-  ${If} $0 == ${BST_CHECKED}
-    StrCpy $ModelChoice "small"
-    Return
-  ${EndIf}
-  ${NSD_GetState} $RbMedium $0
-  ${If} $0 == ${BST_CHECKED}
-    StrCpy $ModelChoice "medium"
-    Return
-  ${EndIf}
-  ${NSD_GetState} $RbParakeet $0
-  ${If} $0 == ${BST_CHECKED}
-    StrCpy $ModelChoice "parakeet"
-    Return
-  ${EndIf}
-  StrCpy $ModelChoice "base"
+  StrCpy $InteractiveUI "0"
+  IfSilent silent_done
+    StrCpy $InteractiveUI "1"
+    SetSilent silent
+  silent_done:
 FunctionEnd
 
 Section "Uninstall"
-  SetRegView 64                   ; match the install section's hive
-  ; Stop + delete the service and remove the ProgramData service binary.
+  SetRegView 64
   nsExec::ExecToLog '"$INSTDIR\warmup-companion.exe" uninstall'
   Pop $0
   ${If} $0 != 0
@@ -332,11 +250,8 @@ Section "Uninstall"
   RMDir  "$INSTDIR"
 
   DeleteRegKey HKLM "${UNINSTKEY}"
-  ; Downloaded voice-typing engine + model are not user data — remove them.
   RMDir /r "${DATADIR}\speech"
   Delete "${DATADIR}\bin\icon.ico"
   Delete "${DATADIR}\bin\warmup-companion.version"
   RMDir  "${DATADIR}\bin"
-  ; Logs and the local dictionary under ${DATADIR} are intentionally left in
-  ; place, matching `warmup-companion.exe uninstall`.
 SectionEnd

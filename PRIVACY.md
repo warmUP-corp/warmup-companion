@@ -28,6 +28,12 @@ same GitHub release, the checksum is verified, and the installer runs silently.
 Turn the check off in the tray (Updates → Check automatically) or with
 `update_check = false` in `settings.ini`.
 
+When warmUP is not installed and you choose **Get warmUP Game Launcher** in the
+tray or the Controller Center, the companion fetches
+`github.com/warmUP-corp/warmup-releases/releases/latest/download/latest.json`
+to find the newest installer and opens that download in your browser. Nothing
+is requested unless you choose it.
+
 ## Password Fields
 
 When a word is completed, the companion checks whether the focused element is a
