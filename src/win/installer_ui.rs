@@ -69,6 +69,10 @@ const WEBSITE: &str = "https://www.warmup-gamelauncher.com";
 const LICENSE: &str = include_str!("../../LICENSE");
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const ADMIN_MSG: &str = "Administrator permission is needed to install the service.";
+const UN_ADMIN_MSG: &str = "Administrator permission is needed to remove the service.";
+const UNINSTALL_CMD: &str = "uninstall-ui";
+const EXIT_CANCELLED: i32 = 2;
+const EXIT_NO_WINDOW: i32 = 3;
 
 const BG: u32 = 0x001E1C1C;
 const CARD: u32 = 0x002E2C2C;
@@ -120,16 +124,35 @@ enum Step {
     Features,
     Install,
     Finish,
+    Confirm,
+    Removing,
+    Done,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Install,
+    Uninstall,
+}
+
+impl Mode {
+    fn steps(self) -> &'static [Step] {
+        match self {
+            Mode::Install => &Step::INSTALL,
+            Mode::Uninstall => &Step::UNINSTALL,
+        }
+    }
 }
 
 impl Step {
-    const ALL: [Step; 5] = [
+    const INSTALL: [Step; 5] = [
         Step::Welcome,
         Step::License,
         Step::Features,
         Step::Install,
         Step::Finish,
     ];
+    const UNINSTALL: [Step; 3] = [Step::Confirm, Step::Removing, Step::Done];
 
     fn label(self) -> &'static str {
         match self {
@@ -138,15 +161,18 @@ impl Step {
             Step::Features => "Features",
             Step::Install => "Install",
             Step::Finish => "Finish",
+            Step::Confirm => "Confirm",
+            Step::Removing => "Removing",
+            Step::Done => "Done",
         }
     }
 
-    fn index(self) -> usize {
-        Step::ALL.iter().position(|s| *s == self).unwrap_or(0)
+    fn index(self, mode: Mode) -> usize {
+        mode.steps().iter().position(|s| *s == self).unwrap_or(0)
     }
 
-    fn parse(s: &str) -> Option<Step> {
-        Step::ALL
+    fn parse(mode: Mode, s: &str) -> Option<Step> {
+        mode.steps()
             .iter()
             .copied()
             .find(|st| st.label().eq_ignore_ascii_case(s))
@@ -251,6 +277,31 @@ fn model_installed(m: Model) -> bool {
     }
 }
 
+fn dir_bytes(p: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(p) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => dir_bytes(&e.path()),
+            Ok(_) => e.metadata().map(|m| m.len()).unwrap_or(0),
+            Err(_) => 0,
+        })
+        .sum()
+}
+
+fn format_bytes(b: u64) -> String {
+    let mb = b as f64 / (1024.0 * 1024.0);
+    if mb >= 1024.0 {
+        format!("{:.1} GB", mb / 1024.0)
+    } else if mb >= 1.0 {
+        format!("{:.0} MB", mb)
+    } else {
+        format!("{:.0} KB", (b as f64 / 1024.0).max(1.0))
+    }
+}
+
 fn read_trimmed(p: &Path) -> String {
     std::fs::read_to_string(p)
         .map(|s| s.trim().to_string())
@@ -349,28 +400,43 @@ fn job_snapshot() -> JobState {
 
 #[derive(Clone)]
 struct Options {
+    mode: Mode,
     preview: bool,
     no_admin: bool,
     step: Option<Step>,
     install: Option<Option<Model>>,
+    remove: Option<bool>,
     snapshot: Option<PathBuf>,
 }
 
+impl Options {
+    fn new(mode: Mode) -> Self {
+        Options {
+            mode,
+            preview: false,
+            no_admin: false,
+            step: None,
+            install: None,
+            remove: None,
+            snapshot: None,
+        }
+    }
+}
+
 fn parse_options(args: &[String]) -> Options {
-    let mut o = Options {
-        preview: false,
-        no_admin: false,
-        step: None,
-        install: None,
-        snapshot: None,
+    let mode = if args.get(1).map(String::as_str) == Some(UNINSTALL_CMD) {
+        Mode::Uninstall
+    } else {
+        Mode::Install
     };
+    let mut o = Options::new(mode);
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
             "--preview" => o.preview = true,
             "--no-admin" => o.no_admin = true,
             "--step" => {
-                o.step = args.get(i + 1).and_then(|s| Step::parse(s));
+                o.step = args.get(i + 1).and_then(|s| Step::parse(mode, s));
                 i += 1;
             }
             "--snapshot" => {
@@ -380,6 +446,10 @@ fn parse_options(args: &[String]) -> Options {
             }
             "--install" => {
                 o.install = args.get(i + 1).map(|s| Model::parse(s));
+                i += 1;
+            }
+            "--remove" => {
+                o.remove = args.get(i + 1).map(|s| s == "models");
                 i += 1;
             }
             _ => {}
@@ -402,6 +472,8 @@ struct Ui {
     voice_on: bool,
     model: Model,
     installed: [bool; 5],
+    models_on: bool,
+    models_bytes: u64,
     job: JobState,
     hidden: bool,
     scroll: f32,
@@ -551,14 +623,15 @@ pub fn run(args: &[String]) -> i32 {
     let slot = THREAD.get_or_init(|| Mutex::new(None));
     {
         let Ok(mut guard) = slot.lock() else {
-            return 1;
+            crate::install::log_line("installer ui: window thread lock poisoned");
+            return EXIT_NO_WINDOW;
         };
         if guard.is_none() {
             match desktop_window::spawn(InstallerApp) {
                 Ok(t) => *guard = Some(t),
                 Err(e) => {
                     crate::install::log_line(&format!("installer ui: spawn failed: {e}"));
-                    return 1;
+                    return EXIT_NO_WINDOW;
                 }
             }
         }
@@ -566,7 +639,7 @@ pub fn run(args: &[String]) -> i32 {
             let _ = t.show(LPARAM(0));
         }
     }
-    let code = rx.recv().unwrap_or(2);
+    let code = rx.recv().unwrap_or(EXIT_CANCELLED);
     if let Ok(mut guard) = slot.lock() {
         *guard = None;
     }
@@ -585,29 +658,26 @@ fn ui_show() {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .take()
-        .unwrap_or_else(|| {
-            (
-                Options {
-                    preview: false,
-                    no_admin: false,
-                    step: None,
-                    install: None,
-                    snapshot: None,
-                },
-                is_elevated(),
-                String::new(),
-            )
-        });
+        .unwrap_or_else(|| (Options::new(Mode::Install), is_elevated(), String::new()));
+    let mode = opts.mode;
     unsafe {
         let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let Ok(instance) = GetModuleHandleW(None) else {
-            finish(1);
+            finish(EXIT_NO_WINDOW);
             return;
+        };
+        let gfx = match Gfx::new() {
+            Ok(g) => g,
+            Err(e) => {
+                crate::install::log_line(&format!("installer ui: gfx: {e}"));
+                finish(EXIT_NO_WINDOW);
+                return;
+            }
         };
         let Ok(hwnd) = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_APPWINDOW,
             CLASS,
-            w!("warmUP Companion Setup"),
+            &HSTRING::from(window_title(mode)),
             WS_POPUP,
             0,
             0,
@@ -619,22 +689,29 @@ fn ui_show() {
             None,
         ) else {
             crate::install::log_line("installer ui: CreateWindowExW failed");
-            finish(1);
+            finish(EXIT_NO_WINDOW);
             return;
         };
         let installed = Model::ALL.map(model_installed);
+        let models_bytes = if mode == Mode::Uninstall {
+            dir_bytes(&speech_dir())
+        } else {
+            0
+        };
         let mut ui = Ui {
             hwnd,
             scale: 1.0,
-            gfx: None,
+            gfx: Some(gfx),
             elevated,
             elevate_error,
-            step: Step::Welcome,
+            step: mode.steps()[0],
             focus: Target::Next,
             kb: false,
             voice_on: true,
             model: preferred_model(&installed),
             installed,
+            models_on: models_bytes > 0,
+            models_bytes,
             job: job_snapshot(),
             hidden: false,
             scroll: 0.0,
@@ -644,18 +721,24 @@ fn ui_show() {
             started: Instant::now(),
             opts,
         };
-        if let Some(choice) = ui.opts.install {
+        if let (Mode::Install, Some(choice)) = (mode, ui.opts.install) {
             ui.voice_on = choice.is_some();
             if let Some(m) = choice {
                 ui.model = m;
             }
             ui.step = Step::Install;
             start_install(&mut ui);
+        } else if let (Mode::Uninstall, Some(models)) = (mode, ui.opts.remove) {
+            ui.models_on = models && ui.models_bytes > 0;
+            ui.step = Step::Removing;
+            start_uninstall(&mut ui);
         } else if ui.opts.preview {
             if let Some(st) = ui.opts.step {
                 ui.step = st;
-                if st == Step::Install {
-                    start_install(&mut ui);
+                match st {
+                    Step::Install => start_install(&mut ui),
+                    Step::Removing => start_uninstall(&mut ui),
+                    _ => {}
                 }
             }
         }
@@ -689,6 +772,13 @@ fn ui_show() {
                 | windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE,
         );
         let _ = SetForegroundWindow(hwnd);
+    }
+}
+
+fn window_title(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Install => "warmUP Companion Setup",
+        Mode::Uninstall => "Uninstall warmUP Companion",
     }
 }
 
@@ -845,6 +935,8 @@ fn back_label(ui: &Ui) -> Option<&'static str> {
         Step::Welcome => Some("Cancel"),
         Step::License | Step::Features => Some("Back"),
         Step::Install if ui.job.phase == Phase::Failed => Some("Back"),
+        Step::Confirm => Some("Cancel"),
+        Step::Removing if ui.job.phase == Phase::Failed => Some("Close"),
         _ => None,
     }
 }
@@ -860,7 +952,18 @@ fn next_label(ui: &Ui) -> Option<&'static str> {
             _ => None,
         },
         Step::Finish => Some("Finish"),
+        Step::Confirm => Some("Uninstall"),
+        Step::Removing => match ui.job.phase {
+            Phase::Failed => Some("Retry"),
+            Phase::Done => Some("Continue"),
+            _ => None,
+        },
+        Step::Done => Some("Close"),
     }
+}
+
+fn has_models(ui: &Ui) -> bool {
+    ui.models_bytes > 0
 }
 
 fn focus_order(ui: &Ui) -> Vec<Target> {
@@ -873,6 +976,7 @@ fn focus_order(ui: &Ui) -> Vec<Target> {
             }
         }
         Step::Finish => o.push(Target::Link),
+        Step::Confirm if has_models(ui) => o.push(Target::Voice),
         _ => {}
     }
     if back_label(ui).is_some() {
@@ -902,7 +1006,23 @@ fn set_step(ui: &mut Ui, step: Step) {
     ensure_focus(ui);
 }
 
+fn uninstall_close_code(ui: &Ui) -> Option<i32> {
+    match ui.step {
+        Step::Confirm => Some(EXIT_CANCELLED),
+        Step::Done => Some(0),
+        _ => match ui.job.phase {
+            Phase::Done => Some(0),
+            Phase::Running => None,
+            Phase::Failed if ui.job.needs_admin => Some(EXIT_CANCELLED),
+            Phase::Failed | Phase::Idle => Some(1),
+        },
+    }
+}
+
 fn close_code(ui: &Ui) -> Option<i32> {
+    if ui.opts.mode == Mode::Uninstall {
+        return uninstall_close_code(ui);
+    }
     if ui.step == Step::Finish || ui.job.phase == Phase::Done {
         return Some(0);
     }
@@ -940,10 +1060,25 @@ fn go_next(ui: &mut Ui) {
             Phase::Done => set_step(ui, Step::Finish),
             _ => {}
         },
-        Step::Finish => {
+        Step::Finish | Step::Done => {
             finish(0);
             return;
         }
+        Step::Confirm => {
+            set_step(ui, Step::Removing);
+            start_uninstall(ui);
+        }
+        Step::Removing => match ui.job.phase {
+            Phase::Failed => {
+                if ui.job.needs_admin && !ui.opts.preview {
+                    request_elevation(ui);
+                } else {
+                    start_uninstall(ui);
+                }
+            }
+            Phase::Done => set_step(ui, Step::Done),
+            _ => {}
+        },
     }
     ensure_focus(ui);
 }
@@ -958,6 +1093,8 @@ fn go_back(ui: &mut Ui) {
             ui.job = job_snapshot();
             set_step(ui, Step::Features);
         }
+        Step::Confirm => finish(EXIT_CANCELLED),
+        Step::Removing if ui.job.phase == Phase::Failed => request_close(ui),
         _ => {}
     }
 }
@@ -1010,9 +1147,147 @@ fn start_install(ui: &mut Ui) {
     ensure_focus(ui);
 }
 
+fn start_uninstall(ui: &mut Ui) {
+    if ui.job.phase == Phase::Running {
+        return;
+    }
+    ui.scroll = 0.0;
+    let models = ui.models_on && has_models(ui);
+    if !ui.elevated {
+        let msg = if ui.elevate_error.is_empty() {
+            UN_ADMIN_MSG.to_string()
+        } else {
+            format!("{UN_ADMIN_MSG} {}", ui.elevate_error)
+        };
+        job_update(|j| {
+            j.phase = Phase::Failed;
+            j.service = Task::Pending;
+            j.voice = Task::Pending;
+            j.status = "Waiting for administrator permission".into();
+            j.error = msg;
+            j.note.clear();
+            j.needs_admin = true;
+        });
+        ui.job = job_snapshot();
+        ensure_focus(ui);
+        return;
+    }
+    job_update(|j| {
+        j.phase = Phase::Running;
+        j.service = Task::Running;
+        j.voice = Task::Pending;
+        j.status = "Removing the Companion service\u{2026}".into();
+        j.error.clear();
+        j.note.clear();
+        j.needs_admin = false;
+    });
+    ui.job = job_snapshot();
+    let preview = ui.opts.preview;
+    thread::spawn(move || {
+        if preview {
+            run_preview_uninstall(models);
+        } else {
+            run_uninstall_job(models);
+        }
+    });
+    ensure_focus(ui);
+}
+
+fn run_preview_uninstall(models: bool) {
+    thread::sleep(Duration::from_millis(1400));
+    job_update(|j| {
+        j.service = Task::Done;
+        if models {
+            j.voice = Task::Running;
+            j.status = "Removing offline voice models\u{2026}".into();
+        }
+    });
+    if models {
+        thread::sleep(Duration::from_millis(900));
+    }
+    job_update(|j| {
+        if models {
+            j.voice = Task::Done;
+        }
+        j.phase = Phase::Done;
+        j.status = "Preview only. Nothing was removed.".into();
+    });
+}
+
+fn run_uninstall_job(models: bool) {
+    if let Err(e) = crate::install::uninstall_service() {
+        crate::install::log_line(&format!("uninstall ui: service removal failed: {e}"));
+        job_update(|j| {
+            j.phase = Phase::Failed;
+            j.service = Task::Failed;
+            j.status = "The Companion service could not be removed".into();
+            j.error = format!(
+                "{}\nDetails are logged in {}\\service.log.",
+                e.trim(),
+                crate::install::DATA_DIR
+            );
+        });
+        return;
+    }
+    if !models {
+        job_update(|j| {
+            j.service = Task::Done;
+            j.phase = Phase::Done;
+            j.status = "warmUP Companion was removed.".into();
+        });
+        return;
+    }
+    job_update(|j| {
+        j.service = Task::Done;
+        j.voice = Task::Running;
+        j.status = "Removing offline voice models\u{2026}".into();
+    });
+    let dir = speech_dir();
+    let result = remove_dir_retry(&dir);
+    if let Err(e) = &result {
+        crate::install::log_line(&format!("uninstall ui: remove {}: {e}", dir.display()));
+    }
+    job_update(|j| {
+        j.phase = Phase::Done;
+        j.status = "warmUP Companion was removed.".into();
+        match result {
+            Ok(()) => j.voice = Task::Done,
+            Err(e) => {
+                j.voice = Task::Failed;
+                j.note = format!(
+                    "Some voice model files could not be removed ({e}). Delete {} by hand after a restart.",
+                    dir.display()
+                );
+            }
+        }
+    });
+}
+
+fn remove_dir_retry(dir: &Path) -> std::io::Result<()> {
+    let mut last = Ok(());
+    for attempt in 0..5 {
+        if !dir.exists() {
+            return Ok(());
+        }
+        if attempt > 0 {
+            thread::sleep(Duration::from_millis(400));
+        }
+        last = std::fs::remove_dir_all(dir);
+        if last.is_ok() {
+            return Ok(());
+        }
+    }
+    last
+}
+
 fn request_elevation(ui: &mut Ui) {
-    let choice = if ui.voice_on { ui.model.id() } else { "none" };
-    let params = format!("setup --install {choice}");
+    let params = if ui.opts.mode == Mode::Uninstall {
+        let choice = if ui.models_on && has_models(ui) { "models" } else { "service" };
+        format!("{UNINSTALL_CMD} --remove {choice}")
+    } else {
+        let choice = if ui.voice_on { ui.model.id() } else { "none" };
+        format!("setup --install {choice}")
+    };
     job_update(|j| {
         j.phase = Phase::Running;
         j.service = Task::Pending;
@@ -1221,6 +1496,11 @@ fn click(ui: &mut Ui, x: f32, y: f32) {
         open_website();
         return;
     }
+    if ui.step == Step::Confirm && has_models(ui) && voice_row().contains(x, y) {
+        ui.models_on = !ui.models_on;
+        ui.focus = Target::Voice;
+        return;
+    }
     if ui.step == Step::Features {
         if voice_row().contains(x, y) {
             ui.voice_on = !ui.voice_on;
@@ -1270,6 +1550,7 @@ fn key_down(ui: &mut Ui, vk: u16) {
         v if v == VK_RETURN.0 || v == VK_SPACE.0 => match ui.focus {
             Target::Back => go_back(ui),
             Target::Next => go_next(ui),
+            Target::Voice if ui.step == Step::Confirm => ui.models_on = !ui.models_on,
             Target::Voice => {
                 ui.voice_on = !ui.voice_on;
                 ensure_focus(ui);
@@ -1410,7 +1691,7 @@ unsafe fn draw(ui: &Ui, g: &mut Gfx) {
 
     g.icon(Icon::Logo, rect(24.0, 25.0, 18.0, 18.0), WHITE, 1.0, s);
     g.text(
-        "warmUP Companion Setup",
+        window_title(ui.opts.mode),
         rect(52.0, 25.0, 360.0, 18.0),
         15.0,
         true,
@@ -1436,15 +1717,19 @@ unsafe fn draw(ui: &Ui, g: &mut Gfx) {
         Step::Features => draw_features(ui, g),
         Step::Install => draw_install(ui, g),
         Step::Finish => draw_finish(ui, g),
+        Step::Confirm => draw_confirm(ui, g),
+        Step::Removing => draw_removing(ui, g),
+        Step::Done => draw_done(ui, g),
     }
     draw_footer(ui, g);
 }
 
 unsafe fn draw_rail(ui: &Ui, g: &mut Gfx) {
     let s = ui.scale;
-    let cur = ui.step.index();
-    let all_done = ui.step == Step::Finish;
-    for (i, step) in Step::ALL.iter().enumerate() {
+    let steps = ui.opts.mode.steps();
+    let cur = ui.step.index(ui.opts.mode);
+    let all_done = matches!(ui.step, Step::Finish | Step::Done);
+    for (i, step) in steps.iter().enumerate() {
         let r = step_rect(i);
         let done = i < cur || all_done;
         let active = i == cur && !all_done;
@@ -1665,26 +1950,18 @@ unsafe fn draw_toggle(g: &mut Gfx, r: Rect, on: bool) {
     g.circle(kx, r.y + 14.0, 11.0, WHITE);
 }
 
-unsafe fn draw_features(ui: &Ui, g: &mut Gfx) {
-    let s = ui.scale;
-    heading(
-        g,
-        "Choose features",
-        "The Companion service is required. Offline voice typing runs on your PC and needs a one-time model download.",
-    );
-
+unsafe fn required_card(ui: &Ui, g: &mut Gfx, label: &str, caption: &str) {
     let req = rect(CX, 163.0, CW, 59.0);
-    card_row(
-        g,
-        req,
-        "warmUP Companion service",
-        "Controller input on sign-in, lock and admin screens",
-        359.0,
-        CARD,
-    );
+    card_row(g, req, label, caption, 359.0, CARD);
     let pill = rect(req.x + 391.0, req.y + 17.0, 89.0, 26.0);
     g.fill(pill, 13.0, HI, 1.0);
-    g.icon(Icon::Svg(LOCK), rect(pill.x + 10.0, pill.y + 7.0, 12.0, 12.0), DIM, DIM_A, s);
+    g.icon(
+        Icon::Svg(LOCK),
+        rect(pill.x + 10.0, pill.y + 7.0, 12.0, 12.0),
+        DIM,
+        DIM_A,
+        ui.scale,
+    );
     g.text(
         "Required",
         rect(pill.x + 28.0, pill.y + 5.5, 56.0, 15.0),
@@ -1694,21 +1971,156 @@ unsafe fn draw_features(ui: &Ui, g: &mut Gfx) {
         DIM_A,
         Align::Left,
     );
+}
 
-    let voice = voice_row();
-    card_row(
+unsafe fn toggle_card(ui: &Ui, g: &mut Gfx, label: &str, caption: &str, on: bool) {
+    let r = voice_row();
+    card_row(g, r, label, caption, 402.0, if on { HI } else { CARD });
+    if on {
+        g.ring(r, 12.0, 2.0, LAV, 1.0);
+    }
+    focus_ring(ui, g, Target::Voice, r, 12.0);
+    draw_toggle(g, rect(r.x + 434.0, r.y + 16.0, 46.0, 28.0), on);
+}
+
+unsafe fn draw_confirm(ui: &Ui, g: &mut Gfx) {
+    heading(
         g,
-        voice,
+        "Remove warmUP Companion",
+        &format!(
+            "This stops and removes the Companion service. Logs and diagnostics stay in {} for troubleshooting.",
+            crate::install::DATA_DIR
+        ),
+    );
+    required_card(
+        ui,
+        g,
+        "warmUP Companion service",
+        "Service, tray helper and installed program files",
+    );
+    if has_models(ui) {
+        toggle_card(
+            ui,
+            g,
+            "Offline voice models",
+            &format!(
+                "{} on disk. Keep them if you plan to reinstall",
+                format_bytes(ui.models_bytes)
+            ),
+            ui.models_on,
+        );
+    }
+    note_box(
+        ui,
+        g,
+        None,
+        INFO,
+        "Your controller stops working on the sign-in screen, the lock screen and admin prompts once the service is removed.",
+    );
+}
+
+unsafe fn draw_removing(ui: &Ui, g: &mut Gfx) {
+    let job = &ui.job;
+    let (title, sub) = match job.phase {
+        Phase::Done => (
+            "warmUP Companion was removed",
+            "The service is stopped and deleted.",
+        ),
+        Phase::Failed if job.needs_admin => (
+            "Administrator permission needed",
+            "Windows asks for permission before the service can be removed.",
+        ),
+        Phase::Failed => (
+            "Uninstall could not finish",
+            "Nothing else was changed. You can retry or close.",
+        ),
+        _ => (
+            "Removing warmUP Companion",
+            "This takes a few seconds.",
+        ),
+    };
+    let mut rows = vec![("warmUP Companion service".to_string(), job.service)];
+    if ui.models_on && has_models(ui) {
+        rows.push((
+            format!("Offline voice models \u{00B7} {}", format_bytes(ui.models_bytes)),
+            job.voice,
+        ));
+    }
+    draw_progress(ui, g, title, sub, &rows);
+}
+
+unsafe fn draw_done(ui: &Ui, g: &mut Gfx) {
+    heading(
+        g,
+        "warmUP Companion was removed",
+        "Your controller no longer works on the sign-in screen or admin prompts.",
+    );
+    let models_removed = ui.models_on && has_models(ui) && ui.job.voice != Task::Failed;
+    icon_row(
+        ui,
+        g,
+        144.0,
+        Icon::Svg(CIRCLE_CHECK),
+        "Removed: Companion service",
+        "Service, tray helper and program files",
+    );
+    let mut y = 211.0;
+    if has_models(ui) {
+        let size = format_bytes(ui.models_bytes);
+        if models_removed {
+            icon_row(
+                ui,
+                g,
+                y,
+                Icon::Svg(CIRCLE_CHECK),
+                "Removed: Offline voice models",
+                &format!("{size} freed"),
+            );
+        } else {
+            icon_row(
+                ui,
+                g,
+                y,
+                Icon::Svg(MIC),
+                "Kept: Offline voice models",
+                &format!("{size} in {}", speech_dir().display()),
+            );
+        }
+        y += 67.0;
+    }
+    icon_row(
+        ui,
+        g,
+        y,
+        Icon::Svg(HARD_DRIVE),
+        "Kept: Logs and diagnostics",
+        crate::install::DATA_DIR,
+    );
+    if !ui.job.note.is_empty() {
+        note_box(ui, g, Some(y + 79.0), ALERT, &ui.job.note);
+    }
+}
+
+unsafe fn draw_features(ui: &Ui, g: &mut Gfx) {
+    heading(
+        g,
+        "Choose features",
+        "The Companion service is required. Offline voice typing runs on your PC and needs a one-time model download.",
+    );
+
+    required_card(
+        ui,
+        g,
+        "warmUP Companion service",
+        "Controller input on sign-in, lock and admin screens",
+    );
+    toggle_card(
+        ui,
+        g,
         "Offline voice typing",
         "Speech is recognised on your PC, never in the cloud",
-        402.0,
-        if ui.voice_on { HI } else { CARD },
+        ui.voice_on,
     );
-    if ui.voice_on {
-        g.ring(voice, 12.0, 2.0, LAV, 1.0);
-    }
-    focus_ring(ui, g, Target::Voice, voice, 12.0);
-    draw_toggle(g, rect(voice.x + 434.0, voice.y + 16.0, 46.0, 28.0), ui.voice_on);
 
     let on = ui.voice_on;
     let fade = if on { 1.0 } else { 0.4 };
@@ -1821,6 +2233,13 @@ unsafe fn task_row(ui: &Ui, g: &mut Gfx, y: f32, label: &str, task: Task) {
 
 unsafe fn draw_install(ui: &Ui, g: &mut Gfx) {
     let job = &ui.job;
+    let mut rows = vec![("warmUP Companion service".to_string(), job.service)];
+    if ui.voice_on {
+        rows.push((
+            format!("Offline voice typing \u{00B7} {}", ui.model.title()),
+            job.voice,
+        ));
+    }
     let (title, sub) = match job.phase {
         Phase::Done => (
             "warmUP Companion is installed",
@@ -1839,6 +2258,11 @@ unsafe fn draw_install(ui: &Ui, g: &mut Gfx) {
             "This takes about a minute. Voice models can take longer to download.",
         ),
     };
+    draw_progress(ui, g, title, sub, &rows);
+}
+
+unsafe fn draw_progress(ui: &Ui, g: &mut Gfx, title: &str, sub: &str, rows: &[(String, Task)]) {
+    let job = &ui.job;
     heading(g, title, sub);
 
     let status = if job.status.is_empty() {
@@ -1863,10 +2287,8 @@ unsafe fn draw_install(ui: &Ui, g: &mut Gfx) {
         }
     }
 
-    task_row(ui, g, 210.0, "warmUP Companion service", job.service);
-    if ui.voice_on {
-        let label = format!("Offline voice typing \u{00B7} {}", ui.model.title());
-        task_row(ui, g, 242.0, &label, job.voice);
+    for (i, (label, task)) in rows.iter().enumerate() {
+        task_row(ui, g, 210.0 + i as f32 * 32.0, label, *task);
     }
 
     let msg = if job.phase == Phase::Failed {
@@ -1980,6 +2402,12 @@ unsafe fn footer_info(ui: &Ui) -> Option<(&'static str, String)> {
         }
         Step::Install => Some((HARD_DRIVE, data)),
         Step::Finish => Some((CIRCLE_CHECK, format!("Installed in {data}"))),
+        Step::Confirm if ui.models_on && has_models(ui) => Some((
+            HARD_DRIVE,
+            format!("Frees {}", format_bytes(ui.models_bytes)),
+        )),
+        Step::Confirm | Step::Removing => Some((HARD_DRIVE, data)),
+        Step::Done => Some((CIRCLE_CHECK, format!("Logs kept in {data}"))),
     }
 }
 
@@ -2056,7 +2484,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_TIMER if wparam.0 == TIMER_ID => {
             with_ui(|ui| {
                 let changed = poll_job(ui);
-                let animating = ui.step == Step::Install && ui.job.phase == Phase::Running;
+                let animating = matches!(ui.step, Step::Install | Step::Removing)
+                    && ui.job.phase == Phase::Running;
                 if changed || animating {
                     paint(ui);
                 }

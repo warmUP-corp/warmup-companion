@@ -73,6 +73,10 @@ pub fn run_install_dev(path: &Path) {
     println!("Log: {DATA_DIR}\\{LOG_NAME}");
 }
 
+pub fn uninstall_service() -> Result<(), String> {
+    uninstall_inner()
+}
+
 pub fn run_uninstall() {
     if let Err(e) = uninstall_inner() {
         eprintln!("uninstall failed: {e}");

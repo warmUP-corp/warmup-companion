@@ -1,7 +1,10 @@
 ; warmup-companion.nsi - NSIS installer for Warmup Companion (WarmupVkSvc).
 ;
 ; Interactive installs launch the mono_ui setup wizard
-; (`warmup-companion.exe setup`). Silent /S keeps the section defaults below.
+; (`warmup-companion.exe setup`); interactive uninstalls launch
+; `warmup-companion.exe uninstall-ui`. Silent /S keeps the section defaults below.
+; Wizard exit codes: 0 done, 2 cancelled, 3 window could not be created (fall back
+; to the silent path), anything else failed.
 ;
 ; Build (from the repo root):
 ;   makensis install\warmup-companion.nsi
@@ -72,16 +75,9 @@ VIAddVersionKey "LegalCopyright"  "${COMPANY}"
 !define MUI_HEADERIMAGE
 !define MUI_HEADERIMAGE_BITMAP "${SRCROOT}\assets\installer\header.bmp"
 !define MUI_WELCOMEFINISHPAGE_BITMAP "${SRCROOT}\assets\installer\welcome.bmp"
-!define MUI_UNWELCOMEFINISHPAGE_BITMAP "${SRCROOT}\assets\installer\welcome.bmp"
-!define MUI_UNCONFIRMPAGE_TEXT_TOP "This removes the service, installer files, and optional offline voice models. Logs and diagnostics are kept under C:\ProgramData\WarmupVk so they remain available for troubleshooting."
-!define MUI_UNFINISHPAGE_TITLE "${APPNAME} was removed"
-!define MUI_UNFINISHPAGE_TEXT "The service and installed files were removed. Existing logs and diagnostics remain under C:\ProgramData\WarmupVk."
 
 !insertmacro MUI_PAGE_INSTFILES
-
-!insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
-!insertmacro MUI_UNPAGE_FINISH
 
 !insertmacro MUI_LANGUAGE "English"
 
@@ -110,7 +106,10 @@ Section "!Warmup Companion service (required)" SEC_MAIN
     DetailPrint "Opening warmUP Companion Setup..."
     nsExec::Exec '"$INSTDIR\warmup-companion.exe" setup'
     Pop $0
-    ${If} $0 == 2
+    ${If} $0 == 3
+      DetailPrint "Setup wizard could not open a window (exit 3); installing with defaults."
+      StrCpy $InteractiveUI "0"
+    ${ElseIf} $0 == 2
       DetailPrint "Setup cancelled."
       Call RemovePayload
       Abort
@@ -119,7 +118,9 @@ Section "!Warmup Companion service (required)" SEC_MAIN
       MessageBox MB_ICONSTOP|MB_OK "Setup failed (exit $0). See ${DATADIR}\service.log." /SD IDOK
       Abort
     ${EndIf}
-  ${Else}
+  ${EndIf}
+
+  ${If} $InteractiveUI == "0"
     DetailPrint "Stopping stale ${APPNAME} processes..."
     nsExec::ExecToLog 'taskkill /F /IM warmup-companion.exe'
     Pop $0
@@ -226,14 +227,40 @@ Function .onInit
   silent_done:
 FunctionEnd
 
-Section "Uninstall"
+Function un.onInit
+  StrCpy $InteractiveUI "0"
+  IfSilent un_silent_done
+    StrCpy $InteractiveUI "1"
+    SetSilent silent
+  un_silent_done:
+FunctionEnd
+
+Section "!un.Warmup Companion (required)" SEC_UNMAIN
+  SectionIn RO
   SetRegView 64
-  nsExec::ExecToLog '"$INSTDIR\warmup-companion.exe" uninstall'
-  Pop $0
-  ${If} $0 != 0
-    IfSilent +2
-    MessageBox MB_ICONSTOP|MB_OK "Warmup Companion could not be removed (exit $0). The service may still be running. See ${DATADIR}\service.log and try again." /SD IDOK
-    Abort
+  ${If} $InteractiveUI == "1"
+    nsExec::Exec '"$INSTDIR\warmup-companion.exe" uninstall-ui'
+    Pop $0
+    ${If} $0 == 3
+      DetailPrint "Uninstall wizard could not open a window (exit 3); removing with defaults."
+      StrCpy $InteractiveUI "0"
+    ${ElseIf} $0 == 2
+      DetailPrint "Uninstall cancelled."
+      Abort
+    ${ElseIf} $0 != 0
+      MessageBox MB_ICONSTOP|MB_OK "Warmup Companion could not be removed (exit $0). The service may still be running. See ${DATADIR}\service.log and try again."
+      Abort
+    ${EndIf}
+  ${EndIf}
+
+  ${If} $InteractiveUI == "0"
+    nsExec::ExecToLog '"$INSTDIR\warmup-companion.exe" uninstall'
+    Pop $0
+    ${If} $0 != 0
+      IfSilent +2
+      MessageBox MB_ICONSTOP|MB_OK "Warmup Companion could not be removed (exit $0). The service may still be running. See ${DATADIR}\service.log and try again." /SD IDOK
+      Abort
+    ${EndIf}
   ${EndIf}
 
   SetShellVarContext all
@@ -250,8 +277,14 @@ Section "Uninstall"
   RMDir  "$INSTDIR"
 
   DeleteRegKey HKLM "${UNINSTKEY}"
-  RMDir /r "${DATADIR}\speech"
   Delete "${DATADIR}\bin\icon.ico"
   Delete "${DATADIR}\bin\warmup-companion.version"
   RMDir  "${DATADIR}\bin"
+SectionEnd
+
+Section "un.Offline voice models" SEC_UNSPEECH
+  ${If} $InteractiveUI == "1"
+    Return
+  ${EndIf}
+  RMDir /r "${DATADIR}\speech"
 SectionEnd

@@ -55,6 +55,18 @@ pub fn dispatch_install_or_service(args: &[String]) {
                 std::process::exit(1);
             }
         }
+        Some("uninstall-ui") => {
+            #[cfg(feature = "gamepad")]
+            {
+                let code = crate::win::installer_ui::run(args);
+                std::process::exit(code);
+            }
+            #[cfg(not(feature = "gamepad"))]
+            {
+                eprintln!("uninstall UI requires the gamepad feature");
+                std::process::exit(3);
+            }
+        }
         Some("install") => {
             let debug_ui = args.iter().any(|a| a == "--debug-ui" || a == "--debug");
             crate::install::run_install(debug_ui);
