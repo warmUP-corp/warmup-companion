@@ -9,7 +9,7 @@
 - **Battery.** Bluetooth controllers show the level Windows reports (for example 80% on an Xbox Wireless Controller instead of a rough 10%). Wired Xbox controllers show as wired instead of a made-up percentage.
 - **Lighter when idle.** Solid and Off lightbar colours are applied once instead of 30 times a second, controller and desktop checks slow down when no pad is connected, and settings are only re-read when the file changes.
 - Lightbar "off" now hands the DualSense / DS4 lightbar back to the controller's own player-indicator lighting instead of switching it black, and the companion stops writing the lightbar while it is off. warmUP sends "off" whenever its Custom lightbar switch is off (the new default).
-- On the sign-in screen, when only Xbox controllers are connected, the companion leaves sign-in to Windows' own controller keyboard (Windows 11 24H2 and newer); with a PlayStation controller connected, the warmUP keyboard stays.
+- On the sign-in screen, when only Xbox controllers are connected, the companion leaves sign-in to Windows' own controller keyboard (Windows 11 24H2 and newer); with a PlayStation controller connected, the warmUP keyboard stays. Newer Windows 11 builds no longer pass Xbox controller input to other programs on the sign-in screen, so the companion cannot drive its own keyboard or cursor with an Xbox controller there. The companion now also switches Windows' controller keyboard back on for these sign-ins (`ControllerToVKMapping`), which an earlier version could leave turned off.
 
 ## v0.9.2
 

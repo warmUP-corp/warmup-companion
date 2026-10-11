@@ -95,6 +95,7 @@ pub fn set_active(on_winlogon: bool) {
                 NEED_SEARCH_START.store(true, Ordering::SeqCst);
             } else {
                 crate::win::native_keyboard::restore_auto_invoke();
+                crate::win::native_keyboard::enable_controller_to_vk_mapping();
                 crate::win::native_keyboard::ensure_search_service_running();
             }
             NATIVE_SUPPRESSED.store(want, Ordering::SeqCst);

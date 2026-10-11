@@ -61,6 +61,8 @@ No Steam setup is required. To try the sign-in path after confirming normal desk
 - PlayStation DualSense and DualSense Edge
 - Other compatible HID gamepads recognized through the controller mapping database
 
+> **Xbox controllers on the sign-in screen.** Newer Windows 11 builds (24H2 and later) no longer pass Xbox controller input to other programs on the sign-in screen; only Windows' own sign-in screen receives it. This affects every third-party controller tool, not just warmUP Companion. So when only Xbox controllers are connected, the companion hands sign-in to Windows' built-in controller keyboard and navigation (D-pad and A, no mouse cursor). With a PlayStation controller connected, the warmUP keyboard is used as usual. UAC prompts and the normal desktop are not affected.
+
 ## Controller controls
 
 ![Shortcut legend overlay](assets/promo/shortcut-legend.png)
