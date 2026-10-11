@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v0.10.0
+
+- **Several controllers at once.** Every connected controller now drives the mouse, keyboard and warmUP together, with no switching: buttons from all pads count, the stick pushed furthest wins, and a press held on two pads fires once. Rumble goes to the pad you used last, the lightbar to every pad. Works on the desktop and on the sign-in and UAC screens (PlayStation pads). Turn it off with `multi_controller = false` in `settings.ini`.
+- **Settings shared with warmUP.** Deadzone, cursor, lightbar colour, effect and brightness live in `settings.ini` for both apps. A change in the Controller Center shows up in warmUP right away and the other way round, without polling.
+- **Battery.** Bluetooth controllers show the level Windows reports (for example 80% on an Xbox Wireless Controller instead of a rough 10%). Wired Xbox controllers show as wired instead of a made-up percentage.
+- **Lighter when idle.** Solid and Off lightbar colours are applied once instead of 30 times a second, controller and desktop checks slow down when no pad is connected, and settings are only re-read when the file changes.
 - Lightbar "off" now hands the DualSense / DS4 lightbar back to the controller's own player-indicator lighting instead of switching it black, and the companion stops writing the lightbar while it is off. warmUP sends "off" whenever its Custom lightbar switch is off (the new default).
 
 ## v0.9.2
