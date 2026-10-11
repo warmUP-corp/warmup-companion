@@ -4,7 +4,9 @@
 
 # warmUP Companion
 
-Type anywhere in Windows with the controller already in your hands. warmUP Companion is an open-source controller keyboard for Xbox and PlayStation controllers, including desktop apps, UAC prompts, the lock screen, and sign-in screen.
+Use an Xbox or PlayStation controller as a mouse and keyboard on Windows, including the sign-in screen, lock screen, and UAC.
+
+warmUP Companion is an open-source Windows app. Left stick moves the pointer, right stick scrolls, A / Cross clicks, and L3 opens a native on-screen keyboard. It types into desktop apps, UAC prompts, the lock screen, and the sign-in screen, and it works without Steam.
 
 [Download for Windows](https://github.com/warmUP-corp/warmup-companion/releases/latest)
 · [Join the Discord](https://discord.gg/z2zmB4v2Bn)
