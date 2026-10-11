@@ -8,7 +8,7 @@
 
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -572,58 +572,28 @@ unsafe fn read_dword(hkey: HKEY, value_name: &[u16]) -> Option<u32> {
 }
 
 /// Windows 11 24H2 KB5062660+ ships a gamepad PIN keyboard on LogonUI.
+/// Detected for logs only — we do not yield to it unless
+/// `WARMUP_NATIVE_LOGON_VK` is a non-zero value. The OS keyboard overlaps
+/// our overlay (CoreInputView Gamepad / TabTip) and L3 then does nothing.
 const NATIVE_LOGON_VK_BUILD: u32 = 26100;
 const NATIVE_LOGON_VK_UBR: u32 = 4762;
 
-#[derive(Clone, Copy)]
-struct NativeLogonVk {
-    forced: Option<bool>,
-    os_has_native: bool,
+static NATIVE_LOGON_VK: OnceLock<bool> = OnceLock::new();
+
+static LOGON_XBOX_PAD: AtomicBool = AtomicBool::new(false);
+
+pub fn set_logon_pad_is_xbox(xbox: bool) {
+    LOGON_XBOX_PAD.store(xbox, Ordering::SeqCst);
 }
 
-static NATIVE_LOGON_VK: OnceLock<NativeLogonVk> = OnceLock::new();
-
-static LOGON_XBOX_PAD: AtomicU8 = AtomicU8::new(0);
-
-pub fn set_logon_pad_is_xbox(xbox: Option<bool>) {
-    let v = match xbox {
-        None => 0,
-        Some(false) => 1,
-        Some(true) => 2,
-    };
-    LOGON_XBOX_PAD.store(v, Ordering::SeqCst);
+pub fn logon_pad_is_xbox() -> bool {
+    LOGON_XBOX_PAD.load(Ordering::SeqCst)
 }
 
 static LOGON_SIGNIN_SURFACE: AtomicBool = AtomicBool::new(false);
-static LOGON_DECISION_LOGGED: Mutex<Option<(bool, &'static str)>> = Mutex::new(None);
 
 pub fn set_logon_signin_surface(signin: bool) {
     LOGON_SIGNIN_SURFACE.store(signin, Ordering::SeqCst);
-    let decision = signin.then(logon_decision);
-    let Ok(mut logged) = LOGON_DECISION_LOGGED.lock() else {
-        return;
-    };
-    if *logged == decision {
-        return;
-    }
-    *logged = decision;
-    if let Some((native, reason)) = decision {
-        let target = if native {
-            "Windows controller keyboard"
-        } else {
-            "warmUP overlay"
-        };
-        crate::install::log_line(&format!("native kbd: sign-in → {target} ({reason})"));
-    }
-}
-
-fn logon_decision() -> (bool, &'static str) {
-    let vk = native_logon_vk();
-    match vk.forced {
-        Some(true) => (true, "forced by WARMUP_NATIVE_LOGON_VK"),
-        Some(false) => (false, "forced by WARMUP_NATIVE_LOGON_VK=0"),
-        None => (false, "warmUP overlay default"),
-    }
 }
 
 pub fn window_is_logonui(hwnd: HWND) -> bool {
@@ -634,7 +604,7 @@ pub fn window_is_logonui(hwnd: HWND) -> bool {
 }
 
 pub fn yield_logon_to_native() -> bool {
-    LOGON_SIGNIN_SURFACE.load(Ordering::SeqCst) && logon_decision().0
+    native_logon_keyboard_available() && LOGON_SIGNIN_SURFACE.load(Ordering::SeqCst)
 }
 
 fn build_has_native_logon_vk(build: u32, ubr: u32) -> bool {
@@ -647,25 +617,22 @@ fn native_logon_vk_opt_in(env: Option<&str>) -> bool {
     env.is_some_and(|v| v != "0")
 }
 
-fn native_logon_vk() -> NativeLogonVk {
+pub fn native_logon_keyboard_available() -> bool {
     *NATIVE_LOGON_VK.get_or_init(|| {
         let env = std::env::var("WARMUP_NATIVE_LOGON_VK").ok();
-        let forced = env.as_deref().map(|v| native_logon_vk_opt_in(Some(v)));
+        let native = native_logon_vk_opt_in(env.as_deref());
         let (build, ubr) = current_windows_build();
         let os_has_native = match (build, ubr) {
             (Some(b), Some(u)) => build_has_native_logon_vk(b, u),
             _ => false,
         };
         crate::install::log_line(&format!(
-            "native kbd: logon VK forced={forced:?} os_has_native={os_has_native} build={}.{} env={}",
+            "native kbd: logon VK native={native} os_has_native={os_has_native} build={}.{} env={}",
             build.map(|b| b.to_string()).unwrap_or_else(|| "?".into()),
             ubr.map(|u| u.to_string()).unwrap_or_else(|| "?".into()),
             env.as_deref().unwrap_or("(unset)"),
         ));
-        NativeLogonVk {
-            forced,
-            os_has_native,
-        }
+        native
     })
 }
 
@@ -713,9 +680,6 @@ unsafe fn read_sz(hkey: HKEY, value_name: &[u16]) -> Option<String> {
 }
 
 pub fn suppress() {
-    if yield_logon_to_native() {
-        return;
-    }
     unsafe {
         let _ = EnumWindows(Some(enum_window), LPARAM(0));
     }
