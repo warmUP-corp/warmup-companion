@@ -755,6 +755,7 @@ impl GamepadPoll {
         #[cfg(windows)]
         let changes = {
             let chord_allowed = !game_owns_input
+                && (center_open || !crate::pipe_server::launcher_foreground_nav())
                 && !crate::gamepad_backend::poll_mode_is_sleep()
                 && !Self::service_signin_desktop();
             let mut kept = Vec::with_capacity(changes.len());
