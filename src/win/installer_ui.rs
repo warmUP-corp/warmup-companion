@@ -29,7 +29,8 @@ use windows::Win32::UI::Shell::{
     SHELLEXECUTEINFOW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowRect, KillTimer,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetForegroundWindow, GetWindowRect,
+    KillTimer,
     SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, HMENU, HTCAPTION, HTCLIENT,
     SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, WM_CLOSE,
     WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEWHEEL, WM_NCHITTEST, WM_TIMER,
@@ -483,6 +484,129 @@ struct Ui {
     back_r: Cell<Option<Rect>>,
     next_r: Cell<Option<Rect>>,
     started: Instant,
+    pad: Pad,
+}
+
+const PAD_UP: u32 = 1 << 0;
+const PAD_DOWN: u32 = 1 << 1;
+const PAD_LEFT: u32 = 1 << 2;
+const PAD_RIGHT: u32 = 1 << 3;
+/// South face button: ✕ on PlayStation, A on Xbox.
+const PAD_CONFIRM: u32 = 1 << 4;
+/// East face button: ○ on PlayStation, B on Xbox.
+const PAD_BACK: u32 = 1 << 5;
+const PAD_DIRS: u32 = PAD_UP | PAD_DOWN | PAD_LEFT | PAD_RIGHT;
+
+/// Controller input for the wizard. Reads pads itself through the shared SDL3 layer, so
+/// PlayStation, Xbox, Switch and generic pads work whether or not the service is running.
+struct Pad {
+    #[cfg(feature = "gamepad")]
+    input: Option<crate::gamepad_backend::GamepadInput>,
+    buttons: u32,
+    held: u32,
+    since: Option<Instant>,
+    last_repeat: Option<Instant>,
+}
+
+impl Pad {
+    fn new() -> Self {
+        Pad {
+            #[cfg(feature = "gamepad")]
+            input: crate::gamepad_backend::GamepadInput::new(&crate::gamepad_backend::mapping_db_path())
+                .map_err(|e| crate::install::log_line(&format!("installer ui: gamepad: {e}")))
+                .ok(),
+            buttons: 0,
+            held: 0,
+            since: None,
+            last_repeat: None,
+        }
+    }
+
+    fn connected(&self) -> bool {
+        #[cfg(feature = "gamepad")]
+        return self.input.as_ref().is_some_and(|i| i.active_controller_name().is_some());
+        #[cfg(not(feature = "gamepad"))]
+        false
+    }
+
+    /// Generic and Switch pads use the Xbox art, like the rest of the Companion.
+    fn playstation(&self) -> bool {
+        #[cfg(feature = "gamepad")]
+        return self.input.as_ref().is_some_and(|i| i.active_controller_type() == "playstation");
+        #[cfg(not(feature = "gamepad"))]
+        false
+    }
+
+    /// Returns (new presses including repeats, right stick Y up-positive, connection changed).
+    /// Presses only count while `focused`, so input meant for another window never clicks
+    /// through the wizard.
+    #[cfg(feature = "gamepad")]
+    fn poll(&mut self, focused: bool) -> (Vec<u32>, f32, bool) {
+        use crate::gamepad_backend::Button;
+        let Some(input) = self.input.as_mut() else {
+            return (Vec::new(), 0.0, false);
+        };
+        let changed = input.poll_events();
+        for c in input.detect_button_changes() {
+            let bit = match c.button {
+                Button::A => PAD_CONFIRM,
+                Button::B => PAD_BACK,
+                Button::Up => PAD_UP,
+                Button::Down => PAD_DOWN,
+                Button::Left => PAD_LEFT,
+                Button::Right => PAD_RIGHT,
+                _ => continue,
+            };
+            if c.pressed {
+                self.buttons |= bit;
+            } else {
+                self.buttons &= !bit;
+            }
+        }
+        let (lx, ly, _, ry) = input.axes();
+        let mut held = self.buttons;
+        for (on, bit) in [(ly > 0.5, PAD_UP), (ly < -0.5, PAD_DOWN), (lx < -0.5, PAD_LEFT), (lx > 0.5, PAD_RIGHT)] {
+            if on {
+                held |= bit;
+            }
+        }
+        if changed {
+            // Baseline on (dis)connect so a button already held does not fire.
+            self.buttons = 0;
+            self.held = held & PAD_DIRS;
+            return (Vec::new(), 0.0, true);
+        }
+        let now = Instant::now();
+        let pressed = held & !self.held;
+        if held != self.held {
+            self.since = Some(now);
+            self.last_repeat = None;
+        }
+        let mut edges: Vec<u32> = [PAD_CONFIRM, PAD_BACK, PAD_UP, PAD_DOWN, PAD_LEFT, PAD_RIGHT]
+            .into_iter()
+            .filter(|b| pressed & b != 0)
+            .collect();
+        // A held direction repeats after 400 ms, every 120 ms, like a console menu.
+        let dirs = held & PAD_DIRS;
+        if dirs != 0 && pressed == 0 {
+            let held_for = self.since.map_or(0.0, |t| now.duration_since(t).as_secs_f32());
+            let since_repeat = self.last_repeat.map_or(f32::MAX, |t| now.duration_since(t).as_secs_f32());
+            if held_for > 0.4 && since_repeat > 0.12 {
+                self.last_repeat = Some(now);
+                edges.extend([PAD_UP, PAD_DOWN, PAD_LEFT, PAD_RIGHT].into_iter().filter(|b| dirs & b != 0));
+            }
+        }
+        self.held = held;
+        if !focused {
+            return (Vec::new(), 0.0, false);
+        }
+        (edges, if ry.abs() > 0.25 { ry } else { 0.0 }, false)
+    }
+
+    #[cfg(not(feature = "gamepad"))]
+    fn poll(&mut self, _focused: bool) -> (Vec<u32>, f32, bool) {
+        (Vec::new(), 0.0, false)
+    }
 }
 
 thread_local! {
@@ -717,6 +841,7 @@ fn ui_show() {
             back_r: Cell::new(None),
             next_r: Cell::new(None),
             started: Instant::now(),
+            pad: Pad::new(),
             opts,
         };
         if let (Mode::Install, Some(choice)) = (mode, ui.opts.install) {
@@ -1582,6 +1707,25 @@ fn key_down(ui: &mut Ui, vk: u16) {
     }
 }
 
+/// Controller presses reuse the keyboard paths, so focus and step rules stay identical.
+/// Back follows the visible Back / Cancel / Close button and does nothing while it is hidden
+/// (installing, removing, finished).
+fn pad_press(ui: &mut Ui, bit: u32) {
+    match bit {
+        PAD_CONFIRM => key_down(ui, VK_RETURN.0),
+        PAD_BACK => {
+            ui.kb = true;
+            if back_label(ui).is_some() {
+                go_back(ui);
+            }
+        }
+        PAD_UP => key_down(ui, VK_UP.0),
+        PAD_DOWN => key_down(ui, VK_DOWN.0),
+        PAD_LEFT => key_down(ui, VK_LEFT.0),
+        _ => key_down(ui, VK_RIGHT.0),
+    }
+}
+
 fn design_point(ui: &Ui, lparam: LPARAM) -> (f32, f32) {
     let x = (lparam.0 & 0xffff) as i16 as f32;
     let y = ((lparam.0 >> 16) & 0xffff) as i16 as f32;
@@ -2440,7 +2584,23 @@ unsafe fn footer_info(ui: &Ui) -> Option<(&'static str, String)> {
 unsafe fn draw_footer(ui: &Ui, g: &mut Gfx) {
     let s = ui.scale;
     line(g, rect(0.0, FOOTER_Y, WIN_W, 1.0));
-    if let Some((icon, text)) = footer_info(ui) {
+    if ui.pad.connected() {
+        let mut hints = Vec::new();
+        if next_label(ui).is_some() {
+            hints.push((0, "Select"));
+        }
+        if let Some(label) = back_label(ui) {
+            hints.push((1, label));
+        }
+        let mut x = 24.0;
+        for (glyph, label) in hints {
+            g.icon(Icon::Pad(ui.pad.playstation(), glyph), rect(x, 583.0, 22.0, 22.0), WHITE, 1.0, s);
+            x += 28.0;
+            let lw = g.measure(label, 13.0, false);
+            g.text(label, rect(x, 583.0, lw + 4.0, 22.0), 13.0, false, DIM, DIM_A, Align::Left);
+            x += lw + 16.0;
+        }
+    } else if let Some((icon, text)) = footer_info(ui) {
         g.icon(Icon::Svg(icon), rect(24.0, 586.0, 16.0, 16.0), DIM, DIM_A, s);
         g.text(&text, rect(48.0, 586.5, 420.0, 15.0), 12.0, false, DIM, DIM_A, Align::Left);
     }
@@ -2510,9 +2670,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_TIMER if wparam.0 == TIMER_ID => {
             with_ui(|ui| {
                 let changed = poll_job(ui);
+                let focused = GetForegroundWindow() == ui.hwnd;
+                let (presses, ry, pad_changed) = ui.pad.poll(focused);
+                for bit in &presses {
+                    pad_press(ui, *bit);
+                }
+                if ry != 0.0 {
+                    ui.scroll -= ry * 18.0;
+                }
+                ui.scroll = ui.scroll.clamp(0.0, ui.scroll_max.get());
                 let animating = matches!(ui.step, Step::Install | Step::Removing)
                     && ui.job.phase == Phase::Running;
-                if changed || animating {
+                if changed || animating || pad_changed || ry != 0.0 || !presses.is_empty() {
                     paint(ui);
                 }
             });
