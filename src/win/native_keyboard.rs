@@ -104,7 +104,7 @@ fn wide(s: &str) -> Vec<u16> {
 /// profile, saving the prior value for [`restore_auto_invoke`]. Idempotent:
 /// once overridden, repeated calls are no-ops (the prior value stays captured).
 pub fn disable_auto_invoke() {
-    disable_controller_to_vk_mapping();
+    override_controller_to_vk_mapping(0);
     let Ok(mut saved) = AUTO_INVOKE_SAVED.lock() else {
         return;
     };
@@ -139,13 +139,10 @@ pub fn restore_auto_invoke() {
     crate::install::log_line("native kbd: restored TabletTip keyboard values");
 }
 
-fn disable_controller_to_vk_mapping() {
+fn override_controller_to_vk_mapping(desired: u32) {
     let Ok(mut saved) = CONTROLLER_VK_SAVED.lock() else {
         return;
     };
-    if saved.is_some() {
-        return;
-    }
     unsafe {
         let subkey_w = wide(CONTROLLER_VK_SUBKEY);
         let mut hkey = HKEY::default();
@@ -169,13 +166,20 @@ fn disable_controller_to_vk_mapping() {
         }
         let value_w = wide(CONTROLLER_VK_VALUE);
         let prior = read_dword(hkey, &value_w);
-        let desired = 0u32.to_le_bytes();
-        let rc = RegSetValueExW(hkey, PCWSTR(value_w.as_ptr()), 0, REG_DWORD, Some(&desired));
+        let rc = RegSetValueExW(
+            hkey,
+            PCWSTR(value_w.as_ptr()),
+            0,
+            REG_DWORD,
+            Some(&desired.to_le_bytes()),
+        );
         let _ = RegCloseKey(hkey);
         if rc.0 == 0 {
-            *saved = Some(prior);
+            if saved.is_none() {
+                *saved = Some(prior);
+            }
             crate::install::log_line(&format!(
-                "native kbd: set ControllerToVKMapping\\Enabled=0 (prior={prior:?})"
+                "native kbd: set ControllerToVKMapping\\Enabled={desired} (prior={prior:?})"
             ));
         } else {
             crate::install::log_line(&format!(
@@ -184,6 +188,10 @@ fn disable_controller_to_vk_mapping() {
             ));
         }
     }
+}
+
+pub fn enable_controller_to_vk_mapping() {
+    override_controller_to_vk_mapping(1);
 }
 
 fn restore_controller_to_vk_mapping() {
