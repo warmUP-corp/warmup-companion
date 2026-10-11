@@ -209,6 +209,10 @@ fn secure_poll_main(
             last_slot_err_log: crate::time_util::stale(Duration::from_secs(60)),
             prev_trigger_left: false,
             prev_trigger_right: false,
+            last_axes_sent: None,
+            merged_buttons: 0,
+            prev_xbox_activity: 0,
+            prev_hid_activity: 0,
         });
     });
 

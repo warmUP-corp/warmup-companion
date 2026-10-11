@@ -18,11 +18,10 @@ use crate::xinput_backend::XInputBackend;
 const VK_BUTTON: Button = Button::L3;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(8);
-/// Idle poll cadence: once no pad is connected and the VK is closed for
-/// `IDLE_AFTER`, drop from 125Hz to ~8Hz to cut idle CPU / handheld battery.
-/// Restored to `POLL_INTERVAL` immediately on connect / VK-open. (P2)
 const POLL_INTERVAL_IDLE: Duration = Duration::from_millis(125);
+const POLL_INTERVAL_NOPAD: Duration = Duration::from_millis(1000);
 const IDLE_AFTER: Duration = Duration::from_secs(2);
+const SERVICE_BACKEND_SYNC_MIN: Duration = Duration::from_millis(500);
 const WARMUP_LAUNCH_DEBOUNCE: Duration = Duration::from_secs(2);
 const GUIDE_LAUNCH_DEBOUNCE: Duration = Duration::from_secs(10);
 /// Ignore spurious X/dpad from misaligned HID for a moment after VK opens.
@@ -308,6 +307,14 @@ impl Backend {
         }
     }
 
+    fn release_led(&mut self) {
+        match self {
+            Backend::Sdl(be) => be.release_led(),
+            #[cfg(windows)]
+            Backend::XInput(be) => be.release_led(),
+        }
+    }
+
     fn rumble(&mut self, strong: f32, weak: f32, duration_ms: u32) {
         match self {
             Backend::Sdl(b) => b.rumble(strong, weak, duration_ms),
@@ -333,11 +340,13 @@ impl Backend {
             return;
         }
         if crate::gamepad_backend::game_owns_controller() {
-            if let Some(led) = cmds.iter().rev().find_map(|cmd| match *cmd {
-                PadCommand::Led { r, g, b } => Some((r, g, b)),
+            match cmds.iter().rev().find_map(|cmd| match *cmd {
+                PadCommand::Led { r, g, b } => Some(Some((r, g, b))),
+                PadCommand::LedRelease => Some(None),
                 _ => None,
             }) {
-                *held = Some(led);
+                Some(led) => *held = led,
+                None => {}
             }
             return;
         }
@@ -347,6 +356,7 @@ impl Backend {
         for cmd in cmds {
             match cmd {
                 PadCommand::Led { r, g, b } => self.set_led(r, g, b),
+                PadCommand::LedRelease => self.release_led(),
                 PadCommand::Rumble { strong, weak, ms } => self.rumble(strong, weak, ms),
                 PadCommand::TriggerRumble { left, right, ms } => {
                     self.trigger_rumble(left, right, ms)
@@ -431,6 +441,8 @@ pub struct GamepadPoll {
     last_input_desktop: Option<String>,
     #[cfg(windows)]
     last_desktop_watch: Option<(String, String)>,
+    #[cfg(windows)]
+    last_service_backend_sync: Instant,
 }
 
 impl GamepadPoll {
@@ -490,33 +502,29 @@ impl GamepadPoll {
             .unwrap_or(false)
     }
 
-    /// Switch between SDL3 (Default) and HID+XInput (Winlogon) when the service crosses desktops.
     #[cfg(windows)]
     fn sync_service_backend(&mut self) {
         if !crate::config::service_mode() {
             return;
         }
         let on_winlogon = Self::input_desktop_is_winlogon();
+        let using_xinput = matches!(self.backend, Backend::XInput(_));
+        let matched = on_winlogon == using_xinput;
+        if matched && self.last_service_backend_sync.elapsed() < SERVICE_BACKEND_SYNC_MIN {
+            return;
+        }
+        self.last_service_backend_sync = Instant::now();
         let xbox_pad = on_winlogon && self.backend.controller_label().starts_with("XInput");
         crate::win::native_keyboard::set_logon_pad_is_xbox(xbox_pad);
         let signin = on_winlogon
             && crate::xinput_backend::logon_credential_window()
                 .is_none_or(crate::win::native_keyboard::window_is_logonui);
         crate::win::native_keyboard::set_logon_signin_surface(signin);
-        // Publish each poll so the per-keystroke UIA focus redirect (vk_nav send
-        // path) gates correctly and records this loop thread's apartment.
         crate::win::logon_focus::set_active(on_winlogon);
-        // Keep a hide sweep alive the whole time we're on the secure desktop.
-        // `EnableDesktopModeAutoInvoke` is already 0 on some machines yet the
-        // touch keyboard is still summoned by the shell's CoreWindow gamepad
-        // navigation when an XInput (Xbox) pad drives the lock screen — the
-        // registry switch doesn't gate that path, so the panel must be hidden
-        // on sight. Idempotent: `suppress_for` no-ops while a sweep is running.
         if on_winlogon && !crate::win::native_keyboard::yield_logon_to_native() {
             crate::win::native_keyboard::suppress_for(std::time::Duration::from_secs(3));
         }
-        let using_xinput = matches!(self.backend, Backend::XInput(_));
-        if on_winlogon == using_xinput {
+        if matched {
             if !on_winlogon {
                 let current = crate::win::current_desktop_name().unwrap_or_else(|| "?".into());
                 if !current.eq_ignore_ascii_case("default") {
@@ -607,6 +615,8 @@ impl GamepadPoll {
             last_input_desktop: None,
             #[cfg(windows)]
             last_desktop_watch: None,
+            #[cfg(windows)]
+            last_service_backend_sync: crate::time_util::stale(SERVICE_BACKEND_SYNC_MIN),
         }
     }
 
@@ -745,6 +755,7 @@ impl GamepadPoll {
         #[cfg(windows)]
         let changes = {
             let chord_allowed = !game_owns_input
+                && (center_open || !crate::pipe_server::launcher_foreground_nav())
                 && !crate::gamepad_backend::poll_mode_is_sleep()
                 && !Self::service_signin_desktop();
             let mut kept = Vec::with_capacity(changes.len());
@@ -1819,10 +1830,13 @@ where
         // Idle backoff (P2): slow the poll once nothing has needed input for a
         // while, to cut idle CPU / handheld battery. Snap back to full rate the
         // moment a pad is connected or the VK is open.
-        if poll.is_connected() || vk_open() {
+        let connected = poll.is_connected();
+        if connected || vk_open() {
             last_active = now;
         }
-        let interval = if last_active.elapsed() >= IDLE_AFTER {
+        let interval = if !connected && !vk_open() {
+            POLL_INTERVAL_NOPAD
+        } else if last_active.elapsed() >= IDLE_AFTER {
             POLL_INTERVAL_IDLE
         } else {
             POLL_INTERVAL

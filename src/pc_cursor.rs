@@ -565,22 +565,24 @@ pub(crate) fn copy_screen_to_clipboard(window_only: bool) {
         }
         let seq = copied.then(|| windows::Win32::System::DataExchange::GetClipboardSequenceNumber());
         if let Some((rgba, stem)) = capture {
-            std::thread::spawn(move || {
-                let path = crate::image_paste::save_png(
-                    &stem,
-                    width as u32,
-                    height as u32,
-                    &rgba,
-                    "screenshot",
-                );
-                if let Some(path) = path {
-                    if let Some(seq) = seq {
-                        crate::image_paste::remember_screenshot(path.clone(), seq);
+            let _ = std::thread::Builder::new()
+                .name("warmup-screenshot-save".into())
+                .spawn(move || {
+                    let path = crate::image_paste::save_png(
+                        &stem,
+                        width as u32,
+                        height as u32,
+                        &rgba,
+                        "screenshot",
+                    );
+                    if let Some(path) = path {
+                        if let Some(seq) = seq {
+                            crate::image_paste::remember_screenshot(path.clone(), seq);
+                        }
+                        let _ = MessageBeep(MB_OK);
+                        spawn_toast_helper(&path, copied);
                     }
-                    let _ = MessageBeep(MB_OK);
-                    spawn_toast_helper(&path, copied);
-                }
-            });
+                });
         }
     }
 }

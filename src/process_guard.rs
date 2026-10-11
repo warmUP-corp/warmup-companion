@@ -131,10 +131,12 @@ fn process_image_path(handle: windows::Win32::Foundation::HANDLE) -> Option<Stri
 
 pub(crate) fn terminate_blocked_process(pid: u32) -> bool {
     request_window_close(pid);
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(800));
-        let _ = terminate_pid_with_privilege(pid);
-    });
+    let _ = std::thread::Builder::new()
+        .name("warmup-terminate-pid".into())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_millis(800));
+            let _ = terminate_pid_with_privilege(pid);
+        });
     true
 }
 
