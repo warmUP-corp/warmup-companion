@@ -514,8 +514,15 @@ impl GamepadPoll {
             return;
         }
         self.last_service_backend_sync = Instant::now();
-        let xbox_pad = on_winlogon && self.backend.controller_label().starts_with("XInput");
-        crate::win::native_keyboard::set_logon_pad_is_xbox(xbox_pad);
+        if !on_winlogon {
+            crate::xinput_backend::clear_logon_pad_presence();
+        }
+        let (xbox_pad, hid_pad) = if on_winlogon && using_xinput {
+            crate::xinput_backend::logon_pad_presence()
+        } else {
+            (None, None)
+        };
+        crate::win::native_keyboard::set_logon_pads(xbox_pad, hid_pad);
         let signin = on_winlogon
             && crate::xinput_backend::logon_credential_window()
                 .is_none_or(crate::win::native_keyboard::window_is_logonui);
@@ -808,6 +815,13 @@ impl GamepadPoll {
 
         if vk_open {
             #[cfg(windows)]
+            if Self::service_signin_desktop()
+                && crate::win::native_keyboard::yield_logon_to_native()
+            {
+                service_log("native kbd: closing warmUP VK, sign-in yielded to Windows keyboard");
+                return Ok(vec![VkLoopAction::Close]);
+            }
+            #[cfg(windows)]
             {
                 self.sync_stick_nav(lx, ly);
                 if crate::win::vk_ui::tick_dpad_hold(Instant::now()) {
@@ -840,7 +854,7 @@ impl GamepadPoll {
             self.a_cursor_down = false;
             self.clear_touchpad();
             self.b_cursor_down = false;
-            if !crate::win::native_keyboard::logon_pad_is_xbox() {
+            if crate::win::native_keyboard::logon_hid_pad_present() {
                 for change in &changes {
                     if change.pressed && crate::vk_nav::inject_logon_pin(change.button) {
                         self.backend.haptic_tick();
