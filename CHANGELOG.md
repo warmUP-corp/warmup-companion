@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- On-screen keyboard: holding LT (symbols / numbers) or RT (shift) for 0.4 s locks that layer until the trigger is tapped again, with a firmer rumble when the lock engages. The quick double-tap still works; a single tap stays one-shot. The locked key keeps its pill marker.
+
 ## v0.10.0
 
 - **Several controllers at once.** Every connected controller now drives the mouse, keyboard and warmUP together, with no switching: buttons from all pads count, the stick pushed furthest wins, and a press held on two pads fires once. Rumble goes to the pad you used last, the lightbar to every pad. Works on the desktop and on the sign-in and UAC screens (PlayStation pads). Turn it off with `multi_controller = false` in `settings.ini`.
