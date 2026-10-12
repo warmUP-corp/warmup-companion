@@ -112,6 +112,10 @@ struct NavState {
     one_shot_symbol: bool,
     last_shift_at: Option<Instant>,
     last_symbol_at: Option<Instant>,
+    /// RT / LT held down since: holding a modifier promotes its one-shot layer to
+    /// sticky (caps / locked symbols) without the double-tap timing.
+    shift_hold_since: Option<Instant>,
+    symbol_hold_since: Option<Instant>,
     /// QWERTZ letter rows (web `de-DE` language toggle on L3).
     lang_de: bool,
     voice_input: bool,
@@ -137,6 +141,8 @@ static NAV: Mutex<NavState> = Mutex::new(NavState {
     one_shot_symbol: false,
     last_shift_at: None,
     last_symbol_at: None,
+    shift_hold_since: None,
+    symbol_hold_since: None,
     lang_de: false,
     voice_input: false,
     tv_layout: false,
@@ -196,6 +202,8 @@ const HOLD_REPEAT: Duration = Duration::from_millis(70);
 /// Second shift/symbol tap inside this window promotes one-shot to sticky
 /// (web `DOUBLE_TAP_SHIFT_MS`).
 const DOUBLE_TAP_STICKY: Duration = Duration::from_millis(400);
+/// Holding RT / LT this long locks the layer the tap just opened (caps / symbols).
+const MODIFIER_HOLD_LOCK: Duration = Duration::from_millis(400);
 
 const SPAN_KEY: f32 = 1.0;
 const SPAN_SPACE: f32 = 3.0;
@@ -834,6 +842,62 @@ pub fn toggle_symbols() {
         rebuild(&mut nav);
     }
     request_ui_repaint();
+}
+
+/// Which modifier trigger is held (RT = shift, LT = symbols).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ModifierHold {
+    Shift,
+    Symbol,
+}
+
+/// RT / LT went down (after its tap action fired): start the hold-to-lock timer.
+pub fn modifier_hold_pressed(kind: ModifierHold) {
+    if let Ok(mut nav) = NAV.lock() {
+        let now = Some(Instant::now());
+        match kind {
+            ModifierHold::Shift => nav.shift_hold_since = now,
+            ModifierHold::Symbol => nav.symbol_hold_since = now,
+        }
+    }
+}
+
+/// RT / LT came back up: a short tap stays one-shot, a hold already locked.
+pub fn modifier_hold_released(kind: ModifierHold) {
+    if let Ok(mut nav) = NAV.lock() {
+        match kind {
+            ModifierHold::Shift => nav.shift_hold_since = None,
+            ModifierHold::Symbol => nav.symbol_hold_since = None,
+        }
+    }
+}
+
+/// Promote a one-shot layer to sticky once its trigger has been held for
+/// [`MODIFIER_HOLD_LOCK`]. Returns `true` on the frame the lock engages so the
+/// caller can confirm it with haptics. Driven from the gamepad poll like
+/// [`tick_key_repeat`].
+pub fn tick_modifier_hold(now: Instant) -> bool {
+    let Ok(mut nav) = NAV.lock() else {
+        return false;
+    };
+    let held = |since: Option<Instant>| since.is_some_and(|t| now.duration_since(t) >= MODIFIER_HOLD_LOCK);
+    let mut locked = false;
+    if held(nav.shift_hold_since) {
+        nav.shift_hold_since = None;
+        if nav.layer == Layer::Upper && nav.one_shot_shift {
+            nav.one_shot_shift = false;
+            locked = true;
+        }
+    }
+    if held(nav.symbol_hold_since) {
+        nav.symbol_hold_since = None;
+        if nav.layer == Layer::Symbol && nav.one_shot_symbol {
+            nav.one_shot_symbol = false;
+            locked = true;
+        }
+    }
+    // The layer does not change, only its stickiness; the renderer reads that via `modifier_state`.
+    locked
 }
 
 /// Web L3: flip between QWERTY (en-US) and QWERTZ (de-DE) letter rows.
