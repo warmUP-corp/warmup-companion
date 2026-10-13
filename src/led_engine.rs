@@ -48,11 +48,10 @@ pub(crate) struct LedState {
 
 impl Default for LedState {
     fn default() -> Self {
-        // warmUP primary #b6a0ff.
         Self {
             effect: LedEffect::Solid,
-            r: 0xb6,
-            g: 0xa0,
+            r: 0x7c,
+            g: 0x3a,
             b: 0xff,
             r2: 0x4c,
             g2: 0x7b,

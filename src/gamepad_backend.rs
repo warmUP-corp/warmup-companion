@@ -74,6 +74,16 @@ fn effective_userland_poll_mode() -> PollMode {
     let detected_game_active = !desktop_connected
         && settings.sleep_on_game
         && standalone_game_active_now();
+    static VOICE_GAME_SEEN: AtomicBool = AtomicBool::new(false);
+    let any_game = raw_game_active || detected_game_active;
+    if any_game && !VOICE_GAME_SEEN.swap(any_game, Ordering::SeqCst) {
+        crate::install::log_line("game started; unloading voice engine");
+        let _ = std::thread::Builder::new()
+            .name("voice-unload".into())
+            .spawn(crate::win::speech_input::unload_engine);
+    } else if !any_game {
+        VOICE_GAME_SEEN.store(false, Ordering::SeqCst);
+    }
     let game_active = should_sleep_for_game(
         desktop_connected,
         raw_game_active,

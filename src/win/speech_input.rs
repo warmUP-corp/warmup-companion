@@ -93,7 +93,7 @@ pub fn start_helper() -> Result<(), String> {
 /// Fire-and-forget — the mic helper waits for readiness when it needs to transcribe.
 fn ensure_parakeet_server() {
     if !crate::config::voice_enabled()
-        || engine() != "parakeet"
+        || !engine().starts_with("parakeet")
         || !parakeet_available()
         || parakeet_server_up()
     {
@@ -437,8 +437,8 @@ unsafe fn elevated_primary_token(token: HANDLE) -> Option<HANDLE> {
 #[cfg(feature = "speech")]
 pub use engine::{
     available, current_phase, engine, list_mics, mic_choice, parakeet_available,
-    parakeet_server_up, request_parakeet_quit, request_stop, run_blocking, run_parakeet_server,
-    set_engine, set_mic_choice, set_vk_language, voice_level,
+    parakeet_server_up, redux_available, request_parakeet_quit, request_stop, run_blocking,
+    run_parakeet_server, set_engine, set_mic_choice, set_vk_language, voice_level,
 };
 
 #[cfg(not(feature = "speech"))]
@@ -485,6 +485,11 @@ pub fn set_engine(_name: &str) {}
 
 #[cfg(not(feature = "speech"))]
 pub fn parakeet_available() -> bool {
+    false
+}
+
+#[cfg(not(feature = "speech"))]
+pub fn redux_available() -> bool {
     false
 }
 
@@ -1165,6 +1170,10 @@ mod engine {
         parakeet::available()
     }
 
+    pub fn redux_available() -> bool {
+        parakeet::redux_available()
+    }
+
     /// True if the resident parakeet server is loaded + listening. Used by the SYSTEM
     /// worker to decide whether it still needs to spawn one.
     pub fn parakeet_server_up() -> bool {
@@ -1182,24 +1191,27 @@ mod engine {
         std::fs::read_to_string(engine_path())
             .ok()
             .map(|s| s.trim().to_string())
-            .filter(|s| s == "parakeet")
+            .filter(|s| s == "parakeet" || s == "parakeet-redux")
             .unwrap_or_else(|| "whisper".to_string())
     }
 
     /// Persist the engine choice (anything but "parakeet" => whisper).
     pub fn set_engine(name: &str) {
-        let v = if name == "parakeet" {
-            "parakeet"
-        } else {
-            "whisper"
+        let v = match name {
+            "parakeet" | "parakeet-redux" => name,
+            _ => "whisper",
         };
+        let changed = engine() != v;
         let _ = std::fs::write(engine_path(), v);
+        if changed {
+            parakeet::request_quit();
+        }
     }
 
     /// Resolve the engine for this run: honor the user's pick when it's installed,
     /// else fall back to whatever IS installed (e.g. parakeet-only box).
     fn use_parakeet() -> bool {
-        parakeet::available() && (engine() == "parakeet" || !whisper_available())
+        parakeet::available() && (engine().starts_with("parakeet") || !whisper_available())
     }
 
     fn mic_choice_path() -> PathBuf {
@@ -1599,11 +1611,14 @@ mod engine {
 
         // `transcribe_samples` lives on the `Transcriber` trait — must be in scope.
         use parakeet_rs::Transcriber;
+        use windows::core::PCWSTR;
+        use windows::Win32::System::LibraryLoader::SetDllDirectoryW;
         // ParakeetTDT (encoder/decoder_joint + vocab.txt), NOT Parakeet (the CTC
         // model, which wants model.onnx + tokenizer.json). We ship the TDT model.
         pub use parakeet_rs::ParakeetTDT as Session;
 
-        const DIR: &str = r"C:\ProgramData\WarmupVk\speech\parakeet";
+        const CLASSIC_DIR: &str = r"C:\ProgramData\WarmupVk\speech\parakeet";
+        const REDUX_DIR: &str = r"C:\ProgramData\WarmupVk\speech\parakeet-redux";
         /// Loopback port for the resident parakeet-server (uncommon, distinct from
         /// whisper-server's 17181, to avoid clashes).
         const PORT: u16 = 17182;
@@ -1613,10 +1628,33 @@ mod engine {
         /// File set per parakeet-rs's TDT loader: an `encoder*.onnx` (int8 or fp32),
         /// a `decoder_joint*.onnx`, and `vocab.txt`.
         pub fn available() -> bool {
-            let d = Path::new(DIR);
+            installed(CLASSIC_DIR) || installed(REDUX_DIR)
+        }
+
+        pub fn redux_available() -> bool {
+            installed(REDUX_DIR)
+        }
+
+        fn installed(dir: &str) -> bool {
+            let d = Path::new(dir);
             let encoder = d.join("encoder-model.int8.onnx").is_file()
                 || d.join("encoder-model.onnx").is_file();
-            encoder && d.join("vocab.txt").is_file() && d.join("onnxruntime.dll").is_file()
+            let decoder = d.join("decoder_joint-model.int8.onnx").is_file()
+                || d.join("decoder_joint-model.onnx").is_file();
+            encoder
+                && decoder
+                && d.join("vocab.txt").is_file()
+                && d.join("onnxruntime.dll").is_file()
+        }
+
+        fn model_dir() -> &'static str {
+            if super::engine() == "parakeet-redux" && installed(REDUX_DIR) {
+                REDUX_DIR
+            } else if installed(CLASSIC_DIR) {
+                CLASSIC_DIR
+            } else {
+                REDUX_DIR
+            }
         }
 
         /// Load the model. Called during the "starting" phase so the load overlaps
@@ -1626,8 +1664,16 @@ mod engine {
         // per-toggle ~load cost on CPU proves annoying.
         pub fn load() -> Result<Session, String> {
             // Point ort's load-dynamic backend at the DLL beside the model.
-            std::env::set_var("ORT_DYLIB_PATH", Path::new(DIR).join("onnxruntime.dll"));
-            Session::from_pretrained(DIR, None).map_err(|e| format!("parakeet load: {e}"))
+            let dir = model_dir();
+            std::env::set_var("ORT_DYLIB_PATH", Path::new(dir).join("onnxruntime.dll"));
+            let dir_w: Vec<u16> = dir.encode_utf16().chain(std::iter::once(0)).collect();
+            unsafe {
+                let _ = SetDllDirectoryW(PCWSTR(dir_w.as_ptr()));
+            }
+            let model =
+                Session::from_pretrained(dir, None).map_err(|e| format!("parakeet load: {e}"))?;
+            super::log("parakeet: model loaded on CPU");
+            Ok(model)
         }
 
         /// Transcribe 16 kHz mono f32 samples (exactly what `resample_16k` produces).
@@ -1764,6 +1810,9 @@ mod engine {
     #[cfg(not(feature = "parakeet"))]
     mod parakeet {
         pub fn available() -> bool {
+            false
+        }
+        pub fn redux_available() -> bool {
             false
         }
         pub fn server_up() -> bool {
@@ -2011,15 +2060,15 @@ mod engine {
 
         let tick = Duration::from_millis(50);
         let dt = tick.as_secs_f32();
-        let mut all: Vec<f32> = Vec::new();
+        let all = std::sync::Arc::new(std::sync::Mutex::new(Vec::<f32>::new()));
         // Audio captured while the engine warmed up: keep it in the recording, but
         // DON'T feed it through the floor/level math below. It's one multi-second
         // chunk whose rms would seed a bogus noise floor and gate the glow off for the
         // whole utterance. Parakeet loads its model in-process here (seconds), so this
         // pre-roll is large; whisper's resident server makes it ~empty — which is why
         // the visualizer strength only died on parakeet.
-        if let Ok(mut b) = buf.lock() {
-            all.append(&mut b);
+        if let (Ok(mut b), Ok(mut a)) = (buf.lock(), all.lock()) {
+            a.append(&mut b);
         }
         let mut glow = crate::vk_motion::VoiceGlow::new();
         let mut since_log = 0.0f32;
@@ -2042,8 +2091,12 @@ mod engine {
             } else {
                 (new.iter().map(|x| x * x).sum::<f32>() / new.len() as f32).sqrt()
             };
-            all.extend_from_slice(&new); // record the whole monologue regardless
-            let secs = all.len() as f32 / in_rate as f32;
+            let recorded = {
+                let mut a = all.lock().map_err(|_| "recording buffer poisoned")?;
+                a.extend_from_slice(&new); // record the whole monologue regardless
+                a.len()
+            };
+            let secs = recorded as f32 / in_rate as f32;
 
             if warmup > 0 {
                 noise = if noise == 0.0 {
@@ -2092,6 +2145,7 @@ mod engine {
             }
         }
 
+        let all = std::mem::take(&mut *all.lock().unwrap_or_else(|e| e.into_inner()));
         let secs = all.len() as f32 / in_rate as f32;
         if discard || !crate::config::voice_enabled() {
             log("speech: disabled, transcript discarded");

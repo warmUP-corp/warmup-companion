@@ -25,9 +25,9 @@ use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVE
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClassNameW, GetClientRect, GetWindowRect,
     GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible, IsZoomed, KillTimer,
-    PostThreadMessageW, SetTimer, SetWindowPos, ShowWindow, EVENT_SYSTEM_DESKTOPSWITCH,
+    PostThreadMessageW, SetTimer, SetWindowPos, ShowWindow, ShowWindowAsync, EVENT_SYSTEM_DESKTOPSWITCH,
     EVENT_SYSTEM_FOREGROUND, HMENU, HWND_NOTOPMOST, HWND_TOPMOST, MA_NOACTIVATE, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_MAXIMIZE, SW_RESTORE,
+    SWP_ASYNCWINDOWPOS, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_MAXIMIZE, SW_RESTORE,
     SW_SHOWNOACTIVATE, WINDOWPOS, WINEVENT_OUTOFCONTEXT, WM_DESTROY, WM_DISPLAYCHANGE,
     WM_DPICHANGED, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_PAINT, WM_TIMER, WM_WINDOWPOSCHANGING,
     WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
@@ -59,7 +59,6 @@ const VK_SHOW_ANIMATION_MS: u64 = 180;
 const VK_HIDE_ANIMATION_MS: u64 = 130;
 /// Foreground-app reflow easing when the keyboard docks / undocks (was an instant
 /// snap). ponytail: fixed duration; tune if it feels slow on open.
-const APP_REFLOW_MS: u64 = 150;
 
 static HINT_SHOWN_AT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
 const HINT_VISIBLE_SECS: u64 = 3;
@@ -529,8 +528,7 @@ unsafe fn reserve_app_space(
     if was_maximized {
         let _ = ShowWindow(app, SW_RESTORE);
     }
-    // Ease the shrink instead of snapping, so the app doesn't jump when the bar docks.
-    animate_app_height(
+    set_app_height(
         app,
         r.left,
         r.top,
@@ -660,7 +658,7 @@ unsafe fn restore_app_space(saved: Option<(HWND, windows::Win32::Foundation::REC
         } else {
             r.bottom - r.top
         };
-        animate_app_height(
+        set_app_height(
             app,
             r.left,
             r.top,
@@ -669,45 +667,21 @@ unsafe fn restore_app_space(saved: Option<(HWND, windows::Win32::Foundation::REC
             r.bottom - r.top,
         );
         if restore_maximized {
-            let _ = ShowWindow(app, SW_MAXIMIZE);
+            let _ = ShowWindowAsync(app, SW_MAXIMIZE);
         }
     }
 }
 
-/// Ease a foreground app window's height from `from_h` to `to_h` over
-/// [`APP_REFLOW_MS`]. Steps at the render cadence; a no-op delta just sets the rect.
-unsafe fn animate_app_height(app: HWND, x: i32, y: i32, w: i32, from_h: i32, to_h: i32) {
-    if from_h == to_h {
-        let _ = SetWindowPos(
-            app,
-            HWND::default(),
-            x,
-            y,
-            w,
-            to_h,
-            SWP_NOACTIVATE | SWP_NOZORDER,
-        );
-        return;
-    }
-    let started = Instant::now();
-    let dur = Duration::from_millis(APP_REFLOW_MS.max(1));
-    loop {
-        let t = (started.elapsed().as_secs_f32() / dur.as_secs_f32()).min(1.0);
-        let h = (from_h as f32 + (to_h - from_h) as f32 * ease_out_cubic(t)).round() as i32;
-        let _ = SetWindowPos(
-            app,
-            HWND::default(),
-            x,
-            y,
-            w,
-            h,
-            SWP_NOACTIVATE | SWP_NOZORDER,
-        );
-        if t >= 1.0 {
-            break;
-        }
-        thread::sleep(Duration::from_millis(VK_RENDER_TIMER_MS as u64));
-    }
+unsafe fn set_app_height(app: HWND, x: i32, y: i32, w: i32, _from_h: i32, to_h: i32) {
+    let _ = SetWindowPos(
+        app,
+        HWND::default(),
+        x,
+        y,
+        w,
+        to_h,
+        SWP_NOACTIVATE | SWP_NOZORDER | SWP_ASYNCWINDOWPOS,
+    );
 }
 
 /// EVENT_SYSTEM_DESKTOPSWITCH callback. Re-attaches the VK

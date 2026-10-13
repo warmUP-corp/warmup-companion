@@ -1,8 +1,20 @@
 # Changelog
 
-## Unreleased
+## v0.10.1
 
+- **Per-app controller profiles.** A new Apps tab in the Control Center maps controller buttons to keys or shortcuts for a specific program (or for every browser at once). Pick an installed app or type its program name; profiles switch automatically when that app is in front.
+- **Parakeet Redux voice engine.** A lighter 1.58-bit build of Parakeet TDT v3 (moondream/parakeet-redux, ~420 MB instead of ~670 MB), multilingual. Pick it in setup, in the tray under Voice engine, or in the Control Center. It reuses the ONNX Runtime from an existing Parakeet install.
+- **Voice tab in the Control Center.** Lists Parakeet Redux, Parakeet and Whisper Tiny to Medium with their size and state (Active, Installed, Download, Downloading %). Pick an installed model to switch to it right away, or download one in the background; it becomes active when the download finishes. Works with the controller, mouse and keyboard.
+- Voice engines run on the CPU only. Parakeet no longer uses the GPU (DirectML), so starting dictation no longer competes with a running game for the graphics card. The live transcript shown while speaking is gone; text is transcribed once when you stop.
+- Picking the voice model that is already active no longer unloads and reloads it.
 - On-screen keyboard: holding LT (symbols / numbers) or RT (shift) for 0.4 s locks that layer until the trigger is tapped again, with a firmer rumble when the lock engages. The quick double-tap still works; a single tap stays one-shot. The locked key keeps its pill marker.
+- Opening and closing the on-screen keyboard is smoother: the controller no longer freezes for a moment after closing it, and the app behind it is resized in one step instead of being animated.
+- Fixed repeated rumble and keyboard moves with no button held, after opening the Control Center while a button was held on the keyboard. The Control Center's own hold-to-repeat also stops when a dialog or the tray menu opens.
+- The Apps tab no longer stalls while it lists installed programs; the list is built once in the background. Long app names are shortened with "…" instead of running outside the row.
+- Lightbar presets are fully saturated colours, so they look vivid on the controller instead of washed out.
+- Every companion window follows Windows display scaling.
+- One key press on the sign-in screen no longer types twice.
+- The Controller Center is now called the **Control Center**.
 
 ## v0.10.0
 

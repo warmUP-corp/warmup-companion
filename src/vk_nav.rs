@@ -740,6 +740,21 @@ pub fn tick_key_repeat(now: Instant) -> bool {
     true
 }
 
+pub fn release_holds() {
+    if let Ok(mut nav) = NAV.lock() {
+        #[cfg(feature = "gamepad")]
+        {
+            nav.hold_button = None;
+        }
+        nav.hold_count = 0;
+        nav.hold_deadline = None;
+        nav.repeat_key = None;
+        nav.repeat_deadline = None;
+        nav.shift_hold_since = None;
+        nav.symbol_hold_since = None;
+    }
+}
+
 #[cfg(feature = "gamepad")]
 pub fn dpad_released(dir: Button) {
     let Ok(mut nav) = NAV.lock() else {

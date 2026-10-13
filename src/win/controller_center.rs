@@ -11,7 +11,8 @@ use windows::Win32::Graphics::Direct2D::D2D1_ELLIPSE;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN,
+    GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_LEFT,
+    VK_RETURN,
     VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -47,8 +48,8 @@ const TITLE_H: f32 = 64.0;
 const TAB_X: f32 = 24.0;
 const TAB_Y: f32 = 68.0;
 const TAB_W: f32 = 180.0;
-const TAB_H: f32 = 52.0;
-const TAB_STEP: f32 = 60.0;
+const TAB_H: f32 = 48.0;
+const TAB_STEP: f32 = 54.0;
 const CONTENT_X: f32 = 224.0;
 const CONTENT_Y: f32 = 68.0;
 const CONTENT_W: f32 = 496.0;
@@ -66,12 +67,13 @@ const RED: u32 = 0x003A45FF;
 const REPEAT_DELAY: Duration = Duration::from_millis(400);
 const REPEAT_EVERY: Duration = Duration::from_millis(90);
 
-const TABS: [(&str, Icon); 5] = [
+const TABS: [(&str, Icon); 6] = [
     ("General", Icon::Settings),
     ("Mouse", Icon::Mouse),
     ("Keyboard", Icon::Keyboard),
     ("Controller", Icon::Gamepad),
     ("Apps", Icon::AppWindow),
+    ("Voice", Icon::Mic),
 ];
 
 const PAD_BUTTONS: [&str; 10] = ["A", "B", "X", "Y", "LB", "RB", "LT", "RT", "L3", "R3"];
@@ -171,6 +173,9 @@ enum Kind {
     Swatch {
         options: &'static [(&'static str, Option<&'static str>)],
     },
+    VoiceModel {
+        id: &'static str,
+    },
 }
 
 struct Item {
@@ -234,14 +239,14 @@ const VK_STYLE_OPTIONS: &[(&str, &str)] =
     &[("Normal", "normal"), ("Mono", "mono"), ("Modern", "modern")];
 const VK_DISPLAY_OPTIONS: &[(&str, &str)] = &[("Auto", "auto"), ("TV", "tv"), ("Desk", "desk")];
 const LED_SWATCHES: &[(&str, Option<&str>)] = &[
-    ("Lavender", Some("#B6A0FF")),
+    ("Lavender", Some("#7C3AFF")),
     ("White", Some("#FFFFFF")),
-    ("Red", Some("#FF3B30")),
-    ("Orange", Some("#FF9500")),
-    ("Green", Some("#34C759")),
-    ("Cyan", Some("#32D2F0")),
-    ("Blue", Some("#0A84FF")),
-    ("Pink", Some("#FF2D92")),
+    ("Red", Some("#FF0000")),
+    ("Orange", Some("#FF5A00")),
+    ("Green", Some("#00FF2A")),
+    ("Cyan", Some("#00E1FF")),
+    ("Blue", Some("#0033FF")),
+    ("Pink", Some("#FF0A78")),
     ("Off", None),
 ];
 const LED_EFFECT_OPTIONS: &[(&str, &str)] = &[
@@ -282,6 +287,376 @@ fn led_choice(swatch: i32, effect: i32) -> (Option<&'static str>, &'static str) 
                 .get(effect.max(0) as usize)
                 .map_or("solid", |(_, v)| v),
         ),
+    }
+}
+
+const VOICE_MODELS: &[(&str, &str, &str)] = &[
+    ("Parakeet Redux", "parakeet-redux", "420 MB"),
+    ("Parakeet (NVIDIA)", "parakeet", "670 MB"),
+    ("Whisper Large v3 Turbo", "large-v3-turbo-q5_0", "574 MB"),
+    ("Whisper Tiny", "tiny", "75 MB"),
+    ("Whisper Base", "base", "142 MB"),
+    ("Whisper Small", "small", "466 MB"),
+    ("Whisper Medium", "medium", "1.5 GB"),
+];
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VoiceDl {
+    Running(&'static str, u8),
+    Removing(&'static str),
+    Failed(&'static str),
+}
+
+static VOICE_DL: Mutex<Option<VoiceDl>> = Mutex::new(None);
+
+fn voice_dl() -> Option<VoiceDl> {
+    VOICE_DL.lock().map(|g| *g).unwrap_or(None)
+}
+
+fn set_voice_dl(v: Option<VoiceDl>) {
+    if let Ok(mut g) = VOICE_DL.lock() {
+        *g = v;
+    }
+}
+
+fn voice_busy() -> bool {
+    matches!(
+        voice_dl(),
+        Some(VoiceDl::Running(..) | VoiceDl::Removing(..))
+    )
+}
+
+fn voice_remove_title(id: &str) -> &'static str {
+    match id {
+        "parakeet-redux" => "Remove Parakeet Redux?",
+        "parakeet" => "Remove Parakeet (NVIDIA)?",
+        "large-v3-turbo-q5_0" => "Remove Whisper Large v3 Turbo?",
+        "tiny" => "Remove Whisper Tiny?",
+        "base" => "Remove Whisper Base?",
+        "small" => "Remove Whisper Small?",
+        _ => "Remove Whisper Medium?",
+    }
+}
+
+fn voice_size(id: &str) -> &'static str {
+    VOICE_MODELS
+        .iter()
+        .find(|(_, v, _)| *v == id)
+        .map_or("", |(_, _, size)| size)
+}
+
+fn speech_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(crate::install::DATA_DIR).join("speech")
+}
+
+fn read_speech(name: &str) -> String {
+    std::fs::read_to_string(speech_dir().join(name))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+fn voice_installed(id: &str) -> bool {
+    let dir = speech_dir();
+    match id {
+        "parakeet-redux" => {
+            let pk = dir.join(id);
+            [
+                "encoder-model.onnx",
+                "decoder_joint-model.onnx",
+                "vocab.txt",
+                "onnxruntime.dll",
+            ]
+            .iter()
+            .all(|f| pk.join(f).is_file())
+        }
+        "parakeet" => {
+            let pk = dir.join(id);
+            pk.join("vocab.txt").is_file()
+                && pk.join("onnxruntime.dll").is_file()
+                && (pk.join("encoder-model.int8.onnx").is_file()
+                    || pk.join("encoder-model.onnx").is_file())
+        }
+        _ => {
+            dir.join(format!("ggml-{id}.bin")).is_file() && dir.join("whisper-server.exe").is_file()
+        }
+    }
+}
+
+fn voice_active(id: &str) -> bool {
+    if !voice_installed(id) {
+        return false;
+    }
+    let engine = read_speech("engine.txt");
+    if id.starts_with("parakeet") {
+        engine == id
+    } else {
+        !engine.starts_with("parakeet") && read_speech("model.txt") == format!("ggml-{id}.bin")
+    }
+}
+
+fn use_voice_model(id: &'static str) {
+    if voice_active(id) {
+        return;
+    }
+    if id.starts_with("parakeet") {
+        crate::win::speech_input::set_engine(id);
+    } else {
+        if let Err(e) = std::fs::write(speech_dir().join("model.txt"), format!("ggml-{id}.bin")) {
+            crate::install::log_line(&format!("control center: model.txt: {e}"));
+        }
+        crate::win::speech_input::set_engine("whisper");
+    }
+    let _ = std::thread::Builder::new()
+        .name("voice-unload".into())
+        .spawn(crate::win::speech_input::unload_engine);
+}
+
+fn activate_voice_model(id: &'static str) {
+    if voice_busy() {
+        return;
+    }
+    if voice_installed(id) {
+        if matches!(voice_dl(), Some(VoiceDl::Failed(f)) if f == id) {
+            set_voice_dl(None);
+        }
+        use_voice_model(id);
+        return;
+    }
+    set_voice_dl(Some(VoiceDl::Running(id, 0)));
+    let spawned = std::thread::Builder::new()
+        .name("voice-download".into())
+        .spawn(move || {
+            if run_voice_download(id) {
+                use_voice_model(id);
+                set_voice_dl(None);
+            } else {
+                set_voice_dl(Some(VoiceDl::Failed(id)));
+            }
+        });
+    if spawned.is_err() {
+        set_voice_dl(Some(VoiceDl::Failed(id)));
+    }
+}
+
+fn run_voice_download(id: &'static str) -> bool {
+    use std::io::BufRead;
+    use std::os::windows::process::CommandExt;
+    let (script, args): (&str, &[&str]) = match id {
+        "parakeet-redux" => ("Get-WarmupParakeet.ps1", &["-Variant", "redux"]),
+        "parakeet" => ("Get-WarmupParakeet.ps1", &[]),
+        _ => ("Get-WarmupSpeech.ps1", &["-Model", id]),
+    };
+    let dirs = [
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf())),
+        std::env::var_os("ProgramW6432")
+            .or_else(|| std::env::var_os("ProgramFiles"))
+            .map(|p| std::path::PathBuf::from(p).join("WarmupCompanion")),
+    ];
+    let Some(script) = dirs
+        .iter()
+        .flatten()
+        .map(|d| d.join(script))
+        .find(|p| p.is_file())
+        .or_else(|| dirs[0].as_ref().map(|d| d.join(script)))
+    else {
+        return false;
+    };
+    if !script.is_file() {
+        crate::install::log_line(&format!(
+            "control center: voice download: {} missing",
+            script.display()
+        ));
+        return false;
+    }
+    let spawned = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(&script)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn();
+    let mut child = match spawned {
+        Ok(c) => c,
+        Err(e) => {
+            crate::install::log_line(&format!("control center: voice download: {e}"));
+            return false;
+        }
+    };
+    if let Some(out) = child.stdout.take() {
+        for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+            if let Some(pct) = line
+                .split_once(": ")
+                .and_then(|(_, rest)| rest.split_once('%'))
+                .and_then(|(p, _)| p.trim().parse::<u8>().ok())
+            {
+                set_voice_dl(Some(VoiceDl::Running(id, pct.min(100))));
+            }
+        }
+    }
+    let ok = child.wait().is_ok_and(|st| st.success());
+    if !ok {
+        crate::install::log_line(&format!("control center: voice download {id} failed"));
+    }
+    ok && voice_installed(id)
+}
+
+const VOICE_FALLBACK: [&str; 7] = [
+    "parakeet-redux",
+    "parakeet",
+    "large-v3-turbo-q5_0",
+    "medium",
+    "small",
+    "base",
+    "tiny",
+];
+
+fn fallback_voice(whisper_only: bool) -> Option<&'static str> {
+    VOICE_FALLBACK
+        .into_iter()
+        .filter(|id| !(whisper_only && id.starts_with("parakeet")))
+        .find(|id| voice_installed(id))
+}
+
+fn remove_with_retry(path: &std::path::Path, dir: bool) -> bool {
+    for attempt in 0..6 {
+        let result = if dir {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        };
+        match result {
+            Ok(()) => return true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
+            Err(e) if attempt == 5 => {
+                crate::install::log_line(&format!(
+                    "control center: remove {}: {e}",
+                    path.display()
+                ));
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(400)),
+        }
+    }
+    false
+}
+
+fn delete_voice_files(id: &str) -> bool {
+    let dir = speech_dir();
+    if id.starts_with("parakeet") {
+        return remove_with_retry(&dir.join(id), true);
+    }
+    if !remove_with_retry(&dir.join(format!("ggml-{id}.bin")), false) {
+        return false;
+    }
+    let files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+                .map(|e| e.path())
+                .collect()
+        })
+        .unwrap_or_default();
+    let name = |p: &std::path::PathBuf| {
+        p.file_name()
+            .map(|n| n.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default()
+    };
+    if files.iter().any(|p| {
+        let n = name(p);
+        n.starts_with("ggml-") && n.ends_with(".bin")
+    }) {
+        return true;
+    }
+    files
+        .iter()
+        .filter(|p| {
+            let n = name(p);
+            n == "whisper-server.exe" || n == "model.txt" || n.ends_with(".dll")
+        })
+        .fold(true, |ok, p| remove_with_retry(p, false) && ok)
+}
+
+fn remove_voice_model(id: &'static str) {
+    if voice_busy() || !voice_installed(id) {
+        return;
+    }
+    let was_active = voice_active(id);
+    set_voice_dl(Some(VoiceDl::Removing(id)));
+    let spawned = std::thread::Builder::new()
+        .name("voice-remove".into())
+        .spawn(move || {
+            crate::win::speech_input::unload_engine();
+            let ok = delete_voice_files(id);
+            if !voice_installed(id) {
+                if was_active {
+                    if let Some(next) = fallback_voice(false) {
+                        use_voice_model(next);
+                    }
+                } else if !id.starts_with("parakeet")
+                    && read_speech("model.txt") == format!("ggml-{id}.bin")
+                {
+                    if let Some(next) = fallback_voice(true) {
+                        if let Err(e) =
+                            std::fs::write(speech_dir().join("model.txt"), format!("ggml-{next}.bin"))
+                        {
+                            crate::install::log_line(&format!("control center: model.txt: {e}"));
+                        }
+                    }
+                }
+            }
+            set_voice_dl(if ok { None } else { Some(VoiceDl::Failed(id)) });
+        });
+    if spawned.is_err() {
+        set_voice_dl(Some(VoiceDl::Failed(id)));
+    }
+}
+
+fn removable_voice(ui: &Ui, target: Target) -> Option<&'static str> {
+    let Target::Item(i) = target else {
+        return None;
+    };
+    let Kind::VoiceModel { id } = ui.items.get(i)?.kind else {
+        return None;
+    };
+    (!voice_busy() && voice_installed(id)).then_some(id)
+}
+
+fn request_voice_remove(ui: &mut Ui, target: Target) {
+    if let Some(id) = removable_voice(ui, target) {
+        ui.confirm = Some((Pending::RemoveVoice(id), false));
+    }
+}
+
+fn voice_trash_rect(row: Rect) -> Rect {
+    rect(
+        row.x + row.w - ROW_PAD - 18.0,
+        row.y + (row.h - 18.0) / 2.0,
+        18.0,
+        18.0,
+    )
+}
+
+fn voice_status(id: &str, size: &str) -> (String, bool) {
+    match voice_dl() {
+        Some(VoiceDl::Running(d, pct)) if d == id => (format!("Downloading {pct}%"), true),
+        Some(VoiceDl::Removing(d)) if d == id => ("Removing\u{2026}".to_string(), true),
+        Some(VoiceDl::Failed(d)) if d == id => ("Failed".to_string(), false),
+        _ if voice_active(id) => ("Active".to_string(), true),
+        _ if voice_installed(id) => ("Installed".to_string(), false),
+        _ => (format!("Download {size}"), false),
     }
 }
 
@@ -404,6 +779,12 @@ fn items() -> Vec<Item> {
     ]
 }
 
+fn voice_items() -> impl Iterator<Item = Item> {
+    VOICE_MODELS
+        .iter()
+        .map(|(label, id, size)| captioned(item(5, label, Kind::VoiceModel { id }), size))
+}
+
 fn gamepad_check(key: &str, s: &crate::config::GamepadSettings) -> bool {
     match key {
         "cursor_enabled" => s.cursor_enabled,
@@ -479,6 +860,7 @@ fn current(item: &Item) -> (bool, i32) {
         }
         Kind::Swatch { .. } => (false, led_swatch_of(&crate::led_engine::led_snapshot())),
         Kind::Slider { key, div, .. } => (false, (gamepad_slider(key, &s) * div).round() as i32),
+        Kind::VoiceModel { .. } => (false, 0),
     }
 }
 
@@ -512,6 +894,7 @@ fn default_value(item: &Item) -> i32 {
         Kind::Slider {
             key, div, min, max, ..
         } => ((gamepad_slider(key, &s) * div).round() as i32).clamp(*min, *max),
+        Kind::VoiceModel { .. } => 0,
     }
 }
 
@@ -545,6 +928,7 @@ enum Pending {
     ResetAll,
     Import(crate::config::ImportPlan),
     RemoveApp(String),
+    RemoveVoice(&'static str),
 }
 
 fn backup_label(backup: &std::path::Path) -> &str {
@@ -556,7 +940,7 @@ fn confirm_text(pending: &Pending) -> (&'static str, Vec<String>, &'static str) 
         Pending::ResetAll => (
             "Reset everything?",
             vec![
-                "All Controller Center settings go back to how they shipped.".to_string(),
+                "All Control Center settings go back to how they shipped.".to_string(),
                 "Your current settings are backed up first.".to_string(),
             ],
             "Reset",
@@ -587,6 +971,14 @@ fn confirm_text(pending: &Pending) -> (&'static str, Vec<String>, &'static str) 
             ],
             "Remove",
         ),
+        Pending::RemoveVoice(id) => (
+            voice_remove_title(id),
+            vec![
+                format!("This deletes its {} model.", voice_size(id)),
+                "You can download it again later.".to_string(),
+            ],
+            "Remove",
+        ),
     }
 }
 
@@ -595,7 +987,7 @@ fn import_settings(ui: &mut Ui, plan: &crate::config::ImportPlan) {
     let backup = match result {
         Ok(b) => b,
         Err(e) => {
-            crate::install::log_line(&format!("controller center: import backup: {e}"));
+            crate::install::log_line(&format!("control center: import backup: {e}"));
             ui.toast = Some((
                 "Import failed. Your settings were not changed.".to_string(),
                 Instant::now(),
@@ -636,7 +1028,7 @@ fn start_import(ui: &mut Ui) {
         Ok(Some(p)) => p,
         Ok(None) => return,
         Err(e) => {
-            crate::install::log_line(&format!("controller center: import dialog: {e}"));
+            crate::install::log_line(&format!("control center: import dialog: {e}"));
             ui.toast = Some(("Import failed".to_string(), Instant::now()));
             return;
         }
@@ -644,7 +1036,7 @@ fn start_import(ui: &mut Ui) {
     let text = match std::fs::read(&path) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(e) => {
-            crate::install::log_line(&format!("controller center: import read: {e}"));
+            crate::install::log_line(&format!("control center: import read: {e}"));
             ui.toast = Some(("Could not read that file".to_string(), Instant::now()));
             return;
         }
@@ -671,7 +1063,7 @@ fn reset_everything(ui: &mut Ui) {
         match result {
             Ok(backup) => format!("Defaults restored. Backup: {}", backup_label(&backup)),
             Err(e) => {
-                crate::install::log_line(&format!("controller center: reset all: {e}"));
+                crate::install::log_line(&format!("control center: reset all: {e}"));
                 "Reset failed. Your settings were not changed.".to_string()
             }
         },
@@ -796,7 +1188,7 @@ fn export_settings(ui: &mut Ui) {
             dest.file_name().and_then(|n| n.to_str()).unwrap_or("")
         ),
         Err(e) => {
-            crate::install::log_line(&format!("controller center: export: {e}"));
+            crate::install::log_line(&format!("control center: export: {e}"));
             "Export failed".to_string()
         }
     };
@@ -815,6 +1207,7 @@ fn confirm_input(ui: &mut Ui, action: ConfirmInput) {
             Pending::ResetAll => reset_everything(ui),
             Pending::Import(plan) => import_settings(ui, &plan),
             Pending::RemoveApp(_) => apps::remove_editing(ui),
+            Pending::RemoveVoice(id) => remove_voice_model(id),
         },
     }
 }
@@ -1004,7 +1397,7 @@ fn style_card_art(i: usize) -> (crate::config::VkStyle, &'static MiniLayout) {
 
 fn set(key: &str, value: &str) {
     if let Err(e) = crate::config::set_gamepad_setting(key, value) {
-        crate::install::log_line(&format!("controller center: set {key}={value}: {e}"));
+        crate::install::log_line(&format!("control center: set {key}={value}: {e}"));
     }
 }
 
@@ -1311,6 +1704,7 @@ struct Ui {
     toast: Option<(String, Instant)>,
     promo: Option<(i32, i32, Vec<u8>)>,
     apps: apps::State,
+    voice_dl: Option<VoiceDl>,
 }
 
 thread_local! {
@@ -1402,11 +1796,12 @@ pub fn show() {
     let Ok(mut guard) = slot.lock() else {
         return;
     };
+    apps::prewarm();
     if guard.is_none() {
         match desktop_window::spawn(CenterApp) {
             Ok(t) => *guard = Some(t),
             Err(e) => {
-                crate::install::log_line(&format!("controller center: spawn failed: {e}"));
+                crate::install::log_line(&format!("control center: spawn failed: {e}"));
                 return;
             }
         }
@@ -1441,7 +1836,7 @@ fn ui_show() {
         let Ok(hwnd) = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_APPWINDOW,
             WINDOW_CLASS,
-            w!("Controller Center"),
+            w!("Control Center"),
             WS_POPUP,
             0,
             0,
@@ -1452,7 +1847,7 @@ fn ui_show() {
             windows::Win32::Foundation::HINSTANCE(instance.0),
             None,
         ) else {
-            crate::install::log_line("controller center: CreateWindowExW failed");
+            crate::install::log_line("control center: CreateWindowExW failed");
             OWNS_PAD.store(false, Ordering::SeqCst);
             return;
         };
@@ -1465,6 +1860,7 @@ fn ui_show() {
         let _ = SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
         set_window_icons(hwnd, scale);
         let mut items = items();
+        items.extend(voice_items());
         for it in &mut items {
             it.value = stored_value(it);
         }
@@ -1490,6 +1886,7 @@ fn ui_show() {
             toast: None,
             promo: promo_art(scale),
             apps: apps::load(),
+            voice_dl: voice_dl(),
         };
         UI.with(|u| *u.borrow_mut() = Some(ui));
         with_ui(|ui| {
@@ -1652,7 +2049,7 @@ fn apply(ui: &mut Ui) -> bool {
                     set(key, &slider_text(&it.kind, it.value));
                 }
             }
-            Kind::Swatch { .. } => {}
+            Kind::Swatch { .. } | Kind::VoiceModel { .. } => {}
         }
     }
     for it in &mut ui.items {
@@ -1667,7 +2064,7 @@ unsafe fn confirm_signin_only(owner: HWND) -> bool {
     let title = wide("Sign-in screen only");
     let body = wide(
         "After you next sign in or unlock, the companion sleeps on the desktop: no controller input, \
-         no tray icon and no Controller Center.\r\n\r\n\
+         no tray icon and no Control Center.\r\n\r\n\
          It only wakes on the lock and sign-in screen. To change this setting later, use \
          warmUP > Settings > Controller > Companion (or Start menu > Warmup Companion).\r\n\r\n\
          Turn it on?",
@@ -1772,6 +2169,8 @@ fn activate(ui: &mut Ui, target: Target) -> After {
                 it.value = (it.value + 1) % options.len() as i32;
             } else if let Kind::Swatch { options } = it.kind {
                 it.value = (it.value + 1) % options.len() as i32;
+            } else if let Kind::VoiceModel { id } = it.kind {
+                activate_voice_model(id);
             }
         }
         Target::Rumble => rumble(),
@@ -1916,6 +2315,9 @@ fn click(ui: &mut Ui, x: f32, y: f32) -> After {
                     ui.items[i].value = s as i32;
                 }
             }
+            Kind::VoiceModel { .. } if voice_trash_rect(r).inset(-8.0).contains(x, y) => {
+                request_voice_remove(ui, t)
+            }
             _ => return activate(ui, t),
         },
         Target::Rumble => rumble(),
@@ -1962,6 +2364,7 @@ fn key_down(ui: &mut Ui, vk: u16) -> After {
         v if v == VK_RIGHT.0 => navigate(ui, Nav::Right),
         v if v == VK_RETURN.0 => return activate(ui, ui.focus),
         v if v == VK_SPACE.0 => return activate(ui, ui.focus),
+        v if v == VK_DELETE.0 => request_voice_remove(ui, ui.focus),
         _ => {}
     }
     After::Stay
@@ -1999,8 +2402,13 @@ fn confirm_pad(button: &str) -> Option<ConfirmInput> {
 
 fn tick(ui: &mut Ui) -> (bool, After) {
     let live = Live::read();
-    let mut dirty = live != ui.live;
+    let mut dirty = live != ui.live || apps::take_scan_done();
     ui.live = live;
+    let dl = voice_dl();
+    if dl != ui.voice_dl {
+        ui.voice_dl = dl;
+        dirty = true;
+    }
     let now = Instant::now();
     if ui
         .toast
@@ -2011,13 +2419,18 @@ fn tick(ui: &mut Ui) -> (bool, After) {
         dirty = true;
     }
     let edges = if MENU_OWNS.load(Ordering::SeqCst) {
+        ui.pad.held = None;
         Vec::new()
     } else {
         take_pad_edges()
     };
     for (button, pressed) in edges {
         dirty = true;
+        if !pressed && matches!(ui.pad.held, Some((nav, _, _)) if pad_nav(button) == Some(nav)) {
+            ui.pad.held = None;
+        }
         if ui.confirm.is_some() {
+            ui.pad.held = None;
             if pressed {
                 if let Some(input) = confirm_pad(button) {
                     confirm_input(ui, input);
@@ -2026,9 +2439,6 @@ fn tick(ui: &mut Ui) -> (bool, After) {
             continue;
         }
         if !pressed {
-            if matches!(ui.pad.held, Some((nav, _, _)) if pad_nav(button) == Some(nav)) {
-                ui.pad.held = None;
-            }
             continue;
         }
         if apps::pad(ui, button) {
@@ -2042,6 +2452,7 @@ fn tick(ui: &mut Ui) -> (bool, After) {
             }
             "B" => return (dirty, After::Close),
             "Y" => reset_tab(ui),
+            "X" => request_voice_remove(ui, ui.focus),
             "LB" => switch_tab(ui, tab_stop(ui) + tab_count(ui) - 1),
             "RB" => switch_tab(ui, tab_stop(ui) + 1),
             other => {
@@ -2069,13 +2480,13 @@ fn paint(ui: &mut Ui) {
         None => match unsafe { Gfx::new() } {
             Ok(g) => g,
             Err(e) => {
-                crate::install::log_line(&format!("controller center: gfx: {e}"));
+                crate::install::log_line(&format!("control center: gfx: {e}"));
                 return;
             }
         },
     };
     if let Err(e) = unsafe { render(ui, &mut gfx) } {
-        crate::install::log_line(&format!("controller center: render: {e}"));
+        crate::install::log_line(&format!("control center: render: {e}"));
         ui.gfx = None;
         return;
     }
@@ -2109,7 +2520,7 @@ unsafe fn draw_window(ui: &Ui, g: &mut Gfx) {
 
     g.icon(Icon::Logo, rect(24.0, 25.0, 18.0, 18.0), t.text, 1.0, s);
     g.text(
-        "Controller Center",
+        "Control Center",
         rect(52.0, 25.0, 300.0, 18.0),
         15.0,
         true,
@@ -2180,12 +2591,16 @@ unsafe fn draw_window(ui: &Ui, g: &mut Gfx) {
     } else if ui.tab == apps::APPS_TAB {
         apps::hints(ui)
     } else {
-        vec![
+        let mut v: Vec<(&[usize], &str)> = vec![
             (&[0], "Select"),
             (&[1], "Back"),
             (&[4, 5], "Tabs"),
             (&[3], "Reset"),
-        ]
+        ];
+        if removable_voice(ui, ui.focus).is_some() {
+            v.push((&[2], "Remove"));
+        }
+        v
     };
     ui.reset_hint.set(rect(0.0, 0.0, 0.0, 0.0));
     if let Some((line, _)) = &ui.toast {
@@ -2609,6 +3024,56 @@ unsafe fn draw_row(ui: &Ui, g: &mut Gfx, target: Target, r: Rect) {
                             }
                         }
                     }
+                }
+                Kind::VoiceModel { id } => {
+                    let sw = 150.0;
+                    let tw = r.w - 2.0 * ROW_PAD - sw - 16.0;
+                    g.text(
+                        it.label,
+                        rect(r.x + ROW_PAD, r.y + 12.0, tw, 17.0),
+                        14.0,
+                        false,
+                        t.text,
+                        1.0,
+                        Align::Left,
+                    );
+                    g.text(
+                        it.caption.unwrap_or(""),
+                        rect(r.x + ROW_PAD, r.y + 32.0, tw, 15.0),
+                        12.0,
+                        false,
+                        t.dim,
+                        DIM_ALPHA,
+                        Align::Left,
+                    );
+                    let (status, accent) = voice_status(id, it.caption.unwrap_or(""));
+                    let (c, a) = if accent {
+                        (t.accent, 1.0)
+                    } else if status == "Failed" {
+                        (RED, 1.0)
+                    } else if status == "Installed" {
+                        (t.text, 1.0)
+                    } else {
+                        (t.dim, DIM_ALPHA)
+                    };
+                    let removable = removable_voice(ui, target).is_some();
+                    if removable {
+                        g.icon(Icon::Trash, voice_trash_rect(r), t.dim, DIM_ALPHA, s);
+                    }
+                    g.text(
+                        &status,
+                        rect(
+                            r.x + r.w - ROW_PAD - sw,
+                            r.y,
+                            if removable { sw - 30.0 } else { sw },
+                            r.h,
+                        ),
+                        13.0,
+                        accent,
+                        c,
+                        a,
+                        Align::Right,
+                    );
                 }
                 _ => {
                     let tw = r.w - 2.0 * ROW_PAD - 46.0 - 16.0;
@@ -3040,8 +3505,8 @@ mod tests {
 
     #[test]
     fn layout_matches_the_design_coordinates() {
-        assert_eq!(tab_rect(0), rect(24.0, 68.0, 180.0, 52.0));
-        assert_eq!(tab_rect(3), rect(24.0, 248.0, 180.0, 52.0));
+        assert_eq!(tab_rect(0), rect(24.0, 68.0, 180.0, 48.0));
+        assert_eq!(tab_rect(3), rect(24.0, 230.0, 180.0, 48.0));
         assert_eq!(
             ys(0),
             vec![
@@ -3265,7 +3730,7 @@ mod tests {
         );
         assert_eq!(
             led_choice(default_value(&items[20]), default_value(&items[21])),
-            (Some("#B6A0FF"), "solid")
+            (Some("#7C3AFF"), "solid")
         );
     }
 
@@ -3333,12 +3798,12 @@ mod tests {
 
     #[test]
     fn lightbar_choice_maps_to_led_settings() {
-        assert_eq!(led_choice(0, 0), (Some("#B6A0FF"), "solid"));
-        assert_eq!(led_choice(2, 1), (Some("#FF3B30"), "breathing"));
-        assert_eq!(led_choice(7, 2), (Some("#FF2D92"), "rainbow"));
+        assert_eq!(led_choice(0, 0), (Some("#7C3AFF"), "solid"));
+        assert_eq!(led_choice(2, 1), (Some("#FF0000"), "breathing"));
+        assert_eq!(led_choice(7, 2), (Some("#FF0A78"), "rainbow"));
         assert_eq!(led_choice(8, 2), (None, "off"));
-        assert_eq!(led_swatch_index(false, (0xB6, 0xA0, 0xFF)), 0);
-        assert_eq!(led_swatch_index(false, (0x0A, 0x84, 0xFF)), 6);
+        assert_eq!(led_swatch_index(false, (0x7C, 0x3A, 0xFF)), 0);
+        assert_eq!(led_swatch_index(false, (0x00, 0x33, 0xFF)), 6);
         assert_eq!(led_swatch_index(false, (1, 2, 3)), 0);
         assert_eq!(led_swatch_index(true, (0xFF, 0xFF, 0xFF)), 8);
         for (_, hex) in LED_SWATCHES {
