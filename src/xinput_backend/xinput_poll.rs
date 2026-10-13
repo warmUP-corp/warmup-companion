@@ -222,19 +222,6 @@ pub(crate) fn poll_xinput_tick(state: &mut PollState) {
         }
 
         INJECT_HOLD_ACTIVE.store(false, Ordering::Relaxed);
-        state.last_xusb = None;
-        state.prev_buttons = [0; 4];
-        if state.merged_buttons != 0 {
-            let old = state.merged_buttons;
-            state.merged_buttons = 0;
-            let _ = state.tx.send(SecureMsg::Buttons {
-                slot: report_slot(state),
-                prev: old,
-                cur: 0,
-            });
-        }
-        let _ = state.tx.send(SecureMsg::Axes((0.0, 0.0, 0.0, 0.0)));
-        return;
     }
 
     // Surface the raw XUSB report in the debug overlay so byte offsets can be
@@ -564,4 +551,63 @@ fn secure_poll_keystrokes(
         }
     }
     events
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::mpsc;
+    use windows::Win32::UI::Input::XboxController::XINPUT_STATE;
+
+    unsafe extern "system" fn no_pad(_slot: u32, _state: *mut XINPUT_STATE) -> u32 {
+        ERROR_DEVICE_NOT_CONNECTED
+    }
+
+    #[test]
+    fn inject_hold_end_does_not_release_a_held_button() {
+        let (tx, rx) = mpsc::channel();
+        let now = Instant::now();
+        let mut state = PollState {
+            get_state: no_pad,
+            get_keystroke: None,
+            tx,
+            prev_buttons: [0; 4],
+            active_slot: Some(0),
+            connected_prev: [false; 4],
+            last_status: now,
+            last_no_pad: now,
+            last_probe_log: now,
+            iter_count: 1,
+            hid_devices: HashMap::new(),
+            hid_readers: Vec::new(),
+            last_hid_scan: now,
+            last_hid: PadSample::default(),
+            hid_diag_count: 0,
+            suppress_until_zero: false,
+            keystroke_events: 0,
+            last_raw_report: Vec::new(),
+            xusb: Vec::new(),
+            last_xusb: None,
+            hid_active_prev: false,
+            last_xusb_scan: now,
+            last_slot_err_log: now,
+            prev_trigger_left: false,
+            prev_trigger_right: false,
+            last_axes_sent: None,
+            merged_buttons: XINPUT_GAMEPAD_A.0,
+            prev_xbox_activity: 0,
+            prev_hid_activity: 0,
+        };
+        INJECT_HOLD_ACTIVE.store(true, Ordering::Relaxed);
+        INJECT_HOLD_TICKS.store(0, Ordering::Relaxed);
+
+        poll_xinput_tick(&mut state);
+
+        assert!(!INJECT_HOLD_ACTIVE.load(Ordering::Relaxed));
+        assert_eq!(state.merged_buttons, XINPUT_GAMEPAD_A.0);
+        assert!(!rx
+            .try_iter()
+            .any(|m| matches!(m, SecureMsg::Buttons { cur: 0, .. })));
+    }
 }
