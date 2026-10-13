@@ -1212,6 +1212,7 @@ impl GamepadPoll {
         self.view_sheet = ViewSheetHold::default();
         self.reset_view_hold();
         self.reset_launch_hotkey();
+        crate::vk_nav::release_holds();
         #[cfg(windows)]
         crate::win::shortcut_sheet::set_shown(false);
     }

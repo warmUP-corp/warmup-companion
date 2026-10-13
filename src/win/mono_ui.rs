@@ -88,6 +88,8 @@ pub(crate) enum Icon {
     AppWindow,
     Globe,
     Plus,
+    Mic,
+    Trash,
     Pad(bool, usize),
     Svg(&'static str),
 }
@@ -148,6 +150,8 @@ pub(crate) fn icon_svg(icon: Icon) -> Option<&'static str> {
         Icon::AppWindow => include_str!("../../assets/controller-center/app-window.svg"),
         Icon::Globe => include_str!("../../assets/controller-center/globe.svg"),
         Icon::Plus => include_str!("../../assets/controller-center/plus.svg"),
+        Icon::Mic => include_str!("../../assets/controller-center/mic.svg"),
+        Icon::Trash => include_str!("../../assets/controller-center/trash-2.svg"),
         Icon::Pad(ps, i) => pad_svg(ps, i),
     })
 }

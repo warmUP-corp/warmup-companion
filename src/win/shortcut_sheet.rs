@@ -118,10 +118,7 @@ pub static GROUPS: [SheetGroup; 3] = [
             row(&[Button("RT")], "Shift"),
             row(&[Button("LT")], "Symbols"),
             row(&[Button("X")], "Switch layout"),
-            row(
-                &[Button("SELECT"), Plus, Button("START")],
-                "Controller Center",
-            ),
+            row(&[Button("SELECT"), Plus, Button("START")], "Control Center"),
         ],
     },
     SheetGroup {
@@ -230,10 +227,7 @@ pub static MODERN_GROUPS: [SheetGroup; 6] = [
                 &[Button("SELECT"), Plus, Button("LB"), Plus, Button("X")],
                 "Open warmUP",
             ),
-            row(
-                &[Button("SELECT"), Plus, Button("START")],
-                "Controller Center",
-            ),
+            row(&[Button("SELECT"), Plus, Button("START")], "Control Center"),
         ],
     },
     SheetGroup {
@@ -459,7 +453,7 @@ mod tests {
             without,
             [
                 "Clear field",
-                "Controller Center",
+                "Control Center",
                 "Open warmUP",
                 "Record (warmUP)"
             ]
@@ -515,7 +509,7 @@ mod tests {
             "Screenshot",
             "Window screenshot",
             "Open warmUP",
-            "Controller Center",
+            "Control Center",
             "Record (warmUP)",
         ] {
             assert!(labels.contains(&l), "{l}");
@@ -573,7 +567,7 @@ mod tests {
             "Screenshot",
             "Window screenshot",
             "Open warmUP",
-            "Controller Center",
+            "Control Center",
             "Record (warmUP)",
         ] {
             assert!(labels.contains(&l), "{l}");

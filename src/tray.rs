@@ -81,6 +81,7 @@ const MENU_UPDATE: usize = 1030;
 const MENU_UPDATE_AUTO: usize = 1031;
 const MENU_UPDATE_NOTES: usize = 1032;
 const MENU_GET_LAUNCHER: usize = 1033;
+const MENU_ENGINE_REDUX: usize = 1034;
 /// Mic device i is `MENU_MIC_BASE + i` (capped at 32 devices in the menu).
 const MENU_MIC_BASE: usize = 1100;
 /// Global hotkey id for "toggle voice dictation" (Ctrl+Alt+V).
@@ -349,6 +350,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     crate::win::speech_input::set_engine("parakeet");
                     set_voice_enabled(hwnd, true);
                 }
+                MENU_ENGINE_REDUX => {
+                    crate::win::speech_input::set_engine("parakeet-redux");
+                    set_voice_enabled(hwnd, true);
+                }
                 MENU_MIC_DEFAULT => crate::win::speech_input::set_mic_choice(""),
                 MENU_VOICE_ENABLED => {
                     set_voice_enabled(hwnd, !crate::config::gamepad_settings().voice_enabled)
@@ -400,7 +405,7 @@ fn menu_entries() -> Vec<crate::win::tray_menu::Entry> {
             crate::gamepad_backend::userland_poll_paused(),
         ),
         Entry::toggle("Gamepad cursor", MENU_CURSOR_ENABLED, gs.cursor_enabled),
-        Entry::command("Controller Center…", MENU_CONTROLLER_CENTER).with_accel("Ctrl+Alt+C"),
+        Entry::command("Control Center…", MENU_CONTROLLER_CENTER).with_accel("Ctrl+Alt+C"),
         Entry::command("Show controller tips", MENU_CONTROLLER_TIPS),
         Entry::toggle(
             "Sign-in controller hints",
@@ -492,8 +497,9 @@ fn menu_entries() -> Vec<crate::win::tray_menu::Entry> {
     if !crate::win::speech_input::available_cached() {
         root.push(Entry::toggle("Voice typing", MENU_VOICE_ENABLED, voice_on));
     } else {
-        let parakeet = crate::win::speech_input::parakeet_available()
-            && crate::win::speech_input::engine() == "parakeet";
+        let engine = crate::win::speech_input::engine();
+        let parakeet =
+            crate::win::speech_input::parakeet_available() && engine.starts_with("parakeet");
         let mut eng = vec![
             Entry::radio("Off", MENU_VOICE_OFF, !voice_on),
             Entry::radio("Whisper", MENU_ENGINE_WHISPER, voice_on && !parakeet),
@@ -502,7 +508,14 @@ fn menu_entries() -> Vec<crate::win::tray_menu::Entry> {
             eng.push(Entry::radio(
                 "Parakeet (NVIDIA)",
                 MENU_ENGINE_PARAKEET,
-                voice_on && parakeet,
+                voice_on && parakeet && engine == "parakeet",
+            ));
+        }
+        if crate::win::speech_input::redux_available() {
+            eng.push(Entry::radio(
+                "Parakeet Redux",
+                MENU_ENGINE_REDUX,
+                voice_on && parakeet && engine == "parakeet-redux",
             ));
         }
         root.push(Entry::submenu("Voice engine", eng));

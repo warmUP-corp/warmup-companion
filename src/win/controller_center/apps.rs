@@ -57,8 +57,30 @@ pub(super) struct State {
     pub(super) editing: Option<usize>,
     pub(super) dialog: Option<Dialog>,
     first: usize,
-    installed: Option<Vec<(String, String)>>,
     wheel: i32,
+}
+
+static INSTALLED: OnceLock<Vec<(String, String)>> = OnceLock::new();
+static SCAN_STARTED: AtomicBool = AtomicBool::new(false);
+static SCAN_DONE: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn prewarm() {
+    if SCAN_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("apps-scan".into())
+        .spawn(|| {
+            let _ = INSTALLED.set(installed_apps());
+            SCAN_DONE.store(true, Ordering::SeqCst);
+        });
+    if spawned.is_err() {
+        SCAN_STARTED.store(false, Ordering::SeqCst);
+    }
+}
+
+pub(super) fn take_scan_done() -> bool {
+    SCAN_DONE.swap(false, Ordering::SeqCst)
 }
 
 #[derive(Clone, Copy)]
@@ -86,9 +108,7 @@ pub(super) fn load() -> State {
 }
 
 pub(super) fn reload(st: &mut State) {
-    let installed = st.installed.take();
     *st = load();
-    st.installed = installed;
 }
 
 pub(super) fn dirty(st: &State) -> bool {
@@ -110,9 +130,7 @@ pub(super) fn enter(st: &mut State) {
     st.editing = None;
     st.dialog = None;
     st.first = 0;
-    if st.installed.is_none() {
-        st.installed = Some(installed_apps());
-    }
+    prewarm();
 }
 
 pub(super) fn leave(ui: &mut Ui) {
@@ -129,8 +147,8 @@ pub(super) fn leave(ui: &mut Ui) {
     ui.apps.dialog = None;
 }
 
-fn installed(st: &State) -> &[(String, String)] {
-    st.installed.as_deref().unwrap_or(&[])
+fn installed(_st: &State) -> &'static [(String, String)] {
+    INSTALLED.get().map_or(&[], Vec::as_slice)
 }
 
 fn profile_index(st: &State, exe: &str) -> Option<usize> {
@@ -326,9 +344,7 @@ pub(super) fn activate(ui: &mut Ui, target: Target) {
 }
 
 fn open_add(st: &mut State) {
-    if st.installed.is_none() {
-        st.installed = Some(installed_apps());
-    }
+    prewarm();
     let list = installed(st);
     let focus = (0..list.len())
         .find(|i| profile_index(st, &list[*i].1).is_none())
@@ -1134,14 +1150,19 @@ unsafe fn draw_keycaps(g: &mut Gfx, t: &Theme, caps: &[String], x: f32, cy: f32)
     }
 }
 
+unsafe fn fit(g: &mut Gfx, text: &str, w: f32, size: f32, bold: bool) -> String {
+    crate::win::tray_menu::ellipsize(text, w, |x| g.measure(x, size, bold))
+}
+
 unsafe fn two_lines(g: &mut Gfx, t: &Theme, r: Rect, title: &str, caption: &str, dim: bool) {
     let (c, a) = if dim {
         (t.dim, DIM_ALPHA)
     } else {
         (t.text, 1.0)
     };
+    let fitted = fit(g, title, r.w, 14.0, false);
     g.text(
-        title,
+        &fitted,
         rect(r.x, r.y + 12.0, r.w, 17.0),
         14.0,
         false,
@@ -1149,8 +1170,9 @@ unsafe fn two_lines(g: &mut Gfx, t: &Theme, r: Rect, title: &str, caption: &str,
         a,
         Align::Left,
     );
+    let fitted = fit(g, caption, r.w, 12.0, false);
     g.text(
-        caption,
+        &fitted,
         rect(r.x, r.y + 32.0, r.w, 15.0),
         12.0,
         false,
@@ -1270,8 +1292,9 @@ pub(super) unsafe fn draw_row(ui: &Ui, g: &mut Gfx, target: Target, r: Rect) {
                 DIM_ALPHA,
                 s,
             );
+            let fitted = fit(g, &name(st, p), 380.0, 14.0, true);
             g.text(
-                &name(st, p),
+                &fitted,
                 rect(r.x + 40.0, r.y + 12.0, 380.0, 17.0),
                 14.0,
                 true,
@@ -1370,8 +1393,9 @@ pub(super) unsafe fn draw_dialog(ui: &Ui, g: &mut Gfx) {
             }
             None => x,
         };
+        let fitted = fit(g, text, DLG_IN - (tx - x), 17.0, true);
         g.text(
-            text,
+            &fitted,
             rect(tx, card.y + 24.0, DLG_IN - (tx - x), 22.0),
             17.0,
             true,
@@ -1611,7 +1635,11 @@ pub(super) unsafe fn draw_dialog(ui: &Ui, g: &mut Gfx) {
             let shown = list.len().saturating_sub(*first).min(MAX_PICKS);
             if list.is_empty() {
                 g.text(
-                    "No installed apps found",
+                    if INSTALLED.get().is_none() {
+                        "Finding installed apps…"
+                    } else {
+                        "No installed apps found"
+                    },
                     pick_rect(card, 0),
                     13.0,
                     false,
@@ -1636,9 +1664,12 @@ pub(super) unsafe fn draw_dialog(ui: &Ui, g: &mut Gfx) {
                     a,
                     s,
                 );
+                let tw = r.w - 68.0 - if has { 112.0 } else { 0.0 };
+                let n = fit(g, n, tw, 14.0, false);
+                let exe = fit(g, exe, tw, 12.0, false);
                 g.text(
-                    n,
-                    rect(r.x + 56.0, r.y + 9.0, 250.0, 17.0),
+                    &n,
+                    rect(r.x + 56.0, r.y + 9.0, tw, 17.0),
                     14.0,
                     false,
                     t.text,
@@ -1646,8 +1677,8 @@ pub(super) unsafe fn draw_dialog(ui: &Ui, g: &mut Gfx) {
                     Align::Left,
                 );
                 g.text(
-                    exe,
-                    rect(r.x + 56.0, r.y + 28.0, 250.0, 15.0),
+                    &exe,
+                    rect(r.x + 56.0, r.y + 28.0, tw, 15.0),
                     12.0,
                     false,
                     t.dim,

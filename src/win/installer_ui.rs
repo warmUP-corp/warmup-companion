@@ -182,7 +182,9 @@ impl Step {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Model {
+    ParakeetRedux,
     Parakeet,
+    Turbo,
     Tiny,
     Base,
     Small,
@@ -190,8 +192,10 @@ enum Model {
 }
 
 impl Model {
-    const ALL: [Model; 5] = [
+    const ALL: [Model; 7] = [
+        Model::ParakeetRedux,
         Model::Parakeet,
+        Model::Turbo,
         Model::Tiny,
         Model::Base,
         Model::Small,
@@ -200,7 +204,9 @@ impl Model {
 
     fn title(self) -> &'static str {
         match self {
+            Model::ParakeetRedux => "Parakeet Redux",
             Model::Parakeet => "Parakeet (NVIDIA)",
+            Model::Turbo => "Whisper Large v3 Turbo",
             Model::Tiny => "Whisper Tiny",
             Model::Base => "Whisper Base",
             Model::Small => "Whisper Small",
@@ -210,7 +216,9 @@ impl Model {
 
     fn caption(self) -> &'static str {
         match self {
+            Model::ParakeetRedux => "Lighter Parakeet, multilingual",
             Model::Parakeet => "Fast, multilingual",
+            Model::Turbo => "Best Whisper, 99 languages",
             Model::Tiny => "Fastest, least accurate",
             Model::Base => "Balanced",
             Model::Small => "Better accuracy",
@@ -220,7 +228,9 @@ impl Model {
 
     fn size(self) -> &'static str {
         match self {
+            Model::ParakeetRedux => "420 MB",
             Model::Parakeet => "670 MB",
+            Model::Turbo => "574 MB",
             Model::Tiny => "75 MB",
             Model::Base => "142 MB",
             Model::Small => "466 MB",
@@ -230,7 +240,9 @@ impl Model {
 
     fn download(self) -> &'static str {
         match self {
+            Model::ParakeetRedux => "~430 MB download",
             Model::Parakeet => "~700 MB download",
+            Model::Turbo => "~580 MB download",
             Model::Tiny => "~75 MB download",
             Model::Base => "~142 MB download",
             Model::Small => "~466 MB download",
@@ -240,7 +252,9 @@ impl Model {
 
     fn id(self) -> &'static str {
         match self {
+            Model::ParakeetRedux => "parakeet-redux",
             Model::Parakeet => "parakeet",
+            Model::Turbo => "large-v3-turbo-q5_0",
             Model::Tiny => "tiny",
             Model::Base => "base",
             Model::Small => "small",
@@ -264,6 +278,13 @@ fn speech_dir() -> PathBuf {
 fn model_installed(m: Model) -> bool {
     let dir = speech_dir();
     match m {
+        Model::ParakeetRedux => {
+            let pk = dir.join("parakeet-redux");
+            pk.join("vocab.txt").is_file()
+                && pk.join("onnxruntime.dll").is_file()
+                && pk.join("encoder-model.onnx").is_file()
+                && pk.join("decoder_joint-model.onnx").is_file()
+        }
         Model::Parakeet => {
             let pk = dir.join("parakeet");
             pk.join("vocab.txt").is_file()
@@ -309,17 +330,20 @@ fn read_trimmed(p: &Path) -> String {
         .unwrap_or_default()
 }
 
-fn preferred_model(installed: &[bool; 5]) -> Model {
+fn preferred_model(installed: &[bool; 7]) -> Model {
     let dir = speech_dir();
-    if read_trimmed(&dir.join("engine.txt")) == "parakeet" && installed[0] {
+    let engine = read_trimmed(&dir.join("engine.txt"));
+    if engine == "parakeet-redux" && installed[Model::ParakeetRedux.index()] {
+        return Model::ParakeetRedux;
+    }
+    if engine == "parakeet" && installed[Model::Parakeet.index()] {
         return Model::Parakeet;
     }
     let chosen = read_trimmed(&dir.join("model.txt"));
-    if let Some(m) = Model::ALL
-        .iter()
-        .copied()
-        .find(|m| *m != Model::Parakeet && chosen == format!("ggml-{}.bin", m.id()))
-    {
+    if let Some(m) = Model::ALL.iter().copied().find(|m| {
+        !matches!(m, Model::Parakeet | Model::ParakeetRedux)
+            && chosen == format!("ggml-{}.bin", m.id())
+    }) {
         if installed[m.index()] {
             return m;
         }
@@ -474,7 +498,7 @@ struct Ui {
     kb: bool,
     voice_on: bool,
     model: Model,
-    installed: [bool; 5],
+    installed: [bool; 7],
     models_on: bool,
     models_bytes: u64,
     job: JobState,
@@ -1042,11 +1066,11 @@ fn voice_row() -> Rect {
 }
 
 fn engine_list() -> Rect {
-    rect(CX, 330.0, CW, 192.0)
+    rect(CX, 330.0, CW, 208.0)
 }
 
 fn engine_row(i: usize) -> Rect {
-    rect(CX + 6.0, 336.0 + i as f32 * 36.0, CW - 12.0, 36.0)
+    rect(CX + 6.0, 336.0 + i as f32 * 28.0, CW - 12.0, 28.0)
 }
 
 fn link_row() -> Rect {
@@ -1539,13 +1563,18 @@ fn run_install_job(voice: bool, model: Model, installed: bool) {
     });
     let dir = payload_dir();
     let speech = speech_dir();
-    let note = if model == Model::Parakeet {
+    let note = if matches!(model, Model::Parakeet | Model::ParakeetRedux) {
         if installed {
-            let _ = std::fs::write(speech.join("engine.txt"), "parakeet");
+            let _ = std::fs::write(speech.join("engine.txt"), model.id());
             None
         } else {
             let script = dir.join("Get-WarmupParakeet.ps1");
-            voice_script(&script, &[], model.title())
+            let args: &[&str] = if model == Model::ParakeetRedux {
+                &["-Variant", "redux"]
+            } else {
+                &[]
+            };
+            voice_script(&script, args, model.title())
         }
     } else {
         let script = dir.join("Get-WarmupSpeech.ps1");
@@ -2315,7 +2344,7 @@ unsafe fn draw_features(ui: &Ui, g: &mut Gfx) {
             g.fill(r, 8.0, LAV, 0x1F as f32 / 255.0);
         }
         focus_ring(ui, g, Target::Engine(i), r, 8.0);
-        let radio = rect(r.x + 10.0, r.y + 9.0, 18.0, 18.0);
+        let radio = rect(r.x + 10.0, r.y + 5.0, 18.0, 18.0);
         if sel {
             g.fill(radio, 9.0, WHITE, 1.0);
             g.ring(radio, 9.0, 5.0, LAV, 1.0);
@@ -2326,7 +2355,7 @@ unsafe fn draw_features(ui: &Ui, g: &mut Gfx) {
         let tw = g.measure(model.title(), 13.0, sel);
         g.text(
             model.title(),
-            rect(x, r.y + 10.0, tw + 4.0, 16.0),
+            rect(x, r.y + 6.0, tw + 4.0, 16.0),
             13.0,
             sel,
             WHITE,
@@ -2337,7 +2366,7 @@ unsafe fn draw_features(ui: &Ui, g: &mut Gfx) {
         let cw = g.measure(model.caption(), 12.0, false);
         g.text(
             model.caption(),
-            rect(x, r.y + 10.5, cw + 4.0, 15.0),
+            rect(x, r.y + 6.5, cw + 4.0, 15.0),
             12.0,
             false,
             DIM,
@@ -2347,15 +2376,20 @@ unsafe fn draw_features(ui: &Ui, g: &mut Gfx) {
         x += cw + 8.0;
         if *model == Model::Parakeet {
             let bw = g.measure("RECOMMENDED", 9.0, true).ceil() + 14.0;
-            let badge = rect(x, r.y + 10.5, bw, 15.0);
+            let badge = rect(x, r.y + 6.5, bw, 15.0);
             g.fill(badge, 7.5, BADGE, fade);
             g.text("RECOMMENDED", badge, 9.0, true, WHITE, fade, Align::Center);
         }
-        let sz = rect(r.x + r.w - 10.0 - 90.0, r.y + 10.5, 90.0, 15.0);
-        if ui.installed[i] {
-            g.text("Installed", sz, 12.0, false, ACCENT, fade, Align::Right);
+        let sz = rect(r.x + r.w - 10.0 - 90.0, r.y + 6.5, 90.0, 15.0);
+        let size_text = if ui.installed[i] {
+            "Installed"
         } else {
-            g.text(model.size(), sz, 12.0, false, DIM, DIM_A * fade, Align::Right);
+            model.size()
+        };
+        if ui.installed[i] {
+            g.text(size_text, sz, 12.0, false, ACCENT, fade, Align::Right);
+        } else {
+            g.text(size_text, sz, 12.0, false, DIM, DIM_A * fade, Align::Right);
         }
     }
 }
