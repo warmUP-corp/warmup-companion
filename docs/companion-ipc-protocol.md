@@ -134,6 +134,7 @@ Persisted lightbar keys in `C:\ProgramData\WarmupVk\settings.ini` (shared with w
 | `led_secondary_color` | `ledSecondaryColor` | `#RRGGBB` (gradient) |
 | `led_effect` | `ledEffect` | `solid` / `breathing` / `rainbow` / `gradient` / `off` |
 | `led_brightness` | `ledBrightness` | `0.0`–`1.0` |
+| `scroll_accel` | `scrollAccel` | `1.0`–`5.0` (right-stick scroll acceleration exponent; optional, additive) |
 
 Inbound `config` frames persist these when they change (after the first seeding frame). Companion UI / tray writes go through the same keys; startup restores colour, secondary, effect, and brightness from the ini.
 

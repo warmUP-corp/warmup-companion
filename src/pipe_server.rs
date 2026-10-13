@@ -341,6 +341,11 @@ impl SettingsSync {
         if prev.scroll_sensitivity != p.scroll_sensitivity {
             s.push(("scroll_speed", p.scroll_sensitivity.to_string()));
         }
+        if let Some(accel) = p.scroll_accel {
+            if prev.scroll_accel != Some(accel) {
+                s.push(("scroll_accel", accel.clamp(1.0, 5.0).to_string()));
+            }
+        }
         if prev.natural_scroll != p.natural_scroll {
             s.push(("natural_scroll", bool_setting(p.natural_scroll)));
         }
@@ -402,6 +407,7 @@ fn companion_snapshot() -> (ConfigPayload, CompanionSettingsPayload) {
         sensitivity: g.cursor_speed,
         acceleration_exp: g.cursor_accel,
         scroll_sensitivity: g.scroll_speed,
+        scroll_accel: Some(g.scroll_accel),
         enabled: g.cursor_enabled,
         cursor_enabled: Some(g.cursor_enabled),
         clicks_enabled: clicks_enabled(),
@@ -1594,6 +1600,7 @@ mod tests {
             led_secondary_color: Some("#0000ff".into()),
             led_effect: Some("solid".into()),
             led_brightness: Some(0.5),
+            scroll_accel: None,
             natural_scroll: false,
             cursor_smoothing: 0.3,
             keyboard_theme: None,

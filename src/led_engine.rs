@@ -355,6 +355,7 @@ mod tests {
             led_secondary_color: None,
             led_effect: led_effect.map(str::to_string),
             led_brightness,
+            scroll_accel: None,
             natural_scroll: false,
             cursor_smoothing: 0.0,
             keyboard_theme: None,

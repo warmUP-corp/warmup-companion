@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Scroll acceleration syncs with warmUP.** The Cursor tab's Scroll acceleration now travels over the pipe like the other cursor settings (`scrollAccel` on the config frame, additive), so a change in either app shows up in the other.
+
 ## v0.10.1
 
 - **Per-app controller profiles.** A new Apps tab in the Control Center maps controller buttons to keys or shortcuts for a specific program (or for every browser at once). Pick an installed app or type its program name; profiles switch automatically when that app is in front.
