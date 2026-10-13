@@ -829,6 +829,10 @@ impl GamepadPoll {
                     self.backend.haptic_tick();
                     crate::win::vk_ui::request_repaint();
                 }
+                if crate::vk_nav::tick_modifier_hold(Instant::now()) {
+                    self.backend.haptic_alert();
+                    crate::win::vk_ui::request_repaint();
+                }
             }
             let mut edges = Vec::new();
             if let Some(edge) = desktop_reopen {
@@ -1481,12 +1485,22 @@ impl GamepadPoll {
             }
             (Button::Lt, true) => {
                 vk_nav::toggle_symbols();
+                vk_nav::modifier_hold_pressed(vk_nav::ModifierHold::Symbol);
                 self.backend.haptic_confirm();
+                None
+            }
+            (Button::Lt, false) => {
+                vk_nav::modifier_hold_released(vk_nav::ModifierHold::Symbol);
                 None
             }
             (Button::Rt, true) => {
                 vk_nav::toggle_shift();
+                vk_nav::modifier_hold_pressed(vk_nav::ModifierHold::Shift);
                 self.backend.haptic_confirm();
+                None
+            }
+            (Button::Rt, false) => {
+                vk_nav::modifier_hold_released(vk_nav::ModifierHold::Shift);
                 None
             }
             (Button::R3, true) => {

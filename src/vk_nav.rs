@@ -112,6 +112,8 @@ struct NavState {
     one_shot_symbol: bool,
     last_shift_at: Option<Instant>,
     last_symbol_at: Option<Instant>,
+    shift_hold_since: Option<Instant>,
+    symbol_hold_since: Option<Instant>,
     /// QWERTZ letter rows (web `de-DE` language toggle on L3).
     lang_de: bool,
     voice_input: bool,
@@ -137,6 +139,8 @@ static NAV: Mutex<NavState> = Mutex::new(NavState {
     one_shot_symbol: false,
     last_shift_at: None,
     last_symbol_at: None,
+    shift_hold_since: None,
+    symbol_hold_since: None,
     lang_de: false,
     voice_input: false,
     tv_layout: false,
@@ -196,6 +200,7 @@ const HOLD_REPEAT: Duration = Duration::from_millis(70);
 /// Second shift/symbol tap inside this window promotes one-shot to sticky
 /// (web `DOUBLE_TAP_SHIFT_MS`).
 const DOUBLE_TAP_STICKY: Duration = Duration::from_millis(400);
+const MODIFIER_HOLD_LOCK: Duration = Duration::from_millis(400);
 
 const SPAN_KEY: f32 = 1.0;
 const SPAN_SPACE: f32 = 3.0;
@@ -405,6 +410,12 @@ pub fn reset_selection() {
         clamp_pos(&mut nav);
     }
     crate::vk_predict::reset();
+}
+
+pub fn on_ui_shown(reshow: bool) {
+    if !reshow {
+        reset_selection();
+    }
 }
 
 pub fn selection() -> KeyPos {
@@ -828,6 +839,54 @@ pub fn toggle_symbols() {
         rebuild(&mut nav);
     }
     request_ui_repaint();
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ModifierHold {
+    Shift,
+    Symbol,
+}
+
+pub fn modifier_hold_pressed(kind: ModifierHold) {
+    if let Ok(mut nav) = NAV.lock() {
+        let now = Some(Instant::now());
+        match kind {
+            ModifierHold::Shift => nav.shift_hold_since = now,
+            ModifierHold::Symbol => nav.symbol_hold_since = now,
+        }
+    }
+}
+
+pub fn modifier_hold_released(kind: ModifierHold) {
+    if let Ok(mut nav) = NAV.lock() {
+        match kind {
+            ModifierHold::Shift => nav.shift_hold_since = None,
+            ModifierHold::Symbol => nav.symbol_hold_since = None,
+        }
+    }
+}
+
+pub fn tick_modifier_hold(now: Instant) -> bool {
+    let Ok(mut nav) = NAV.lock() else {
+        return false;
+    };
+    let held = |since: Option<Instant>| since.is_some_and(|t| now.duration_since(t) >= MODIFIER_HOLD_LOCK);
+    let mut locked = false;
+    if held(nav.shift_hold_since) {
+        nav.shift_hold_since = None;
+        if nav.layer == Layer::Upper && nav.one_shot_shift {
+            nav.one_shot_shift = false;
+            locked = true;
+        }
+    }
+    if held(nav.symbol_hold_since) {
+        nav.symbol_hold_since = None;
+        if nav.layer == Layer::Symbol && nav.one_shot_symbol {
+            nav.one_shot_symbol = false;
+            locked = true;
+        }
+    }
+    locked
 }
 
 /// Web L3: flip between QWERTY (en-US) and QWERTZ (de-DE) letter rows.
@@ -1550,6 +1609,19 @@ mod tests {
         assert_eq!(shoulder_nav(true, false), ShoulderNav::CaretWord);
         assert_eq!(shoulder_nav(false, true), ShoulderNav::CycleSuggestions);
         assert_eq!(shoulder_nav(true, true), ShoulderNav::CaretWord);
+    }
+
+    #[test]
+    fn reshow_keeps_locked_numbers_layer() {
+        let _guard = NAV_TEST_LOCK.lock().unwrap();
+        {
+            let mut nav = NAV.lock().unwrap();
+            nav.layer = Layer::Symbol;
+            nav.one_shot_symbol = false;
+            rebuild(&mut nav);
+        }
+        on_ui_shown(true);
+        assert_eq!(modifier_state(), (false, false, true, true));
     }
 
     #[test]
