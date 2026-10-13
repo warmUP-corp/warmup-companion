@@ -182,6 +182,25 @@ pub struct BatteryPayload {
     pub wired: bool,
 }
 
+/// One connected controller in a `pads` frame (multi-controller input).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PadBatteryPayload {
+    pub controller_name: String,
+    pub controller_type: String,
+    pub percent: i32,
+    pub charging: bool,
+    pub wired: bool,
+}
+
+/// `pads` up-frame: every connected controller with its battery, sent when the list changes.
+/// Additive — older desktops parse it as an unknown frame and ignore it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PadsPayload {
+    pub pads: Vec<PadBatteryPayload>,
+}
+
 /// One touchpad finger slot. `x`/`y` are normalized 0..1; `pressure` 0..1.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -342,6 +361,7 @@ pub enum UpFrame {
     CursorMoved(CursorMovedPayload),
     Axis(AxisPayload),
     Battery(BatteryPayload),
+    Pads(PadsPayload),
     Touchpad(TouchpadPayload),
     ParentalBlocked(ParentalBlockedPayload),
     PlaySessions(PlaySessionsPayload),
@@ -394,7 +414,7 @@ impl UpFrame {
     pub fn parse_line(line: &str) -> Result<Self, serde_json::Error> {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
-            "hello" | "connection" | "button" | "cursor_moved" | "axis" | "battery"
+            "hello" | "connection" | "button" | "cursor_moved" | "axis" | "battery" | "pads"
             | "touchpad" | "parental_blocked" | "play_sessions" | "settings_changed" => {
                 serde_json::from_str(line)
             }

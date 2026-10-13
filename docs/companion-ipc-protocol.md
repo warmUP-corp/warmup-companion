@@ -62,6 +62,7 @@ Each maps to an existing webview event; the desktop re-emits the `payload` uncha
 | `connection` | `gamepad:connection` | `{ connected: bool, controllerType: string, controllerName: string }` |
 | `button` | `gamepad:button` | `{ button: string, pressed: bool, controllerType: string }` |
 | `battery` | `gamepad:battery` | `{ percent: i32, charging: bool, wired: bool }` |
+| `pads` | `gamepad:pads` | `{ pads: [{ controllerName, controllerType, percent, charging, wired }] }` — every connected controller (multi-controller input), sent when the list or a level changes; additive |
 | `cursor_moved` | `gamepad:cursor_moved` | `{ dx: f64, dy: f64 }` |
 | `axis` | `gamepad:axis` | `{ leftX: f32, leftY: f32, rightX: f32, rightY: f32 }` |
 | `touchpad` | `gamepad:touchpad` | `{ fingers: [{ index: u8, down: bool, x: f32, y: f32, pressure: f32 }] }` |

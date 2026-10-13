@@ -196,6 +196,17 @@ pub fn live_input_format(pressed: &[&str], axes: (f32, f32, f32, f32)) -> String
 }
 
 /// A detected button state change (including synthesised LT/RT from trigger axes).
+/// One open pad and its battery, for multi-controller battery display.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PadBattery {
+    pub name: String,
+    pub controller_type: &'static str,
+    /// 0–100, or −1 when unknown.
+    pub percent: i32,
+    pub charging: bool,
+    pub wired: bool,
+}
+
 #[derive(Clone, Copy)]
 pub struct ButtonChange {
     pub button: Button,
@@ -619,6 +630,39 @@ impl GamepadInput {
                 SDL_SetGamepadLED(raw, r, g, b);
             }
         }
+    }
+
+    /// Every open pad with its battery, in connection order. The active pad uses [`Self::battery`]
+    /// (with the Windows Bluetooth refinement); the others read SDL's power info directly.
+    pub fn pads_battery(&self) -> Vec<PadBattery> {
+        unsafe extern "C" {
+            fn SDL_GetGamepadPowerInfo(
+                gamepad: *mut sdl3::sys::gamepad::SDL_Gamepad,
+                percent: *mut ::std::ffi::c_int,
+            ) -> ::std::ffi::c_int;
+        }
+        let active = self.battery();
+        self.pads
+            .iter()
+            .map(|pad| {
+                let (percent, charging, wired) = if Some(pad.id) == self.primary {
+                    active
+                } else if let Some(raw) = pad_raw(&pad.gp) {
+                    let mut pct: std::ffi::c_int = -1;
+                    let state = unsafe { SDL_GetGamepadPowerInfo(raw, &mut pct) };
+                    map_power_info(state, pct, false)
+                } else {
+                    (-1, false, false)
+                };
+                PadBattery {
+                    name: pad.gp.name().unwrap_or_default(),
+                    controller_type: sdl3_type_to_str(pad.gp.r#type()),
+                    percent,
+                    charging,
+                    wired,
+                }
+            })
+            .collect()
     }
 
     /// Reads the controller battery level via `SDL_GetGamepadPowerInfo`.

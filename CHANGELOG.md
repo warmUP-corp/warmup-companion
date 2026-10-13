@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Every connected controller's battery reaches warmUP.** A new additive `pads` frame lists each connected pad with its name, type and battery (the active pad keeps the Windows Bluetooth refinement), sent when the list or a level changes. warmUP shows two controllers stacked in its Home battery pill; older warmUP builds ignore the frame.
+
 ## v0.10.2
 
 - **Saturation slider.** The Lightbar panel gets a Saturation slider next to Brightness (saved as `led_saturation`, mirrored with warmUP via the optional `ledSaturation` config field); lower values mix the colour toward white.

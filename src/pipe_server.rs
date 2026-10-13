@@ -10,8 +10,9 @@
 use crate::gamepad_backend::PadCommand;
 use crate::protocol::{
     AxisPayload, BatteryPayload, ButtonPayload, CompanionSettingsPayload, ConfigPayload,
-    ConnectionPayload, KeyboardThemePayload, ModeSnapshot, ParentalBlockedPayload,
-    ParentalGuardPayload, RumblePayload, SettingsChangedPayload, TouchpadPayload,
+    ConnectionPayload, KeyboardThemePayload, ModeSnapshot, PadBatteryPayload,
+    ParentalBlockedPayload, ParentalGuardPayload, RumblePayload, SettingsChangedPayload,
+    TouchpadPayload,
 };
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -224,6 +225,34 @@ pub fn publish_touchpad(payload: TouchpadPayload) {
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn current_battery() -> Option<BatteryPayload> {
     battery_slot().lock().ok().and_then(|b| *b)
+}
+
+/// Every connected pad with its battery, as last published by the gamepad loop.
+static PADS: OnceLock<Mutex<Vec<PadBatteryPayload>>> = OnceLock::new();
+
+fn pads_slot() -> &'static Mutex<Vec<PadBatteryPayload>> {
+    PADS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Publish the connected pads with their battery (read by the server, sent on change).
+pub fn publish_pads(pads: &[crate::gamepad_backend::PadBattery]) {
+    if let Ok(mut slot) = pads_slot().lock() {
+        *slot = pads
+            .iter()
+            .map(|p| PadBatteryPayload {
+                controller_name: p.name.clone(),
+                controller_type: p.controller_type.to_string(),
+                percent: p.percent,
+                charging: p.charging,
+                wired: p.wired,
+            })
+            .collect();
+    }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn current_pads() -> Vec<PadBatteryPayload> {
+    pads_slot().lock().map(|p| p.clone()).unwrap_or_default()
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -957,14 +986,14 @@ mod server {
     use super::{
         apply_companion_settings, apply_config, apply_led, apply_library_watch, apply_mode,
         apply_parental_guard, apply_play_sessions_ack, apply_rumble, clear_desktop_mode,
-        companion_snapshot, current, current_axis, current_battery, drain_buttons,
+        companion_snapshot, current, current_axis, current_battery, current_pads, drain_buttons,
         drain_parental_blocked, ensure_settings_watcher, inbound_frame_ready, reset_button_stream,
         set_native_vk_request, take_cursor_moved, take_touchpad, tracking_owner_from_process,
         SettingsSync, TrackingOwner, DESKTOP_CONNECTED, SETTINGS_GEN,
     };
     use crate::protocol::{
         is_supported_protocol_version, AxisPayload, BatteryPayload, ConnectionPayload, DownFrame,
-        Hello, UpFrame, PROTOCOL_VERSION,
+        Hello, PadBatteryPayload, PadsPayload, UpFrame, PROTOCOL_VERSION,
     };
     use std::collections::HashSet;
     use std::sync::atomic::Ordering;
@@ -1199,6 +1228,7 @@ mod server {
     ) {
         let mut last: Option<ConnectionPayload> = None;
         let mut last_battery: Option<BatteryPayload> = None;
+        let mut last_pads: Option<Vec<PadBatteryPayload>> = None;
         let mut last_axis: Option<AxisPayload> = None;
         let mut last_conn_write = Instant::now()
             .checked_sub(KEEPALIVE)
@@ -1258,6 +1288,15 @@ mod server {
                     last_battery = Some(b);
                 }
             }
+            // Every connected pad with its battery — sent when the list or a level changes.
+            let pads = current_pads();
+            if last_pads.as_ref() != Some(&pads) {
+                let frame = UpFrame::Pads(PadsPayload { pads: pads.clone() });
+                if write_all(pipe, frame.to_ndjson_line().as_bytes()).is_err() {
+                    return;
+                }
+                last_pads = Some(pads);
+            }
             if last_cursor_write.elapsed() >= CURSOR_HINT_INTERVAL {
                 if let Some(hint) = take_cursor_moved() {
                     last_input = Instant::now();
@@ -1292,6 +1331,7 @@ mod server {
             // disconnect and would sit at "unknown" until the level moved.
             if last.as_ref() != Some(&cur) {
                 last_battery = None;
+                last_pads = None;
             }
             if last.as_ref() != Some(&cur) || last_conn_write.elapsed() >= KEEPALIVE {
                 if write_all(

@@ -299,6 +299,14 @@ impl Backend {
         }
     }
 
+    fn pads(&self) -> Vec<crate::gamepad_backend::PadBattery> {
+        match self {
+            Backend::Sdl(b) => b.pads(),
+            #[cfg(windows)]
+            Backend::XInput(b) => b.pads(),
+        }
+    }
+
     fn set_led(&mut self, r: u8, g: u8, b: u8) {
         match self {
             Backend::Sdl(be) => be.set_led(r, g, b),
@@ -382,6 +390,7 @@ impl Backend {
         let bat = self.battery();
         crate::pipe_server::publish_battery(bat.percent, bat.charging, bat.wired);
         crate::pipe_server::publish_usb(bat.usb);
+        crate::pipe_server::publish_pads(&self.pads());
 
         // Only publish when a finger slot is present this poll — avoids spamming empty frames.
         if !tp.fingers.is_empty() {
@@ -791,6 +800,7 @@ impl GamepadPoll {
                 let bat = self.backend.battery();
                 crate::pipe_server::publish_battery(bat.percent, bat.charging, bat.wired);
                 crate::pipe_server::publish_usb(bat.usb);
+                crate::pipe_server::publish_pads(&self.backend.pads());
                 crate::win::shortcut_sheet::set_shown(false);
                 return Ok(center_vk_actions(vk_open));
             }
