@@ -13,6 +13,7 @@ use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{InvalidateRect, ValidateRect};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, KillTimer, SetTimer, SetWindowPos, ShowWindow,
@@ -170,18 +171,21 @@ fn ui_show() {
         Ok(hwnd) => {
             HWND_STATE.with(|state| state.set(Some(hwnd)));
             unsafe {
+                let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
+                let px = |v: i32| (v as f32 * scale).round() as i32;
                 let _ = SetWindowPos(
                     hwnd,
                     HWND_TOPMOST,
-                    24,
-                    24,
-                    PANEL_W,
-                    PANEL_H,
+                    px(24),
+                    px(24),
+                    px(PANEL_W),
+                    px(PANEL_H),
                     SWP_SHOWWINDOW | SWP_NOACTIVATE,
                 );
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                 match VkRenderer::create(hwnd) {
-                    Ok(r) => {
+                    Ok(mut r) => {
+                        r.set_dip_scale(scale);
                         DBG_RENDERER.with(|c| *c.borrow_mut() = Some(r));
                         service_log("debug ui: D3D11/DComp renderer created");
                     }

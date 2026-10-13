@@ -22,9 +22,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, GetWindowLongPtrW, KillTimer,
     SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
     HMENU, HTTRANSPARENT, HWND_TOPMOST, LWA_ALPHA, SM_SHUTTINGDOWN, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, WM_DESTROY, WM_NCHITTEST, WM_PAINT,
-    WM_TIMER, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, WM_DESTROY, WM_DISPLAYCHANGE,
+    WM_DPICHANGED, WM_NCHITTEST, WM_PAINT, WM_TIMER, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use super::controller_tips::{self, Gate, TipsState};
@@ -380,7 +380,7 @@ fn fullscreen_border(visual: PromptVisual) -> bool {
 
 /// Where the overlay sits, relative to a monitor origin. Transcription covers
 /// that monitor so the border can run along its edges; everything else stays a small panel.
-fn overlay_rect(visual: PromptVisual, screen_w: i32, screen_h: i32) -> PromptRect {
+fn overlay_rect(visual: PromptVisual, screen_w: i32, screen_h: i32, scale: f32) -> PromptRect {
     let screen_w = screen_w.max(1);
     let screen_h = screen_h.max(1);
     if fullscreen_border(visual) {
@@ -391,20 +391,25 @@ fn overlay_rect(visual: PromptVisual, screen_w: i32, screen_h: i32) -> PromptRec
             h: screen_h,
         };
     }
+    let px = |v: i32| (v as f32 * scale.max(1.0)).round() as i32;
     let (w, h) = panel_size_for_visual(visual);
-    let w = w.min(screen_w);
+    let (w, h) = (px(w).min(screen_w), px(h).min(screen_h));
     let (x, y) = if visual_is_voice(visual) {
         (
-            (screen_w - w - MARGIN_RIGHT).max(0),
+            (screen_w - w - px(MARGIN_RIGHT)).max(0),
             ((screen_h - h) / 2).max(0),
         )
     } else {
         (
             ((screen_w - w) / 2).max(0),
-            (screen_h - h - MARGIN_BOTTOM).max(0),
+            (screen_h - h - px(MARGIN_BOTTOM)).max(0),
         )
     };
     PromptRect { x, y, w, h }
+}
+
+unsafe fn overlay_scale() -> f32 {
+    super::monitor::dpi_scale(super::monitor::active_monitor().0)
 }
 
 unsafe fn target_rect_for_visual(visual: PromptVisual) -> PromptRect {
@@ -413,7 +418,12 @@ unsafe fn target_rect_for_visual(visual: PromptVisual) -> PromptRect {
     } else {
         super::monitor::active_monitor_rect()
     };
-    let mut rect = overlay_rect(visual, (m.right - m.left).max(1), (m.bottom - m.top).max(1));
+    let mut rect = overlay_rect(
+        visual,
+        (m.right - m.left).max(1),
+        (m.bottom - m.top).max(1),
+        overlay_scale(),
+    );
     rect.x += m.left;
     rect.y += m.top;
     rect
@@ -809,6 +819,11 @@ unsafe extern "system" fn prompt_wndproc(
             let _ = ValidateRect(hwnd, None);
             LRESULT(0)
         }
+        WM_DPICHANGED | WM_DISPLAYCHANGE => {
+            place_overlay(hwnd, VISUAL_STATE.with(|state| state.get()), false);
+            render_prompt(hwnd);
+            LRESULT(0)
+        }
         WM_TIMER => {
             if wparam.0 == REPAINT_TIMER_ID {
                 render_prompt(hwnd);
@@ -879,6 +894,7 @@ fn render_prompt(hwnd: HWND) {
                     if let Err(e) = r.resize(hwnd) {
                         service_log(&format!("prompt ui: renderer resize: {e}"));
                     }
+                    r.set_dip_scale(overlay_scale());
                     // The live device name (e.g. "DualSense Wireless Controller")
                     // drives both the card title and the controller artwork. Fall
                     // back to a generic pad name only when the backend hasn't
@@ -1076,10 +1092,10 @@ mod tests {
             assert!(!fullscreen_border(visual));
             assert_eq!(thread_kind_for_visual(visual), PromptThreadKind::Tips);
         }
-        let rect = overlay_rect(PromptVisual::Tips(0), 1920, 1080);
+        let rect = overlay_rect(PromptVisual::Tips(0), 1920, 1080, 1.0);
         assert_eq!(rect.w, TIPS_W);
         assert_eq!(rect.y + rect.h, 1080 - MARGIN_BOTTOM);
-        assert_eq!(overlay_rect(PromptVisual::Tips(0), 1024, 768).w, 1024);
+        assert_eq!(overlay_rect(PromptVisual::Tips(0), 1024, 768, 1.0).w, 1024);
         assert!(!click_through(PromptVisual::Ready));
     }
 
@@ -1111,7 +1127,7 @@ mod tests {
             PromptVisual::Starting,
             PromptVisual::VoiceBorder,
         ] {
-            let rect = overlay_rect(visual, 1920, 1080);
+            let rect = overlay_rect(visual, 1920, 1080, 1.0);
             assert_eq!((rect.x, rect.y, rect.w, rect.h), (0, 0, 1920, 1080));
             assert!(fullscreen_border(visual));
         }
