@@ -923,14 +923,8 @@ pub fn send_text_direct(text: &str) {
 /// target — the speech helper injects from its own process, so this is the only
 /// way to see where a transcript actually went.
 fn foreground_info() -> (usize, String, String, String) {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
-        PROCESS_QUERY_LIMITED_INFORMATION,
-    };
     use windows::Win32::UI::WindowsAndMessaging::{
         GetClassNameW, GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
-        GetWindowThreadProcessId,
     };
     unsafe {
         let fg = GetForegroundWindow();
@@ -949,31 +943,44 @@ fn foreground_info() -> (usize, String, String, String) {
         } else {
             String::new()
         };
+        (hwnd, window_exe(fg), class, title)
+    }
+}
+
+pub(crate) fn window_exe(hwnd: windows::Win32::Foundation::HWND) -> String {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+    unsafe {
         let mut pid = 0u32;
-        GetWindowThreadProcessId(fg, Some(&mut pid));
-        let mut exe = String::new();
-        if pid != 0 {
-            if let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
-                let mut buf = [0u16; 1024];
-                let mut len = buf.len() as u32;
-                let ok = QueryFullProcessImageNameW(
-                    process,
-                    PROCESS_NAME_FORMAT(0),
-                    windows::core::PWSTR(buf.as_mut_ptr()),
-                    &mut len,
-                )
-                .is_ok();
-                let _ = CloseHandle(process);
-                if ok && len > 0 {
-                    exe = std::path::Path::new(&String::from_utf16_lossy(&buf[..len as usize]))
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or_default()
-                        .to_string();
-                }
-            }
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == 0 {
+            return String::new();
         }
-        (hwnd, exe, class, title)
+        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return String::new();
+        };
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_FORMAT(0),
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .is_ok();
+        let _ = CloseHandle(process);
+        if !ok || len == 0 {
+            return String::new();
+        }
+        std::path::Path::new(&String::from_utf16_lossy(&buf[..len as usize]))
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string()
     }
 }
 

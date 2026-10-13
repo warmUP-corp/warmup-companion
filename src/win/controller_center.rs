@@ -20,13 +20,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetTimer, SetWindowPos, ShowWindow, GCLP_HICON, GCLP_HICONSM, HICON, HMENU, HTCAPTION,
     HTCLIENT, ICON_BIG, ICON_SMALL, IDOK, LR_DEFAULTCOLOR, MB_DEFBUTTON2, MB_ICONWARNING,
     MB_OKCANCEL, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WM_CLOSE,
-    WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_CHAR, WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_SYSKEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
     WM_NCHITTEST, WM_SETICON, WM_SETTINGCHANGE, WM_TIMER, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_POPUP,
 };
 
 use super::desktop_window::{self, DesktopApp, DesktopWindowThread};
 use super::mono_ui::*;
 use super::vk_renderer::{self, VkPalette};
+
+mod apps;
 
 const WINDOW_CLASS: PCWSTR = w!("WarmupControllerCenter");
 const TIMER_ID: usize = 31;
@@ -64,11 +66,12 @@ const RED: u32 = 0x003A45FF;
 const REPEAT_DELAY: Duration = Duration::from_millis(400);
 const REPEAT_EVERY: Duration = Duration::from_millis(90);
 
-const TABS: [(&str, Icon); 4] = [
+const TABS: [(&str, Icon); 5] = [
     ("General", Icon::Settings),
     ("Mouse", Icon::Mouse),
     ("Keyboard", Icon::Keyboard),
     ("Controller", Icon::Gamepad),
+    ("Apps", Icon::AppWindow),
 ];
 
 const PAD_BUTTONS: [&str; 10] = ["A", "B", "X", "Y", "LB", "RB", "LT", "RT", "L3", "R3"];
@@ -534,12 +537,14 @@ fn reload_all(ui: &mut Ui) {
     ui.led_orig = crate::led_engine::led_snapshot();
     ui.led_base = led_values(ui);
     ui.led_previewed = ui.led_base;
+    apps::reload(&mut ui.apps);
 }
 
 #[derive(Clone, Debug, PartialEq)]
 enum Pending {
     ResetAll,
     Import(crate::config::ImportPlan),
+    RemoveApp(String),
 }
 
 fn backup_label(backup: &std::path::Path) -> &str {
@@ -574,6 +579,14 @@ fn confirm_text(pending: &Pending) -> (&'static str, Vec<String>, &'static str) 
             }
             ("Import settings?", lines, "Import")
         }
+        Pending::RemoveApp(name) => (
+            "Remove this app?",
+            vec![
+                format!("{name} goes back to the normal controller buttons."),
+                "Nothing changes until you press Apply.".to_string(),
+            ],
+            "Remove",
+        ),
     }
 }
 
@@ -667,21 +680,27 @@ fn reset_everything(ui: &mut Ui) {
 }
 
 fn staged_changes(ui: &Ui) -> bool {
-    ui.items.iter().any(|it| it.value != stored_value(it)) || ui.led_previewed != ui.led_base
+    ui.items.iter().any(|it| it.value != stored_value(it))
+        || ui.led_previewed != ui.led_base
+        || apps::dirty(&ui.apps)
 }
 
 fn documents_dir() -> Option<String> {
+    known_folder(&windows::Win32::UI::Shell::FOLDERID_Documents)
+}
+
+fn known_folder(id: &windows::core::GUID) -> Option<String> {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::System::Com::CoTaskMemFree;
     use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
-    use windows::Win32::UI::Shell::{FOLDERID_Documents, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+    use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT};
     unsafe {
         let mut token = HANDLE::default();
         let have_token = WTSQueryUserToken(WTSGetActiveConsoleSessionId(), &mut token).is_ok();
         let result = if have_token {
-            SHGetKnownFolderPath(&FOLDERID_Documents, KF_FLAG_DEFAULT, token)
+            SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, token)
         } else {
-            SHGetKnownFolderPath(&FOLDERID_Documents, KF_FLAG_DEFAULT, None)
+            SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None)
         };
         if have_token {
             let _ = CloseHandle(token);
@@ -795,6 +814,7 @@ fn confirm_input(ui: &mut Ui, action: ConfirmInput) {
         ConfirmInput::Activate => match pending {
             Pending::ResetAll => reset_everything(ui),
             Pending::Import(plan) => import_settings(ui, &plan),
+            Pending::RemoveApp(_) => apps::remove_editing(ui),
         },
     }
 }
@@ -807,6 +827,10 @@ enum ConfirmInput {
 }
 
 fn reset_tab(ui: &mut Ui) {
+    if ui.tab == apps::APPS_TAB {
+        apps::reset(ui);
+        return;
+    }
     let tab = ui.tab;
     for it in ui.items.iter_mut().filter(|it| it.tab == tab) {
         it.value = default_value(it);
@@ -997,6 +1021,11 @@ enum Target {
     Cancel,
     Apply,
     Promo,
+    AppsToggle,
+    App(usize),
+    AddApp,
+    ProfileHeader,
+    Map(usize),
 }
 
 impl Target {
@@ -1281,6 +1310,7 @@ struct Ui {
     confirm: Option<(Pending, bool)>,
     toast: Option<(String, Instant)>,
     promo: Option<(i32, i32, Vec<u8>)>,
+    apps: apps::State,
 }
 
 thread_local! {
@@ -1459,6 +1489,7 @@ fn ui_show() {
             confirm: None,
             toast: None,
             promo: promo_art(scale),
+            apps: apps::load(),
         };
         UI.with(|u| *u.borrow_mut() = Some(ui));
         with_ui(|ui| {
@@ -1501,6 +1532,9 @@ fn ui_hide() {
     OWNS_PAD.store(false, Ordering::SeqCst);
     let _ = take_pad_edges();
     if let Some(ui) = UI.with(|u| u.borrow_mut().take()) {
+        if apps::typing(&ui) {
+            crate::pipe_server::request_native_vk(false);
+        }
         if ui.led_previewed != ui.led_base {
             crate::led_engine::restore_led(ui.led_orig);
         }
@@ -1569,6 +1603,7 @@ fn apply_led(ui: &mut Ui) {
 
 fn apply(ui: &mut Ui) -> bool {
     apply_led(ui);
+    apps::apply(&mut ui.apps);
     let mut declined = false;
     let hwnd = ui.hwnd;
     let words = ui.words.clone();
@@ -1667,15 +1702,35 @@ fn tab_stop(ui: &Ui) -> usize {
     }
 }
 
+fn page_rows(ui: &Ui) -> Vec<(Target, Rect)> {
+    if ui.tab == apps::APPS_TAB {
+        apps::rows(ui)
+    } else {
+        rows(ui.tab, &ui.items, ui.led_open)
+    }
+}
+
+fn page_order(ui: &Ui) -> Vec<Target> {
+    if ui.tab == apps::APPS_TAB {
+        apps::order(ui)
+    } else {
+        focus_order(ui.tab, &ui.items, ui.led_open)
+    }
+}
+
 fn switch_tab(ui: &mut Ui, tab: usize) {
     ui.drag = None;
+    apps::leave(ui);
     let tab = tab % tab_count(ui);
     if tab == TABS.len() {
         ui.focus = Target::Promo;
         return;
     }
     ui.tab = tab;
-    ui.focus = focus_order(ui.tab, &ui.items, ui.led_open)[0];
+    if tab == apps::APPS_TAB {
+        apps::enter(&mut ui.apps);
+    }
+    ui.focus = page_order(ui)[0];
 }
 
 fn adjust(ui: &mut Ui, delta: i32) -> bool {
@@ -1742,12 +1797,20 @@ fn activate(ui: &mut Ui, target: Target) -> After {
         }
         Target::Cancel => return After::Close,
         Target::Promo => crate::updater::download_launcher(),
+        Target::AppsToggle
+        | Target::App(_)
+        | Target::AddApp
+        | Target::ProfileHeader
+        | Target::Map(_) => apps::activate(ui, target),
         _ => {}
     }
     After::Stay
 }
 
 fn navigate(ui: &mut Ui, nav: Nav) {
+    if apps::navigate(ui, nav) {
+        return;
+    }
     let delta = match nav {
         Nav::Left => -1,
         Nav::Right => 1,
@@ -1756,11 +1819,12 @@ fn navigate(ui: &mut Ui, nav: Nav) {
     if delta != 0 && adjust(ui, delta) {
         return;
     }
-    let mut order = focus_order(ui.tab, &ui.items, ui.led_open);
-    if ui.promo.is_some() {
+    let mut order = page_order(ui);
+    if ui.promo.is_some() && ui.apps.editing.is_none() {
         order.push(Target::Promo);
     }
     ui.focus = step_focus(&order, ui.focus, nav);
+    apps::keep_visible(ui);
 }
 
 fn finish(after: After) {
@@ -1782,6 +1846,12 @@ fn click(ui: &mut Ui, x: f32, y: f32) -> After {
             confirm_input(ui, ConfirmInput::Activate);
         } else if CONFIRM_CANCEL.contains(x, y) {
             confirm_input(ui, ConfirmInput::Cancel);
+        }
+        return After::Stay;
+    }
+    if ui.apps.dialog.is_some() {
+        if !apps::typing(ui) {
+            apps::click_dialog(ui, x, y);
         }
         return After::Stay;
     }
@@ -1808,9 +1878,7 @@ fn click(ui: &mut Ui, x: f32, y: f32) -> After {
             return activate(ui, t);
         }
     }
-    let hit = rows(ui.tab, &ui.items, ui.led_open)
-        .into_iter()
-        .find(|(_, r)| r.contains(x, y));
+    let hit = page_rows(ui).into_iter().find(|(_, r)| r.contains(x, y));
     let Some((t, r)) = hit else {
         return After::Stay;
     };
@@ -1854,6 +1922,11 @@ fn click(ui: &mut Ui, x: f32, y: f32) -> After {
         Target::Lightbar | Target::Export | Target::Import | Target::ResetAll => {
             return activate(ui, t)
         }
+        Target::AppsToggle
+        | Target::App(_)
+        | Target::AddApp
+        | Target::ProfileHeader
+        | Target::Map(_) => apps::click_page(ui, t, r, x),
         _ => {}
     }
     After::Stay
@@ -1870,6 +1943,9 @@ fn key_down(ui: &mut Ui, vk: u16) -> After {
     }
     if ui.confirm.is_some() {
         return After::Stay;
+    }
+    if let Some(after) = apps::key_down(ui, vk) {
+        return after;
     }
     match vk {
         v if v == VK_ESCAPE.0 => return After::Close,
@@ -1953,6 +2029,9 @@ fn tick(ui: &mut Ui) -> (bool, After) {
             if matches!(ui.pad.held, Some((nav, _, _)) if pad_nav(button) == Some(nav)) {
                 ui.pad.held = None;
             }
+            continue;
+        }
+        if apps::pad(ui, button) {
             continue;
         }
         match button {
@@ -2088,7 +2167,7 @@ unsafe fn draw_window(ui: &Ui, g: &mut Gfx) {
         draw_promo(ui, g, *w, *h, px);
     }
 
-    for (target, r) in rows(ui.tab, &ui.items, ui.led_open) {
+    for (target, r) in page_rows(ui) {
         draw_row(ui, g, target, r);
     }
 
@@ -2096,16 +2175,19 @@ unsafe fn draw_window(ui: &Ui, g: &mut Gfx) {
     g.rt.FillRectangle(&rect(0.0, HINT_Y, WIN_W, 1.0).d2d(), &g.brush);
     let ps = ui.live.playstation();
     let mut x = 24.0;
-    let hints: &[(&[usize], &str)] = if ui.toast.is_some() {
-        &[]
+    let hints: Vec<(&[usize], &str)> = if ui.toast.is_some() {
+        Vec::new()
+    } else if ui.tab == apps::APPS_TAB {
+        apps::hints(ui)
     } else {
-        &[
+        vec![
             (&[0], "Select"),
             (&[1], "Back"),
             (&[4, 5], "Tabs"),
             (&[3], "Reset"),
         ]
     };
+    ui.reset_hint.set(rect(0.0, 0.0, 0.0, 0.0));
     if let Some((line, _)) = &ui.toast {
         ui.reset_hint.set(rect(0.0, 0.0, 0.0, 0.0));
         g.text(
@@ -2140,7 +2222,7 @@ unsafe fn draw_window(ui: &Ui, g: &mut Gfx) {
             DIM_ALPHA,
             Align::Left,
         );
-        if label == "Reset" {
+        if glyphs == [3] {
             ui.reset_hint.set(rect(start, 652.0, x + lw - start, 44.0));
         }
         x += lw + 16.0;
@@ -2155,6 +2237,7 @@ unsafe fn draw_window(ui: &Ui, g: &mut Gfx) {
         }
         g.text(label, r, 15.0, true, ink, 1.0, Align::Center);
     }
+    apps::draw_dialog(ui, g);
     if let Some((pending, on_ok)) = &ui.confirm {
         draw_confirm(ui, g, pending, *on_ok);
     }
@@ -2725,6 +2808,11 @@ unsafe fn draw_row(ui: &Ui, g: &mut Gfx, target: Target, r: Rect) {
             );
         }
         Target::Cancel | Target::Apply | Target::Promo => {}
+        Target::AppsToggle
+        | Target::App(_)
+        | Target::AddApp
+        | Target::ProfileHeader
+        | Target::Map(_) => apps::draw_row(ui, g, target, r),
     }
 }
 
@@ -2792,6 +2880,32 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 paint(ui);
             });
             finish(after);
+            LRESULT(0)
+        }
+        WM_SYSKEYDOWN => {
+            let mut handled = false;
+            with_ui(|ui| {
+                if apps::records_keys(ui) {
+                    let _ = key_down(ui, wparam.0 as u16);
+                    paint(ui);
+                    handled = true;
+                }
+            });
+            if handled {
+                LRESULT(0)
+            } else {
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+        }
+        WM_CHAR => {
+            with_ui(|ui| {
+                if apps::typing(ui) {
+                    if let Some(ch) = char::from_u32(wparam.0 as u32) {
+                        apps::char_input(ui, ch);
+                        paint(ui);
+                    }
+                }
+            });
             LRESULT(0)
         }
         WM_TIMER if wparam.0 == TIMER_ID => {
