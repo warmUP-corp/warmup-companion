@@ -995,13 +995,13 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
         "led_color" | "led_secondary_color" => parse_theme_color(value)
             .map(|_| ())
             .ok_or_else(|| format!("{key} must be a #RRGGBB color")),
-        "led_brightness" => value
+        "led_brightness" | "led_saturation" => value
             .trim()
             .parse::<f32>()
             .ok()
             .filter(|v| (0.0..=1.0).contains(v))
             .map(|_| ())
-            .ok_or_else(|| "led_brightness must be between 0.0 and 1.0".to_string()),
+            .ok_or_else(|| format!("{key} must be between 0.0 and 1.0")),
         "led_effect" => match value.trim().to_ascii_lowercase().as_str() {
             "solid" | "breathing" | "rainbow" | "gradient" | "off" => Ok(()),
             _ => Err("led_effect must be solid, breathing, rainbow, gradient or off".to_string()),

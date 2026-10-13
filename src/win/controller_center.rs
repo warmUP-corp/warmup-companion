@@ -249,6 +249,19 @@ const LED_SWATCHES: &[(&str, Option<&str>)] = &[
     ("Pink", Some("#FF0A78")),
     ("Off", None),
 ];
+const LEGACY_LED_SWATCHES: &[(&str, usize)] = &[
+    ("#B6A0FF", 0),
+    ("#8000FF", 0),
+    ("#FF3B30", 2),
+    ("#FF9500", 3),
+    ("#FF3C00", 3),
+    ("#34C759", 4),
+    ("#00FF00", 4),
+    ("#32D2F0", 5),
+    ("#0A84FF", 6),
+    ("#FF2D92", 7),
+    ("#FF0066", 7),
+];
 const LED_EFFECT_OPTIONS: &[(&str, &str)] = &[
     ("Solid", "solid"),
     ("Breathing", "breathing"),
@@ -264,6 +277,12 @@ fn led_swatch_index(off: bool, rgb: (u8, u8, u8)) -> i32 {
     LED_SWATCHES
         .iter()
         .position(|(_, c)| *c == Some(hex.as_str()))
+        .or_else(|| {
+            LEGACY_LED_SWATCHES
+                .iter()
+                .find(|(c, _)| *c == hex)
+                .map(|(_, i)| *i)
+        })
         .map_or(0, |i| i as i32)
 }
 
@@ -668,6 +687,10 @@ fn is_led(kind: &Kind) -> bool {
                 key: "led_effect",
                 ..
             }
+            | Kind::Slider {
+                key: "led_brightness" | "led_saturation",
+                ..
+            }
     )
 }
 
@@ -776,6 +799,28 @@ fn items() -> Vec<Item> {
                 options: LED_EFFECT_OPTIONS,
             },
         ),
+        item(
+            3,
+            "Brightness",
+            Kind::Slider {
+                key: "led_brightness",
+                min: 0,
+                max: 20,
+                div: 20.0,
+                decimals: 2,
+            },
+        ),
+        item(
+            3,
+            "Saturation",
+            Kind::Slider {
+                key: "led_saturation",
+                min: 0,
+                max: 20,
+                div: 20.0,
+                decimals: 2,
+            },
+        ),
     ]
 }
 
@@ -806,6 +851,8 @@ fn gamepad_slider(key: &str, s: &crate::config::GamepadSettings) -> f32 {
         "cursor_smoothing" => s.cursor_smoothing,
         "scroll_speed" => s.scroll_speed,
         "scroll_accel" => s.scroll_accel,
+        "led_brightness" => crate::led_engine::led_snapshot().brightness,
+        "led_saturation" => crate::led_engine::led_snapshot().saturation,
         _ => 0.0,
     }
 }
@@ -891,6 +938,16 @@ fn default_value(item: &Item) -> i32 {
             },
         ),
         Kind::Swatch { .. } => led_swatch_of(&led),
+        Kind::Slider {
+            key: "led_brightness",
+            div,
+            ..
+        } => (led.brightness * div).round() as i32,
+        Kind::Slider {
+            key: "led_saturation",
+            div,
+            ..
+        } => (led.saturation * div).round() as i32,
         Kind::Slider {
             key, div, min, max, ..
         } => ((gamepad_slider(key, &s) * div).round() as i32).clamp(*min, *max),
@@ -1266,6 +1323,12 @@ fn choice_index(kind: &Kind, value: &str) -> i32 {
 
 fn slider_text(kind: &Kind, pos: i32) -> String {
     match kind {
+        // Shown as a percentage, like warmUP's lightbar sliders.
+        Kind::Slider {
+            key: "led_brightness" | "led_saturation",
+            div,
+            ..
+        } => format!("{}%", (pos as f32 / div * 100.0).round() as i32),
         Kind::Slider { div, decimals, .. } => format!("{:.*}", decimals, pos as f32 / div),
         _ => String::new(),
     }
@@ -1442,6 +1505,9 @@ fn item_height(it: &Item) -> f32 {
 fn rows(tab: usize, items: &[Item], led_open: bool) -> Vec<(Target, Rect)> {
     let mut stack: Vec<(Target, f32)> = Vec::new();
     match tab {
+        // The open lightbar panel (colour, effect, brightness) needs the room of the live
+        // input view, so that view steps aside while the lightbar is being edited.
+        3 if led_open => stack.extend([(Target::Device, 84.0), (Target::Rumble, 48.0)]),
         3 => stack.extend([
             (Target::Device, 84.0),
             (Target::Live, 238.0),
@@ -1601,6 +1667,8 @@ fn device_name(label: &str) -> String {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Battery {
     percent: i32,
+    /// Charging over the cable and not full yet.
+    charging: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1620,6 +1688,7 @@ impl Live {
             .filter(|b| connected && b.percent >= 0)
             .map(|b| Battery {
                 percent: b.percent.min(100),
+                charging: b.charging && !b.wired,
             });
         Live {
             connected,
@@ -1697,8 +1766,8 @@ struct Ui {
     pad: PadNav,
     led_open: bool,
     led_orig: crate::led_engine::LedState,
-    led_base: (i32, i32),
-    led_previewed: (i32, i32),
+    led_base: (i32, i32, i32, i32),
+    led_previewed: (i32, i32, i32, i32),
     reset_hint: std::cell::Cell<Rect>,
     confirm: Option<(Pending, bool)>,
     toast: Option<(String, Instant)>,
@@ -1879,8 +1948,8 @@ fn ui_show() {
             pad: PadNav::default(),
             led_open: false,
             led_orig: crate::led_engine::led_snapshot(),
-            led_base: (0, 0),
-            led_previewed: (0, 0),
+            led_base: (0, 0, 0, 0),
+            led_previewed: (0, 0, 0, 0),
             reset_hint: std::cell::Cell::new(rect(0.0, 0.0, 0.0, 0.0)),
             confirm: None,
             toast: None,
@@ -1952,7 +2021,7 @@ fn with_ui(f: impl FnOnce(&mut Ui)) {
     });
 }
 
-fn led_values(ui: &Ui) -> (i32, i32) {
+fn led_values(ui: &Ui) -> (i32, i32, i32, i32) {
     let pick = |f: fn(&Kind) -> bool| {
         ui.items
             .iter()
@@ -1970,7 +2039,30 @@ fn led_values(ui: &Ui) -> (i32, i32) {
                 }
             )
         }),
+        pick(|k| {
+            matches!(
+                k,
+                Kind::Slider {
+                    key: "led_brightness",
+                    ..
+                }
+            )
+        }),
+        pick(|k| {
+            matches!(
+                k,
+                Kind::Slider {
+                    key: "led_saturation",
+                    ..
+                }
+            )
+        }),
     )
+}
+
+/// Brightness / saturation slider position (0–20, 5 % steps) as a 0.0–1.0 value.
+fn led_brightness_of(pos: i32) -> f32 {
+    (pos as f32 / 20.0).clamp(0.0, 1.0)
 }
 
 fn sync_led_preview(ui: &mut Ui) {
@@ -1979,6 +2071,8 @@ fn sync_led_preview(ui: &mut Ui) {
         ui.led_previewed = now;
         let (color, effect) = led_choice(now.0, now.1);
         crate::led_engine::apply_led_choice(color, Some(effect));
+        crate::led_engine::apply_led_brightness(led_brightness_of(now.2));
+        crate::led_engine::apply_led_saturation(led_brightness_of(now.3));
     }
 }
 
@@ -1992,7 +2086,17 @@ fn apply_led(ui: &mut Ui) {
         set("led_color", c);
     }
     set("led_effect", effect);
+    set(
+        "led_brightness",
+        &format!("{:.2}", led_brightness_of(now.2)),
+    );
+    set(
+        "led_saturation",
+        &format!("{:.2}", led_brightness_of(now.3)),
+    );
     crate::led_engine::apply_led_choice(color, Some(effect));
+    crate::led_engine::apply_led_brightness(led_brightness_of(now.2));
+    crate::led_engine::apply_led_saturation(led_brightness_of(now.3));
     ui.led_base = now;
     ui.led_previewed = now;
     ui.led_orig = crate::led_engine::led_snapshot();
@@ -3149,7 +3253,9 @@ unsafe fn draw_row(ui: &Ui, g: &mut Gfx, target: Target, r: Rect) {
             if let Some(b) = ui.live.battery {
                 let label = format!("{}%", b.percent);
                 let lw = g.measure(&label, 13.0, true);
-                let cw = 10.0 + 18.0 + 6.0 + lw + 10.0;
+                // Charging adds a bolt after the percentage: "95% ⚡".
+                let bolt_w = if b.charging { 4.0 + 14.0 } else { 0.0 };
+                let cw = 10.0 + 18.0 + 6.0 + lw + bolt_w + 10.0;
                 let chip = rect(r.x + r.w - ROW_PAD - cw, r.y + 27.0, cw, 30.0);
                 g.fill(chip, 10.0, t.bg, 1.0);
                 let tint = if b.percent <= 20 { RED } else { GREEN };
@@ -3169,6 +3275,15 @@ unsafe fn draw_row(ui: &Ui, g: &mut Gfx, target: Target, r: Rect) {
                     1.0,
                     Align::Left,
                 );
+                if b.charging {
+                    g.icon(
+                        Icon::Charging,
+                        rect(chip.x + 34.0 + lw + 4.0, chip.y + 8.0, 14.0, 14.0),
+                        GREEN,
+                        1.0,
+                        s,
+                    );
+                }
             }
         }
         Target::Live => {
@@ -3710,6 +3825,8 @@ mod tests {
             ("Coding vocabulary", 1),
             ("Color", 0),
             ("Lightbar effect", 0),
+            ("Brightness", 20),
+            ("Saturation", 20),
         ];
         let items = items();
         assert_eq!(items.len(), expect.len());
@@ -3827,13 +3944,16 @@ mod tests {
         let closed = rows(3, &items, false);
         assert_eq!(closed.len(), 4);
         let open = rows(3, &items, true);
-        assert_eq!(open.len(), 6);
-        assert_eq!(open[4].1, rect(224.0, 462.0, 496.0, 52.0));
-        assert_eq!(open[5].1, rect(224.0, 522.0, 496.0, 89.0));
-        assert!(open[5].1.y + open[5].1.h <= HINT_Y);
+        // Live input steps aside: Device, Rumble + Lightbar, Color, Effect, Brightness, Saturation.
+        assert_eq!(open.len(), 7);
+        assert_eq!(open[3].1, rect(224.0, 216.0, 496.0, 52.0));
+        assert_eq!(open[4].1, rect(224.0, 276.0, 496.0, 89.0));
+        assert_eq!(open[5].1, rect(224.0, 373.0, 496.0, 63.0));
+        assert_eq!(open[6].1, rect(224.0, 444.0, 496.0, 63.0));
+        assert!(open[6].1.y + open[6].1.h <= HINT_Y);
         let order = focus_order(3, &items, true);
-        assert_eq!(order[3], open[4].0);
-        let sw = swatch_rect(open[4].1, LED_SWATCHES.len(), LED_SWATCHES.len() - 1);
+        assert_eq!(order[3], open[3].0);
+        let sw = swatch_rect(open[3].1, LED_SWATCHES.len(), LED_SWATCHES.len() - 1);
         assert_eq!(sw.x + sw.w, 720.0 - ROW_PAD);
     }
 

@@ -163,12 +163,19 @@ fn touchpad_slot() -> &'static Mutex<(Option<TouchpadPayload>, bool)> {
 
 /// Publish the latest battery snapshot (read by the server, sent on change).
 pub fn publish_battery(percent: i32, charging: bool, wired: bool) {
+    let next = BatteryPayload {
+        percent,
+        charging,
+        wired,
+    };
     if let Ok(mut b) = battery_slot().lock() {
-        *b = Some(BatteryPayload {
-            percent,
-            charging,
-            wired,
-        });
+        // Log only the charging / wired flips, not every percent tick.
+        if b.map(|p| (p.charging, p.wired)) != Some((charging, wired)) {
+            crate::install::log_line(&format!(
+                "battery: {percent}% charging={charging} wired={wired}"
+            ));
+        }
+        *b = Some(next);
     }
 }
 
@@ -297,6 +304,9 @@ impl SettingsSync {
             if merged.led_brightness.is_none() {
                 merged.led_brightness = r.led_brightness;
             }
+            if merged.led_saturation.is_none() {
+                merged.led_saturation = r.led_saturation;
+            }
         }
         if reference == Some(&merged) && *settings == self.companion_baseline {
             return None;
@@ -370,6 +380,9 @@ impl SettingsSync {
         if prev.led_brightness == p.led_brightness {
             changes.led.led_brightness = None;
         }
+        if prev.led_saturation == p.led_saturation {
+            changes.led.led_saturation = None;
+        }
         changes
     }
 
@@ -409,6 +422,8 @@ fn companion_snapshot() -> (ConfigPayload, CompanionSettingsPayload) {
         led_secondary_color: crate::config::raw_setting("led_secondary_color"),
         led_effect: crate::config::raw_setting("led_effect"),
         led_brightness: crate::config::raw_setting("led_brightness")
+            .and_then(|v| v.parse::<f32>().ok()),
+        led_saturation: crate::config::raw_setting("led_saturation")
             .and_then(|v| v.parse::<f32>().ok()),
         natural_scroll: g.natural_scroll,
         cursor_smoothing: g.cursor_smoothing,
@@ -537,6 +552,10 @@ fn persist_led(led: &ConfigPayload) -> Vec<&'static str> {
         (
             "led_brightness",
             led.led_brightness.map(|b| b.clamp(0.0, 1.0).to_string()),
+        ),
+        (
+            "led_saturation",
+            led.led_saturation.map(|s| s.clamp(0.0, 1.0).to_string()),
         ),
     ] {
         if let Some(value) = value {
@@ -1262,6 +1281,12 @@ mod server {
                 last_cursor_write = Instant::now();
             }
             let cur = current();
+            // A (re)connected pad usually reports the same level as before, so the change check
+            // alone would keep the battery from going out again; the desktop reset its copy on
+            // disconnect and would sit at "unknown" until the level moved.
+            if last.as_ref() != Some(&cur) {
+                last_battery = None;
+            }
             if last.as_ref() != Some(&cur) || last_conn_write.elapsed() >= KEEPALIVE {
                 if write_all(
                     pipe,
@@ -1594,6 +1619,7 @@ mod tests {
             led_secondary_color: Some("#0000ff".into()),
             led_effect: Some("solid".into()),
             led_brightness: Some(0.5),
+            led_saturation: None,
             natural_scroll: false,
             cursor_smoothing: 0.3,
             keyboard_theme: None,
