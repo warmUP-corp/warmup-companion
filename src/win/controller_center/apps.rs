@@ -58,6 +58,7 @@ pub(super) struct State {
     pub(super) dialog: Option<Dialog>,
     first: usize,
     installed: Option<Vec<(String, String)>>,
+    wheel: i32,
 }
 
 #[derive(Clone, Copy)]
@@ -485,6 +486,47 @@ fn set_add_focus(st: &mut State, to: usize) {
             }
         }
     }
+}
+
+pub(super) fn wheel(ui: &mut Ui, delta: i32) -> bool {
+    if ui.tab != APPS_TAB || typing(ui) {
+        return false;
+    }
+    let st = &mut ui.apps;
+    st.wheel += delta;
+    let steps = st.wheel / 120;
+    if steps == 0 {
+        return false;
+    }
+    st.wheel -= steps * 120;
+    if let Some(Dialog::Add { focus, first, .. }) = st.dialog {
+        let n = installed(st).len();
+        let top = (first as i32 - steps).clamp(0, n.saturating_sub(MAX_PICKS) as i32) as usize;
+        let window = top..(top + MAX_PICKS).min(n);
+        let mut to = focus;
+        if focus < n && !window.contains(&focus) {
+            let mut candidates: Vec<usize> = window.filter(|i| selectable(st, *i)).collect();
+            if focus > top {
+                candidates.reverse();
+            }
+            to = candidates.first().copied().unwrap_or(focus);
+        }
+        if let Some(Dialog::Add { focus, first, .. }) = &mut st.dialog {
+            *focus = to;
+            *first = top;
+        }
+        return true;
+    }
+    if st.dialog.is_some() || st.editing.is_some() {
+        return false;
+    }
+    let n = st.profiles.len();
+    st.first = (st.first as i32 - steps).clamp(0, n.saturating_sub(MAX_ROWS) as i32) as usize;
+    if let Target::App(i) = ui.focus {
+        let last = (st.first + MAX_ROWS).min(n) - 1;
+        ui.focus = Target::App(i.clamp(st.first, last));
+    }
+    true
 }
 
 fn page_add(ui: &mut Ui, dir: i32) {

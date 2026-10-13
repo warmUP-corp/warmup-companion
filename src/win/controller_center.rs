@@ -20,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetTimer, SetWindowPos, ShowWindow, GCLP_HICON, GCLP_HICONSM, HICON, HMENU, HTCAPTION,
     HTCLIENT, ICON_BIG, ICON_SMALL, IDOK, LR_DEFAULTCOLOR, MB_DEFBUTTON2, MB_ICONWARNING,
     MB_OKCANCEL, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WM_CLOSE,
-    WM_CHAR, WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_SYSKEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_CHAR, WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_MOUSEWHEEL, WM_SYSKEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
     WM_NCHITTEST, WM_SETICON, WM_SETTINGCHANGE, WM_TIMER, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_POPUP,
 };
 
@@ -2843,6 +2843,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 paint(ui);
             });
             finish(after);
+            LRESULT(0)
+        }
+        WM_MOUSEWHEEL => {
+            let delta = ((wparam.0 >> 16) & 0xffff) as u16 as i16 as i32;
+            with_ui(|ui| {
+                if apps::wheel(ui, delta) {
+                    paint(ui);
+                }
+            });
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
