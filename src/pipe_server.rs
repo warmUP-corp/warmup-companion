@@ -159,12 +159,18 @@ fn touchpad_slot() -> &'static Mutex<(Option<TouchpadPayload>, bool)> {
 
 /// Publish the latest battery snapshot (read by the server, sent on change).
 pub fn publish_battery(percent: i32, charging: bool, wired: bool) {
+    let mut charging_changed = false;
     if let Ok(mut b) = battery_slot().lock() {
+        charging_changed = b.map(|prev| prev.charging) != Some(charging);
         *b = Some(BatteryPayload {
             percent,
             charging,
             wired,
         });
+    }
+    // Plugging the cable in or out switches the original lighting to / from the charging pulse.
+    if charging_changed {
+        crate::led_engine::wake_led_engine();
     }
 }
 

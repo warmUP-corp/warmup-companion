@@ -143,6 +143,17 @@ pub(crate) fn led_color_at(state: &LedState, t: f32) -> (u8, u8, u8) {
     }
 }
 
+/// True while the pad reports it is charging over its cable (not full yet).
+fn pad_charging() -> bool {
+    crate::pipe_server::current_battery().is_some_and(|b| b.charging && !b.wired)
+}
+
+/// Slow orange pulse like the DualSense shows while it charges, ~2.5 s period.
+pub(crate) fn charging_color_at(t: f32) -> (u8, u8, u8) {
+    let env = 0.15 + 0.85 * (0.5 - 0.5 * (t * std::f32::consts::TAU / 2.5).cos());
+    (scale_channel(0xff, env), scale_channel(0x5a, env), 0)
+}
+
 /// Spawn the LED engine once. Animated effects tick at ~30 Hz; solid/off apply once and park.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn ensure_led_engine() {
@@ -164,6 +175,22 @@ pub(crate) fn ensure_led_engine() {
                         }
                         let state = led_state().lock().map(|s| *s).unwrap_or_default();
                         if state.effect == LedEffect::Off {
+                            // Our HID writes stop the DualSense firmware's own orange
+                            // charging pulse, so the original lighting shows it instead.
+                            if pad_charging() {
+                                let color = charging_color_at(start.elapsed().as_secs_f32());
+                                if last != Some(color) {
+                                    crate::device_commands::push_device_command(PadCommand::Led {
+                                        r: color.0,
+                                        g: color.1,
+                                        b: color.2,
+                                    });
+                                    last = Some(color);
+                                }
+                                released = false;
+                                park = Duration::from_millis(33);
+                                return;
+                            }
                             if !released {
                                 crate::device_commands::push_device_command(PadCommand::LedRelease);
                                 released = true;
@@ -278,8 +305,12 @@ pub(crate) fn load_saved_led() {
             effect.as_deref(),
             brightness,
         );
-        ensure_led_engine();
+    } else if let Ok(mut st) = led_state().lock() {
+        // Nothing saved yet: keep the controller's original lighting.
+        st.effect = LedEffect::Off;
     }
+    // Always run, so the original lighting can show the charging pulse.
+    ensure_led_engine();
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]

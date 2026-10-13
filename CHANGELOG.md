@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.10.1
+
+- **PlayStation lightbar "Off" is the real original lighting again.** Off now restores the player colour on the lightbar and the white player lights under the touchpad. Before, a colour picked earlier (for example pink) stayed on the lightbar, because SDL keeps the last custom colour for as long as the pad is open.
+- **Custom colours keep the white player lights on.** Picking a lightbar colour no longer switches off the lights under the touchpad.
+- **Charging shows again.** With the lightbar on Off, a DualSense or DS4 charging over USB pulses orange, as the controller does on its own when no PC is driving it. Unplugged or full, it goes back to the player colour. A custom colour still wins while charging.
+- The lightbar engine now always runs, also before warmUP connects or a colour is saved, so the charging pulse works without warmUP.
+
 ## v0.10.0
 
 - **Several controllers at once.** Every connected controller now drives the mouse, keyboard and warmUP together, with no switching: buttons from all pads count, the stick pushed furthest wins, and a press held on two pads fires once. Rumble goes to the pad you used last, the lightbar to every pad. Works on the desktop and on the sign-in and UAC screens (PlayStation pads). Turn it off with `multi_controller = false` in `settings.ini`.

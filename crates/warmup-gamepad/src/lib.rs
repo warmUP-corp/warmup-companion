@@ -287,10 +287,6 @@ pub struct GamepadInput {
     poll_mode: PollMode,
     /// Last known position of touchpad 0 finger 0 while it was down; used for delta computation.
     prev_touchpad_pos: Option<(f32, f32)>,
-    /// Pad instance whose SDL player-index lightbar override has been cleared. The clear
-    /// itself sends an output report, so doing it on every `set_led` call makes animated
-    /// LED effects (breathing/rainbow at ~30 Hz) visibly flicker — clear once per pad.
-    led_player_cleared_for: Vec<u32>,
     last_hotplug_scan: Instant,
     bt_battery: Cell<Option<(u32, Instant, Option<i32>)>>,
 }
@@ -323,7 +319,6 @@ impl GamepadInput {
             touchpad_samples: Vec::new(),
             poll_mode: PollMode::Full,
             prev_touchpad_pos: None,
-            led_player_cleared_for: Vec::new(),
             last_hotplug_scan: Instant::now(),
             bt_battery: Cell::new(None),
         };
@@ -418,8 +413,6 @@ impl GamepadInput {
         if self.pads.len() == before {
             return false;
         }
-        let ids: Vec<u32> = self.pads.iter().map(|p| p.id).collect();
-        self.led_player_cleared_for.retain(|id| ids.contains(id));
         if self.active().is_none() {
             self.primary = self.best_scored_pad();
             self.prev_touchpad_pos = None;
@@ -580,6 +573,12 @@ impl GamepadInput {
 
     /// Returns the SDL3-detected controller type as a canonical string.
     /// Uses `sdl3_type_to_str(gamepad.type())` — no name heuristic needed.
+    /// Puts the DualSense / DS4 back on its PlayStation player lighting: the player colour on
+    /// the lightbar and the white player lights under the touchpad.
+    ///
+    /// SDL3 keeps the last `SDL_SetGamepadLED` colour for as long as the pad stays open (its
+    /// HIDAPI driver never clears `color_set`), so re-assigning the player index alone leaves a
+    /// custom colour on the lightbar. The player colour is therefore written explicitly.
     pub fn release_led(&mut self) {
         unsafe extern "C" {
             fn SDL_SetGamepadPlayerIndex(
@@ -587,16 +586,18 @@ impl GamepadInput {
                 player_index: ::std::ffi::c_int,
             ) -> bool;
         }
-        for pad in &self.pads {
+        for (index, pad) in self.pads.iter().enumerate() {
             let Some(raw) = pad_raw(&pad.gp) else {
                 continue;
             };
+            let (r, g, b) = player_led_color(index);
+            // Clear first so SDL re-sends the player lights even when the index is unchanged.
             unsafe {
                 SDL_SetGamepadPlayerIndex(raw, -1);
-                SDL_SetGamepadPlayerIndex(raw, 0);
+                SDL_SetGamepadPlayerIndex(raw, index as ::std::ffi::c_int);
+                SDL_SetGamepadLED(raw, r, g, b);
             }
         }
-        self.led_player_cleared_for.clear();
     }
 
     pub fn active_controller_type(&self) -> &'static str {
@@ -607,29 +608,13 @@ impl GamepadInput {
 
     /// Sets the controller lightbar / LED color. No-ops if the controller has no LED.
     ///
-    /// Clears SDL3's automatic player-index lightbar color first so the custom color is not
-    /// overwritten by SDL3's internal player-assignment logic (relevant for DualSense / DS4).
+    /// The player index is left alone: once a colour is set SDL3 always sends it instead of the
+    /// player colour, and clearing the index would also switch off the white player lights.
     pub fn set_led(&mut self, r: u8, g: u8, b: u8) {
-        unsafe extern "C" {
-            // Setting player index to -1 removes SDL3's automatic player-indicator color so
-            // SDL_SetGamepadLED can take full control of the DualSense / DS4 lightbar.
-            fn SDL_SetGamepadPlayerIndex(
-                gamepad: *mut sdl3::sys::gamepad::SDL_Gamepad,
-                player_index: ::std::ffi::c_int,
-            ) -> bool;
-        }
         for pad in &self.pads {
             let Some(raw) = pad_raw(&pad.gp) else {
                 continue;
             };
-            // The player-index clear sends its own output report; repeating it on every LED
-            // write makes ~30 Hz animated effects flicker. Clear once per pad instance.
-            if !self.led_player_cleared_for.contains(&pad.id) {
-                unsafe {
-                    SDL_SetGamepadPlayerIndex(raw, -1);
-                }
-                self.led_player_cleared_for.push(pad.id);
-            }
             unsafe {
                 SDL_SetGamepadLED(raw, r, g, b);
             }
@@ -904,6 +889,20 @@ pub fn map_power_info(state: i32, pct: i32, xbox_wired: bool) -> (i32, bool, boo
 }
 
 const BT_BATTERY_TTL: Duration = Duration::from_secs(30);
+
+/// SDL3's own DualSense / DS4 player colours (`SetLedsForPlayerIndex` in its HIDAPI drivers).
+fn player_led_color(index: usize) -> (u8, u8, u8) {
+    const COLORS: [(u8, u8, u8); 7] = [
+        (0x00, 0x00, 0x40),
+        (0x40, 0x00, 0x00),
+        (0x00, 0x40, 0x00),
+        (0x20, 0x00, 0x20),
+        (0x20, 0x10, 0x00),
+        (0x00, 0x10, 0x10),
+        (0x10, 0x10, 0x10),
+    ];
+    COLORS[index % COLORS.len()]
+}
 
 fn bluetooth_address(path: &str) -> Option<String> {
     path.split(['&', '#', '\\', '_'])
