@@ -830,7 +830,6 @@ impl GamepadPoll {
                     crate::win::vk_ui::request_repaint();
                 }
                 if crate::vk_nav::tick_modifier_hold(Instant::now()) {
-                    // Held RT / LT locked its layer (caps / symbols) — a firmer confirm than the tap.
                     self.backend.haptic_alert();
                     crate::win::vk_ui::request_repaint();
                 }
@@ -1486,7 +1485,6 @@ impl GamepadPoll {
             }
             (Button::Lt, true) => {
                 vk_nav::toggle_symbols();
-                // Keep holding LT: the one-shot symbol layer locks (see `tick_modifier_hold`).
                 vk_nav::modifier_hold_pressed(vk_nav::ModifierHold::Symbol);
                 self.backend.haptic_confirm();
                 None
