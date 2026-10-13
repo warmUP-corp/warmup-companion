@@ -28,18 +28,18 @@ use windows::Win32::UI::WindowsAndMessaging::{
     PostThreadMessageW, SetTimer, SetWindowPos, ShowWindow, EVENT_SYSTEM_DESKTOPSWITCH,
     EVENT_SYSTEM_FOREGROUND, HMENU, HWND_NOTOPMOST, HWND_TOPMOST, MA_NOACTIVATE, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_MAXIMIZE, SW_RESTORE,
-    SW_SHOWNOACTIVATE, WINDOWPOS, WINEVENT_OUTOFCONTEXT, WM_DESTROY, WM_LBUTTONDOWN,
-    WM_MOUSEACTIVATE, WM_PAINT, WM_TIMER, WM_WINDOWPOSCHANGING, WS_EX_NOACTIVATE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    SW_SHOWNOACTIVATE, WINDOWPOS, WINEVENT_OUTOFCONTEXT, WM_DESTROY, WM_DISPLAYCHANGE,
+    WM_DPICHANGED, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_PAINT, WM_TIMER, WM_WINDOWPOSCHANGING,
+    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use super::desktop;
 use super::desktop_window::{self, DesktopApp, DesktopWindowThread, WM_APP_REPAINT, WM_APP_SHOW};
 use super::vk_log;
-pub use super::vk_renderer::VkPalette;
-use super::vk_renderer::{self, VkRenderer};
 #[cfg(feature = "vk-panels")]
 pub(crate) use super::vk_renderer::vk_panels;
+pub use super::vk_renderer::VkPalette;
+use super::vk_renderer::{self, VkRenderer};
 
 /// Live keyboard palette (OS dark/light defaults, then `settings.ini` overrides).
 pub fn theme_palette() -> VkPalette {
@@ -794,6 +794,22 @@ unsafe extern "system" fn vk_wndproc(
             LRESULT(0)
         }
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        WM_DPICHANGED | WM_DISPLAYCHANGE => {
+            if VK_VISIBLE.load(Ordering::SeqCst) {
+                let (x, y, w, h) = vk_dock_rect();
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND::default(),
+                    x,
+                    y,
+                    w,
+                    h,
+                    SWP_NOACTIVATE | SWP_NOZORDER,
+                );
+                request_repaint();
+            }
+            LRESULT(0)
+        }
         WM_TIMER => {
             match _wparam.0 {
                 VK_ZORDER_TIMER_ID => {
@@ -973,13 +989,18 @@ unsafe fn target_monitor_dpi_scale() -> f32 {
 unsafe fn docked_base_h(full_h: i32) -> i32 {
     let look = vk_look();
     if !look.tv_layout() {
-        let h = VK_KB_REF_H * target_monitor_dpi_scale() * crate::config::vk_bar_scale();
-        let extra = top_inset() - vk_renderer::STRIP_BAND_H + bottom_inset();
-        return ((h + extra).round() as i32).clamp(160, full_h);
+        let h = docked_compact_h(ui_scale(), top_inset(), bottom_inset());
+        return (h.round() as i32).clamp(160, full_h);
     }
     let rows = vk_nav::rows_snapshot();
     let h = vk_renderer::dock_height_for_full_keys(vk_scale_w(), &rows, top_inset(), look);
     (h.round() as i32).clamp(160, full_h)
+}
+
+fn docked_compact_h(ui_scale: f32, top: f32, bottom: f32) -> f32 {
+    (VK_KB_REF_H * crate::config::COMPACT_BAR_SCALE - vk_renderer::STRIP_BAND_H) * ui_scale
+        + top
+        + bottom
 }
 
 fn key_scale(dpi_scale: f32, bar_scale: f32) -> f32 {

@@ -506,7 +506,8 @@ static NORMAL_SPEC: StyleSpec = StyleSpec {
     separator_alpha: 0.0,
 };
 
-pub(crate) const MONO_FAMILIES: &[&str] = &["Inter", "SF Pro Text", "Segoe UI Variable Text", "Segoe UI"];
+pub(crate) const MONO_FAMILIES: &[&str] =
+    &["Inter", "SF Pro Text", "Segoe UI Variable Text", "Segoe UI"];
 
 static MONO_SPEC: StyleSpec = StyleSpec {
     design_kh: 100.0,
@@ -866,6 +867,7 @@ struct StyleFonts {
 pub struct VkRenderer {
     width: u32,
     height: u32,
+    dip_scale: f32,
     swapchain: IDXGISwapChain1,
     d2d_context: ID2D1DeviceContext,
     /// Owns the swapchain buffer. Must be dropped before `ResizeBuffers`, or the
@@ -2092,6 +2094,7 @@ impl VkRenderer {
         Ok(Self {
             width,
             height,
+            dip_scale: 1.0,
             swapchain,
             d2d_context,
             d2d_target: Some(d2d_target),
@@ -2129,6 +2132,23 @@ impl VkRenderer {
         let width = (client.right - client.left).max(1) as u32;
         let height = (client.bottom - client.top).max(1) as u32;
         self.resize_to(width, height)
+    }
+
+    pub fn set_dip_scale(&mut self, scale: f32) {
+        self.dip_scale = if scale.is_finite() {
+            scale.max(1.0)
+        } else {
+            1.0
+        };
+    }
+
+    unsafe fn dip_canvas(&self) -> (f32, f32) {
+        let dpi = 96.0 * self.dip_scale;
+        self.d2d_context.SetDpi(dpi, dpi);
+        (
+            self.width as f32 / self.dip_scale,
+            self.height as f32 / self.dip_scale,
+        )
     }
 
     pub unsafe fn resize_to(&mut self, width: u32, height: u32) -> Result<(), String> {
@@ -2254,7 +2274,7 @@ impl VkRenderer {
             icon if icon.is_controller_tip() => (draw_px * 3.0)
                 .round()
                 .clamp(54.0, (draw_px * 3.0).max(192.0)),
-            _ => draw_px,
+            _ => (draw_px * self.dip_scale).round(),
         } as u32;
         let key = IconCacheKey {
             icon,
@@ -2735,7 +2755,16 @@ impl VkRenderer {
         let panel_open = false;
         #[cfg(feature = "vk-panels")]
         if panel_open {
-            self.draw_panel(pal, spec, &fonts, &rects, unit, radius, style, controller_icons)?;
+            self.draw_panel(
+                pal,
+                spec,
+                &fonts,
+                &rects,
+                unit,
+                radius,
+                style,
+                controller_icons,
+            )?;
         }
 
         for kr in rects.iter().filter(|_| !panel_open) {
@@ -3979,8 +4008,7 @@ impl VkRenderer {
         accent: u32,
         lines: &[(u32, String)],
     ) -> Result<(), String> {
-        let cw = self.width as f32;
-        let ch = self.height as f32;
+        let (cw, ch) = self.dip_canvas();
         // Left-align text for the panel (the keyboard path centres it).
         let _ = self
             .text_format
@@ -4077,8 +4105,7 @@ impl VkRenderer {
         if let Some(spec) = prompt_spec(p.style) {
             return self.draw_prompt_card_spec(p, spec);
         }
-        let cw = self.width as f32;
-        let ch = self.height as f32;
+        let (cw, ch) = self.dip_canvas();
         let card_t = card_t.clamp(0.0, 1.0);
         // Pill text leaves first, then the panel grows, then title + art arrive:
         // the two text layers never sit on top of each other.
@@ -4382,8 +4409,7 @@ impl VkRenderer {
     }
 
     pub unsafe fn draw_tips(&mut self, p: &TipsPill) -> Result<(), String> {
-        let cw = self.width as f32;
-        let ch = self.height as f32;
+        let (cw, ch) = self.dip_canvas();
         let spec = prompt_spec(p.style);
         let family = ControllerIconFamily::from_label(p.controller_label);
         let (label, counter_format) = match spec {
@@ -4691,8 +4717,7 @@ impl VkRenderer {
         spec: &PromptSpec,
     ) -> Result<(), String> {
         let fonts = self.ensure_prompt_fonts(spec)?;
-        let cw = self.width as f32;
-        let ch = self.height as f32;
+        let (cw, ch) = self.dip_canvas();
         let card_t = p.card_t.clamp(0.0, 1.0);
         let prompt_alpha = 1.0 - (card_t / 0.3).clamp(0.0, 1.0);
         let content_alpha = ((card_t - 0.35) / 0.65).clamp(0.0, 1.0);
@@ -5003,8 +5028,7 @@ impl VkRenderer {
     /// rectangle, so the corner wedges are filled. Only the inner edge has a
     /// small radius.
     unsafe fn draw_display_border(&self, accent: u32, alpha: f32) -> Result<(), String> {
-        let cw = self.width as f32;
-        let ch = self.height as f32;
+        let (cw, ch) = self.dip_canvas();
         let scale = (ch / 1080.0).clamp(0.85, 2.0);
         let radius = 8.0 * scale;
         // How far the glow reaches in from the bezel, faintest first. Each band
@@ -5050,8 +5074,7 @@ impl VkRenderer {
             label_alpha,
             show_orb,
         } = *pill;
-        let cw = self.width as f32;
-        let ch = self.height as f32;
+        let (cw, ch) = self.dip_canvas();
         let now = Instant::now();
         let alpha = alpha.clamp(0.0, 1.0);
         let label_alpha = label_alpha.clamp(0.0, 1.0) * alpha;
