@@ -77,6 +77,8 @@ mod parental_guard;
 #[cfg(all(windows, feature = "gamepad"))]
 mod parental_store;
 #[cfg(feature = "gamepad")]
+mod app_profiles;
+#[cfg(feature = "gamepad")]
 mod pc_cursor;
 #[cfg(feature = "gamepad")]
 mod touchpad_gestures;

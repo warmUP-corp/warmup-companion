@@ -83,12 +83,25 @@ pub(crate) enum Icon {
     RotateCcw,
     Check,
     ChevronRight,
+    ChevronLeft,
+    ChevronDown,
+    AppWindow,
+    Globe,
+    Plus,
     Pad(bool, usize),
     Svg(&'static str),
 }
 
 pub(crate) fn pad_svg(ps: bool, i: usize) -> &'static str {
     match (ps, i) {
+        (_, 12) => include_str!("../../assets/controller-center/dpad-left.svg"),
+        (_, 13) => include_str!("../../assets/controller-center/dpad-right.svg"),
+        (_, 14) => include_str!("../../assets/controller-center/dpad-up.svg"),
+        (_, 15) => include_str!("../../assets/controller-center/dpad-down.svg"),
+        (true, 10) => include_str!("../../controller-icons/p5_share.svg"),
+        (true, 11) => include_str!("../../controller-icons/p5_options.svg"),
+        (false, 10) => include_str!("../../controller-icons/x_menu_view.svg"),
+        (false, 11) => include_str!("../../controller-icons/x_menu_menu.svg"),
         (true, 0) => include_str!("../../controller-icons/p5_face_cross_colored.svg"),
         (true, 1) => include_str!("../../controller-icons/p5_face_circle_colored.svg"),
         (true, 2) => include_str!("../../controller-icons/p5_face_square_colored.svg"),
@@ -130,6 +143,11 @@ pub(crate) fn icon_svg(icon: Icon) -> Option<&'static str> {
         Icon::RotateCcw => include_str!("../../assets/controller-center/rotate-ccw.svg"),
         Icon::Check => include_str!("../../assets/controller-center/check.svg"),
         Icon::ChevronRight => include_str!("../../assets/controller-center/chevron-right.svg"),
+        Icon::ChevronLeft => include_str!("../../assets/controller-center/chevron-left.svg"),
+        Icon::ChevronDown => include_str!("../../assets/controller-center/chevron-down.svg"),
+        Icon::AppWindow => include_str!("../../assets/controller-center/app-window.svg"),
+        Icon::Globe => include_str!("../../assets/controller-center/globe.svg"),
+        Icon::Plus => include_str!("../../assets/controller-center/plus.svg"),
         Icon::Pad(ps, i) => pad_svg(ps, i),
     })
 }

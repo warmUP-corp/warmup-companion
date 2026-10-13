@@ -921,6 +921,23 @@ impl GamepadPoll {
                 }
                 continue;
             }
+            #[cfg(windows)]
+            if change.pressed
+                && !self.view_down
+                && !crate::pipe_server::native_vk_suppressed()
+                && !Self::service_signin_desktop()
+                && !(self.shot_lb_down && self.shot_rb_down)
+                && cursor_injection_enabled
+                && crate::config::gamepad_settings().cursor_enabled
+            {
+                if let Some(chord) =
+                    crate::app_profiles::chord_for_foreground(change.button.as_str())
+                {
+                    cursor.tap_chord(chord);
+                    self.backend.haptic_tick();
+                    continue;
+                }
+            }
             let view_action = view_chord_step(&mut self.view_down, &mut self.view_chorded, change);
             // Use one mode snapshot for forwarding and local handling. Sending L3 to warmUP
             // while also opening the native VK lets a delayed launcher event open/focus its dock

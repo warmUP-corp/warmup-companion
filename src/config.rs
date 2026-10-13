@@ -694,6 +694,15 @@ const SETTINGS_TEMPLATE: &str = r#"# Warmup Companion settings. One `key = value
 # WARMUP_WHISPER_LANG environment variable. Mic = your Windows default input device.
 # Dictation vocabulary: coding (built-in terminal/agent terms) | off | a comma list, e.g. coding, herdr, MyProject
 # vocabulary = coding
+
+# Per-app button profiles: profile.<exe>.<button> = <keys>, matched on the foreground
+# app. Buttons: A B X Y LB RB LT RT SELECT START UP DOWN LEFT RIGHT. Keys joined
+# with +: ctrl shift alt win tab enter esc space backspace left right up down
+# pageup pagedown home end f5 f11, a-z, 0-9. "none" keeps the default action.
+# Browsers (chrome, msedge, firefox, brave, opera, vivaldi) ship with
+# B = ctrl+w, Y = ctrl+t, RT = ctrl+tab, LT = ctrl+shift+tab.
+# profile.chrome.exe.b = ctrl+w
+# profile.notepad.exe.y = ctrl+s
 "#;
 
 /// Path to `settings.ini`, creating it with the documented template if missing
@@ -821,6 +830,47 @@ pub fn reset_settings_to_shipped() -> Result<std::path::PathBuf, String> {
 }
 
 #[cfg(feature = "gamepad")]
+static SETTINGS_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(feature = "gamepad")]
+fn is_profile_key(key: &str) -> bool {
+    key == "app_profiles" || key.starts_with("profile.")
+}
+
+#[cfg(feature = "gamepad")]
+pub fn replace_profile_settings(lines: &[(String, String)]) -> Result<(), String> {
+    for (key, value) in lines {
+        validate_gamepad_setting(key, value)?;
+    }
+    let path = settings_path().ok_or_else(|| "settings path unavailable".to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create settings dir: {e}"))?;
+    }
+    let _guard = SETTINGS_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let current = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut text: String = current
+        .lines()
+        .filter(|line| {
+            let t = line.trim_start();
+            t.starts_with('#') || !t.split_once('=').is_some_and(|(k, _)| is_profile_key(k.trim()))
+        })
+        .flat_map(|line| [line, "
+"])
+        .collect();
+    for (key, value) in lines {
+        text.push_str(&format!("{key}={value}
+"));
+    }
+    let tmp = path.with_extension("ini.tmp");
+    std::fs::write(&tmp, text).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("rename to {}: {e}", path.display()))?;
+    invalidate_gamepad_settings_cache();
+    Ok(())
+}
+
+#[cfg(feature = "gamepad")]
 pub fn set_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
     validate_gamepad_setting(key, value)?;
     let path = settings_path()
@@ -828,8 +878,9 @@ pub fn set_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create settings dir: {e}"))?;
     }
-    static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = SETTINGS_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let current = std::fs::read_to_string(&path).unwrap_or_default();
     let text = upsert_setting_line(&current, key, value);
     let tmp = path.with_extension("ini.tmp");
@@ -919,6 +970,7 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
         | "multi_controller"
         | "update_check"
         | "voice_enabled"
+        | "app_profiles"
         | "vk_side_tips" => match value.trim().to_ascii_lowercase().as_str() {
             "true" | "false" | "1" | "0" | "yes" | "no" | "on" | "off" => Ok(()),
             _ => Err(format!("{key} must be a boolean")),
@@ -988,6 +1040,13 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
                 Err("vocabulary must not contain newlines or '='".to_string())
             } else {
                 Ok(())
+            }
+        }
+        _ if key.starts_with("profile.") => {
+            if crate::app_profiles::valid_setting(key, value) {
+                Ok(())
+            } else {
+                Err(format!("{key} must be a key combo like ctrl+w, or none"))
             }
         }
         _ => Err(format!("unknown setting: {key}")),

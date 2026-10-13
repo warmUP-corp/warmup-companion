@@ -325,6 +325,10 @@ impl PcCursor {
         self.dispatch(Cmd::EnterTap);
     }
 
+    pub fn tap_chord(&mut self, keys: Vec<Key>) {
+        self.dispatch(Cmd::Chord(keys));
+    }
+
     pub fn screenshot(&mut self, window_only: bool) {
         self.dispatch(Cmd::Screenshot { window_only });
     }
@@ -391,18 +395,27 @@ fn apply_cmd(enigo: &mut Enigo, cmd: Cmd) {
                 Swipe::Up => (&[Key::Meta], Key::Tab),
                 Swipe::Down => (&[Key::Meta], Key::Other(0x44)),
             };
-            for m in mods {
-                let _ = enigo.key(*m, Direction::Press);
-            }
-            let _ = enigo.key(key, Direction::Click);
-            for m in mods.iter().rev() {
-                let _ = enigo.key(*m, Direction::Release);
+            tap_keys(enigo, mods, key);
+        }
+        Cmd::Chord(keys) => {
+            if let Some((key, mods)) = keys.split_last() {
+                tap_keys(enigo, mods, *key);
             }
         }
         Cmd::Screenshot { window_only } => {
             #[cfg(windows)]
             copy_screen_to_clipboard(window_only);
         }
+    }
+}
+
+fn tap_keys(enigo: &mut Enigo, mods: &[Key], key: Key) {
+    for m in mods {
+        let _ = enigo.key(*m, Direction::Press);
+    }
+    let _ = enigo.key(key, Direction::Click);
+    for m in mods.iter().rev() {
+        let _ = enigo.key(*m, Direction::Release);
     }
 }
 
@@ -609,7 +622,7 @@ fn spawn_toast_helper(path: &std::path::Path, copied: bool) {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Cmd {
     Move(i32, i32),
     ScrollV(i32),
@@ -622,6 +635,7 @@ enum Cmd {
     Wheel(i32, i32),
     Swipe(crate::touchpad_gestures::Swipe),
     Screenshot { window_only: bool },
+    Chord(Vec<Key>),
 }
 
 /// Dedicated cursor-injection thread. Owns its own Enigo and runs on whatever
