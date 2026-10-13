@@ -407,6 +407,12 @@ pub fn reset_selection() {
     crate::vk_predict::reset();
 }
 
+pub fn on_ui_shown(reshow: bool) {
+    if !reshow {
+        reset_selection();
+    }
+}
+
 pub fn selection() -> KeyPos {
     NAV.lock().map(|n| n.pos).unwrap_or_default()
 }
@@ -1550,6 +1556,19 @@ mod tests {
         assert_eq!(shoulder_nav(true, false), ShoulderNav::CaretWord);
         assert_eq!(shoulder_nav(false, true), ShoulderNav::CycleSuggestions);
         assert_eq!(shoulder_nav(true, true), ShoulderNav::CaretWord);
+    }
+
+    #[test]
+    fn reshow_keeps_locked_numbers_layer() {
+        let _guard = NAV_TEST_LOCK.lock().unwrap();
+        {
+            let mut nav = NAV.lock().unwrap();
+            nav.layer = Layer::Symbol;
+            nav.one_shot_symbol = false;
+            rebuild(&mut nav);
+        }
+        on_ui_shown(true);
+        assert_eq!(modifier_state(), (false, false, true, true));
     }
 
     #[test]

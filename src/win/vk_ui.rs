@@ -443,7 +443,7 @@ fn ui_show(attach: VkAttach) {
             return;
         }
     }
-    vk_nav::reset_selection();
+    vk_nav::on_ui_shown(old.is_some());
     UI.with(|ui| {
         let mut state = ui.borrow_mut();
         state.monitor = Some(unsafe { target_monitor_rect() });
