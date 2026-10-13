@@ -44,6 +44,8 @@ pub(crate) struct LedState {
     pub(crate) b2: u8,
     /// 0.0–1.0 brightness multiplier.
     pub(crate) brightness: f32,
+    /// 0.0 (white) – 1.0 (full colour) saturation.
+    pub(crate) saturation: f32,
 }
 
 impl Default for LedState {
@@ -57,6 +59,7 @@ impl Default for LedState {
             g2: 0x7b,
             b2: 0x99,
             brightness: 1.0,
+            saturation: 1.0,
         }
     }
 }
@@ -109,8 +112,24 @@ pub(crate) fn blend_channel(a: u8, b: u8, t: f32, brightness: f32) -> u8 {
     scale_channel(c.round() as u8, brightness)
 }
 
+/// Mixes a channel toward white as saturation drops (1.0 keeps it, 0.0 gives white).
+fn desaturate_channel(c: u8, saturation: f32) -> u8 {
+    let s = saturation.clamp(0.0, 1.0);
+    (c as f32 + (255.0 - c as f32) * (1.0 - s)).round() as u8
+}
+
 /// Effective lightbar colour for `state` at elapsed time `t` seconds.
 pub(crate) fn led_color_at(state: &LedState, t: f32) -> (u8, u8, u8) {
+    let s = state.saturation;
+    let state = &LedState {
+        r: desaturate_channel(state.r, s),
+        g: desaturate_channel(state.g, s),
+        b: desaturate_channel(state.b, s),
+        r2: desaturate_channel(state.r2, s),
+        g2: desaturate_channel(state.g2, s),
+        b2: desaturate_channel(state.b2, s),
+        ..*state
+    };
     match state.effect {
         LedEffect::Off => (0, 0, 0),
         LedEffect::Solid => (
@@ -129,7 +148,7 @@ pub(crate) fn led_color_at(state: &LedState, t: f32) -> (u8, u8, u8) {
             )
         }
         // ~6 s hue sweep; the base colour is replaced by the cycling hue.
-        LedEffect::Rainbow => hsv_to_rgb((t / 6.0).fract(), 1.0, state.brightness),
+        LedEffect::Rainbow => hsv_to_rgb((t / 6.0).fract(), s.clamp(0.0, 1.0), state.brightness),
         LedEffect::Gradient => {
             // Smoothly ping-pong between the two configured colours over ~5 seconds.
             let mix = 0.5 - 0.5 * (t * std::f32::consts::TAU / 5.0).cos();
@@ -201,6 +220,7 @@ pub(crate) fn apply_led_config(p: &crate::protocol::ConfigPayload) {
         p.led_secondary_color.as_deref(),
         p.led_effect.as_deref(),
         p.led_brightness,
+        p.led_saturation,
     );
     ensure_led_engine();
 }
@@ -211,6 +231,7 @@ fn set_led_fields(
     secondary: Option<&str>,
     effect: Option<&str>,
     brightness: Option<f32>,
+    saturation: Option<f32>,
 ) {
     if let Ok(mut st) = led_state().lock() {
         // `parse_theme_color` yields a Windows COLORREF (0x00BBGGRR); extract true RGB
@@ -231,6 +252,9 @@ fn set_led_fields(
         if let Some(brightness) = brightness {
             st.brightness = brightness.clamp(0.0, 1.0);
         }
+        if let Some(saturation) = saturation {
+            st.saturation = saturation.clamp(0.0, 1.0);
+        }
     }
     wake_led_engine();
 }
@@ -248,6 +272,22 @@ pub(crate) fn apply_led_choice(color: Option<&str>, effect: Option<&str>) {
         }
     }
     ensure_led_engine();
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn apply_led_brightness(brightness: f32) {
+    if let Ok(mut st) = led_state().lock() {
+        st.brightness = brightness.clamp(0.0, 1.0);
+    }
+    wake_led_engine();
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn apply_led_saturation(saturation: f32) {
+    if let Ok(mut st) = led_state().lock() {
+        st.saturation = saturation.clamp(0.0, 1.0);
+    }
+    wake_led_engine();
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -270,12 +310,20 @@ pub(crate) fn load_saved_led() {
     let effect = crate::config::raw_setting("led_effect").map(|e| e.to_ascii_lowercase());
     let brightness =
         crate::config::raw_setting("led_brightness").and_then(|b| b.parse::<f32>().ok());
-    if color.is_some() || secondary.is_some() || effect.is_some() || brightness.is_some() {
+    let saturation =
+        crate::config::raw_setting("led_saturation").and_then(|s| s.parse::<f32>().ok());
+    if color.is_some()
+        || secondary.is_some()
+        || effect.is_some()
+        || brightness.is_some()
+        || saturation.is_some()
+    {
         set_led_fields(
             color.as_deref(),
             secondary.as_deref(),
             effect.as_deref(),
             brightness,
+            saturation,
         );
         ensure_led_engine();
     }
@@ -355,6 +403,7 @@ mod tests {
             led_secondary_color: None,
             led_effect: led_effect.map(str::to_string),
             led_brightness,
+            led_saturation: None,
             natural_scroll: false,
             cursor_smoothing: 0.0,
             keyboard_theme: None,

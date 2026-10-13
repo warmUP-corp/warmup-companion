@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.10.2
+
+- **Saturation slider.** The Lightbar panel gets a Saturation slider next to Brightness (saved as `led_saturation`, mirrored with warmUP via the optional `ledSaturation` config field); lower values mix the colour toward white.
+- **Battery reaches warmUP right after a reconnect.** The pipe re-sends the level whenever the controller connection changes; before, a pad that came back with the same level stayed "unknown" in warmUP for up to a minute.
+- **Charging bolt.** While a controller charges over the cable, the Controller Center battery chip shows a bolt after the percentage (for example "95% ⚡").
+- **Lightbar changes apply right away.** Picking a colour, effect or brightness in the Controller Center shows and saves it at once; Apply is no longer needed for the lightbar.
+- **Lightbar brightness in the Controller Center.** The Lightbar panel has a Brightness slider (5 % steps), saved to `led_brightness` and mirrored with warmUP. While the panel is open the live input view steps aside to make room.
+- **Off is the real PlayStation lighting again.** Off restores the player colour and the white player lights. Before, a colour picked earlier stayed on the lightbar, because SDL keeps the last custom colour while the pad is open.
+- **Custom colours keep the white player lights on.** Picking a colour no longer turns off the lights under the touchpad.
+
 ## v0.10.1
 
 - **Per-app controller profiles.** A new Apps tab in the Control Center maps controller buttons to keys or shortcuts for a specific program (or for every browser at once). Pick an installed app or type its program name; profiles switch automatically when that app is in front.
