@@ -197,7 +197,7 @@ No up-frame ack. Behavior:
 
 `Restart App` / updates must not send this frame. Use it only for "Close Companion with warmUP".
 
-The companion maps cursor/scroll tuning fields to its internal names per the golden fixture's `configFieldMapping` (`sensitivity->cursor_speed`, `accelerationExp->cursor_accel`, `deadzone->cursor_deadzone`, `scrollSensitivity->scroll_speed`).
+The companion maps cursor/scroll tuning fields to its internal names per the golden fixture's `configFieldMapping` (`sensitivity->cursor_speed`, `accelerationExp->cursor_accel`, `deadzone->cursor_deadzone`, `scrollSensitivity->scroll_speed`, plus the optional `scrollAccel->scroll_accel`, `1.0`–`5.0`).
 
 `keyboardTheme` is optional, and each color inside it is optional. Colors are `#RRGGBB`;
 the companion persists provided values as `keyboard_bg`, `keyboard_key`,

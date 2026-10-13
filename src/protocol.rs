@@ -307,6 +307,9 @@ pub struct ConfigPayload {
     /// Lightbar saturation 0.0 (white) – 1.0 (full colour). Absent keeps the current saturation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub led_saturation: Option<f32>,
+    /// Right-stick scroll acceleration exponent (1.0–5.0). Absent keeps the current value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scroll_accel: Option<f32>,
     /// Invert the scroll direction (natural / reverse scrolling).
     #[serde(default)]
     pub natural_scroll: bool,
@@ -482,6 +485,7 @@ mod tests {
             led_effect: Some("gradient".into()),
             led_brightness: Some(0.8),
             led_saturation: None,
+            scroll_accel: Some(2.0),
             natural_scroll: true,
             cursor_smoothing: 0.25,
             keyboard_theme: Some(KeyboardThemePayload {
@@ -691,6 +695,7 @@ mod tests {
             led_effect: None,
             led_brightness: None,
             led_saturation: None,
+            scroll_accel: None,
             natural_scroll: true,
             cursor_smoothing: 0.25,
             keyboard_theme: None,

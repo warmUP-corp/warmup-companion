@@ -9,6 +9,7 @@
 - **Lightbar brightness in the Controller Center.** The Lightbar panel has a Brightness slider (5 % steps), saved to `led_brightness` and mirrored with warmUP. While the panel is open the live input view steps aside to make room.
 - **Off is the real PlayStation lighting again.** Off restores the player colour and the white player lights. Before, a colour picked earlier stayed on the lightbar, because SDL keeps the last custom colour while the pad is open.
 - **Custom colours keep the white player lights on.** Picking a colour no longer turns off the lights under the touchpad.
+- **Scroll acceleration syncs with warmUP.** The Cursor tab's Scroll acceleration now travels over the pipe like the other cursor settings (`scrollAccel` on the config frame, additive), so a change in either app shows up in the other.
 
 ## v0.10.1
 
