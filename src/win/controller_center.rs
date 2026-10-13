@@ -249,6 +249,19 @@ const LED_SWATCHES: &[(&str, Option<&str>)] = &[
     ("Pink", Some("#FF0A78")),
     ("Off", None),
 ];
+const LEGACY_LED_SWATCHES: &[(&str, usize)] = &[
+    ("#B6A0FF", 0),
+    ("#8000FF", 0),
+    ("#FF3B30", 2),
+    ("#FF9500", 3),
+    ("#FF3C00", 3),
+    ("#34C759", 4),
+    ("#00FF00", 4),
+    ("#32D2F0", 5),
+    ("#0A84FF", 6),
+    ("#FF2D92", 7),
+    ("#FF0066", 7),
+];
 const LED_EFFECT_OPTIONS: &[(&str, &str)] = &[
     ("Solid", "solid"),
     ("Breathing", "breathing"),
@@ -264,6 +277,12 @@ fn led_swatch_index(off: bool, rgb: (u8, u8, u8)) -> i32 {
     LED_SWATCHES
         .iter()
         .position(|(_, c)| *c == Some(hex.as_str()))
+        .or_else(|| {
+            LEGACY_LED_SWATCHES
+                .iter()
+                .find(|(c, _)| *c == hex)
+                .map(|(_, i)| *i)
+        })
         .map_or(0, |i| i as i32)
 }
 
@@ -2046,8 +2065,17 @@ fn led_brightness_of(pos: i32) -> f32 {
     (pos as f32 / 20.0).clamp(0.0, 1.0)
 }
 
-/// Saves and shows a lightbar change right away, like warmUP: colour, effect and brightness
-/// do not wait for Apply.
+fn sync_led_preview(ui: &mut Ui) {
+    let now = led_values(ui);
+    if now != ui.led_previewed {
+        ui.led_previewed = now;
+        let (color, effect) = led_choice(now.0, now.1);
+        crate::led_engine::apply_led_choice(color, Some(effect));
+        crate::led_engine::apply_led_brightness(led_brightness_of(now.2));
+        crate::led_engine::apply_led_saturation(led_brightness_of(now.3));
+    }
+}
+
 fn apply_led(ui: &mut Ui) {
     let now = led_values(ui);
     if now == ui.led_base {
@@ -2550,7 +2578,7 @@ fn tick(ui: &mut Ui) -> (bool, After) {
 }
 
 fn paint(ui: &mut Ui) {
-    apply_led(ui);
+    sync_led_preview(ui);
     let mut gfx = match ui.gfx.take() {
         Some(g) => g,
         None => match unsafe { Gfx::new() } {
