@@ -996,6 +996,10 @@ fn foreground_is_warmup_browser_info(exe: &str, title: &str) -> bool {
         && is_warmup_browser_title(title)
 }
 
+pub(crate) fn foreground_exe() -> String {
+    foreground_info().1
+}
+
 pub(crate) fn foreground_is_warmup_browser() -> bool {
     let (_, exe, _, title) = foreground_info();
     foreground_is_warmup_browser_info(&exe, &title)

@@ -970,6 +970,22 @@ impl GamepadPoll {
                     ));
                 }
             }
+            #[cfg(windows)]
+            if change.pressed
+                && !native_vk_suppressed
+                && !Self::service_signin_desktop()
+                && !(self.shot_lb_down && self.shot_rb_down)
+                && cursor_injection_enabled
+                && crate::config::gamepad_settings().cursor_enabled
+            {
+                if let Some(chord) =
+                    crate::app_profiles::chord_for_foreground(change.button.as_str())
+                {
+                    cursor.tap_chord(chord);
+                    self.backend.haptic_tick();
+                    continue;
+                }
+            }
             if change.button == Button::A || change.button == Button::Touchpad {
                 // Hold: button down -> mouse-left down, up -> up, so
                 // the PIN keypad sees a real press duration (not an instant click).

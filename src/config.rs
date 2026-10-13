@@ -694,6 +694,15 @@ const SETTINGS_TEMPLATE: &str = r#"# Warmup Companion settings. One `key = value
 # WARMUP_WHISPER_LANG environment variable. Mic = your Windows default input device.
 # Dictation vocabulary: coding (built-in terminal/agent terms) | off | a comma list, e.g. coding, herdr, MyProject
 # vocabulary = coding
+
+# Per-app button profiles: profile.<exe>.<button> = <keys>, matched on the foreground
+# app. Buttons: A B X Y LB RB LT RT SELECT START UP DOWN LEFT RIGHT. Keys joined
+# with +: ctrl shift alt win tab enter esc space backspace left right up down
+# pageup pagedown home end f5 f11, a-z, 0-9. "none" keeps the default action.
+# Browsers (chrome, msedge, firefox, brave, opera, vivaldi) ship with
+# B = ctrl+w, Y = ctrl+t, RT = ctrl+tab, LT = ctrl+shift+tab.
+# profile.chrome.exe.b = ctrl+w
+# profile.notepad.exe.y = ctrl+s
 "#;
 
 /// Path to `settings.ini`, creating it with the documented template if missing
