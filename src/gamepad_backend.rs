@@ -6,7 +6,9 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-pub use warmup_gamepad::{Button, ButtonChange, GamepadInput, PollMode, TouchpadSample};
+pub use warmup_gamepad::{
+    Button, ButtonChange, GamepadInput, PadBattery, PollMode, TouchpadSample,
+};
 
 static USERLAND_POLL_PAUSED: AtomicBool = AtomicBool::new(false);
 
@@ -206,6 +208,10 @@ pub trait GamepadBackend {
     fn battery(&self) -> BatteryFrame {
         BatteryFrame::default()
     }
+    /// Every connected pad with its battery (multi-controller input). Empty when unsupported.
+    fn pads(&self) -> Vec<PadBattery> {
+        Vec::new()
+    }
     /// Set the lightbar/LED colour. No-op if the pad has no LED.
     fn set_led(&mut self, _r: u8, _g: u8, _b: u8) {}
     fn release_led(&mut self) {}
@@ -221,6 +227,7 @@ pub struct SdlBackend {
     touchpad: TouchpadFrame,
     gyro: Option<(f32, f32, f32)>,
     battery: BatteryFrame,
+    pads: Vec<PadBattery>,
     /// Gyro must be enabled once after each (re)connect before `read_gyro` returns data.
     gyro_enabled: bool,
 }
@@ -236,6 +243,7 @@ impl SdlBackend {
             touchpad: TouchpadFrame::default(),
             gyro: None,
             battery: BatteryFrame::default(),
+            pads: Vec::new(),
             gyro_enabled,
         })
     }
@@ -269,6 +277,7 @@ impl SdlBackend {
             wired,
             usb: self.input.connection_wired(),
         };
+        self.pads = self.input.pads_battery();
     }
 }
 
@@ -293,6 +302,10 @@ impl GamepadBackend for SdlBackend {
 
     fn battery(&self) -> BatteryFrame {
         self.battery
+    }
+
+    fn pads(&self) -> Vec<PadBattery> {
+        self.pads.clone()
     }
 
     fn set_led(&mut self, r: u8, g: u8, b: u8) {
@@ -348,6 +361,7 @@ struct SdlShared {
     touchpad: Mutex<TouchpadFrame>,
     gyro: Mutex<Option<(f32, f32, f32)>>,
     battery: Mutex<BatteryFrame>,
+    pads: Mutex<Vec<PadBattery>>,
 }
 
 /// `GamepadBackend` proxy whose `GamepadInput` (and SDL's windows) live entirely
@@ -372,6 +386,7 @@ impl SdlThreadBackend {
             touchpad: Mutex::new(TouchpadFrame::default()),
             gyro: Mutex::new(None),
             battery: Mutex::new(BatteryFrame::default()),
+            pads: Mutex::new(Vec::new()),
         });
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel::<Result<(), String>>();
@@ -507,6 +522,13 @@ fn sdl_thread_main(
                 };
             }
         }
+        if let Ok(mut p) = shared.pads.lock() {
+            *p = if pad_present {
+                input.pads_battery()
+            } else {
+                Vec::new()
+            };
+        }
         let mut pending = Vec::new();
         while let Ok(cmd) = cmd_rx.try_recv() {
             pending.push(cmd);
@@ -615,6 +637,14 @@ impl GamepadBackend for SdlThreadBackend {
 
     fn battery(&self) -> BatteryFrame {
         self.shared.battery.lock().map(|b| *b).unwrap_or_default()
+    }
+
+    fn pads(&self) -> Vec<PadBattery> {
+        self.shared
+            .pads
+            .lock()
+            .map(|p| p.clone())
+            .unwrap_or_default()
     }
 
     fn set_led(&mut self, r: u8, g: u8, b: u8) {
