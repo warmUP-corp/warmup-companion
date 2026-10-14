@@ -833,6 +833,13 @@ impl GamepadPoll {
             }
             #[cfg(windows)]
             {
+                if !self.backend.is_connected() {
+                    self.pad_down.clear();
+                    self.stick_nav = None;
+                    crate::vk_nav::release_holds();
+                } else if Self::service_signin_desktop() {
+                    crate::vk_nav::cancel_key_repeat();
+                }
                 self.sync_stick_nav(lx, ly);
                 if crate::win::vk_ui::tick_dpad_hold(Instant::now()) {
                     // Held d-pad move or held-key auto-repeat fired — ratchet tick.

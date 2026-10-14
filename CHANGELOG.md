@@ -1,11 +1,12 @@
 # Changelog
 
-## Unreleased
+## v0.10.3
 
-- **Every connected controller's battery reaches warmUP.** A new additive `pads` frame lists each connected pad with its name, type and battery (the active pad keeps the Windows Bluetooth refinement), sent when the list or a level changes. warmUP shows two controllers stacked in its Home battery pill; older warmUP builds ignore the frame.
+- **A held key can no longer get stuck on the sign-in screen.** On the PIN/password screen, a held button (A, B, Y, LB/RB) acts once instead of auto-repeating, so a lost button release can't keep typing into the PIN box. Turning the controller off now clears any held key or move while the keyboard is open.
 
 ## v0.10.2
 
+- **Every connected controller's battery reaches warmUP.** A new additive `pads` frame lists each connected pad with its name, type and battery (the active pad keeps the Windows Bluetooth refinement), sent when the list or a level changes. warmUP shows two controllers stacked in its Home battery pill; older warmUP builds ignore the frame.
 - **Saturation slider.** The Lightbar panel gets a Saturation slider next to Brightness (saved as `led_saturation`, mirrored with warmUP via the optional `ledSaturation` config field); lower values mix the colour toward white.
 - **Battery reaches warmUP right after a reconnect.** The pipe re-sends the level whenever the controller connection changes; before, a pad that came back with the same level stayed "unknown" in warmUP for up to a minute.
 - **Charging bolt.** While a controller charges over the cable, the Controller Center battery chip shows a bolt after the percentage (for example "95% ⚡").

@@ -740,6 +740,13 @@ pub fn tick_key_repeat(now: Instant) -> bool {
     true
 }
 
+pub fn cancel_key_repeat() {
+    if let Ok(mut nav) = NAV.lock() {
+        nav.repeat_key = None;
+        nav.repeat_deadline = None;
+    }
+}
+
 pub fn release_holds() {
     if let Ok(mut nav) = NAV.lock() {
         #[cfg(feature = "gamepad")]
