@@ -267,6 +267,10 @@ impl SdlBackend {
                     .active_controller_name()
                     .unwrap_or_else(|| "none".to_string()),
             );
+            #[cfg(target_os = "linux")]
+            if self.input.active_controller_name().is_some() {
+                crate::led_engine::reapply_led();
+            }
         }
         if mode != PollMode::Full {
             self.touchpad = TouchpadFrame::default();
@@ -492,6 +496,10 @@ fn sdl_thread_main(
             );
         }
         let pad_present = input.active_controller_name().is_some();
+        #[cfg(target_os = "linux")]
+        if connected_change && pad_present {
+            crate::led_engine::reapply_led();
+        }
         let changes = input.detect_button_changes();
         if !changes.is_empty() {
             if let Ok(mut q) = shared.changes.lock() {

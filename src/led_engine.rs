@@ -67,6 +67,8 @@ impl Default for LedState {
 static LED_STATE: OnceLock<Mutex<LedState>> = OnceLock::new();
 static LED_ENGINE: Once = Once::new();
 static LED_WAKE: OnceLock<(Mutex<()>, Condvar)> = OnceLock::new();
+#[cfg(target_os = "linux")]
+static LED_REAPPLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub(crate) fn led_state() -> &'static Mutex<LedState> {
     LED_STATE.get_or_init(|| Mutex::new(LedState::default()))
@@ -81,6 +83,12 @@ pub(crate) fn wake_led_engine() {
     let (lock, cv) = led_wake();
     let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
     cv.notify_one();
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn reapply_led() {
+    LED_REAPPLY.store(true, std::sync::atomic::Ordering::SeqCst);
+    wake_led_engine();
 }
 
 fn scale_channel(c: u8, f: f32) -> u8 {
@@ -175,6 +183,11 @@ pub(crate) fn ensure_led_engine() {
                 loop {
                     let mut park = Duration::from_millis(5000);
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        #[cfg(target_os = "linux")]
+                        if LED_REAPPLY.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                            last = None;
+                            released = false;
+                        }
                         if crate::gamepad_backend::game_owns_controller() {
                             last = None;
                             released = false;
