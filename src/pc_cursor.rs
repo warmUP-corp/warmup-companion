@@ -60,6 +60,8 @@ pub struct PcCursor {
     mouse: Option<evdev::uinput::VirtualDevice>,
     #[cfg(target_os = "linux")]
     keyboard: Option<evdev::uinput::VirtualDevice>,
+    #[cfg(target_os = "linux")]
+    notch_rem: (i32, i32),
     remainder_x: f32,
     remainder_y: f32,
     scroll_remainder_x: f32,
@@ -152,6 +154,7 @@ impl PcCursor {
         Self {
             mouse,
             keyboard,
+            notch_rem: (0, 0),
             remainder_x: 0.0,
             remainder_y: 0.0,
             scroll_remainder_x: 0.0,
@@ -300,6 +303,10 @@ impl PcCursor {
         if !settings.cursor_enabled {
             self.wheel_rem_x = 0.0;
             self.wheel_rem_y = 0.0;
+            #[cfg(target_os = "linux")]
+            {
+                self.notch_rem = (0, 0);
+            }
             return;
         }
         let (h, v) = touchpad_wheel(dx, dy, settings.scroll_speed, settings.natural_scroll);
@@ -401,7 +408,12 @@ impl PcCursor {
         }
         #[cfg(target_os = "linux")]
         {
-            apply_uinput(self.mouse.as_mut(), self.keyboard.as_mut(), cmd);
+            apply_uinput(
+                self.mouse.as_mut(),
+                self.keyboard.as_mut(),
+                &mut self.notch_rem,
+                cmd,
+            );
         }
         #[cfg(not(any(windows, target_os = "linux")))]
         {
@@ -868,6 +880,7 @@ fn uinput_error(error: std::io::Error) -> String {
 fn apply_uinput(
     mouse: Option<&mut evdev::uinput::VirtualDevice>,
     keyboard: Option<&mut evdev::uinput::VirtualDevice>,
+    notch_rem: &mut (i32, i32),
     cmd: Cmd,
 ) {
     let Some(mouse) = mouse else {
@@ -916,14 +929,16 @@ fn apply_uinput(
             let mut axes = Vec::with_capacity(4);
             if v != 0 {
                 axes.push((evdev::RelativeAxisCode::REL_WHEEL_HI_RES, v));
-                if v / 120 != 0 {
-                    axes.push((evdev::RelativeAxisCode::REL_WHEEL, v / 120));
+                let notches = take_notches(&mut notch_rem.1, v);
+                if notches != 0 {
+                    axes.push((evdev::RelativeAxisCode::REL_WHEEL, notches));
                 }
             }
             if h != 0 {
                 axes.push((evdev::RelativeAxisCode::REL_HWHEEL_HI_RES, h));
-                if h / 120 != 0 {
-                    axes.push((evdev::RelativeAxisCode::REL_HWHEEL, h / 120));
+                let notches = take_notches(&mut notch_rem.0, h);
+                if notches != 0 {
+                    axes.push((evdev::RelativeAxisCode::REL_HWHEEL, notches));
                 }
             }
             if !axes.is_empty() {
@@ -968,6 +983,16 @@ fn apply_uinput(
             crate::install::log_line("screenshot is not available on linux in this stage");
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn take_notches(rem: &mut i32, hi_res: i32) -> i32 {
+    if (*rem > 0 && hi_res < 0) || (*rem < 0 && hi_res > 0) {
+        *rem = 0;
+    }
+    let total = rem.saturating_add(hi_res);
+    *rem = total % 120;
+    total / 120
 }
 
 #[cfg(target_os = "linux")]
