@@ -15,8 +15,6 @@ use linux::*;
 #[cfg(not(windows))]
 pub(crate) use linux::{open_with, POINT};
 #[cfg(windows)]
-use win::*;
-#[cfg(windows)]
 pub(crate) use win::show;
 
 const TIMER_MS: u32 = 33;
