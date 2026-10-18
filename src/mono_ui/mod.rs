@@ -328,3 +328,14 @@ pub(crate) enum Align {
     Right,
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+pub(crate) enum VAlign {
+    Top,
+    Center,
+    Bottom,
+}
+
+pub(crate) const FONT_NORMAL: i32 = 400;
+pub(crate) const FONT_SEMI_BOLD: i32 = 600;
+

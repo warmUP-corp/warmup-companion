@@ -20,7 +20,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use windows::Foundation::Numerics::Matrix3x2;
-use windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE;
 
 use super::desktop_window::{self, DesktopApp, DesktopWindowThread};
 use crate::mono_ui::*;
@@ -803,14 +802,14 @@ unsafe fn draw_progress(ui: &Ui, g: &mut Gfx, left: &str, right: &str) {
     if ui.shown > 0.0 {
         let bar = rect(SIDE, CONTENT_Y, (INNER * ui.shown).max(8.0), 8.0);
         g.fill(bar, 4.0, t.accent, 1.0);
-        g.rt.PushAxisAlignedClip(&bar.d2d(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        g.push_clip(bar, true);
         let travel = bar.w + SHIMMER_W;
         let x = bar.x - SHIMMER_W + (ui.spin as f32 * SHIMMER_SPEED) % travel;
         let w = SHIMMER_W / 5.0;
         for (i, a) in [0.08f32, 0.16, 0.24, 0.16, 0.08].iter().enumerate() {
             g.fill(rect(x + i as f32 * w, bar.y, w, bar.h), 0.0, 0x00FFFFFF, *a);
         }
-        g.rt.PopAxisAlignedClip();
+        g.pop_clip();
     }
     let ly = CONTENT_Y + 16.0;
     g.text(left, rect(SIDE, ly, INNER / 2.0, 16.0), 12.0, false, t.dim, DIM_ALPHA, Align::Left);

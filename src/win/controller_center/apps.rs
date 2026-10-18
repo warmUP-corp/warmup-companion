@@ -1727,8 +1727,7 @@ pub(super) unsafe fn draw_dialog(ui: &Ui, g: &mut Gfx) {
                 );
             }
             let tr = type_rect(ui, card);
-            g.brush.SetColor(&color(t.line, t.line_alpha));
-            g.rt.FillRectangle(&rect(x, tr.y - 13.0, DLG_IN, 1.0).d2d(), &g.brush);
+            g.fill_rect(rect(x, tr.y - 13.0, DLG_IN, 1.0), t.line, t.line_alpha);
             match typing {
                 Some(text) => {
                     g.fill(tr, 12.0, t.bg, 1.0);

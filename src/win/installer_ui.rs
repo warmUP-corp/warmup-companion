@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Foundation::Numerics::Matrix3x2;
 use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_ALIASED;
 use windows::Win32::Graphics::Gdi::{
     GdiFlush, GetMonitorInfoW, GetObjectW, MonitorFromPoint, BITMAP, MonitorFromWindow, HMONITOR, MONITORINFO,
     MONITOR_DEFAULTTONEAREST,
@@ -1873,8 +1872,7 @@ unsafe fn focus_ring(ui: &Ui, g: &mut Gfx, target: Target, r: Rect, radius: f32)
 }
 
 unsafe fn line(g: &mut Gfx, r: Rect) {
-    g.brush.SetColor(&color(WHITE, LINE_A));
-    g.rt.FillRectangle(&r.d2d(), &g.brush);
+    g.fill_rect(r, WHITE, LINE_A);
 }
 
 unsafe fn draw(ui: &Ui, g: &mut Gfx) {
@@ -2114,7 +2112,7 @@ unsafe fn draw_license(ui: &Ui, g: &mut Gfx) {
     let max = (total - inner.h).max(0.0);
     ui.scroll_max.set(max);
     let off = ui.scroll.clamp(0.0, max);
-    g.rt.PushAxisAlignedClip(&inner.d2d(), D2D1_ANTIALIAS_MODE_ALIASED);
+    g.push_clip(inner, false);
     for (i, l) in lines.iter().enumerate() {
         let y = inner.y + i as f32 * lh - off;
         if y + lh < inner.y || y > inner.y + inner.h {
@@ -2122,7 +2120,7 @@ unsafe fn draw_license(ui: &Ui, g: &mut Gfx) {
         }
         g.text(l, rect(inner.x, y, inner.w - 8.0, lh), 12.0, false, WHITE, 0.85, Align::Left);
     }
-    g.rt.PopAxisAlignedClip();
+    g.pop_clip();
     draw_scrollbar(g, inner, total, off);
 }
 
@@ -2524,7 +2522,7 @@ unsafe fn draw_progress(ui: &Ui, g: &mut Gfx, title: &str, sub: &str, rows: &[(S
         let max = (total - inner.h).max(0.0);
         ui.scroll_max.set(max);
         let off = ui.scroll.clamp(0.0, max);
-        g.rt.PushAxisAlignedClip(&inner.d2d(), D2D1_ANTIALIAS_MODE_ALIASED);
+        g.push_clip(inner, false);
         for (i, l) in lines.iter().enumerate() {
             g.text(
                 l,
@@ -2536,7 +2534,7 @@ unsafe fn draw_progress(ui: &Ui, g: &mut Gfx, title: &str, sub: &str, rows: &[(S
                 Align::Left,
             );
         }
-        g.rt.PopAxisAlignedClip();
+        g.pop_clip();
         draw_scrollbar(g, rect(inner.x, inner.y, inner.w - 2.0, inner.h), total, off);
     } else {
         ui.scroll_max.set(0.0);

@@ -782,10 +782,7 @@ unsafe fn draw_panel(m: &Menu, g: &mut Gfx, level: usize) {
         if hot && e.selectable() {
             g.fill(r, 8.0, t.hi, 1.0);
         }
-        g.rt.PushAxisAlignedClip(
-            &r.d2d(),
-            windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_ALIASED,
-        );
+        g.push_clip(r, false);
         let (icon_c, icon_a) = if hot {
             (t.text, 1.0)
         } else {
@@ -987,7 +984,7 @@ unsafe fn draw_panel(m: &Menu, g: &mut Gfx, level: usize) {
                 g.icon(Icon::Svg(SKIP_FORWARD), next, t.dim, DIM_ALPHA, s);
             }
         }
-        g.rt.PopAxisAlignedClip();
+        g.pop_clip();
     }
 }
 

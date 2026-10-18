@@ -6,8 +6,6 @@ use std::time::{Duration, Instant};
 
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Direct2D::Common::D2D_POINT_2F;
-use windows::Win32::Graphics::Direct2D::D2D1_ELLIPSE;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -2686,8 +2684,7 @@ unsafe fn draw_window(ui: &Ui, g: &mut Gfx) {
         draw_row(ui, g, target, r);
     }
 
-    g.brush.SetColor(&color(t.line, t.line_alpha));
-    g.rt.FillRectangle(&rect(0.0, HINT_Y, WIN_W, 1.0).d2d(), &g.brush);
+    g.fill_rect(rect(0.0, HINT_Y, WIN_W, 1.0), t.line, t.line_alpha);
     let ps = ui.live.playstation();
     let mut x = 24.0;
     let hints: Vec<(&[usize], &str)> = if ui.toast.is_some() {
@@ -2768,13 +2765,7 @@ unsafe fn draw_promo(ui: &Ui, g: &mut Gfx, w: i32, h: i32, px: &[u8]) {
     g.fill(c, 12.0, PROMO_FILL, 1.0);
     let art = rect(c.x, c.y, c.w, PROMO_ART_H);
     if let Ok(bmp) = g.bitmap(w, h, px) {
-        g.rt.DrawBitmap(
-            &bmp,
-            Some(&art.d2d()),
-            1.0,
-            windows::Win32::Graphics::Direct2D::D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-            None,
-        );
+        g.draw_bitmap(&bmp, art, 1.0, false);
     }
     g.gradient(
         rect(art.x, art.y + art.h * 0.4, art.w, art.h * 0.6 + 1.0),
@@ -3095,36 +3086,13 @@ unsafe fn draw_row(ui: &Ui, g: &mut Gfx, target: Target, r: Rect) {
                         let sw = swatch_rect(r, options.len(), si);
                         let (cx, cy) = (sw.x + 13.0, sw.y + 13.0);
                         if si as i32 == it.value {
-                            g.brush.SetColor(&color(t.ring, 1.0));
-                            g.rt.DrawEllipse(
-                                &D2D1_ELLIPSE {
-                                    point: D2D_POINT_2F { x: cx, y: cy },
-                                    radiusX: 16.0,
-                                    radiusY: 16.0,
-                                },
-                                &g.brush,
-                                2.0,
-                                None,
-                            );
+                            g.ellipse(cx, cy, 16.0, 16.0, 2.0, t.ring, 1.0);
                         }
                         match hex.and_then(crate::config::parse_theme_color) {
                             Some(c) => g.circle(cx, cy, 13.0, c),
                             None => {
                                 g.circle(cx, cy, 13.0, t.bg);
-                                g.brush.SetColor(&color(t.dim, DIM_ALPHA));
-                                g.rt.DrawLine(
-                                    D2D_POINT_2F {
-                                        x: cx - 7.0,
-                                        y: cy + 7.0,
-                                    },
-                                    D2D_POINT_2F {
-                                        x: cx + 7.0,
-                                        y: cy - 7.0,
-                                    },
-                                    &g.brush,
-                                    1.5,
-                                    None,
-                                );
+                                g.line(cx - 7.0, cy + 7.0, cx + 7.0, cy - 7.0, 1.5, t.dim, DIM_ALPHA);
                             }
                         }
                     }
@@ -3315,19 +3283,9 @@ unsafe fn draw_row(ui: &Ui, g: &mut Gfx, target: Target, r: Rect) {
                 let cx = r.x + 16.0 + ci as f32 * (col_w + 16.0) + col_w / 2.0;
                 let cy = r.y + 47.0 + 52.0;
                 g.circle(cx, cy, 52.0, t.bg);
-                g.brush.SetColor(&color(t.hi, 1.0));
-                g.rt.DrawEllipse(
-                    &D2D1_ELLIPSE {
-                        point: D2D_POINT_2F { x: cx, y: cy },
-                        radiusX: 51.0,
-                        radiusY: 51.0,
-                    },
-                    &g.brush,
-                    2.0,
-                    None,
-                );
-                g.rt.FillRectangle(&rect(cx - 40.0, cy - 1.0, 80.0, 2.0).d2d(), &g.brush);
-                g.rt.FillRectangle(&rect(cx - 1.0, cy - 40.0, 2.0, 80.0).d2d(), &g.brush);
+                g.ellipse(cx, cy, 51.0, 51.0, 2.0, t.hi, 1.0);
+                g.fill_rect(rect(cx - 40.0, cy - 1.0, 80.0, 2.0), t.hi, 1.0);
+                g.fill_rect(rect(cx - 1.0, cy - 40.0, 2.0, 80.0), t.hi, 1.0);
                 let moved = sx.abs() > 0.0 || sy.abs() > 0.0;
                 g.circle(
                     cx + sx.clamp(-1.0, 1.0) * 40.0,
