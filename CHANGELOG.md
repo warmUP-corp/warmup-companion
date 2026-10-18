@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, a button shortcut such as Ctrl+Z follows the active keyboard layout. On a German keyboard it undoes instead of sending Ctrl+Y. The on-screen keyboard's Ctrl shortcuts do the same.
 - On Linux, turning voice typing off drops a recording that is still going and unloads the voice engine. Starting a game unloads an idle voice engine; a dictation already in progress finishes first.
 - On Linux, a controller that connects while a lightbar colour is already on gets that colour. A game that has the pad keeps its own lightbar colour.
 - On Linux, a swipe left or right on the touchpad moves to the previous or next workspace on Hyprland. Swipe up and swipe down send the overview and show-desktop shortcuts.

@@ -840,10 +840,8 @@ fn open_enter_key() -> Result<evdev::uinput::VirtualDevice, String> {
             keys.insert(code);
         }
     }
-    for code in (b'A'..=b'Z').chain(b'0'..=b'9') {
-        if let Some(code) = uinput_vk(code as u32) {
-            keys.insert(code);
-        }
+    for code in crate::linux_type::chord_codes() {
+        keys.insert(*code);
     }
     evdev::uinput::VirtualDevice::builder()
         .map_err(uinput_error)?
@@ -1033,6 +1031,11 @@ fn uinput_vk(code: u32) -> Option<evdev::KeyCode> {
         K::KEY_9,
     ];
     let c = char::from_u32(code)?;
+    if c.is_ascii_alphanumeric() {
+        if let Some(code) = crate::linux_type::chord_code(c) {
+            return Some(code);
+        }
+    }
     match c {
         'A'..='Z' => Some(LETTERS[(c as u8 - b'A') as usize]),
         '0'..='9' => Some(DIGITS[(c as u8 - b'0') as usize]),

@@ -12,6 +12,7 @@ struct Board {
 }
 
 static BOARD: OnceLock<Mutex<Option<Board>>> = OnceLock::new();
+static CHORD_LAYOUT: Mutex<Option<(String, Layout)>> = Mutex::new(None);
 
 fn board() -> &'static Mutex<Option<Board>> {
     BOARD.get_or_init(|| Mutex::new(None))
@@ -37,7 +38,10 @@ pub fn tap_vk(vk: u16) -> bool {
 }
 
 pub fn tap_ctrl(vk: u16) -> bool {
-    let Some(code) = evdev_from_vk(vk) else {
+    let layout_code = char::from_u32(vk as u32)
+        .filter(char::is_ascii_alphanumeric)
+        .and_then(chord_code);
+    let Some(code) = layout_code.or_else(|| evdev_from_vk(vk)) else {
         return false;
     };
     chord(KeyCode::KEY_LEFTCTRL, code)
@@ -68,6 +72,21 @@ pub fn replace_text(del: usize, ins: &str) -> std::io::Result<()> {
     }
     type_text(ins);
     Ok(())
+}
+
+pub fn chord_code(ch: char) -> Option<KeyCode> {
+    let name = active_layout();
+    let mut slot = CHORD_LAYOUT.lock().ok()?;
+    if slot.as_ref().is_none_or(|(have, _)| *have != name) {
+        let layout = Layout::for_name(&name);
+        *slot = Some((name, layout));
+    }
+    let (_, layout) = slot.as_ref()?;
+    layout.lookup(ch.to_ascii_lowercase()).map(|(code, _)| code)
+}
+
+pub fn chord_codes() -> &'static [KeyCode] {
+    KEYS
 }
 
 fn type_char(ch: char, layout: &mut Layout) -> bool {
@@ -306,8 +325,12 @@ struct Layout {
 
 impl Layout {
     fn load() -> Self {
+        Self::for_name(&active_layout())
+    }
+
+    fn for_name(name: &str) -> Self {
         let mut map = Vec::new();
-        if let Some(keymap) = load_keymap() {
+        if let Some(keymap) = load_keymap(name) {
             let min = keymap.min_keycode().raw();
             let max = keymap.max_keycode().raw();
             for raw in min..=max {
@@ -345,14 +368,13 @@ impl Layout {
     }
 }
 
-fn load_keymap() -> Option<xkbcommon::xkb::Keymap> {
+fn load_keymap(layout: &str) -> Option<xkbcommon::xkb::Keymap> {
     let context = xkbcommon::xkb::Context::new(xkbcommon::xkb::CONTEXT_NO_FLAGS);
-    let layout = active_layout();
     xkbcommon::xkb::Keymap::new_from_names(
         &context,
         "evdev",
         "pc105",
-        &layout,
+        layout,
         "",
         None,
         xkbcommon::xkb::KEYMAP_COMPILE_NO_FLAGS,
