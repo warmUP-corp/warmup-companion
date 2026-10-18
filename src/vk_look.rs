@@ -101,3 +101,27 @@ fn modern_themed_palette(mut pal: VkPalette, theme: KeyboardTheme) -> VkPalette 
     }
     pal
 }
+
+pub fn is_dark_theme() -> bool {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+    if let Ok(cache) = CACHE.lock() {
+        if let Some((at, dark)) = *cache {
+            if at.elapsed() < Duration::from_secs(5) {
+                return dark;
+            }
+        }
+    }
+    let dark = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.interface", "color-scheme"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map_or(true, |out| !String::from_utf8_lossy(&out.stdout).contains("light"));
+    if let Ok(mut cache) = CACHE.lock() {
+        *cache = Some((Instant::now(), dark));
+    }
+    dark
+}

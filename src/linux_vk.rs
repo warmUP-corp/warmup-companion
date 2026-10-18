@@ -70,7 +70,7 @@ pub fn paint_voice_orb(
 #[cfg(feature = "speech")]
 pub fn voice_accent() -> u32 {
     let look = crate::vk_paint::VkLook { style: vk_style(), tv: false };
-    draw::accent(look, &crate::config::keyboard_theme())
+    draw::accent(look, crate::vk_look::is_dark_theme(), &crate::config::keyboard_theme())
 }
 
 #[cfg(feature = "speech")]
@@ -223,6 +223,10 @@ fn keyboard_loop(wake: UnixStream) -> Result<(), String> {
                 shell.dirty = true;
             }
         }
+        if shell.configured && shell.dark != crate::vk_look::is_dark_theme() {
+            shell.dark = !shell.dark;
+            shell.dirty = true;
+        }
         if shell.dirty && shell.configured && !shell.frame_pending {
             shell.draw(&qh);
         }
@@ -303,6 +307,7 @@ struct Shell {
     gpu_failed: bool,
     gpu_presented: bool,
     gpu_errors: u32,
+    dark: bool,
     voice_gen: u64,
 }
 
@@ -360,6 +365,7 @@ impl Shell {
             gpu_failed: false,
             gpu_presented: false,
             gpu_errors: 0,
+            dark: crate::vk_look::is_dark_theme(),
             voice_gen: 0,
         };
         shell.apply_layout();
@@ -486,6 +492,7 @@ impl Shell {
             sel: crate::vk_nav::selection(),
             style: look.style,
             tv: look.tv,
+            dark: crate::vk_look::is_dark_theme(),
             theme: crate::config::keyboard_theme(),
             strip,
             pressed,

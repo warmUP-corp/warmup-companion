@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, the on-screen keyboard follows the light or dark desktop setting, like the Linux panels and like Windows. It stays dark unless the desktop asks for light, and switches while open.
 - On Linux, the highlighted suggestion in the Modern keyboard uses the accent colour with its own text colour, so it stays readable.
 - On Linux, the keyboard takes its sizes and colours from the same style tables as Windows. The Modern style now shows its own colours and layout, a TV-sized screen (or `vk_display=tv`) uses the TV layout, Mono shows seven suggestions like Windows, and custom keyboard colours are applied the Windows way in every style.
 - On Linux, the glow around the screen during dictation uses the keyboard accent colour the same way Windows does. A custom accent no longer shows with red and blue swapped.

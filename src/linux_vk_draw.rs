@@ -110,6 +110,7 @@ pub struct Frame {
     pub sel: KeyPos,
     pub style: VkStyle,
     pub tv: bool,
+    pub dark: bool,
     pub theme: KeyboardTheme,
     pub strip: Option<StripState>,
     pub pressed: Option<(KeyPos, f32)>,
@@ -261,7 +262,7 @@ fn render_keyboard(
     let scale = frame.scale.max(1.0);
     let look = frame.look();
     let spec = spec_for(look);
-    let pal = palette(look, &frame.theme);
+    let pal = palette(look, frame.dark, &frame.theme);
     let lu = crate::vk_paint::ref_unit(ui_scale(), look);
     let top_inset = crate::vk_paint::strip_band_height(ui_scale(), look);
     let legend_h = legend_band_height(ui_scale(), look);
@@ -525,6 +526,7 @@ pub(crate) fn keyboard_stamp(frame: &Frame) -> u64 {
     frame.symbol.hash(&mut hasher);
     frame.symbol_locked.hash(&mut hasher);
     frame.floating.hash(&mut hasher);
+    frame.dark.hash(&mut hasher);
     frame.theme.bg.hash(&mut hasher);
     frame.theme.key.hash(&mut hasher);
     frame.theme.accent.hash(&mut hasher);
@@ -680,7 +682,7 @@ fn scene(frame: &Frame) -> (&'static Spec, Pal, Vec<KeyRect>, f32, f32, f32, f32
     let scale = frame.scale.max(1.0);
     let look = frame.look();
     let spec = spec_for(look);
-    let pal = palette(look, &frame.theme);
+    let pal = palette(look, frame.dark, &frame.theme);
     let top_inset = crate::vk_paint::strip_band_height(ui_scale(), look);
     let legend_h = legend_band_height(ui_scale(), look);
     let rects = vk_geom::key_rects(
@@ -1037,8 +1039,8 @@ fn draw_strip(
     }
 }
 
-fn palette(look: VkLook, theme: &KeyboardTheme) -> Pal {
-    let v = crate::vk_look::themed_palette(crate::vk_paint::style_palette(look.style, true), look.style, *theme);
+fn palette(look: VkLook, dark: bool, theme: &KeyboardTheme) -> Pal {
+    let v = crate::vk_look::themed_palette(crate::vk_paint::style_palette(look.style, dark), look.style, *theme);
     Pal {
         bg: from_colorref(v.bg),
         key: from_colorref(v.key),
@@ -1055,8 +1057,8 @@ fn palette(look: VkLook, theme: &KeyboardTheme) -> Pal {
     }
 }
 
-pub fn accent(look: VkLook, theme: &KeyboardTheme) -> u32 {
-    crate::vk_look::themed_palette(crate::vk_paint::style_palette(look.style, true), look.style, *theme).accent
+pub fn accent(look: VkLook, dark: bool, theme: &KeyboardTheme) -> u32 {
+    crate::vk_look::themed_palette(crate::vk_paint::style_palette(look.style, dark), look.style, *theme).accent
 }
 
 fn rgb(v: u32) -> Rgb {
@@ -1618,6 +1620,7 @@ mod tests {
             sel: KeyPos { row: 1, col: 1 },
             style: VkStyle::Normal,
             tv: false,
+            dark: true,
             theme: KeyboardTheme::default(),
             strip: None,
             pressed: None,
@@ -1683,6 +1686,7 @@ mod tests {
             sel: KeyPos { row: 0, col: 0 },
             style: VkStyle::Normal,
             tv: false,
+            dark: true,
             theme: KeyboardTheme::default(),
             strip: None,
             pressed: None,
