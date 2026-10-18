@@ -284,7 +284,7 @@ struct Host {
     frame_pending: bool,
     next_tick: Instant,
     pointer_at: (f32, f32),
-    repeat_info: (Duration, Duration),
+    repeat_info: Option<(Duration, Duration)>,
     repeat: Option<Repeat>,
 }
 
@@ -330,7 +330,7 @@ impl Host {
             frame_pending: false,
             next_tick: Instant::now(),
             pointer_at: (0.0, 0.0),
-            repeat_info: (Duration::from_millis(600), Duration::from_millis(40)),
+            repeat_info: Some((Duration::from_millis(600), Duration::from_millis(40))),
             repeat: None,
         })
     }
@@ -441,8 +441,8 @@ impl Host {
             self.apply(flow);
         }
         if let Some(r) = &mut self.repeat {
-            if now >= r.next {
-                r.next = now + self.repeat_info.1;
+            if let (true, Some((_, every))) = (now >= r.next, self.repeat_info) {
+                r.next = now + every;
                 let key = r.key.clone();
                 let flow = self.app.key(key);
                 self.apply(flow);
@@ -555,11 +555,14 @@ impl Host {
             return;
         }
         let modifier = matches!(key.vk, Some(0x10..=0x12 | 0x5B | 0x5C));
-        self.repeat = (!modifier).then(|| Repeat {
-            raw: event.raw_code,
-            key: key.clone(),
-            next: Instant::now() + self.repeat_info.0,
-        });
+        self.repeat = match self.repeat_info {
+            Some((delay, _)) if !modifier => Some(Repeat {
+                raw: event.raw_code,
+                key: key.clone(),
+                next: Instant::now() + delay,
+            }),
+            _ => None,
+        };
         let flow = self.app.key(key);
         self.apply(flow);
     }
@@ -626,7 +629,16 @@ impl CompositorHandler for Host {
     ) {
     }
 
-    fn frame(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
+    fn frame(
+        &mut self,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+        surface: &wl_surface::WlSurface,
+        _: u32,
+    ) {
+        if self.window.as_ref().map(|w| w.wl_surface()) != Some(surface) {
+            return;
+        }
         self.frame_pending = false;
         if self.dirty && self.configured {
             self.draw(qh);
@@ -833,11 +845,15 @@ impl KeyboardHandler for Host {
         _: &wl_keyboard::WlKeyboard,
         info: RepeatInfo,
     ) {
-        if let RepeatInfo::Repeat { rate, delay } = info {
-            self.repeat_info = (
+        self.repeat_info = match info {
+            RepeatInfo::Repeat { rate, delay } => Some((
                 Duration::from_millis(delay as u64),
                 Duration::from_millis((1000 / rate.get().max(1)) as u64),
-            );
+            )),
+            RepeatInfo::Disable => None,
+        };
+        if self.repeat_info.is_none() {
+            self.repeat = None;
         }
     }
 }
