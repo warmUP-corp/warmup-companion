@@ -51,6 +51,9 @@ mod linux_notify;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
 mod linux_center;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
+#[allow(dead_code)]
+mod linux_panel;
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
 mod linux_diag;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
 mod linux_game_detect;
