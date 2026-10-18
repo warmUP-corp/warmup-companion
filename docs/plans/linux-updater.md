@@ -44,7 +44,7 @@ Both URLs stay restricted to `https://github.com/warmUP-corp/warmup-companion/re
 
 ## Replacing a running binary
 
-The service is the process executing the installed binary. Writing over that file fails with `ETXTBSY`.
+The service is the process executing the installed binary. Opening that file for writing fails with `ETXTBSY`, but `rename()` over it succeeds: the running process keeps the old inode until it exits.
 
 Download next to it, for example `warmup-companion.new`, in the same directory. Verify the checksum there. Then a short helper that is not the running binary should:
 
@@ -52,7 +52,7 @@ Download next to it, for example `warmup-companion.new`, in the same directory. 
 2. Rename `warmup-companion.new` onto `warmup-companion` (keep the previous file only until the rename succeeds)
 3. `systemctl --user start warmup-companion.service`
 
-`Restart=on-failure` does not perform that swap. The helper has to stop the unit, or the rename still hits a live mapping. `systemctl --user restart` after the rename is the same outcome if the stop already happened. The helper can be `systemd-run --user` or another short-lived command. It must not be the binary that is about to be replaced.
+So the swap can happen while the service runs: write `warmup-companion.new`, rename it over `warmup-companion`, then `systemctl --user restart warmup-companion.service`. `Restart=on-failure` does not restart a clean exit, so the explicit restart is what picks up the new binary. The helper can be `systemd-run --user` or another short-lived command. It must not be the binary that is about to be replaced.
 
 The unit file does not need a rewrite when the path stays the same. Do not `daemon-reload` unless the unit text changed. Do not enable the unit again if it is already enabled.
 

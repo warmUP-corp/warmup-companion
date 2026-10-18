@@ -46,8 +46,10 @@ pub fn request_stop() {
 }
 
 pub fn unload_engine() {
-    DISCARD.store(true, Ordering::SeqCst);
-    request_stop();
+    if running() {
+        crate::install::log_line("game started during dictation; voice engine stays loaded");
+        return;
+    }
     quit_server();
     std::thread::sleep(Duration::from_millis(500));
     if server_up() {
@@ -432,34 +434,27 @@ fn model_dir() -> Option<PathBuf> {
     None
 }
 
-fn cpu_onnx(path: PathBuf) -> Option<PathBuf> {
-    if !path.is_file() {
-        return None;
-    }
-    if path.to_string_lossy().to_ascii_lowercase().contains("cuda") {
-        return None;
-    }
-    Some(path)
-}
-
 fn onnx_runtime() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("ORT_DYLIB_PATH") {
-        if let Some(path) = cpu_onnx(PathBuf::from(path)) {
+        let path = PathBuf::from(path);
+        if path.is_file() {
             return Some(path);
         }
     }
     if let Some(dir) = model_dir() {
-        if let Some(path) = cpu_onnx(dir.join("libonnxruntime.so")) {
-            return Some(path);
+        let beside = dir.join("libonnxruntime.so");
+        if beside.is_file() {
+            return Some(beside);
         }
     }
     [
         "/usr/lib/libonnxruntime.so",
         "/usr/lib64/libonnxruntime.so",
+        "/usr/lib/voxtype/cuda-13/libonnxruntime.so",
     ]
     .into_iter()
     .map(PathBuf::from)
-    .find_map(cpu_onnx)
+    .find(|path| path.is_file())
 }
 
 fn addr() -> SocketAddr {

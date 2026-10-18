@@ -934,12 +934,21 @@ fn apply_uinput(
         }
         Cmd::Swipe(swipe) => {
             use crate::touchpad_gestures::Swipe;
-            let lua = match swipe {
-                Swipe::Left => Some(r#"hl.dsp.focus({ workspace = "e-1" })"#),
-                Swipe::Right => Some(r#"hl.dsp.focus({ workspace = "e+1" })"#),
-                Swipe::Up | Swipe::Down => None,
-            };
-            if lua.is_some_and(crate::linux_game_detect::hypr_dispatch) {
+            if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
+                let lua = match swipe {
+                    Swipe::Left => r#"hl.dsp.focus({ workspace = "e-1" })"#,
+                    Swipe::Right => r#"hl.dsp.focus({ workspace = "e+1" })"#,
+                    Swipe::Up | Swipe::Down => return,
+                };
+                let _ = std::thread::Builder::new()
+                    .name("hypr-swipe".into())
+                    .spawn(move || crate::linux_game_detect::hypr_dispatch(lua));
+                return;
+            }
+            let kde = std::env::var("XDG_CURRENT_DESKTOP")
+                .map(|d| d.split(':').any(|p| p.eq_ignore_ascii_case("KDE")))
+                .unwrap_or(false);
+            if !kde {
                 return;
             }
             let keys = match swipe {

@@ -102,9 +102,8 @@ pub fn start() {
         ),
         Err(error) => {
             crate::install::log_line(&format!(
-                "game detection: this compositor does not expose zwlr_foreign_toplevel_management_v1 ({error}). KWin does not implement that protocol, so Plasma has no fullscreen-game signal from it."
+                "game detection: this compositor does not expose zwlr_foreign_toplevel_management_v1 ({error}). KWin does not implement that protocol, so Plasma has no fullscreen-game signal or per-app profiles from it."
             ));
-            start_kde_profiles();
         }
     }
 }
@@ -279,8 +278,9 @@ fn hypr_loop() {
             std::thread::sleep(Duration::from_secs(2));
             continue;
         };
-        if let Ok(surface) = hypr_surface(&command) {
-            publish(Some(surface));
+        match hypr_surface(&command) {
+            Ok(surface) => publish(Some(surface)),
+            Err(_) => publish(None),
         }
         match UnixStream::connect(&events) {
             Ok(stream) => read_hypr_events(stream, &command),
@@ -307,6 +307,7 @@ fn read_hypr_events(mut stream: UnixStream, command: &std::path::Path) {
                         match hypr_surface(command) {
                             Ok(surface) => publish(Some(surface)),
                             Err(error) => {
+                                publish(None);
                                 crate::install::log_line(&format!(
                                     "game detection: hyprland activewindow: {error}"
                                 ));
@@ -470,147 +471,6 @@ fn exe_for_pid(pid: u32) -> Option<String> {
     }
     let link = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
     Some(link.to_string_lossy().into_owned())
-}
-
-fn start_kde_profiles() {
-    if !kde_available() {
-        crate::install::log_line(
-            "game detection: KWin is not on the session bus, so per-app profiles stay off",
-        );
-        return;
-    }
-    crate::install::log_line("game detection: KWin active window");
-    let _ = std::thread::Builder::new()
-        .name("warmup-kde-window".into())
-        .spawn(kde_loop);
-}
-
-fn kde_available() -> bool {
-    std::process::Command::new("busctl")
-        .args(["--user", "status", "org.kde.KWin"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-}
-
-fn kde_loop() {
-    let mut logged = false;
-    loop {
-        match kde_surface() {
-            Some(surface) => {
-                publish(Some(surface));
-                logged = false;
-            }
-            None => {
-                if !logged {
-                    crate::install::log_line("game detection: KWin active window was not readable");
-                    logged = true;
-                }
-            }
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-}
-
-fn kde_surface() -> Option<Surface> {
-    let id_text = busctl_text(&[
-        "call",
-        "org.kde.KWin",
-        "/KWin",
-        "org.kde.KWin",
-        "activeWindow",
-    ])?;
-    let id = first_number(&id_text)?;
-    if id == 0 {
-        return None;
-    }
-    let id = id.to_string();
-    let info = busctl_text(&[
-        "call",
-        "org.kde.KWin",
-        "/KWin",
-        "org.kde.KWin",
-        "getWindowInfo",
-        "u",
-        &id,
-    ])
-    .or_else(|| {
-        busctl_text(&[
-            "call",
-            "org.kde.KWin",
-            "/KWin",
-            "org.kde.KWin",
-            "getWindowInfo",
-            "i",
-            &id,
-        ])
-    })?;
-    let class_name = dbus_string(&info, "resourceClass").unwrap_or_default();
-    let resource_name = dbus_string(&info, "resourceName").unwrap_or_default();
-    let pid = dbus_number(&info, "pid").unwrap_or(0);
-    let exe = exe_for_pid(pid).unwrap_or_else(|| {
-        if resource_name.is_empty() {
-            class_name.clone()
-        } else {
-            resource_name
-        }
-    });
-    if exe.is_empty() && class_name.is_empty() {
-        return None;
-    }
-    Some(Surface {
-        exe,
-        class_name,
-        pid,
-        our_pid: std::process::id(),
-        fullscreen: false,
-        floating: false,
-        x: 0,
-        y: 0,
-        w: 0,
-        h: 0,
-        mon_x: 0,
-        mon_y: 0,
-        mon_w: 0,
-        mon_h: 0,
-    })
-}
-
-fn busctl_text(args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new("busctl")
-        .arg("--user")
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout).ok()
-}
-
-fn dbus_string(text: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{key}\"");
-    let rest = text.split(&needle).nth(1)?;
-    let start = rest.find('"')?;
-    let rest = &rest[start + 1..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
-}
-
-fn dbus_number(text: &str, key: &str) -> Option<u32> {
-    let needle = format!("\"{key}\"");
-    let rest = text.split(&needle).nth(1)?;
-    rest.split_whitespace().find_map(|token| token.parse().ok())
-}
-
-fn first_number(text: &str) -> Option<u32> {
-    text.split_whitespace().find_map(|token| token.parse().ok())
 }
 
 mod wlr {

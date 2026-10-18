@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- On Linux, turning voice typing off drops a recording that is still going and unloads the voice engine. Starting a game unloads it too. The voice engine loads on the CPU.
+- On Linux, turning voice typing off drops a recording that is still going and unloads the voice engine. Starting a game unloads an idle voice engine; a dictation already in progress finishes first.
 - On Linux, a controller that connects while a lightbar colour is already on gets that colour. A game that has the pad keeps its own lightbar colour.
 - On Linux, a swipe left or right on the touchpad moves to the previous or next workspace on Hyprland. Swipe up and swipe down send the overview and show-desktop shortcuts.
 - On Linux, a controller button can send the shortcut for the focused app. In a browser, B closes the tab, Y opens a tab, and the triggers move between tabs.
