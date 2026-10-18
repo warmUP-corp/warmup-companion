@@ -3,6 +3,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::release_feed::{
@@ -20,6 +21,54 @@ const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 const SETTLE: Duration = Duration::from_secs(3);
 
 static BUSY: AtomicBool = AtomicBool::new(false);
+static AVAILABLE: Mutex<Option<(String, String)>> = Mutex::new(None);
+
+pub(crate) fn available() -> Option<(String, String)> {
+    AVAILABLE.lock().ok().and_then(|a| a.clone())
+}
+
+fn set_available(release: Option<&Release>) {
+    let next = release.map(|r| (r.version.clone(), r.page.clone()));
+    let changed = match AVAILABLE.lock() {
+        Ok(mut a) if *a != next => {
+            *a = next;
+            true
+        }
+        _ => false,
+    };
+    if changed {
+        crate::linux_tray::refresh();
+    }
+}
+
+pub(crate) fn check_now() {
+    spawn("update-check-now", || match check() {
+        Ok(Check::Available(release)) => {
+            set_available(Some(&release));
+            notify(
+                &format!("warmUP companion v{} is available", release.version),
+                "Choose Install update in the tray menu to install it.",
+            );
+        }
+        Ok(Check::UpToDate(_)) => {
+            set_available(None);
+            notify(
+                "Up to date",
+                &format!("warmUP companion v{CURRENT} is the latest version."),
+            );
+        }
+        Ok(Check::NoLinuxBuild(version)) => {
+            notify(
+                "No Linux build",
+                &format!("v{version} has no Linux build yet."),
+            );
+        }
+        Err(e) => {
+            log(&format!("check failed: {e}"));
+            notify("Update check failed", &e);
+        }
+    });
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct Release {
@@ -111,7 +160,6 @@ pub(crate) fn update(options: &Options) -> Result<Outcome, String> {
     result
 }
 
-#[allow(dead_code)]
 pub(crate) fn start_update() {
     spawn("update-install", || match update(&Options::installed()) {
         Ok(Outcome::NoLinuxBuild(version)) => {
@@ -124,6 +172,7 @@ pub(crate) fn start_update() {
             release,
             restarted: false,
         }) => {
+            set_available(None);
             notify(
                 "Update installed",
                 &format!(
@@ -155,6 +204,7 @@ pub(crate) fn spawn_auto_check() {
             if crate::config::gamepad_settings().update_check && !BUSY.load(Ordering::SeqCst) {
                 match check() {
                     Ok(Check::Available(release)) if release.version != notified => {
+                        set_available(Some(&release));
                         log(&format!("v{} available", release.version));
                         let bin = crate::paths::install_dir().join(BIN_NAME);
                         notify(

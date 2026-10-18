@@ -1040,7 +1040,7 @@ fn draw_strip(
 }
 
 fn palette(look: VkLook, dark: bool, theme: &KeyboardTheme) -> Pal {
-    let v = crate::vk_look::themed_palette(crate::vk_paint::style_palette(look.style, dark), look.style, *theme);
+    let v = crate::vk_theme::themed_palette(crate::vk_paint::style_palette(look.style, dark), look.style, *theme);
     Pal {
         bg: from_colorref(v.bg),
         key: from_colorref(v.key),
@@ -1058,7 +1058,7 @@ fn palette(look: VkLook, dark: bool, theme: &KeyboardTheme) -> Pal {
 }
 
 pub fn accent(look: VkLook, dark: bool, theme: &KeyboardTheme) -> u32 {
-    crate::vk_look::themed_palette(crate::vk_paint::style_palette(look.style, dark), look.style, *theme).accent
+    crate::vk_theme::themed_palette(crate::vk_paint::style_palette(look.style, dark), look.style, *theme).accent
 }
 
 fn rgb(v: u32) -> Rgb {

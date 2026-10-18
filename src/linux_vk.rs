@@ -70,7 +70,7 @@ pub fn paint_voice_orb(
 #[cfg(feature = "speech")]
 pub fn voice_accent() -> u32 {
     let look = crate::vk_paint::VkLook { style: vk_style(), tv: false };
-    draw::accent(look, crate::vk_look::is_dark_theme(), &crate::config::keyboard_theme())
+    draw::accent(look, crate::vk_theme::is_dark_theme(), &crate::config::keyboard_theme())
 }
 
 #[cfg(feature = "speech")]
@@ -223,7 +223,7 @@ fn keyboard_loop(wake: UnixStream) -> Result<(), String> {
                 shell.dirty = true;
             }
         }
-        if shell.configured && shell.dark != crate::vk_look::is_dark_theme() {
+        if shell.configured && shell.dark != crate::vk_theme::is_dark_theme() {
             shell.dark = !shell.dark;
             shell.dirty = true;
         }
@@ -365,7 +365,7 @@ impl Shell {
             gpu_failed: false,
             gpu_presented: false,
             gpu_errors: 0,
-            dark: crate::vk_look::is_dark_theme(),
+            dark: crate::vk_theme::is_dark_theme(),
             voice_gen: 0,
         };
         shell.apply_layout();
@@ -448,7 +448,7 @@ impl Shell {
 
     fn look(&self) -> crate::vk_paint::VkLook {
         if let Some(info) = self.output.as_ref().and_then(|output| self.output_state.info(output)) {
-            OUTPUT_IS_TV.store(crate::vk_look::is_tv(info.physical_size.0, info.physical_size.1), Ordering::SeqCst);
+            OUTPUT_IS_TV.store(crate::vk_theme::is_tv(info.physical_size.0, info.physical_size.1), Ordering::SeqCst);
         }
         look()
     }
@@ -492,7 +492,7 @@ impl Shell {
             sel: crate::vk_nav::selection(),
             style: look.style,
             tv: look.tv,
-            dark: crate::vk_look::is_dark_theme(),
+            dark: crate::vk_theme::is_dark_theme(),
             theme: crate::config::keyboard_theme(),
             strip,
             pressed,

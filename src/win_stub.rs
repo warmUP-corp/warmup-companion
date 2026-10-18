@@ -73,5 +73,24 @@ pub mod xbox_vk {
     }
 }
 
+#[cfg(feature = "gamepad")]
+#[path = "win/controller_center.rs"]
+pub mod controller_center;
+
+#[cfg(feature = "gamepad")]
+#[path = "win/tray_menu.rs"]
+pub(crate) mod tray_menu;
+
+pub mod speech_input {
+    #[cfg_attr(not(feature = "gamepad"), allow(dead_code))]
+    pub fn set_engine(_name: &str) {}
+
+    #[cfg_attr(not(feature = "gamepad"), allow(dead_code))]
+    pub fn unload_engine() {
+        #[cfg(feature = "speech")]
+        crate::linux_speech::unload_engine();
+    }
+}
+
 pub use desktop::{attach_input, attach_named, current_desktop_name, input_desktop_name};
 pub use xbox_vk::{VkAttach, VkSession};

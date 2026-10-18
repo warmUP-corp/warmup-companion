@@ -719,11 +719,7 @@ fn end_typing(ui: &mut Ui, commit: bool) {
     OWNS_PAD.store(true, Ordering::SeqCst);
     let name = text.trim();
     if commit && !name.is_empty() {
-        let exe = if name.to_ascii_lowercase().ends_with(".exe") {
-            name.to_string()
-        } else {
-            format!("{name}.exe")
-        };
+        let exe = program_name(name);
         add_app(ui, &exe);
     }
 }
@@ -966,86 +962,6 @@ pub(super) fn click_dialog(ui: &mut Ui, x: f32, y: f32) {
     dialog_activate(ui);
 }
 
-pub(super) fn installed_apps() -> Vec<(String, String)> {
-    use windows::core::Interface;
-    use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, IPersistFile, CLSCTX_INPROC_SERVER,
-        COINIT_APARTMENTTHREADED, STGM_READ,
-    };
-    use windows::Win32::UI::Shell::{
-        FOLDERID_CommonPrograms, FOLDERID_Programs, IShellLinkW, ShellLink,
-    };
-    let mut links = Vec::new();
-    let mut dirs: Vec<std::path::PathBuf> = [&FOLDERID_Programs, &FOLDERID_CommonPrograms]
-        .into_iter()
-        .filter_map(|id| known_folder(id).map(std::path::PathBuf::from))
-        .collect();
-    while let Some(dir) = dirs.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                dirs.push(path);
-            } else if path
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("lnk"))
-            {
-                links.push(path);
-            }
-        }
-    }
-    let mut out: Vec<(String, String)> = Vec::new();
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        for link in links {
-            let Some(name) = link.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let lower = name.to_ascii_lowercase();
-            if ["uninstall", "readme", "help", "documentation", "website"]
-                .iter()
-                .any(|w| lower.contains(w))
-            {
-                continue;
-            }
-            let shell: IShellLinkW = match CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
-            {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            let Ok(file) = shell.cast::<IPersistFile>() else {
-                continue;
-            };
-            if file
-                .Load(&windows::core::HSTRING::from(link.as_path()), STGM_READ)
-                .is_err()
-            {
-                continue;
-            }
-            let mut buf = [0u16; 1024];
-            if shell.GetPath(&mut buf, std::ptr::null_mut(), 0).is_err() {
-                continue;
-            }
-            let len = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
-            let target = String::from_utf16_lossy(&buf[..len]);
-            let Some(exe) = std::path::Path::new(&target)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .filter(|e| e.to_ascii_lowercase().ends_with(".exe"))
-            else {
-                continue;
-            };
-            if !out.iter().any(|(_, e)| e.eq_ignore_ascii_case(exe)) {
-                out.push((name.to_string(), exe.to_string()));
-            }
-        }
-    }
-    out.sort_by_key(|(n, _)| n.to_lowercase());
-    out
-}
-
 fn dialog_height(ui: &Ui) -> f32 {
     let st = &ui.apps;
     match &st.dialog {
@@ -1151,7 +1067,7 @@ unsafe fn draw_keycaps(g: &mut Gfx, t: &Theme, caps: &[String], x: f32, cy: f32)
 }
 
 unsafe fn fit(g: &mut Gfx, text: &str, w: f32, size: f32, bold: bool) -> String {
-    crate::win::tray_menu::ellipsize(text, w, |x| g.measure(x, size, bold))
+    ellipsize(text, w, |x| g.measure(x, size, bold))
 }
 
 unsafe fn two_lines(g: &mut Gfx, t: &Theme, r: Rect, title: &str, caption: &str, dim: bool) {
@@ -1362,7 +1278,7 @@ unsafe fn dialog_frame(g: &mut Gfx, t: &Theme, card: Rect) {
     g.ring(card, 16.0, 1.0, t.line, t.line_alpha);
 }
 
-unsafe fn focus_box(g: &Gfx, t: &Theme, r: Rect, focused: bool) {
+unsafe fn focus_box(g: &mut Gfx, t: &Theme, r: Rect, focused: bool) {
     if focused {
         g.fill(r, 12.0, t.hi, 1.0);
         g.ring(r, 12.0, 2.0, t.ring, 1.0);
@@ -1733,7 +1649,7 @@ pub(super) unsafe fn draw_dialog(ui: &Ui, g: &mut Gfx) {
                     g.fill(tr, 12.0, t.bg, 1.0);
                     g.ring(tr, 12.0, 2.0, t.ring, 1.0);
                     let (shown_text, c, a) = if text.is_empty() {
-                        ("Program name, for example notepad.exe", t.dim, DIM_ALPHA)
+                        (TYPE_PLACEHOLDER, t.dim, DIM_ALPHA)
                     } else {
                         (text.as_str(), t.text, 1.0)
                     };
@@ -1775,7 +1691,7 @@ pub(super) unsafe fn draw_dialog(ui: &Ui, g: &mut Gfx) {
                         Align::Left,
                     );
                     g.text(
-                        "Opens the keyboard \u{00B7} for example notepad.exe",
+                        TYPE_CAPTION,
                         rect(tr.x + 56.0, tr.y + 28.0, 300.0, 15.0),
                         12.0,
                         false,

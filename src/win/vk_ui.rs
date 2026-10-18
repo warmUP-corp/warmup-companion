@@ -78,100 +78,10 @@ static LAST_REFLOW_HWND: AtomicIsize = AtomicIsize::new(0);
 
 /// Class background brush colour (dark default; per-paint theme overrides it).
 const BG_FILL: u32 = 0x001f1f1f;
-const MONO_ACCENT_TONE: f32 = 0.7;
-const MODERN_ACTION_TONE: f32 = 0.08;
-const MODERN_ENTER_TONE: f32 = 0.14;
-const MODERN_MOD_TONE: f32 = 0.2;
-const MODERN_DIM_TONE: f32 = 0.8;
 
-pub(crate) fn vk_palette(dark: bool, style: crate::config::VkStyle) -> VkPalette {
-    themed_palette(
-        vk_renderer::style_palette(style, dark),
-        style,
-        crate::config::keyboard_theme(),
-    )
-}
-
-pub(crate) fn themed_palette(
-    mut pal: VkPalette,
-    style: crate::config::VkStyle,
-    theme: crate::config::KeyboardTheme,
-) -> VkPalette {
-    if style == crate::config::VkStyle::Modern {
-        return modern_themed_palette(pal, theme);
-    }
-    if style == crate::config::VkStyle::Mono {
-        if let Some(v) = theme.accent {
-            pal.accent = vk_renderer::mix_color(v, pal.key, MONO_ACCENT_TONE);
-            pal.sel_ring = v;
-        }
-        if let Some(v) = theme.sel_text {
-            pal.sel_text = v;
-        }
-        return pal;
-    }
-    if let Some(v) = theme.bg {
-        pal.bg = v;
-    }
-    if let Some(v) = theme.key {
-        pal.key = v;
-        pal.key_action = vk_renderer::mix_color(0x000000, v, 0.26);
-        pal.chip_sel = vk_renderer::mix_color(0xFFFFFF, v, 0.10);
-    }
-    if let Some(v) = theme.accent {
-        pal.accent = v;
-        pal.sel_ring = vk_renderer::mix_color(0xFFFFFF, v, 0.5);
-    }
-    if let Some(v) = theme.text {
-        pal.text = v;
-        pal.text_dim = v;
-    }
-    if let Some(v) = theme.sel_text {
-        pal.sel_text = v;
-    }
-    if let Some(v) = theme.border {
-        pal.border = v;
-        pal.panel_stroke = v;
-        pal.panel_stroke_alpha = 1.0;
-    }
-    pal
-}
-
-fn modern_themed_palette(mut pal: VkPalette, theme: crate::config::KeyboardTheme) -> VkPalette {
-    use vk_renderer::mix_color;
-    if let Some(v) = theme.bg {
-        pal.bg = v;
-    }
-    if let Some(v) = theme.text {
-        pal.text = v;
-        pal.enter_text = v;
-        pal.text_dim = mix_color(v, pal.bg, MODERN_DIM_TONE);
-    }
-    if let Some(v) = theme.sel_text {
-        pal.sel_text = v;
-    }
-    if let Some(v) = theme.accent {
-        pal.accent = v;
-        pal.sel_ring = v;
-        pal.chip_sel = v;
-    }
-    if let Some(v) = theme.key {
-        pal.key = v;
-        pal.key_action = mix_color(pal.text, v, MODERN_ACTION_TONE);
-    }
-    if theme.key.is_some() || theme.accent.is_some() {
-        if let Some(tint) = theme.accent.or(pal.mod_tint.map(|(_, bar)| bar)) {
-            pal.key_enter = mix_color(tint, pal.key, MODERN_ENTER_TONE);
-            pal.mod_tint = Some((mix_color(tint, pal.key, MODERN_MOD_TONE), tint));
-        }
-    }
-    if let Some(v) = theme.border {
-        pal.border = v;
-        pal.panel_stroke = v;
-        pal.panel_stroke_alpha = 1.0;
-    }
-    pal
-}
+pub(crate) use crate::vk_theme::vk_palette;
+#[cfg(test)]
+use crate::vk_theme::themed_palette;
 
 /// Dark flag, read live from the OS theme.
 /// `HKCU\...\Themes\Personalize\AppsUseLightTheme` (0 = dark). Defaults to dark.

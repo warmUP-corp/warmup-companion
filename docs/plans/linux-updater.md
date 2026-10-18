@@ -9,7 +9,7 @@ The Windows updater in `src/updater.rs` stays Windows-only. The Linux updater is
 - `warmup-companion update --dry-run` downloads and verifies, then deletes the download. Nothing is replaced and nothing restarts.
 - `warmup-companion update --dir <path>` installs into another folder and never restarts the service. Use it to test.
 - The service checks 15 seconds after start, retries after 10 minutes when a check fails, and checks again a day after a successful check, while `update_check` is on. A newer release with a Linux build shows a notification that says to run `warmup-companion update`. A release without a Linux build is only logged.
-- `linux_update::start_update()` runs the same update on a background thread and queues the restart with `systemctl --user --no-block restart`, so it can be called from inside the service. Nothing calls it yet. The tray or Controller Center can add a button for it.
+- `linux_update::start_update()` runs the same update on a background thread and queues the restart with `systemctl --user --no-block restart`, so it can be called from inside the service. The tray's Updates menu calls it from Install update; Check for updates runs `linux_update::check_now()`, which only checks and notifies.
 - Downloads use `curl` with HTTPS only, including redirects. The checksum is computed with `sha256sum`. Both ship with every distribution the install guide covers, so the companion needs no TLS or hash crate.
 
 ## What Windows does today
@@ -87,4 +87,4 @@ The restart is skipped when the service is not running, when the user unit file 
 
 The service notifies through `linux_notify` when a newer release has a Linux build. `start_update()` also notifies when the release has no Linux build, when the installed version is current, and when the update fails.
 
-Controller Center and the tray menu are owned by the UI work. A "Check for updates" button, progress, and the `update_check` switch in those screens stay there. The setting can already be written with `warmup-companion settings`.
+The tray's Updates menu has Check for updates, Install update once a newer Linux build is known, What's new, and the `update_check` switch as Check automatically. The setting can also be written with `warmup-companion settings`.

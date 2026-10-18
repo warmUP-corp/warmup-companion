@@ -779,7 +779,13 @@ fn backup_name_now() -> String {
     settings_backup_name(t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond)
 }
 
-#[cfg(all(feature = "gamepad", windows))]
+#[cfg(all(feature = "gamepad", target_os = "linux"))]
+fn backup_name_now() -> String {
+    let (y, mo, d, h, mi, sec) = crate::time_util::local_now();
+    settings_backup_name(y, mo, d, h, mi, sec)
+}
+
+#[cfg(all(feature = "gamepad", any(windows, target_os = "linux")))]
 pub fn backup_settings() -> Result<std::path::PathBuf, String> {
     let path = settings_path().ok_or_else(|| "settings path unavailable".to_string())?;
     let current = std::fs::read_to_string(&path).unwrap_or_default();
@@ -795,7 +801,7 @@ pub fn export_settings_to(path: &std::path::Path) -> Result<(), String> {
     std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
-#[cfg(all(feature = "gamepad", windows))]
+#[cfg(all(feature = "gamepad", any(windows, target_os = "linux")))]
 pub fn reset_settings_to_shipped() -> Result<std::path::PathBuf, String> {
     let path = settings_path().ok_or_else(|| "settings path unavailable".to_string())?;
     let current = std::fs::read_to_string(&path).unwrap_or_default();

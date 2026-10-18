@@ -32,6 +32,8 @@ mod install;
 mod mono_ui;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod vk_paint;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod vk_theme;
 #[cfg(all(target_os = "linux", feature = "service"))]
 mod linux_service;
 #[cfg(all(windows, feature = "service"))]
@@ -40,14 +42,12 @@ mod service;
 mod service_worker;
 #[cfg(all(windows, feature = "gamepad"))]
 mod tray;
-#[cfg(feature = "gamepad")]
-mod center_rows;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
 mod linux_tray;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
 mod linux_notify;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
-mod linux_center;
+mod linux_panel;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
 mod linux_diag;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
@@ -59,15 +59,14 @@ mod release_feed;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
 mod linux_update;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
+#[cfg_attr(not(windows), allow(dead_code))]
 mod debug_state;
 mod predict_ngram;
 mod vk_commit;
 #[cfg(windows)]
 mod image_paste;
 mod vk_geom;
-#[cfg(all(target_os = "linux", feature = "gamepad"))]
-mod vk_look;
 mod vk_key;
 #[cfg(all(windows, feature = "vk-panels"))]
 mod clipboard_history;

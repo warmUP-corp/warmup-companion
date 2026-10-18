@@ -1,36 +1,29 @@
-use crate::config::{KeyboardTheme, VkStyle};
-use crate::vk_paint::{mix_color, VkPalette};
+use crate::mono_ui::{Theme, DIM_ALPHA};
+use crate::vk_paint::{mix_color, style_palette, VkPalette};
 
 const MONO_ACCENT_TONE: f32 = 0.7;
 const MODERN_ACTION_TONE: f32 = 0.08;
 const MODERN_ENTER_TONE: f32 = 0.14;
 const MODERN_MOD_TONE: f32 = 0.2;
 const MODERN_DIM_TONE: f32 = 0.8;
-const TV_DIAGONAL_INCH_MIN: f32 = 40.0;
-const TV_ASPECT_MAX: f32 = 2.0;
 
-pub fn diagonal_inches_from_mm(width_mm: i32, height_mm: i32) -> f32 {
-    if width_mm <= 0 || height_mm <= 0 {
-        return 0.0;
-    }
-    let w = width_mm as f32;
-    let h = height_mm as f32;
-    (w * w + h * h).sqrt() / 25.4
+pub(crate) fn vk_palette(dark: bool, style: crate::config::VkStyle) -> VkPalette {
+    themed_palette(
+        style_palette(style, dark),
+        style,
+        crate::config::keyboard_theme(),
+    )
 }
 
-pub fn is_tv(width_mm: i32, height_mm: i32) -> bool {
-    if width_mm <= 0 || height_mm <= 0 {
-        return false;
-    }
-    let aspect = width_mm as f32 / height_mm as f32;
-    diagonal_inches_from_mm(width_mm, height_mm) >= TV_DIAGONAL_INCH_MIN && aspect <= TV_ASPECT_MAX
-}
-
-pub fn themed_palette(mut pal: VkPalette, style: VkStyle, theme: KeyboardTheme) -> VkPalette {
-    if style == VkStyle::Modern {
+pub(crate) fn themed_palette(
+    mut pal: VkPalette,
+    style: crate::config::VkStyle,
+    theme: crate::config::KeyboardTheme,
+) -> VkPalette {
+    if style == crate::config::VkStyle::Modern {
         return modern_themed_palette(pal, theme);
     }
-    if style == VkStyle::Mono {
+    if style == crate::config::VkStyle::Mono {
         if let Some(v) = theme.accent {
             pal.accent = mix_color(v, pal.key, MONO_ACCENT_TONE);
             pal.sel_ring = v;
@@ -67,7 +60,7 @@ pub fn themed_palette(mut pal: VkPalette, style: VkStyle, theme: KeyboardTheme) 
     pal
 }
 
-fn modern_themed_palette(mut pal: VkPalette, theme: KeyboardTheme) -> VkPalette {
+fn modern_themed_palette(mut pal: VkPalette, theme: crate::config::KeyboardTheme) -> VkPalette {
     if let Some(v) = theme.bg {
         pal.bg = v;
     }
@@ -102,7 +95,28 @@ fn modern_themed_palette(mut pal: VkPalette, theme: KeyboardTheme) -> VkPalette 
     pal
 }
 
-pub fn is_dark_theme() -> bool {
+pub(crate) fn theme_from(pal: &VkPalette) -> Theme {
+    Theme {
+        bg: pal.bg,
+        tile: pal.key_action,
+        hi: pal.key,
+        ring: pal.sel_ring,
+        accent: pal.accent,
+        on_accent: pal.sel_text,
+        text: pal.text,
+        dim: pal.text_dim,
+        line: pal.panel_stroke,
+        line_alpha: pal.panel_stroke_alpha,
+        toggle_off: mix_color(pal.text, pal.key, 0.07),
+        idle_dot: mix_color(pal.text_dim, pal.bg, DIM_ALPHA),
+    }
+}
+
+#[cfg(windows)]
+pub(crate) use crate::win::vk_ui::is_dark_theme;
+
+#[cfg(not(windows))]
+pub(crate) fn is_dark_theme() -> bool {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
     static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
@@ -124,4 +138,19 @@ pub fn is_dark_theme() -> bool {
         *cache = Some((Instant::now(), dark));
     }
     dark
+}
+
+#[cfg(not(windows))]
+pub(crate) fn is_tv(width_mm: i32, height_mm: i32) -> bool {
+    if width_mm <= 0 || height_mm <= 0 {
+        return false;
+    }
+    let (w, h) = (width_mm as f32, height_mm as f32);
+    let diagonal = (w * w + h * h).sqrt() / 25.4;
+    diagonal >= 40.0 && w / h <= 2.0
+}
+
+#[cfg(not(windows))]
+pub(crate) fn current_theme() -> Theme {
+    theme_from(&vk_palette(is_dark_theme(), crate::config::VkStyle::Mono))
 }
