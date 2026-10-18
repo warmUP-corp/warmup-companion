@@ -62,6 +62,10 @@ pub(crate) fn run_boot_gamepad_loop(
     crate::playtime_tracker::spawn_tracker_loop();
     let on_action = |action: crate::gamepad::VkLoopAction| match action {
         crate::gamepad::VkLoopAction::Toggle => {
+            #[cfg(target_os = "linux")]
+            if app.vk_session.is_some() && crate::linux_vk::keyboard_gone() {
+                app.close_vk();
+            }
             app.toggle_virtual_keyboard_combo();
             vk_open.set(app.vk_session.is_some());
             if !service_mode {
@@ -122,10 +126,17 @@ pub(crate) fn run_boot_gamepad_loop(
             }
         }
     };
+    let is_open = || {
+        #[cfg(target_os = "linux")]
+        if crate::linux_vk::keyboard_gone() {
+            return false;
+        }
+        vk_open.get()
+    };
     if service_mode {
-        crate::gamepad::run_watch_loop_service(|| vk_open.get(), on_action)
+        crate::gamepad::run_watch_loop_service(is_open, on_action)
     } else {
-        crate::gamepad::run_watch_loop(|| vk_open.get(), on_action)
+        crate::gamepad::run_watch_loop(is_open, on_action)
     }
 }
 

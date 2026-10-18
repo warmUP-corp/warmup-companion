@@ -32,7 +32,6 @@ pub struct Presenter {
     present_mode: wgpu::PresentMode,
     shown: u32,
     mode: Mode,
-    configured_once: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -246,12 +245,7 @@ impl Presenter {
             present_mode,
             shown: 0,
             mode: Mode::Keys,
-            configured_once: false,
         })
-    }
-
-    pub fn configured_once(&self) -> bool {
-        self.configured_once
     }
 
     pub fn present(
@@ -317,13 +311,14 @@ impl Presenter {
         }
         if full {
             let mode = if frame.sheet { Mode::Sheet } else { Mode::Full };
-            if mode != Mode::Sheet || self.mode != Mode::Sheet || self.base.is_none() {
+            let stamp = full_stamp(frame, glide);
+            if self.mode != mode || self.base.is_none() || self.stamp != stamp {
                 draw::paint_frame(g, frame, glide);
                 self.base = Some(upload(&self.device, &self.queue, "keyboard-frame", g.pixels(), g.width(), g.height()));
                 self.keys.clear();
-                self.stamp = 0;
                 raster = true;
             }
+            self.stamp = stamp;
             self.mode = mode;
         }
         if let Some(orb) = orb {
@@ -487,7 +482,6 @@ impl Presenter {
             return Err(message);
         }
         self.target_size = (width, height);
-        self.configured_once = true;
         self.base = None;
         self.keys.clear();
         self.stamp = 0;
@@ -506,6 +500,20 @@ impl Presenter {
             Err(error) => Err(error.to_string()),
         }
     }
+}
+
+fn full_stamp(frame: &Frame, glide: &Glide) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    draw::keyboard_stamp(frame).hash(&mut hasher);
+    frame.sheet.hash(&mut hasher);
+    if !frame.sheet {
+        frame.sel.row.hash(&mut hasher);
+        frame.sel.col.hash(&mut hasher);
+        frame.pressed.map(|(pos, scale)| (pos.row, pos.col, scale.to_bits())).hash(&mut hasher);
+        strip_live(glide, frame).then(Instant::now).hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn strip_live(glide: &Glide, frame: &Frame) -> bool {

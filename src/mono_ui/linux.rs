@@ -14,6 +14,7 @@ use super::{
 
 pub(crate) struct Gfx {
     pixmap: Pixmap,
+    spare: Option<Pixmap>,
     fonts: FontSystem,
     swash: SwashCache,
     transform: Transform,
@@ -139,6 +140,7 @@ impl Gfx {
             Pixmap::new(w.max(1), h.max(1)).ok_or("mono_ui pixmap alloc failed")?;
         Ok(Gfx {
             pixmap,
+            spare: None,
             fonts: load_fonts(),
             swash: SwashCache::new(),
             transform: Transform::identity(),
@@ -152,9 +154,13 @@ impl Gfx {
     }
 
     pub(crate) fn begin(&mut self, w: u32, h: u32) {
-        if self.pixmap.width() != w.max(1) || self.pixmap.height() != h.max(1) {
-            if let Some(pixmap) = Pixmap::new(w.max(1), h.max(1)) {
-                self.pixmap = pixmap;
+        let (w, h) = (w.max(1), h.max(1));
+        if self.pixmap.width() != w || self.pixmap.height() != h {
+            let reuse = self
+                .spare
+                .take_if(|spare| spare.width() == w && spare.height() == h);
+            if let Some(pixmap) = reuse.or_else(|| Pixmap::new(w, h)) {
+                self.spare = Some(std::mem::replace(&mut self.pixmap, pixmap));
             }
         }
         self.pixmap.fill(Color::from_rgba8(0, 0, 0, 0));

@@ -36,9 +36,14 @@ mod draw;
 mod gpu;
 
 static KEYBOARD_OPEN: AtomicBool = AtomicBool::new(false);
+static KEYBOARD_GONE: AtomicBool = AtomicBool::new(false);
 
 pub fn keyboard_open() -> bool {
     KEYBOARD_OPEN.load(Ordering::SeqCst)
+}
+
+pub fn keyboard_gone() -> bool {
+    KEYBOARD_GONE.load(Ordering::SeqCst)
 }
 
 #[cfg(feature = "speech")]
@@ -88,6 +93,7 @@ impl Overlay {
         }
         crate::vk_nav::reset_selection();
         STOP.store(false, Ordering::SeqCst);
+        KEYBOARD_GONE.store(false, Ordering::SeqCst);
         let (wake_read, wake_write) = UnixStream::pair().map_err(|error| error.to_string())?;
         wake_read.set_nonblocking(true).map_err(|error| error.to_string())?;
         if let Ok(mut slot) = WAKE.lock() {
@@ -157,6 +163,10 @@ pub fn show_prompt_once() {
 fn run_keyboard(wake: UnixStream) {
     if let Err(error) = keyboard_loop(wake) {
         crate::install::log_line(&format!("on-screen keyboard: {error}"));
+    }
+    if !STOP.load(Ordering::SeqCst) {
+        crate::install::log_line("on-screen keyboard closed on its own");
+        KEYBOARD_GONE.store(true, Ordering::SeqCst);
     }
 }
 
@@ -433,6 +443,9 @@ impl Shell {
             floating,
             sheet: crate::vk_sheet::shown(),
         };
+        if self.logical_w == 0 || self.logical_h == 0 {
+            return;
+        }
         if !self.gpu_failed {
             match self.present_gpu(qh, &frame) {
                 Ok(()) => {
@@ -441,11 +454,8 @@ impl Shell {
                 }
                 Err(error) => {
                     crate::install::log_line(&format!("keyboard gpu: {error}"));
-                    let used = self.gpu_used
-                        || self.gpu.as_ref().is_some_and(|gpu| gpu.configured_once());
                     self.gpu = None;
-                    if used {
-                        self.gpu_used = true;
+                    if self.gpu_used {
                         self.gpu_errors += 1;
                         if self.gpu_errors >= 3 {
                             crate::install::log_line("keyboard closed: the GPU keeps failing");
@@ -500,13 +510,11 @@ impl Shell {
     }
 
     fn present_gpu(&mut self, qh: &QueueHandle<Self>, frame: &draw::Frame) -> Result<(), String> {
-        if self.logical_w == 0 || self.logical_h == 0 {
-            return Err("the keyboard has no size yet".into());
-        }
         let _ = self.conn.flush();
         if self.gpu.is_none() {
             let surface = self.layer.wl_surface().id().as_ptr() as *mut std::ffi::c_void;
             self.gpu = Some(gpu::Presenter::open(self.display, surface)?);
+            self.gpu_used = true;
         }
         #[cfg(feature = "speech")]
         let orb_hold = crate::linux_speech::visual_active().then(crate::linux_nimbus::latest_frame).flatten();
@@ -540,7 +548,6 @@ impl Shell {
         self.queue_gpu_frame(qh);
         let presenter = self.gpu.as_mut().ok_or("keyboard gpu is gone")?;
         presenter.present(frame, &mut self.gfx, &mut self.glide, orb.as_ref())?;
-        self.gpu_used = true;
         self.frame_pending = true;
         self.dirty = self.glide.animating;
         Ok(())
