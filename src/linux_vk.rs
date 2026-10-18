@@ -58,6 +58,12 @@ pub fn paint_voice_orb(
 }
 
 #[cfg(feature = "speech")]
+pub fn voice_accent() -> u32 {
+    let look = crate::vk_paint::VkLook { style: vk_style(), tv: false };
+    draw::accent(look, &crate::config::keyboard_theme())
+}
+
+#[cfg(feature = "speech")]
 pub fn paint_voice_screen(
     g: &mut Gfx,
     width: u32,
@@ -352,7 +358,7 @@ impl Shell {
     fn apply_layout(&mut self) {
         let (output_w, output_h) = self.output_size();
         let keyboard_docked = matches!(vk_layout_mode(), VkLayoutMode::Docked);
-        let (width, height) = desired_size(output_w, output_h);
+        let (width, height) = desired_size(output_w, output_h, self.look());
         let docked = keyboard_docked;
         let margin = if keyboard_docked { 0 } else { draw::floating_bottom_margin(output_h) };
         let key = (docked, width, height, margin);
@@ -397,6 +403,19 @@ impl Shell {
         (pixels_w as f32 / scale, pixels_h as f32 / scale)
     }
 
+    fn look(&self) -> crate::vk_paint::VkLook {
+        let tv = match crate::config::vk_display() {
+            crate::config::VkDisplay::Tv => true,
+            crate::config::VkDisplay::Desk => false,
+            crate::config::VkDisplay::Auto => self
+                .output
+                .as_ref()
+                .and_then(|output| self.output_state.info(output))
+                .is_some_and(|info| is_tv(info.physical_size)),
+        };
+        crate::vk_paint::VkLook { style: vk_style(), tv }
+    }
+
     fn buffer_scale(&self) -> f64 {
         if let Some(scale) = self.fractional {
             return scale.max(1.0);
@@ -414,8 +433,11 @@ impl Shell {
         self.apply_layout();
         let scale = self.buffer_scale() as f32;
         let rows = crate::vk_nav::rows_snapshot();
-        let mono = matches!(vk_style(), VkStyle::Mono);
-        let strip = crate::vk_predict::strip(if mono { 3 } else { 7 }, mono);
+        let look = self.look();
+        let strip = crate::vk_predict::strip(
+            crate::vk_paint::strip_slots(look),
+            look.style == VkStyle::Mono,
+        );
         let pressed = crate::vk_nav::press_feedback().map(|(pos, at)| {
             (
                 pos,
@@ -428,10 +450,11 @@ impl Shell {
             logical_w: self.logical_w as f32,
             logical_h: self.logical_h as f32,
             scale,
-            scale_w: draw::layout_scale_w(vk_style()),
+            scale_w: draw::layout_scale_w(look.style),
             rows,
             sel: crate::vk_nav::selection(),
-            style: vk_style(),
+            style: look.style,
+            tv: look.tv,
             theme: crate::config::keyboard_theme(),
             strip,
             pressed,
@@ -572,10 +595,19 @@ impl Drop for Shell {
     }
 }
 
-fn desired_size(output_w: f32, output_h: f32) -> (u32, u32) {
+fn desired_size(output_w: f32, output_h: f32, look: crate::vk_paint::VkLook) -> (u32, u32) {
     let rows = crate::vk_nav::rows_snapshot();
     let docked = matches!(vk_layout_mode(), VkLayoutMode::Docked);
-    draw::card_size(output_w, output_h, docked, &rows, vk_style())
+    draw::card_size(output_w, output_h, docked, &rows, look)
+}
+
+fn is_tv((width_mm, height_mm): (i32, i32)) -> bool {
+    if width_mm <= 0 || height_mm <= 0 {
+        return false;
+    }
+    let (w, h) = (width_mm as f32, height_mm as f32);
+    let diagonal = (w * w + h * h).sqrt() / 25.4;
+    diagonal >= 40.0 && w / h <= 2.0
 }
 
 fn ps5_pad() -> bool {

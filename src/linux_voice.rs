@@ -188,9 +188,7 @@ impl Pill {
         if self.border_drawn && self.border_phase == phase {
             return;
         }
-        let accent = crate::config::keyboard_theme()
-            .accent
-            .unwrap_or(crate::vk_paint::rgb(0xA6D1FF));
+        let accent = crate::linux_vk::voice_accent();
         if !crate::linux_vk::paint_voice_screen(&mut self.gfx, width, height, phase, 0.0, false, None, 0, accent) {
             return;
         }

@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, the keyboard takes its sizes and colours from the same style tables as Windows. The Modern style now shows its own colours and layout, a TV-sized screen (or `vk_display=tv`) uses the TV layout, Mono shows seven suggestions like Windows, and custom keyboard colours are applied the Windows way in every style.
 - On Linux, the glow around the screen during dictation uses the keyboard accent colour the same way Windows does. A custom accent no longer shows with red and blue swapped.
 - On Linux, the on-screen keyboard stays on the graphics card once it has started there. Pressing a key other than the highlighted one, or a GPU hiccup, no longer switches the keyboard to a software picture that Hyprland rejects; the GPU is opened again instead, and after three failures in a row the keyboard closes. When the keyboard closes on its own, the controller goes back to moving the pointer, and L3 opens a fresh keyboard.
 - On Linux, an Xbox controller on Bluetooth shows its battery level when the driver reports one (xpadneo or the kernel's HID battery).

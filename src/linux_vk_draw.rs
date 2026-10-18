@@ -5,6 +5,7 @@ use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
 use crate::config::{KeyboardTheme, VkStyle};
 use crate::mono_ui::Gfx;
+use crate::vk_paint::{VkLook, VkPalette};
 use crate::vk_geom::{self, KeyRect};
 use crate::vk_key::{VK_BACK, VK_DOWN, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP};
 use crate::vk_motion::{self, concentric_radius};
@@ -63,148 +64,18 @@ fn sheet_metrics_are_the_windows_ones() -> f32 {
         + BAR_H
 }
 
-struct Spec {
-    mono: bool,
-    family: &'static str,
-    design_kh: f32,
-    key_aspect: f32,
-    gap: f32,
-    key_radius: f32,
-    pad_x: f32,
-    pad_y: f32,
-    panel_radius: f32,
-    label_px: f32,
-    label_weight: Weight,
-    word_px: f32,
-    word_weight: Weight,
-    number_px: f32,
-    number_alpha: f32,
-    number_cy: f32,
-    label_cy: f32,
-    caption_cy: f32,
-    space_icon_cy: f32,
-    space_label: Option<&'static str>,
-    space_label_px: f32,
-    trim_symbols: bool,
-    icon_px: f32,
-    icon_large_px: f32,
-    space_icon_px: f32,
-    hint_badge: f32,
-    hint_inset: f32,
-    key_shadow_dy: f32,
-    key_shadow_alpha: f32,
-    sel_shadow: Option<(f32, f32, f32)>,
-    sel_ring_w: f32,
-    strip_bar_h: f32,
-    chip_px: f32,
-    chip_sel_weight: Weight,
-    chip_text_alpha: f32,
-    strip_button_w: f32,
-    strip_button_h: f32,
-    strip_button_gap: f32,
-    strip_hint_px: f32,
-    chips_h: f32,
-    chips_pad: f32,
-    chips_gap: f32,
-    separator_h: f32,
-    separator_alpha: f32,
+type Spec = crate::vk_paint::StyleSpec;
+
+fn spec_for(look: VkLook) -> &'static Spec {
+    crate::vk_paint::style_spec(look)
 }
 
-fn spec_for(style: VkStyle) -> Spec {
-    match style {
-        VkStyle::Mono => Spec {
-            mono: true,
-            family: "Inter",
-            design_kh: 100.0,
-            key_aspect: 100.0 / 137.0,
-            gap: 8.0,
-            key_radius: 12.0,
-            pad_x: 13.0,
-            pad_y: 13.0,
-            panel_radius: 24.0,
-            label_px: 32.0,
-            label_weight: Weight::NORMAL,
-            word_px: 24.0,
-            word_weight: Weight::NORMAL,
-            number_px: 14.0,
-            number_alpha: 0x99 as f32 / 255.0,
-            number_cy: 30.5,
-            label_cy: 58.5,
-            caption_cy: 23.0,
-            space_icon_cy: 50.0,
-            space_label: Some("space"),
-            space_label_px: 22.0,
-            trim_symbols: true,
-            icon_px: 34.0,
-            icon_large_px: 34.0,
-            space_icon_px: 34.0,
-            hint_badge: 36.0,
-            hint_inset: 8.0,
-            key_shadow_dy: 1.0,
-            key_shadow_alpha: 0x99 as f32 / 255.0,
-            sel_shadow: Some((8.0, 24.0, 0x80 as f32 / 255.0)),
-            sel_ring_w: 2.0,
-            strip_bar_h: 72.0,
-            chip_px: 22.0,
-            chip_sel_weight: Weight::NORMAL,
-            chip_text_alpha: 0x99 as f32 / 255.0,
-            strip_button_w: 40.0,
-            strip_button_h: 0.0,
-            strip_button_gap: 0.0,
-            strip_hint_px: 32.0,
-            chips_h: 72.0,
-            chips_pad: 0.0,
-            chips_gap: 0.0,
-            separator_h: 28.0,
-            separator_alpha: 0x99 as f32 / 255.0,
-        },
-        VkStyle::Normal | VkStyle::Modern => Spec {
-            mono: false,
-            family: "Noto Sans",
-            design_kh: 102.0,
-            key_aspect: 102.0 / 138.0,
-            gap: 6.0,
-            key_radius: 12.0,
-            pad_x: 17.0,
-            pad_y: 18.0,
-            panel_radius: 25.0,
-            label_px: 38.0,
-            label_weight: Weight::MEDIUM,
-            word_px: 26.0,
-            word_weight: Weight::MEDIUM,
-            number_px: 14.0,
-            number_alpha: 0x8C as f32 / 255.0,
-            number_cy: 25.0,
-            label_cy: 60.5,
-            caption_cy: 23.0,
-            space_icon_cy: 62.5,
-            space_label: None,
-            space_label_px: 22.0,
-            trim_symbols: false,
-            icon_px: 36.0,
-            icon_large_px: 40.0,
-            space_icon_px: 52.0,
-            hint_badge: 36.0,
-            hint_inset: 8.0,
-            key_shadow_dy: 1.0,
-            key_shadow_alpha: 0x99 as f32 / 255.0,
-            sel_shadow: None,
-            sel_ring_w: 2.0,
-            strip_bar_h: 112.0,
-            chip_px: 20.0,
-            chip_sel_weight: Weight::SEMIBOLD,
-            chip_text_alpha: 0xB3 as f32 / 255.0,
-            strip_button_w: 60.0,
-            strip_button_h: 48.0,
-            strip_button_gap: 18.0,
-            strip_hint_px: 36.0,
-            chips_h: 60.0,
-            chips_pad: 6.0,
-            chips_gap: 4.0,
-            separator_h: 0.0,
-            separator_alpha: 0.0,
-        },
-    }
+fn weight(value: i32) -> Weight {
+    Weight(value.clamp(1, 1000) as u16)
+}
+
+fn is_columns(spec: &Spec) -> bool {
+    spec.strip == crate::vk_paint::StripLook::Columns
 }
 
 #[derive(Clone, Copy)]
@@ -237,6 +108,7 @@ pub struct Frame {
     pub rows: Vec<KeyRow>,
     pub sel: KeyPos,
     pub style: VkStyle,
+    pub tv: bool,
     pub theme: KeyboardTheme,
     pub strip: Option<StripState>,
     pub pressed: Option<(KeyPos, f32)>,
@@ -255,6 +127,15 @@ pub struct Glide {
     pub strip_at: Option<Instant>,
     pub animating: bool,
     base: Option<(u64, Pixmap)>,
+}
+
+impl Frame {
+    pub fn look(&self) -> VkLook {
+        VkLook {
+            style: self.style,
+            tv: self.tv,
+        }
+    }
 }
 
 impl Default for Glide {
@@ -289,16 +170,22 @@ pub fn layout_scale_w(style: VkStyle) -> f32 {
     REF_MON_W * layout_scale(style)
 }
 
-pub fn card_size(output_w: f32, output_h: f32, docked: bool, rows: &[KeyRow], style: VkStyle) -> (u32, u32) {
-    let spec = spec_for(style);
-    let scale = layout_scale(style);
+pub fn card_size(output_w: f32, output_h: f32, docked: bool, rows: &[KeyRow], look: VkLook) -> (u32, u32) {
+    let spec = spec_for(look);
+    let scale = layout_scale(look.style);
     let scale_w = REF_MON_W * scale;
     let (grid_w, block_h) = vk_geom::grid_size(scale_w, rows, spec.key_aspect, spec.gap, spec.design_kh);
-    let u = ref_unit(scale, &spec);
-    let chrome = (spec.strip_bar_h + spec.gap - spec.pad_y) * u;
-    let legend = legend_band_height(scale, &spec);
-    let (pad_x, pad_y) = (spec.pad_x * u, spec.pad_y * u);
-    let height = (chrome + block_h + pad_y * 2.0 + legend).ceil().clamp(160.0, output_h.max(160.0));
+    let chrome = crate::vk_paint::strip_band_height(scale, look);
+    let legend = legend_band_height(scale, look);
+    let (pad_x, pad_y) = crate::vk_paint::floating_pad(scale, look);
+    let full = if docked && look.tv_layout() {
+        let (_, kh, _) =
+            vk_geom::key_metrics(scale_w, f32::INFINITY, rows, 0.0, spec.key_aspect, spec.gap, spec.design_kh);
+        chrome + block_h + kh * 0.25
+    } else {
+        chrome + block_h + pad_y * 2.0 + legend
+    };
+    let height = full.ceil().clamp(160.0, output_h.max(160.0));
     if docked {
         (output_w.max(640.0) as u32, height as u32)
     } else {
@@ -316,12 +203,11 @@ fn sheet_size(output_w: f32, output_h: f32) -> (u32, u32) {
     )
 }
 
-fn legend_band_height(scale: f32, spec: &Spec) -> f32 {
-    ((BAR_H - spec.pad_y) * ref_unit(scale, spec)).max(0.0)
-}
-
-fn ref_unit(scale: f32, spec: &Spec) -> f32 {
-    REF_KEY_W * scale.max(0.05) * spec.key_aspect / spec.design_kh
+fn legend_band_height(scale: f32, look: VkLook) -> f32 {
+    if look.tv_layout() {
+        return 0.0;
+    }
+    ((BAR_H - spec_for(look).pad_y) * crate::vk_paint::ref_unit(scale, look)).max(0.0)
 }
 
 pub fn frame_px(frame: &Frame) -> (u32, u32) {
@@ -375,11 +261,12 @@ fn render_keyboard(
     highlight: bool,
 ) {
     let scale = frame.scale.max(1.0);
-    let spec = spec_for(frame.style);
-    let pal = palette(frame.style, &frame.theme);
-    let lu = ref_unit(ui_scale(), &spec);
-    let top_inset = (spec.strip_bar_h + spec.gap - spec.pad_y) * lu;
-    let legend_h = legend_band_height(ui_scale(), &spec);
+    let look = frame.look();
+    let spec = spec_for(look);
+    let pal = palette(look, &frame.theme);
+    let lu = crate::vk_paint::ref_unit(ui_scale(), look);
+    let top_inset = crate::vk_paint::strip_band_height(ui_scale(), look);
+    let legend_h = legend_band_height(ui_scale(), look);
     let rects = vk_geom::key_rects(
         frame.logical_w,
         (frame.logical_h - legend_h).max(40.0),
@@ -450,7 +337,9 @@ fn render_keyboard(
     if let Some(strip) = &frame.strip {
         draw_strip(pixmap, fonts, cache, &spec, &pal, strip, &rects, unit, scale, frame.ps5, strip_dy, strip_alpha);
     }
-    draw_legend(pixmap, fonts, cache, &spec, &pal, &rects, frame.logical_w, frame.logical_h, lu, scale, frame.ps5);
+    if !look.tv_layout() {
+        draw_legend(pixmap, fonts, cache, spec, &pal, &rects, frame.logical_w, frame.logical_h, lu, scale, frame.ps5);
+    }
     if let Some((x, y, w, h, radius)) = panel {
         clip_round(pixmap, x, y, w, h, radius);
     }
@@ -496,7 +385,7 @@ fn fit_legend(widths: &[f32], sep: f32, avail: f32) -> Vec<usize> {
     kept
 }
 
-fn leg_part_width(part: &Leg, u: f32, fonts: &mut FontSystem, family: &str) -> f32 {
+fn leg_part_width(part: &Leg, u: f32, fonts: &mut FontSystem, family: &[&str]) -> f32 {
     match *part {
         Leg::Btn("SELECT") => BAR_SHARE * u,
         Leg::Btn(_) => BAR_GLYPH * u,
@@ -506,7 +395,7 @@ fn leg_part_width(part: &Leg, u: f32, fonts: &mut FontSystem, family: &str) -> f
     }
 }
 
-fn legend_item_width(parts: &[Leg], label: &str, u: f32, fonts: &mut FontSystem, family: &str) -> f32 {
+fn legend_item_width(parts: &[Leg], label: &str, u: f32, fonts: &mut FontSystem, family: &[&str]) -> f32 {
     let gaps = BAR_GAP * u * parts.len().saturating_sub(1) as f32;
     let body: f32 = parts.iter().map(|part| leg_part_width(part, u, fonts, family)).sum();
     body + gaps + BAR_LABEL_GAP * u + measure_label(fonts, family, label, text_px(BAR_LABEL_PX, u))
@@ -528,7 +417,7 @@ fn draw_legend(
     let pad_x = 16.0 * u;
     let left = pad_x;
     let right = (frame_w - pad_x).max(left);
-    let family = _spec.family;
+    let family = _spec.families;
     let dot_w = measure_label(fonts, family, LEGEND_SEP, text_px(BAR_SEP_PX, u));
     let sep_w = BAR_GAP * u + dot_w + BAR_GAP * u;
     let widths: Vec<f32> = LEGEND_ROWS
@@ -745,16 +634,16 @@ fn paint_key(
     let dim_a = (spec.number_alpha * 255.0) as u8;
     if let Some(sub) = key.sublabel.as_deref().filter(|_| !is_space) {
         let band = band_at(left, top, right, spec.number_cy * unit, key_h);
-        text(pixmap, fonts, cache, sub, band, spec.number_px * unit * scale, Weight::NORMAL, dim, dim_a, scale, spec.family);
+        text(pixmap, fonts, cache, sub, band, spec.number_px * unit * scale, Weight::NORMAL, dim, dim_a, scale, spec.families);
     }
     if matches!(key.action, KeyAction::VoiceInput) {
         blit_svg(pixmap, MIC, left, top, right, bottom, spec.icon_px * unit, scale, Some(label_c), 255);
     } else if is_space {
         if let Some(word) = spec.space_label {
-            text(pixmap, fonts, cache, word, (left, top, right, bottom), spec.space_label_px * unit * scale, Weight::NORMAL, label_c, 255, scale, spec.family);
+            text(pixmap, fonts, cache, word, (left, top, right, bottom), spec.space_label_px * unit * scale, Weight::NORMAL, label_c, 255, scale, spec.families);
         } else if let Some(sub) = key.sublabel.as_deref() {
             let cap = band_at(left, top, right, spec.caption_cy * unit, key_h);
-            text(pixmap, fonts, cache, sub, cap, spec.number_px * unit * scale, Weight::NORMAL, dim, dim_a, scale, spec.family);
+            text(pixmap, fonts, cache, sub, cap, spec.number_px * unit * scale, Weight::NORMAL, dim, dim_a, scale, spec.families);
             let icon = band_at(left, top, right, spec.space_icon_cy * unit, key_h);
             blit_svg(pixmap, SPACE, icon.0, icon.1, icon.2, icon.3, spec.space_icon_px * unit, scale, Some(label_c), 255);
         }
@@ -763,18 +652,18 @@ fn paint_key(
         blit_svg(pixmap, svg, left, top, right, bottom, px, scale, Some(label_c), 255);
     } else {
         let mut glyph = key.label.clone();
-        if spec.trim_symbols && matches!(key.action, KeyAction::Symbols) {
+        if spec.trim_symbols_label && matches!(key.action, KeyAction::Symbols) {
             glyph = glyph.trim_start_matches('?').to_string();
         }
         if !glyph.is_empty() {
-            let weight = if glyph.chars().count() > 1 { spec.word_weight } else { spec.label_weight };
+            let weight = weight(if glyph.chars().count() > 1 { spec.word_weight } else { spec.label_weight });
             let px = if glyph.chars().count() > 1 { spec.word_px } else { spec.label_px };
             let band = if key.sublabel.is_some() {
                 band_at(left, top, right, spec.label_cy * unit, key_h)
             } else {
                 (left, top, right, bottom)
             };
-            text(pixmap, fonts, cache, &glyph, band, px * unit * scale, weight, label_c, 255, scale, spec.family);
+            text(pixmap, fonts, cache, &glyph, band, px * unit * scale, weight, label_c, 255, scale, spec.families);
         }
     }
     if let Some(hint) = key_hint(&key.action) {
@@ -799,13 +688,13 @@ fn erase_key(pixmap: &mut Pixmap, rect: &KeyRect, spec: &Spec, pal: &Pal, unit: 
     round_rect(pixmap, rect.left * scale, rect.top * scale, (rect.right - rect.left) * scale, (rect.bottom - rect.top + dy) * scale, 0.0, pal.bg, 255);
 }
 
-fn scene(frame: &Frame) -> (Spec, Pal, Vec<KeyRect>, f32, f32, f32, f32) {
+fn scene(frame: &Frame) -> (&'static Spec, Pal, Vec<KeyRect>, f32, f32, f32, f32) {
     let scale = frame.scale.max(1.0);
-    let spec = spec_for(frame.style);
-    let pal = palette(frame.style, &frame.theme);
-    let lu = ref_unit(ui_scale(), &spec);
-    let top_inset = (spec.strip_bar_h + spec.gap - spec.pad_y) * lu;
-    let legend_h = legend_band_height(ui_scale(), &spec);
+    let look = frame.look();
+    let spec = spec_for(look);
+    let pal = palette(look, &frame.theme);
+    let top_inset = crate::vk_paint::strip_band_height(ui_scale(), look);
+    let legend_h = legend_band_height(ui_scale(), look);
     let rects = vk_geom::key_rects(
         frame.logical_w,
         (frame.logical_h - legend_h).max(40.0),
@@ -909,9 +798,9 @@ fn sheet_part_width(part: &Leg, fonts: &mut FontSystem) -> f32 {
     match *part {
         Leg::Btn("SELECT") => SHEET_SHARE,
         Leg::Btn(_) => SHEET_GLYPH,
-        Leg::Word(word) => measure_label(fonts, "Noto Sans", word, SHEET_TOKEN_PX),
-        Leg::Plus => measure_label(fonts, "Noto Sans", "+", SHEET_TOKEN_PX),
-        Leg::Slash => measure_label(fonts, "Noto Sans", "/", SHEET_TOKEN_PX),
+        Leg::Word(word) => measure_label(fonts, &["Noto Sans"], word, SHEET_TOKEN_PX),
+        Leg::Plus => measure_label(fonts, &["Noto Sans"], "+", SHEET_TOKEN_PX),
+        Leg::Slash => measure_label(fonts, &["Noto Sans"], "/", SHEET_TOKEN_PX),
     }
 }
 
@@ -972,9 +861,9 @@ fn sheet_columns(fonts: &mut FontSystem) -> [SheetCol; 3] {
             match line {
                 SheetLine::Row(parts, text) => {
                     combo = combo.max(sheet_combo_width(parts, fonts));
-                    label = label.max(measure_label(fonts, "Noto Sans", text, SHEET_ACTION_PX));
+                    label = label.max(measure_label(fonts, &["Noto Sans"], text, SHEET_ACTION_PX));
                 }
-                SheetLine::Title(text) => header = header.max(measure_label(fonts, "Noto Sans", text, SHEET_HEADER_PX)),
+                SheetLine::Title(text) => header = header.max(measure_label(fonts, &["Noto Sans"], text, SHEET_HEADER_PX)),
                 SheetLine::Blank => {}
             }
         }
@@ -1021,7 +910,7 @@ fn paint_sheet(pixmap: &mut Pixmap, fonts: &mut FontSystem, cache: &mut SwashCac
             let y = top + index as f32 * row_h;
             match line {
                 SheetLine::Title(title) => {
-                    text_aligned(pixmap, fonts, cache, title, (x, y, x + col_w, y + row_h), SHEET_HEADER_PX * u * scale, Weight::NORMAL, white, muted, scale, Align::Left, "Noto Sans");
+                    text_aligned(pixmap, fonts, cache, title, (x, y, x + col_w, y + row_h), SHEET_HEADER_PX * u * scale, Weight::NORMAL, white, muted, scale, Align::Left, &["Noto Sans"]);
                 }
                 SheetLine::Row(parts, label) => {
                     let mut cursor = x;
@@ -1037,13 +926,13 @@ fn paint_sheet(pixmap: &mut Pixmap, fonts: &mut FontSystem, cache: &mut SwashCac
                                 }
                             }
                             Leg::Word(_) | Leg::Plus | Leg::Slash => {
-                                text_aligned(pixmap, fonts, cache, leg_word(part), (cursor, y, cursor + w, y + row_h), SHEET_TOKEN_PX * u * scale, Weight::NORMAL, white, muted, scale, Align::Left, "Noto Sans");
+                                text_aligned(pixmap, fonts, cache, leg_word(part), (cursor, y, cursor + w, y + row_h), SHEET_TOKEN_PX * u * scale, Weight::NORMAL, white, muted, scale, Align::Left, &["Noto Sans"]);
                             }
                         }
                         cursor += w;
                     }
                     let label_x = x + col.combo * u + SHEET_ACTION_GAP * u;
-                    text_aligned(pixmap, fonts, cache, label, (label_x, y, x + col_w, y + row_h), SHEET_ACTION_PX * u * scale, Weight::NORMAL, white, 255, scale, Align::Left, "Noto Sans");
+                    text_aligned(pixmap, fonts, cache, label, (label_x, y, x + col_w, y + row_h), SHEET_ACTION_PX * u * scale, Weight::NORMAL, white, 255, scale, Align::Left, &["Noto Sans"]);
                 }
                 SheetLine::Blank => {}
             }
@@ -1094,7 +983,7 @@ fn draw_strip(
     let bottom = grid_top - spec.gap * unit + dy;
     let top = (bottom - spec.strip_bar_h * unit).max(0.0);
     let cy = (top + bottom) * 0.5;
-    if spec.mono {
+    if is_columns(spec) {
         let inner_l = left;
         let inner_r = right;
         let n = strip.visible.len().max(1) as f32;
@@ -1112,7 +1001,7 @@ fn draw_strip(
             let selected = i == strip.highlight_slot;
             let alpha = fade_u8(if selected { 1.0 } else { spec.chip_text_alpha });
             let color = if selected { pal.text } else { pal.text_dim };
-            text(pixmap, fonts, cache, word, (x0, top, x1, bottom), spec.chip_px * unit * scale, if selected { spec.chip_sel_weight } else { Weight::NORMAL }, color, alpha, scale, spec.family);
+            text(pixmap, fonts, cache, word, (x0, top, x1, bottom), spec.chip_px * unit * scale, if selected { weight(spec.chip_sel_weight) } else { Weight::NORMAL }, color, alpha, scale, spec.families);
         }
         return;
     }
@@ -1153,78 +1042,102 @@ fn draw_strip(
             round_rect(pixmap, x0 * scale, inner_t * scale, chip_w * scale, (inner_b - inner_t) * scale, chip_r * scale, pal.chip_sel, fade_u8(1.0));
         }
         let alpha = fade_u8(if selected { 1.0 } else { spec.chip_text_alpha });
-        let weight = if selected { spec.chip_sel_weight } else { Weight::NORMAL };
+        let weight = if selected { weight(spec.chip_sel_weight) } else { Weight::NORMAL };
         let label = (x0 + chip_r * 0.5, inner_t, x0 + chip_w - chip_r * 0.5, inner_b);
-        text(pixmap, fonts, cache, word, label, spec.chip_px * unit * scale, weight, pal.text, alpha, scale, spec.family);
+        text(pixmap, fonts, cache, word, label, spec.chip_px * unit * scale, weight, pal.text, alpha, scale, spec.families);
     }
 }
 
-fn palette(style: VkStyle, theme: &KeyboardTheme) -> Pal {
-    let mut pal = match style {
-        VkStyle::Normal | VkStyle::Modern => Pal {
-            bg: rgb(0x15161C),
-            key: rgb(0x2A2B36),
-            key_action: rgb(0x1F2029),
-            accent: rgb(0xA6D1FF),
-            sel_ring: rgb(0xDCEBFF),
-            text: rgb(0xFFFFFF),
-            text_dim: rgb(0xFFFFFF),
-            sel_text: rgb(0x1A2233),
-            border: rgb(0x3A3B47),
-            panel_stroke: rgb(0xFFFFFF),
-            panel_stroke_alpha: 0x12 as f32 / 255.0,
-            chip_sel: rgb(0x3A3C4A),
-        },
-        VkStyle::Mono => Pal {
-            bg: rgb(0x1C1C1E),
-            key: rgb(0x3A3A3C),
-            key_action: rgb(0x2C2C2E),
-            accent: rgb(0xC9BCFF),
-            sel_ring: rgb(0xB6A0FF),
-            text: rgb(0xFFFFFF),
-            text_dim: rgb(0xEBEBF5),
-            sel_text: rgb(0x211047),
-            border: rgb(0x545458),
-            panel_stroke: rgb(0xFFFFFF),
-            panel_stroke_alpha: 0x14 as f32 / 255.0,
-            chip_sel: rgb(0x3A3A3C),
-        },
-    };
-    if style == VkStyle::Mono {
-        if let Some(v) = theme.accent {
-            let accent = from_colorref(v);
-            pal.accent = mix(pal.key, accent, 0.7);
-            pal.sel_ring = accent;
+fn palette(look: VkLook, theme: &KeyboardTheme) -> Pal {
+    let v = themed_palette(crate::vk_paint::style_palette(look.style, true), look.style, theme);
+    Pal {
+        bg: from_colorref(v.bg),
+        key: from_colorref(v.key),
+        key_action: from_colorref(v.key_action),
+        accent: from_colorref(v.accent),
+        sel_ring: from_colorref(v.sel_ring),
+        text: from_colorref(v.text),
+        text_dim: from_colorref(v.text_dim),
+        sel_text: from_colorref(v.sel_text),
+        border: from_colorref(v.border),
+        panel_stroke: from_colorref(v.panel_stroke),
+        panel_stroke_alpha: v.panel_stroke_alpha,
+        chip_sel: from_colorref(v.chip_sel),
+    }
+}
+
+pub fn accent(look: VkLook, theme: &KeyboardTheme) -> u32 {
+    themed_palette(crate::vk_paint::style_palette(look.style, true), look.style, theme).accent
+}
+
+fn themed_palette(mut pal: VkPalette, style: VkStyle, theme: &KeyboardTheme) -> VkPalette {
+    use crate::vk_paint::mix_color;
+    if style == VkStyle::Modern {
+        if let Some(v) = theme.bg {
+            pal.bg = v;
+        }
+        if let Some(v) = theme.text {
+            pal.text = v;
+            pal.enter_text = v;
+            pal.text_dim = mix_color(v, pal.bg, 0.8);
         }
         if let Some(v) = theme.sel_text {
-            pal.sel_text = from_colorref(v);
+            pal.sel_text = v;
+        }
+        if let Some(v) = theme.accent {
+            pal.accent = v;
+            pal.sel_ring = v;
+            pal.chip_sel = v;
+        }
+        if let Some(v) = theme.key {
+            pal.key = v;
+            pal.key_action = mix_color(pal.text, v, 0.08);
+        }
+        if theme.key.is_some() || theme.accent.is_some() {
+            if let Some(tint) = theme.accent.or(pal.mod_tint.map(|(_, bar)| bar)) {
+                pal.key_enter = mix_color(tint, pal.key, 0.14);
+                pal.mod_tint = Some((mix_color(tint, pal.key, 0.2), tint));
+            }
+        }
+        if let Some(v) = theme.border {
+            pal.border = v;
+            pal.panel_stroke = v;
+            pal.panel_stroke_alpha = 1.0;
+        }
+        return pal;
+    }
+    if style == VkStyle::Mono {
+        if let Some(v) = theme.accent {
+            pal.accent = mix_color(v, pal.key, 0.7);
+            pal.sel_ring = v;
+        }
+        if let Some(v) = theme.sel_text {
+            pal.sel_text = v;
         }
         return pal;
     }
     if let Some(v) = theme.bg {
-        pal.bg = from_colorref(v);
+        pal.bg = v;
     }
     if let Some(v) = theme.key {
-        let key = from_colorref(v);
-        pal.key = key;
-        pal.key_action = mix(rgb(0x000000), key, 0.26);
-        pal.chip_sel = mix(rgb(0xFFFFFF), key, 0.10);
+        pal.key = v;
+        pal.key_action = mix_color(0x000000, v, 0.26);
+        pal.chip_sel = mix_color(0xFFFFFF, v, 0.10);
     }
     if let Some(v) = theme.accent {
-        let accent = from_colorref(v);
-        pal.accent = accent;
-        pal.sel_ring = mix(rgb(0xFFFFFF), accent, 0.5);
+        pal.accent = v;
+        pal.sel_ring = mix_color(0xFFFFFF, v, 0.5);
     }
     if let Some(v) = theme.text {
-        pal.text = from_colorref(v);
-        pal.text_dim = from_colorref(v);
+        pal.text = v;
+        pal.text_dim = v;
     }
     if let Some(v) = theme.sel_text {
-        pal.sel_text = from_colorref(v);
+        pal.sel_text = v;
     }
     if let Some(v) = theme.border {
-        pal.border = from_colorref(v);
-        pal.panel_stroke = from_colorref(v);
+        pal.border = v;
+        pal.panel_stroke = v;
         pal.panel_stroke_alpha = 1.0;
     }
     pal
@@ -1451,12 +1364,25 @@ fn text(
     color: Rgb,
     alpha: u8,
     scale: f32,
-    family: &str,
+    family: &[&str],
 ) {
     text_aligned(pixmap, fonts, cache, value, band, px, weight, color, alpha, scale, Align::Center, family);
 }
 
-fn measure_label(fonts: &mut FontSystem, family: &str, value: &str, px: f32) -> f32 {
+fn pick_family<'a>(fonts: &FontSystem, names: &[&'a str]) -> Family<'a> {
+    names
+        .iter()
+        .find(|name| {
+            fonts
+                .db()
+                .faces()
+                .any(|face| face.families.iter().any(|(have, _)| have == *name))
+        })
+        .map(|name| Family::Name(name))
+        .unwrap_or(Family::SansSerif)
+}
+
+fn measure_label(fonts: &mut FontSystem, family: &[&str], value: &str, px: f32) -> f32 {
     if value.is_empty() || px < 1.0 {
         return 0.0;
     }
@@ -1464,7 +1390,7 @@ fn measure_label(fonts: &mut FontSystem, family: &str, value: &str, px: f32) -> 
     let mut buffer = Buffer::new(fonts, metrics);
     buffer.set_size(fonts, None, None);
     buffer.set_wrap(fonts, Wrap::None);
-    let attrs = Attrs::new().family(Family::Name(family)).weight(Weight::NORMAL);
+    let attrs = Attrs::new().family(pick_family(fonts, family)).weight(Weight::NORMAL);
     buffer.set_text(fonts, value, &attrs, Shaping::Advanced);
     buffer.shape_until_scroll(fonts, false);
     buffer.layout_runs().map(|run| run.line_w).fold(0.0, f32::max)
@@ -1482,7 +1408,7 @@ fn text_aligned(
     alpha: u8,
     scale: f32,
     align: Align,
-    family: &str,
+    family: &[&str],
 ) {
     if value.is_empty() || px < 4.0 {
         return;
@@ -1497,7 +1423,7 @@ fn text_aligned(
     let mut buffer = Buffer::new(fonts, metrics);
     buffer.set_size(fonts, Some(w), Some(h));
     buffer.set_wrap(fonts, Wrap::None);
-    let attrs = Attrs::new().family(Family::Name(family)).weight(weight);
+    let attrs = Attrs::new().family(pick_family(fonts, family)).weight(weight);
     buffer.set_text(fonts, value, &attrs, Shaping::Advanced);
     for line in &mut buffer.lines {
         line.set_align(Some(align));
@@ -1914,7 +1840,7 @@ pub fn paint_prompt(g: &mut Gfx, text_value: &str, scale: f32) {
     g.begin((logical_w * scale) as u32, (logical_h * scale) as u32);
     let (pixmap, fonts, cache) = g.canvas();
     fill(pixmap, rgb(0x15161C), 235);
-    text(pixmap, fonts, cache, text_value, (16.0, 16.0, logical_w - 16.0, logical_h - 16.0), 22.0 * scale, Weight::MEDIUM, rgb(0xFFFFFF), 255, 1.0, "Noto Sans");
+    text(pixmap, fonts, cache, text_value, (16.0, 16.0, logical_w - 16.0, logical_h - 16.0), 22.0 * scale, Weight::MEDIUM, rgb(0xFFFFFF), 255, 1.0, &["Noto Sans"]);
 }
 
 #[cfg(test)]
@@ -1955,6 +1881,7 @@ mod tests {
             rows: rows_for_test(),
             sel: KeyPos { row: 1, col: 1 },
             style: VkStyle::Normal,
+            tv: false,
             theme: KeyboardTheme::default(),
             strip: None,
             pressed: None,
@@ -2019,6 +1946,7 @@ mod tests {
             rows: rows_for_test(),
             sel: KeyPos { row: 0, col: 0 },
             style: VkStyle::Normal,
+            tv: false,
             theme: KeyboardTheme::default(),
             strip: None,
             pressed: None,
