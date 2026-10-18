@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, a controller button can send the shortcut for the focused app. In a browser, B closes the tab, Y opens a tab, and the triggers move between tabs.
 - The on-screen keyboard is drawn on the GPU. The card stays on the graphics card, and moving the highlight uploads the selected key.
 - The voice cloud no longer waits for the graphics card to go idle. If a game is already using the GPU, that cloud frame is skipped so the game is not stalled.
 - The voice cloud on the mic key keeps moving while you dictate. It no longer waits for a D-pad move before the next frame is shown.
