@@ -354,6 +354,30 @@ pub(crate) fn cover_bgra(png_bytes: &[u8], w: u32, h: u32, radius: f32) -> Optio
     Some(out)
 }
 
+pub(crate) fn ellipsize(text: &str, max_w: f32, mut measure: impl FnMut(&str) -> f32) -> String {
+    if measure(text) <= max_w {
+        return text.to_string();
+    }
+    let cuts: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+    let (mut lo, mut hi) = (0usize, cuts.len());
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        let candidate = format!(
+            "{}\u{2026}",
+            text[..cuts[mid.min(cuts.len() - 1)]].trim_end()
+        );
+        if mid < cuts.len() && measure(&candidate) <= max_w {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    format!(
+        "{}\u{2026}",
+        text[..cuts.get(lo).copied().unwrap_or(0)].trim_end()
+    )
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Align {
     Left,

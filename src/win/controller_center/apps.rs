@@ -1151,7 +1151,7 @@ unsafe fn draw_keycaps(g: &mut Gfx, t: &Theme, caps: &[String], x: f32, cy: f32)
 }
 
 unsafe fn fit(g: &mut Gfx, text: &str, w: f32, size: f32, bold: bool) -> String {
-    crate::win::tray_menu::ellipsize(text, w, |x| g.measure(x, size, bold))
+    ellipsize(text, w, |x| g.measure(x, size, bold))
 }
 
 unsafe fn two_lines(g: &mut Gfx, t: &Theme, r: Rect, title: &str, caption: &str, dim: bool) {
