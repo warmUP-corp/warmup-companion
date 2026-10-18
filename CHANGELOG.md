@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, the bundled device rule also lets the companion read a DualSense or DualShock 4 battery and set its lightbar. The install guide explains when that rule is needed, how to update, and which features need Hyprland.
 - On Linux, `warmup-companion update` installs the latest release when it has a Linux build. The download is checked against its SHA-256 file before it replaces the installed program, and the service restarts on the new version. `--check` only looks, and `--dry-run` downloads and checks without replacing anything. While update checks are on, the companion shows a notification when a newer Linux build is out.
 - On Linux, a slow two-finger scroll on the touchpad also scrolls apps that only count whole wheel notches. Small movements add up across frames instead of being dropped.
 - On Linux, a button shortcut such as Ctrl+Z follows the active keyboard layout. On a German keyboard it undoes instead of sending Ctrl+Y. The on-screen keyboard's Ctrl shortcuts do the same.

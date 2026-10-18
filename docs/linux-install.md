@@ -28,6 +28,21 @@ systemctl --user status warmup-companion
 
 Stop it with `warmup-companion stop`. Remove the unit and the installed binary with `warmup-companion uninstall`. Settings, the log, and the socket directory are left in place.
 
+## Update
+
+```sh
+warmup-companion update --check
+warmup-companion update
+```
+
+`--check` shows whether a newer release is out and whether it has a Linux build. `update` downloads the Linux build, checks it against the `.sha256` file published next to it, replaces the installed binary, and restarts `warmup-companion.service`. Settings, the log, and the unit file are not touched. If the download or the checksum fails, the installed binary stays as it was.
+
+`warmup-companion update --dry-run` downloads and checks the new build, then deletes it without replacing anything.
+
+Releases do not carry a Linux build yet. Until they do, `update` says the release has no Linux build and changes nothing. To update before then, pull the source, build it again, and run `./target/release/warmup-companion install`. Installing over an existing install replaces the binary; run `systemctl --user restart warmup-companion` afterwards.
+
+While `update_check` is on in `settings.ini` (the default), the service checks shortly after it starts and once a day after that. When a newer release has a Linux build, it shows a notification. Turn the check off with `warmup-companion settings set update_check false`.
+
 ## Session environment
 
 The user service needs `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` in the systemd user manager. A session started by `uwsm` already exports them. On a plain Hyprland session, import them before expecting the service to stay up:
@@ -63,6 +78,21 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 
 Log out and back in so the new device permission applies. `verify` checks that `/dev/uinput` is writable.
 
+## Controller battery and lightbar (`/dev/hidraw*`)
+
+The battery level and the lightbar colour of a DualSense or DualShock 4 go through SDL's HIDAPI driver, which talks to the pad's `/dev/hidraw*` node. Without access to that node the sticks and buttons still work, but the battery shows as unknown and the lightbar does not change.
+
+Steam's udev rules already give your user that access. They ship with Steam on SteamOS, Bazzite, CachyOS, ChimeraOS, and Nobara, and as `steam-devices` (or `steam-udev`) on most other distributions. The bundled `install/70-warmup-companion.rules` grants the same access for the DualSense, DualSense Edge, and DualShock 4, over USB and Bluetooth, so installing it as shown above covers both `/dev/uinput` and the controller. Unplug and reconnect the controller after installing a rule.
+
+Check it with the controller connected:
+
+```sh
+ls -l /dev/hidraw*
+getfacl /dev/hidrawN
+```
+
+The node for the controller should list your user with `rw`.
+
 If Steam Input grabs the controller, the pad disappears from SDL. The companion logs that and waits for it to come back. It does not try to take the device away from Steam Input.
 
 The virtual pointer is a relative mouse. The compositor's pointer acceleration still applies, so the on-screen distance will not match the raw stick math one-for-one.
@@ -74,5 +104,13 @@ L3 opens the on-screen keyboard on a layer above other windows. It does not take
 The running service adds a StatusNotifierItem. Right-click it, or left-click it, for the menu: pause input, Controller Center, keyboard layout settings, game detection, the log, diagnostics, and uninstall.
 
 `warmup-companion settings` reads and writes `$XDG_CONFIG_HOME/warmup-companion/settings.ini`. `warmup-companion --controller-center` opens the same window. `warmup-companion diagnostics` writes a tarball under `$XDG_STATE_HOME/warmup-companion/diagnostics/`.
+
+## Hyprland-only features
+
+These v0.10 features read Hyprland's IPC socket, so they work only on Hyprland:
+
+- **Per-app button shortcuts.** The focused app comes from Hyprland's active window. On KDE Plasma and other desktops no app is ever focused for the companion, so buttons keep their default actions.
+- **Workspace swipes.** A sideways touchpad swipe moves to the previous or next workspace on Hyprland. Swipe up and down do nothing there. On KDE Plasma, swipes send Plasma's shortcuts instead (Ctrl+Meta+Left/Right, Meta+W, Meta+D). Other desktops ignore swipes.
+- **Pause input while a game is running.** See below.
 
 On Hyprland, "Pause input while a game is running" sleeps the pad while the focused window is fullscreen, or a floating window covers the monitor, unless that program is a browser, launcher, or shell. KDE Plasma's KWin does not advertise `zwlr_foreign_toplevel_management_v1`, so the same switch does not see games there.
