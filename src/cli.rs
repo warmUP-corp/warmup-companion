@@ -392,6 +392,7 @@ fn run_update_command(args: &[String]) -> i32 {
             } else {
                 println!("The service was not restarted.");
             }
+            println!("{}", crate::linux_update::rollback_hint(&options.dir));
             0
         }
         Err(error) => {

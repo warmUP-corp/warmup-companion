@@ -12,10 +12,12 @@ use crate::release_feed::{
 
 const BIN_NAME: &str = "warmup-companion";
 const NEW_NAME: &str = "warmup-companion.new";
+const OLD_NAME: &str = "warmup-companion.old";
 const UNIT_NAME: &str = "warmup-companion.service";
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(15);
 const RETRY_AFTER: Duration = Duration::from_secs(10 * 60);
 const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+const SETTLE: Duration = Duration::from_secs(3);
 
 static BUSY: AtomicBool = AtomicBool::new(false);
 
@@ -194,6 +196,10 @@ fn install(release: Release, options: &Options) -> Result<Outcome, String> {
         return Ok(Outcome::Verified(release));
     }
     let bin = options.dir.join(BIN_NAME);
+    if let Err(e) = keep_previous(&options.dir) {
+        let _ = fs::remove_file(&new);
+        return Err(e);
+    }
     if let Err(e) = fs::rename(&new, &bin) {
         let _ = fs::remove_file(&new);
         return Err(format!("replace {}: {e}", bin.display()));
@@ -203,9 +209,38 @@ fn install(release: Release, options: &Options) -> Result<Outcome, String> {
         release.version,
         bin.display()
     ));
-    let restarted = restart(options.restart)
-        .map_err(|e| format!("installed v{} but the restart failed: {e}", release.version))?;
+    let restarted = restart(options.restart).map_err(|e| {
+        format!(
+            "installed v{} but the restart failed: {e}\n{}",
+            release.version,
+            rollback_hint(&options.dir)
+        )
+    })?;
     Ok(Outcome::Installed { release, restarted })
+}
+
+pub(crate) fn rollback_hint(dir: &Path) -> String {
+    let old = dir.join(OLD_NAME);
+    if !old.is_file() {
+        return "No previous version was kept.".into();
+    }
+    format!(
+        "To go back to the previous version run: mv {} {} && systemctl --user restart {UNIT_NAME}",
+        old.display(),
+        dir.join(BIN_NAME).display()
+    )
+}
+
+fn keep_previous(dir: &Path) -> Result<(), String> {
+    let bin = dir.join(BIN_NAME);
+    let old = dir.join(OLD_NAME);
+    let _ = fs::remove_file(&old);
+    if !bin.is_file() {
+        return Ok(());
+    }
+    fs::hard_link(&bin, &old)
+        .or_else(|_| fs::copy(&bin, &old).map(|_| ()))
+        .map_err(|e| format!("keep the current version as {}: {e}", old.display()))
 }
 
 fn verified_download(url: &str, path: &Path, expected: &str) -> Result<(), String> {
@@ -226,8 +261,13 @@ fn restart(mode: Restart) -> Result<bool, String> {
     }
     if mode == Restart::Queue {
         crate::install::systemctl_ok(&["--user", "--no-block", "restart", UNIT_NAME])?;
-    } else {
-        crate::install::systemctl_ok(&["--user", "restart", UNIT_NAME])?;
+        return Ok(true);
+    }
+    crate::install::systemctl_ok(&["--user", "restart", UNIT_NAME])?;
+    std::thread::sleep(SETTLE);
+    let state = crate::install::systemctl(&["--user", "is-active", UNIT_NAME])?;
+    if state.trim() != "active" {
+        return Err(format!("the new version is {} after the restart", state.trim()));
     }
     Ok(true)
 }

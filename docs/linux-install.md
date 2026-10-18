@@ -35,7 +35,7 @@ warmup-companion update --check
 warmup-companion update
 ```
 
-`--check` shows whether a newer release is out and whether it has a Linux build. `update` downloads the Linux build, checks it against the `.sha256` file published next to it, replaces the installed binary, and restarts `warmup-companion.service`. Settings, the log, and the unit file are not touched. If the download or the checksum fails, the installed binary stays as it was.
+`--check` shows whether a newer release is out and whether it has a Linux build. `update` downloads the Linux build, checks it against the `.sha256` file published next to it, replaces the installed binary, and restarts `warmup-companion.service`. Settings, the log, and the unit file are not touched. If the download or the checksum fails, the installed binary stays as it was. The previous binary is kept next to it as `warmup-companion.old`, and `update` prints the command that puts it back.
 
 `warmup-companion update --dry-run` downloads and checks the new build, then deletes it without replacing anything.
 

@@ -222,7 +222,7 @@ pub fn systemctl_ok(args: &[&str]) -> Result<(), String> {
     ))
 }
 
-fn systemctl(args: &[&str]) -> Result<String, String> {
+pub fn systemctl(args: &[&str]) -> Result<String, String> {
     let output = Command::new("systemctl")
         .args(args)
         .output()
