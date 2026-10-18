@@ -88,6 +88,7 @@ pub(crate) struct Gfx {
     pub(crate) icons: HashMap<(Icon, u32, u32), ID2D1Bitmap>,
     pub(crate) svg_icons: HashMap<(String, u32, u32), ID2D1Bitmap>,
     pub(crate) art: HashMap<String, ID2D1Bitmap>,
+    pub(crate) images: HashMap<String, ID2D1Bitmap>,
     pub(crate) shadow: Option<((i32, i32, Vec<Rect>), ID2D1Bitmap)>,
     pub(crate) dc_rt: Option<ID2D1DCRenderTarget>,
     pub(crate) dc: HDC,
@@ -152,6 +153,7 @@ impl Gfx {
             icons: HashMap::new(),
             svg_icons: HashMap::new(),
             art: HashMap::new(),
+            images: HashMap::new(),
             shadow: None,
             dc_rt: Some(dc_rt),
             dc: HDC::default(),
@@ -187,6 +189,7 @@ impl Gfx {
             icons: HashMap::new(),
             svg_icons: HashMap::new(),
             art: HashMap::new(),
+            images: HashMap::new(),
             shadow: None,
             dc_rt: None,
             dc: HDC::default(),
@@ -771,6 +774,58 @@ impl Gfx {
             self.art.insert(key.to_string(), bmp);
         }
         self.art.get(key).cloned()
+    }
+
+    pub(crate) unsafe fn draw_svg(
+        &mut self,
+        svg: &str,
+        px: u32,
+        tint: u32,
+        dst: Rect,
+        alpha: f32,
+        cubic: bool,
+    ) {
+        let Some(bmp) = self.svg_bitmap(svg, px, tint) else {
+            return;
+        };
+        self.draw_bitmap(&bmp, dst, alpha, cubic);
+    }
+
+    pub(crate) unsafe fn draw_art(
+        &mut self,
+        key: &str,
+        png: &[u8],
+        w: u32,
+        h: u32,
+        radius: f32,
+        dst: Rect,
+        alpha: f32,
+        cubic: bool,
+    ) {
+        let Some(bmp) = self.cover_bitmap(key, png, w, h, radius) else {
+            return;
+        };
+        self.draw_bitmap(&bmp, dst, alpha, cubic);
+    }
+
+    pub(crate) unsafe fn set_image(&mut self, key: &str, w: u32, h: u32, rgba: &[u8]) {
+        if rgba.len() != (w as usize) * (h as usize) * 4 {
+            return;
+        }
+        let bgra: Vec<u8> = rgba
+            .chunks_exact(4)
+            .flat_map(|p| [p[2], p[1], p[0], p[3]])
+            .collect();
+        if let Ok(bmp) = self.bitmap(w as i32, h as i32, &bgra) {
+            self.images.insert(key.to_string(), bmp);
+        }
+    }
+
+    pub(crate) unsafe fn draw_image(&mut self, key: &str, dst: Rect, alpha: f32, cubic: bool) {
+        let Some(bmp) = self.images.get(key).cloned() else {
+            return;
+        };
+        self.draw_bitmap(&bmp, dst, alpha, cubic);
     }
 
     pub(crate) unsafe fn push_shadow_layer(

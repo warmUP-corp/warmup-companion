@@ -3,6 +3,12 @@ mod win;
 #[cfg(windows)]
 pub(crate) use win::{Gfx, color, current_theme, theme_from};
 
+#[cfg(not(windows))]
+mod linux;
+#[cfg(not(windows))]
+#[allow(unused_imports)]
+pub(crate) use linux::Gfx;
+
 #[cfg(windows)]
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 
