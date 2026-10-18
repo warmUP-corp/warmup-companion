@@ -70,15 +70,18 @@ Each maps to an existing webview event; the desktop re-emits the `payload` uncha
 | `connection` | `gamepad:connection` | `{ connected: bool, controllerType: string, controllerName: string }` |
 | `button` | `gamepad:button` | `{ button: string, pressed: bool, controllerType: string }` |
 | `battery` | `gamepad:battery` | `{ percent: i32, charging: bool, wired: bool }` |
+| `pads` | `gamepad:pads` | `{ pads: [{ controllerName, controllerType, percent, charging, wired }] }` — every connected controller (multi-controller input), sent when the list or a level changes; additive |
 | `cursor_moved` | `gamepad:cursor_moved` | `{ dx: f64, dy: f64 }` |
 | `axis` | `gamepad:axis` | `{ leftX: f32, leftY: f32, rightX: f32, rightY: f32 }` |
 | `touchpad` | `gamepad:touchpad` | `{ fingers: [{ index: u8, down: bool, x: f32, y: f32, pressure: f32 }] }` |
 | `play_sessions` | _(desktop ingest only)_ | `{ sessions: [{ externalId, gameId, startedAt, endedAt, durationMinutes }] }` |
+| `settings_changed` | _(desktop ingest only)_ | `{ config: GamepadConfig, companionSettings: CompanionSettings }` |
 
 Notes:
 - `connection.controllerType` / `button.controllerType`: `"xbox" | "playstation" | "switch" | "generic"` (existing desktop vocabulary).
 - `battery.percent`: `0–100`, or `-1` when the controller reports no level. `wired` = no internal battery.
 - `cursor_moved` / `axis` / `touchpad` are throttled by the companion (≈100 ms) exactly as the desktop poll thread does today.
+- `settings_changed` is additive on v6 (do **not** bump `protocolVersion`). The companion emits it when `C:\ProgramData\WarmupVk\settings.ini` (or runtime status) changes on disk — e.g. Control Center or tray edits. A background thread watches the parent directories with `FindFirstChangeNotification` (no mtime polling); the pipe loop only loads an atomic generation counter. External changes are drained before inbound frames each pass. Pipe-originated writes also wake the watcher, but the companion suppresses the echo when the snapshot still matches its SettingsSync baseline. `config` is the companion snapshot (`keyboardTheme` omitted / `null`; `enabled` and `cursorEnabled` both mirror ini `cursor_enabled`); absent optional LED fields mean “not set in ini”.
 
 ## Down frames (desktop → companion)
 
@@ -91,6 +94,7 @@ Notes:
 | `companion_settings` | `{ sleepOnGame?: bool, autoStopOnGame?: bool, userlandPollPaused?: bool, promptUserlandDebug?: bool }` | companion-local runtime/settings control |
 | `library_watch` | `{ enabled: bool, games: [{ gameId, exeStems: string[], installDirPrefixes: string[] }] }` | offline playtime tracking (v6) |
 | `play_sessions_ack` | `{ externalIds: string[] }` | offline playtime tracking (v6) |
+| `shut_down` | `{}` | ask the companion to stop itself (WAR-42); additive on v6 |
 
 ### `GamepadConfig` payload
 
@@ -103,6 +107,7 @@ camelCase, matching the desktop serde shape:
   "accelerationExp": 2.0,
   "scrollSensitivity": 5.0,
   "enabled": true,
+  "cursorEnabled": true,
   "launcherToggleButton": "GUIDE",
   "triggerRumbleEnabled": false,
   "triggerRumbleMagnitude": 0.5,
@@ -124,9 +129,22 @@ camelCase, matching the desktop serde shape:
 }
 ```
 
+`enabled` is the runtime cursor mask on the wire (stick-nav / game leak). It is not the persisted preference when `cursorEnabled` is present.
+`cursorEnabled` is the real desktop cursor toggle; the companion persists it to ini `cursor_enabled`. Absent `cursorEnabled` (older desktops) keeps the legacy mapping from wire `enabled` → ini. Companion snapshots set both to the ini value.
 `ledEffect` accepts `"solid"`, `"breathing"`, `"rainbow"`, `"gradient"`, or `"off"`.
 `gradient` smoothly cycles between `ledColor` and `ledSecondaryColor`.
 `ledBrightness` is a `0.0`-`1.0` multiplier applied to all companion-driven LED writes.
+
+Persisted lightbar keys in `C:\ProgramData\WarmupVk\settings.ini` (shared with warmUP):
+
+| ini key | config field | notes |
+|---|---|---|
+| `led_color` | `ledColor` | `#RRGGBB` |
+| `led_secondary_color` | `ledSecondaryColor` | `#RRGGBB` (gradient) |
+| `led_effect` | `ledEffect` | `solid` / `breathing` / `rainbow` / `gradient` / `off` |
+| `led_brightness` | `ledBrightness` | `0.0`–`1.0` |
+
+Inbound `config` frames persist these when they change (after the first seeding frame). Companion UI / tray writes go through the same keys; startup restores colour, secondary, effect, and brightness from the ini.
 
 Added in v3: `keyboardTheme.border` (key outline, derived desktop-side from `key` to match the
 webview VK) and `vkMode` (`"docked"` | `"floating"`; floating renders a compact panel near the
@@ -166,7 +184,29 @@ Sleep mode also reads LB for one companion-local action: hold Back + LB together
 take one full-screen screenshot (with a rumble). It fires once per hold; release either button to
 arm it again. LB is never forwarded while sleeping, and Back is still forwarded as above.
 
-The companion maps cursor/scroll tuning fields to its internal names per the golden fixture's `configFieldMapping` (`sensitivity->cursor_speed`, `accelerationExp->cursor_accel`, `deadzone->cursor_deadzone`, `scrollSensitivity->scroll_speed`).
+### `shut_down` request (WAR-42)
+
+Additive on protocol v6. Old companions ignore an unknown `type` and keep running. Do **not** bump `protocolVersion` for this frame.
+
+warmUP (desktop, not elevated) sends one NDJSON line after a successful `hello`. Exact wire form, including the empty payload object and the trailing newline:
+
+```
+{"type":"shut_down","payload":{}}\n
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `type` | yes | exactly `shut_down` (snake_case). Not `shutdown`. |
+| `payload` | yes | empty object `{}`. Extra camelCase fields are ignored. |
+
+No up-frame ack. Behavior:
+
+1. If Kid Mode blocking is active (`parental_guard.enabled` from the last `parental_guard` / `hello` snapshot), the companion **refuses** the request and stays running. It logs the refusal to the service log. If `C:\ProgramData\WarmupVk\parental-security.log` already exists, it appends one JSON line: `{"kind":"shut-down-refused","detail":"Kid Mode blocking is active","ts":<unix_secs>}`.
+2. Otherwise the companion writes the clean-exit marker `C:\ProgramData\WarmupVk\companion-clean-exit` first (mtime is what warmUP's Kid Mode watchdog treats as a graceful stop; 30s window), then asks SCM to stop `WarmupVkSvc` (`sc stop` from the LocalSystem worker). The service process exits; the client sees the pipe drop.
+
+`Restart App` / updates must not send this frame. Use it only for "Close Companion with warmUP".
+
+The companion maps cursor/scroll tuning fields to its internal names per the golden fixture's `configFieldMapping` (`sensitivity->cursor_speed`, `accelerationExp->cursor_accel`, `deadzone->cursor_deadzone`, `scrollSensitivity->scroll_speed`, plus the optional `scrollAccel->scroll_accel`, `1.0`–`5.0`).
 
 `keyboardTheme` is optional, and each color inside it is optional. Colors are `#RRGGBB`;
 the companion persists provided values as `keyboard_bg`, `keyboard_key`,
@@ -181,6 +221,8 @@ fields keep the native keyboard's current dark/light default for that color slot
 - While native VK input is unsuppressed (Windows desktop), L3/R3 edges stay local to the companion and are not also emitted as launcher `button` frames. This prevents the same shortcut from opening the keyboard/dictation and the minimized launcher's dock/topbar. Foreground launcher navigation still receives L3/R3; Guide forwarding is unchanged.
 - `axis` is an additive v4-compatible up-frame; old desktop clients ignore it as unknown, old companions simply omit it.
 - `led` is an additive v4-compatible down-frame for one-shot test writes; old companions ignore it as unknown.
+- `shut_down` is an additive v6-compatible down-frame for unelevated companion stop. Old companions ignore it as unknown; Kid Mode blocking refuses it and keeps the service running.
+- `settings_changed` is an additive v6-compatible up-frame for companion→desktop settings sync when the shared ini changes locally. Old desktops ignore it as unknown.
 - Additive fields may stay on the current protocol when both directions are default/unknown-field tolerant.
 - Breaking changes to the pipe name, framing, `hello` shape, or required frame `payload` fields bump it.
 - An unsupported version is resolved by the server closing the connection; the client surfaces a "companion update required" state rather than interpreting unknown frames.

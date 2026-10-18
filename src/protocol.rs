@@ -182,6 +182,25 @@ pub struct BatteryPayload {
     pub wired: bool,
 }
 
+/// One connected controller in a `pads` frame (multi-controller input).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PadBatteryPayload {
+    pub controller_name: String,
+    pub controller_type: String,
+    pub percent: i32,
+    pub charging: bool,
+    pub wired: bool,
+}
+
+/// `pads` up-frame: every connected controller with its battery, sent when the list changes.
+/// Additive — older desktops parse it as an unknown frame and ignore it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PadsPayload {
+    pub pads: Vec<PadBatteryPayload>,
+}
+
 /// One touchpad finger slot. `x`/`y` are normalized 0..1; `pressure` 0..1.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -254,6 +273,9 @@ pub struct NativeVkPayload {
     pub action: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ShutDownPayload {}
+
 /// Optional native keyboard theme colors. Each field is `#RRGGBB`; absent fields keep
 /// the companion's current dark/light default for that slot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -285,6 +307,8 @@ pub struct ConfigPayload {
     pub acceleration_exp: f32,
     pub scroll_sensitivity: f32,
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_enabled: Option<bool>,
     pub clicks_enabled: bool,
     /// Lightbar/LED colour `#RRGGBB` for pads with an LED (DualSense / DS4).
     /// Absent leaves the current colour untouched.
@@ -299,6 +323,12 @@ pub struct ConfigPayload {
     /// Lightbar brightness 0.0–1.0. Absent keeps the current brightness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub led_brightness: Option<f32>,
+    /// Lightbar saturation 0.0 (white) – 1.0 (full colour). Absent keeps the current saturation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub led_saturation: Option<f32>,
+    /// Right-stick scroll acceleration exponent (1.0–5.0). Absent keeps the current value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scroll_accel: Option<f32>,
     /// Invert the scroll direction (natural / reverse scrolling).
     #[serde(default)]
     pub natural_scroll: bool,
@@ -310,6 +340,13 @@ pub struct ConfigPayload {
     /// Virtual-keyboard layout mode: `"docked"` (default) or `"floating"`. Absent keeps current.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vk_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsChangedPayload {
+    pub config: ConfigPayload,
+    pub companion_settings: CompanionSettingsPayload,
 }
 
 /// Up frames (companion → desktop). This slice (#347) knows `hello` + `connection`;
@@ -324,9 +361,11 @@ pub enum UpFrame {
     CursorMoved(CursorMovedPayload),
     Axis(AxisPayload),
     Battery(BatteryPayload),
+    Pads(PadsPayload),
     Touchpad(TouchpadPayload),
     ParentalBlocked(ParentalBlockedPayload),
     PlaySessions(PlaySessionsPayload),
+    SettingsChanged(SettingsChangedPayload),
     /// A frame whose `type` this slice does not know (added by a later slice).
     /// Never serialized; produced only by [`UpFrame::parse_line`].
     #[serde(skip)]
@@ -347,6 +386,7 @@ pub enum DownFrame {
     ParentalGuard(ParentalGuardPayload),
     LibraryWatch(LibraryWatchPayload),
     PlaySessionsAck(PlaySessionsAckPayload),
+    ShutDown(ShutDownPayload),
     #[serde(skip)]
     Unknown,
 }
@@ -374,8 +414,10 @@ impl UpFrame {
     pub fn parse_line(line: &str) -> Result<Self, serde_json::Error> {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
-            "hello" | "connection" | "button" | "cursor_moved" | "axis" | "battery"
-            | "touchpad" | "parental_blocked" | "play_sessions" => serde_json::from_str(line),
+            "hello" | "connection" | "button" | "cursor_moved" | "axis" | "battery" | "pads"
+            | "touchpad" | "parental_blocked" | "play_sessions" | "settings_changed" => {
+                serde_json::from_str(line)
+            }
             _ => Ok(Self::Unknown),
         }
     }
@@ -389,7 +431,7 @@ impl DownFrame {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
             "hello" | "config" | "mode" | "rumble" | "led" | "companion_settings" | "native_vk"
-            | "parental_guard" | "library_watch" | "play_sessions_ack" => {
+            | "parental_guard" | "library_watch" | "play_sessions_ack" | "shut_down" => {
                 serde_json::from_str(line)
             }
             _ => Ok(Self::Unknown),
@@ -456,11 +498,14 @@ mod tests {
             acceleration_exp: 2.0,
             scroll_sensitivity: 5.0,
             enabled: true,
+            cursor_enabled: Some(true),
             clicks_enabled: false,
             led_color: Some("#b6a0ff".into()),
             led_secondary_color: Some("#4c7b99".into()),
             led_effect: Some("gradient".into()),
             led_brightness: Some(0.8),
+            led_saturation: None,
+            scroll_accel: Some(2.0),
             natural_scroll: true,
             cursor_smoothing: 0.25,
             keyboard_theme: Some(KeyboardThemePayload {
@@ -656,6 +701,55 @@ mod tests {
     }
 
     #[test]
+    fn reply_hello_with_snapshot_round_trips() {
+        let config = ConfigPayload {
+            deadzone: 0.15,
+            sensitivity: 1.25,
+            acceleration_exp: 2.0,
+            scroll_sensitivity: 0.75,
+            enabled: true,
+            cursor_enabled: Some(true),
+            clicks_enabled: false,
+            led_color: None,
+            led_secondary_color: None,
+            led_effect: None,
+            led_brightness: None,
+            led_saturation: None,
+            scroll_accel: None,
+            natural_scroll: true,
+            cursor_smoothing: 0.25,
+            keyboard_theme: None,
+            vk_mode: Some("floating".into()),
+        };
+        let settings = CompanionSettingsPayload {
+            sleep_on_game: Some(false),
+            auto_stop_on_game: Some(true),
+            userland_poll_paused: Some(false),
+            prompt_userland_debug: Some(true),
+        };
+        let reply = UpFrame::Hello(Hello {
+            protocol_version: PROTOCOL_VERSION,
+            config: Some(serde_json::to_value(&config).unwrap()),
+            mode: None,
+            companion_settings: Some(settings.clone()),
+            parental_guard: None,
+            library_watch: None,
+        });
+        let line = reply.to_ndjson_line();
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["payload"]["config"]["vkMode"], "floating");
+        assert_eq!(json["payload"]["config"]["naturalScroll"], true);
+        assert!(json["payload"]["config"].get("ledColor").is_none());
+        assert_eq!(json["payload"]["companionSettings"]["autoStopOnGame"], true);
+        let UpFrame::Hello(parsed) = UpFrame::parse_line(line.trim_end()).unwrap() else {
+            panic!("expected hello");
+        };
+        assert_eq!(parsed.companion_settings, Some(settings));
+        let parsed_config: ConfigPayload = serde_json::from_value(parsed.config.unwrap()).unwrap();
+        assert_eq!(parsed_config, config);
+    }
+
+    #[test]
     fn deprecated_protocol_versions_stay_supported() {
         assert!(is_supported_protocol_version(PROTOCOL_VERSION));
         assert!(is_supported_protocol_version(5));
@@ -707,6 +801,26 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(json["type"], "play_sessions_ack");
         assert_eq!(DownFrame::parse_line(line.trim_end()).unwrap(), frame);
+    }
+
+    #[test]
+    fn shut_down_down_frame_is_empty_payload_ndjson() {
+        let frame = DownFrame::ShutDown(ShutDownPayload {});
+        let line = frame.to_ndjson_line();
+        assert_eq!(line, "{\"type\":\"shut_down\",\"payload\":{}}\n");
+        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(json["type"], "shut_down");
+        assert_eq!(json["payload"], serde_json::json!({}));
+        assert_eq!(DownFrame::parse_line(line.trim_end()).unwrap(), frame);
+        assert_eq!(PROTOCOL_VERSION, 6);
+        assert_eq!(
+            DownFrame::parse_line(r#"{"type":"shutdown","payload":{}}"#).unwrap(),
+            DownFrame::Unknown
+        );
+        assert_eq!(
+            DownFrame::parse_line(r#"{"type":"shut_down","payload":{"reason":"close"}}"#).unwrap(),
+            DownFrame::ShutDown(ShutDownPayload {})
+        );
     }
 
     #[test]

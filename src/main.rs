@@ -13,6 +13,8 @@ mod tracking_owner;
 /// Companion IPC wire frames (#347). Pure serde; used by the pipe server and tests.
 #[allow(dead_code)]
 mod protocol;
+#[allow(dead_code)]
+mod service_acl;
 mod sentry_telemetry;
 mod symbols;
 mod time_util;
@@ -46,6 +48,8 @@ mod linux_center;
 mod linux_diag;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
 mod linux_game_detect;
+#[cfg(all(windows, feature = "gamepad"))]
+mod updater;
 
 #[cfg(windows)]
 mod debug_state;
@@ -55,6 +59,10 @@ mod vk_commit;
 mod image_paste;
 mod vk_geom;
 mod vk_key;
+#[cfg(all(windows, feature = "vk-panels"))]
+mod clipboard_history;
+#[cfg(all(windows, feature = "vk-panels"))]
+mod emoji_data;
 mod vk_nav;
 mod vk_predict;
 #[cfg(feature = "gamepad")]
@@ -94,7 +102,11 @@ mod parental_guard;
 #[cfg(all(windows, feature = "gamepad"))]
 mod parental_store;
 #[cfg(feature = "gamepad")]
+mod app_profiles;
+#[cfg(feature = "gamepad")]
 mod pc_cursor;
+#[cfg(feature = "gamepad")]
+mod touchpad_gestures;
 mod predict_dict;
 #[cfg(all(windows, feature = "gamepad"))]
 mod process_guard;

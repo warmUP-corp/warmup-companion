@@ -42,16 +42,21 @@ pub fn parse_vk_layout_mode(raw: Option<&str>) -> VkLayoutMode {
 }
 
 #[cfg(feature = "gamepad")]
+pub(crate) fn raw_setting(key: &str) -> Option<String> {
+    setting_value(&std::fs::read_to_string(settings_path()?).ok()?, key)
+}
+
+#[cfg(feature = "gamepad")]
+fn setting_value(text: &str, key: &str) -> Option<String> {
+    text.lines().rev().find_map(|line| {
+        let (k, v) = line.split_once('=')?;
+        (k.trim() == key).then(|| v.trim().to_string())
+    })
+}
+
+#[cfg(feature = "gamepad")]
 pub fn vk_layout_mode() -> VkLayoutMode {
-    let raw = settings_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|text| {
-            text.lines().find_map(|line| {
-                let (k, v) = line.split_once('=')?;
-                (k.trim() == "vk_mode").then(|| v.trim().to_string())
-            })
-        });
-    parse_vk_layout_mode(raw.as_deref())
+    parse_vk_layout_mode(raw_setting("vk_mode").as_deref())
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -59,27 +64,43 @@ pub enum VkStyle {
     #[default]
     Normal,
     Mono,
+    Modern,
 }
 
 #[cfg(feature = "gamepad")]
 pub fn parse_vk_style(raw: Option<&str>) -> VkStyle {
     match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
         Some("mono" | "apple") => VkStyle::Mono,
+        Some("modern" | "tv") => VkStyle::Modern,
         _ => VkStyle::Normal,
     }
 }
 
 #[cfg(feature = "gamepad")]
 pub fn vk_style() -> VkStyle {
-    let raw = settings_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|text| {
-            text.lines().find_map(|line| {
-                let (k, v) = line.split_once('=')?;
-                (k.trim() == "vk_style").then(|| v.trim().to_string())
-            })
-        });
-    parse_vk_style(raw.as_deref())
+    parse_vk_style(raw_setting("vk_style").as_deref())
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VkDisplay {
+    #[default]
+    Auto,
+    Tv,
+    Desk,
+}
+
+#[cfg(feature = "gamepad")]
+pub fn parse_vk_display(raw: Option<&str>) -> VkDisplay {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("tv") => VkDisplay::Tv,
+        Some("desk") => VkDisplay::Desk,
+        _ => VkDisplay::Auto,
+    }
+}
+
+#[cfg(feature = "gamepad")]
+pub fn vk_display() -> VkDisplay {
+    parse_vk_display(raw_setting("vk_display").as_deref())
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -99,15 +120,7 @@ pub fn parse_run_mode(raw: Option<&str>) -> RunMode {
 
 #[cfg(feature = "gamepad")]
 pub fn run_mode() -> RunMode {
-    let raw = settings_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|text| {
-            text.lines().find_map(|line| {
-                let (k, v) = line.split_once('=')?;
-                (k.trim() == "run_mode").then(|| v.trim().to_string())
-            })
-        });
-    parse_run_mode(raw.as_deref())
+    parse_run_mode(raw_setting("run_mode").as_deref())
 }
 
 #[cfg(feature = "gamepad")]
@@ -115,14 +128,7 @@ pub const COMPACT_BAR_SCALE: f32 = 0.8;
 
 #[cfg(feature = "gamepad")]
 pub fn vk_bar_scale() -> f32 {
-    settings_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|text| {
-            text.lines().find_map(|line| {
-                let (k, v) = line.split_once('=')?;
-                (k.trim() == "vk_bar_scale").then(|| v.trim().to_string())
-            })
-        })
+    raw_setting("vk_bar_scale")
         .and_then(|v| v.parse::<f32>().ok())
         .filter(|v| (0.6..=1.2).contains(v))
         .unwrap_or(1.0)
@@ -142,6 +148,13 @@ pub struct GamepadSettings {
     pub prompt_userland_debug: bool,
     pub signin_hints: bool,
     pub guide_launch: bool,
+    pub multi_controller: bool,
+    pub update_check: bool,
+    /// Offline voice typing. When false, R3, Ctrl+Alt+V and the mic key do nothing,
+    /// the mic key on the keyboard shows disabled, and the speech engine is unloaded.
+    pub voice_enabled: bool,
+    pub vk_side_tips: bool,
+    pub vk_sheet_opens: u32,
     /// Master switch for gamepad-driven mouse control ("Enable gamepad cursor" in
     /// warmUP, pushed as `config.enabled`). When false the sticks and the touchpad
     /// stop moving/scrolling the OS cursor and A/B stop emitting OS clicks — button
@@ -157,6 +170,8 @@ pub struct GamepadSettings {
     pub natural_scroll: bool,
     /// Cursor movement smoothing (EMA factor), 0.0 (off) – 1.0 (max).
     pub cursor_smoothing: f32,
+    pub touchpad_gestures: bool,
+    pub touchpad_tap_click: bool,
 }
 
 #[cfg(feature = "gamepad")]
@@ -169,6 +184,11 @@ impl Default for GamepadSettings {
             prompt_userland_debug: false,
             signin_hints: true,
             guide_launch: true,
+            multi_controller: true,
+            update_check: true,
+            voice_enabled: true,
+            vk_side_tips: true,
+            vk_sheet_opens: 0,
             cursor_enabled: true,
             cursor_deadzone: 0.15,
             cursor_speed: 15.0,
@@ -178,6 +198,8 @@ impl Default for GamepadSettings {
             scroll_accel: 2.0,
             natural_scroll: false,
             cursor_smoothing: 0.0,
+            touchpad_gestures: true,
+            touchpad_tap_click: true,
         }
     }
 }
@@ -295,7 +317,7 @@ pub fn userland_gamepad_poll_mode() -> warmup_gamepad::PollMode {
 }
 
 #[cfg(feature = "gamepad")]
-pub fn gamepad_settings() -> GamepadSettings {
+fn gamepad_settings_uncached() -> GamepadSettings {
     let mut settings = GamepadSettings::default();
     if let Some(text) = settings_path().and_then(|p| std::fs::read_to_string(p).ok()) {
         apply_gamepad_settings_text(&mut settings, &text);
@@ -319,6 +341,48 @@ pub fn gamepad_settings() -> GamepadSettings {
     }
 
     settings
+}
+
+#[cfg(feature = "gamepad")]
+pub fn invalidate_gamepad_settings_cache() {
+    if let Ok(mut cache) = GAMEPAD_SETTINGS_CACHE.lock() {
+        *cache = None;
+    }
+}
+
+#[cfg(feature = "gamepad")]
+static GAMEPAD_SETTINGS_CACHE: std::sync::Mutex<
+    Option<(std::time::Instant, GamepadSettings)>,
+> = std::sync::Mutex::new(None);
+
+#[cfg(feature = "gamepad")]
+pub fn gamepad_settings() -> GamepadSettings {
+    const TTL: std::time::Duration = std::time::Duration::from_millis(100);
+    if let Ok(cache) = GAMEPAD_SETTINGS_CACHE.lock() {
+        if let Some((at, settings)) = cache.as_ref() {
+            if at.elapsed() < TTL {
+                return *settings;
+            }
+        }
+    }
+    let settings = gamepad_settings_uncached();
+    if let Ok(mut cache) = GAMEPAD_SETTINGS_CACHE.lock() {
+        *cache = Some((std::time::Instant::now(), settings));
+    }
+    settings
+}
+
+/// Offline voice typing. Default on, so an install that never set this keeps
+/// dictating. False shuts transcription off completely.
+pub fn voice_enabled() -> bool {
+    #[cfg(feature = "gamepad")]
+    {
+        gamepad_settings().voice_enabled
+    }
+    #[cfg(not(feature = "gamepad"))]
+    {
+        true
+    }
 }
 
 #[cfg(feature = "gamepad")]
@@ -362,11 +426,16 @@ fn apply_gamepad_settings_text(settings: &mut GamepadSettings, text: &str) {
             "prompt_userland_debug" => {
                 settings.prompt_userland_debug = parse_bool(value, settings.prompt_userland_debug)
             }
-            "signin_hints" => {
-                settings.signin_hints = parse_bool(value, settings.signin_hints)
+            "signin_hints" => settings.signin_hints = parse_bool(value, settings.signin_hints),
+            "guide_launch" => settings.guide_launch = parse_bool(value, settings.guide_launch),
+            "multi_controller" => {
+                settings.multi_controller = parse_bool(value, settings.multi_controller)
             }
-            "guide_launch" => {
-                settings.guide_launch = parse_bool(value, settings.guide_launch)
+            "update_check" => settings.update_check = parse_bool(value, settings.update_check),
+            "voice_enabled" => settings.voice_enabled = parse_bool(value, settings.voice_enabled),
+            "vk_side_tips" => settings.vk_side_tips = parse_bool(value, settings.vk_side_tips),
+            "vk_sheet_opens" => {
+                settings.vk_sheet_opens = value.parse().unwrap_or(settings.vk_sheet_opens)
             }
             "cursor_enabled" => {
                 settings.cursor_enabled = parse_bool(value, settings.cursor_enabled)
@@ -397,6 +466,12 @@ fn apply_gamepad_settings_text(settings: &mut GamepadSettings, text: &str) {
             }
             "cursor_smoothing" => {
                 settings.cursor_smoothing = parse_unit_f32(value, settings.cursor_smoothing)
+            }
+            "touchpad_gestures" => {
+                settings.touchpad_gestures = parse_bool(value, settings.touchpad_gestures)
+            }
+            "touchpad_tap_click" => {
+                settings.touchpad_tap_click = parse_bool(value, settings.touchpad_tap_click)
             }
             _ => {}
         }
@@ -546,6 +621,12 @@ const SETTINGS_TEMPLATE: &str = r#"# Warmup Companion settings. One `key = value
 # Guide (Xbox) / PS button opens warmUP when it is closed (true|false)
 # guide_launch = true
 
+# Every connected controller drives input at the same time; false uses one pad (true|false)
+# multi_controller = true
+
+# Check GitHub once a day for a newer Warmup Companion release (true|false)
+# update_check = true
+
 # Gamepad cursor master switch (true|false). False parks stick/touchpad cursor
 # movement, scrolling and A/B OS clicks; the pad still navigates warmUP via d-pad.
 # cursor_enabled = true
@@ -562,6 +643,13 @@ const SETTINGS_TEMPLATE: &str = r#"# Warmup Companion settings. One `key = value
 # scroll_accel = 1.0
 # natural_scroll = false
 
+# Touchpad (DualSense/DS4) on the desktop. touchpad_gestures: two-finger scroll,
+# two-finger tap = right click, pad click on the right third = right click, and
+# pad click held + swipe: left/right = switch desktop, up = Task View, down = show
+# desktop. touchpad_tap_click: tap = left click, tap then drag = drag. (true|false)
+# touchpad_gestures = true
+# touchpad_tap_click = true
+
 # On-screen keyboard layout: docked | floating
 # vk_mode = docked
 # Keyboard size: 0.6 - 1.2 (0.8 = compact)
@@ -575,11 +663,24 @@ const SETTINGS_TEMPLATE: &str = r#"# Warmup Companion settings. One `key = value
 # keyboard_sel_text = #FFFFFF
 # keyboard_border = #333333
 
-# Voice typing (offline whisper) is an opt-in install (-Speech). Recognition
-# language defaults to your Windows locale; override with the WARMUP_WHISPER_LANG
-# environment variable. Mic = your Windows default input device.
+# Voice typing (offline whisper or Parakeet) is an opt-in install (-Speech).
+# voice_enabled = false turns transcription off completely: R3, Ctrl+Alt+V and
+# the mic key do nothing, the mic key on the keyboard shows disabled, and the
+# speech engine unloads.
+# voice_enabled = true
+# Recognition language defaults to your Windows locale; override with the
+# WARMUP_WHISPER_LANG environment variable. Mic = your Windows default input device.
 # Dictation vocabulary: coding (built-in terminal/agent terms) | off | a comma list, e.g. coding, herdr, MyProject
 # vocabulary = coding
+
+# Per-app button profiles: profile.<exe>.<button> = <keys>, matched on the foreground
+# app. Buttons: A B X Y LB RB LT RT SELECT START UP DOWN LEFT RIGHT. Keys joined
+# with +: ctrl shift alt win tab enter esc space backspace left right up down
+# pageup pagedown home end f5 f11, a-z, 0-9. "none" keeps the default action.
+# Browsers (chrome, msedge, firefox, brave, opera, vivaldi) ship with
+# B = ctrl+w, Y = ctrl+t, RT = ctrl+tab, LT = ctrl+shift+tab.
+# profile.chrome.exe.b = ctrl+w
+# profile.notepad.exe.y = ctrl+s
 "#;
 
 /// Path to `settings.ini`, creating it with the documented template if missing
@@ -597,6 +698,157 @@ pub fn ensure_settings_file() -> Option<std::path::PathBuf> {
 }
 
 #[cfg(feature = "gamepad")]
+const KEEP_ON_RESET: &[&str] = &[
+    "vk_sheet_opens",
+    "keyboard_bg",
+    "keyboard_background",
+    "keyboard_key",
+    "keyboard_key_bg",
+    "keyboard_accent",
+    "keyboard_text",
+    "keyboard_sel_text",
+    "keyboard_selected_text",
+    "keyboard_border",
+];
+
+#[cfg(feature = "gamepad")]
+pub fn settings_backup_name(y: u16, mo: u16, d: u16, h: u16, mi: u16, sec: u16) -> String {
+    format!("settings.ini.bak-{y:04}{mo:02}{d:02}-{h:02}{mi:02}{sec:02}")
+}
+
+#[cfg(feature = "gamepad")]
+pub fn shipped_settings_text(current: &str) -> String {
+    let mut out = SETTINGS_TEMPLATE.to_string();
+    let mut kept = Vec::new();
+    for key in KEEP_ON_RESET {
+        if let Some(v) = setting_value(current, key) {
+            kept.push(format!("{key}={v}"));
+        }
+    }
+    let words = parse_vocabulary(Some(current)).words;
+    if !words.is_empty() {
+        let vocab = Vocabulary {
+            coding: parse_vocabulary(None).coding,
+            words,
+        };
+        kept.push(format!("vocabulary={}", format_vocabulary(&vocab)));
+    }
+    if !kept.is_empty() {
+        out.push_str("\n# Kept across reset (keyboard theme, hint counter, custom words)\n");
+        for line in kept {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+#[cfg(feature = "gamepad")]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ImportPlan {
+    pub accepted: Vec<(String, String)>,
+    pub rejected: Vec<String>,
+}
+
+#[cfg(feature = "gamepad")]
+pub fn parse_settings_import(text: &str) -> ImportPlan {
+    let mut plan = ImportPlan::default();
+    for raw in text.lines() {
+        let line = raw.trim().trim_start_matches('\u{feff}');
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            plan.rejected.push(line.to_string());
+            continue;
+        };
+        let (key, value) = (k.trim(), v.trim());
+        if key == "vk_sheet_opens" || validate_gamepad_setting(key, value).is_err() {
+            plan.rejected.push(line.to_string());
+            continue;
+        }
+        plan.accepted.retain(|(existing, _)| existing != key);
+        plan.accepted.push((key.to_string(), value.to_string()));
+    }
+    plan
+}
+
+#[cfg(all(feature = "gamepad", windows))]
+fn backup_name_now() -> String {
+    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    settings_backup_name(t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond)
+}
+
+#[cfg(all(feature = "gamepad", windows))]
+pub fn backup_settings() -> Result<std::path::PathBuf, String> {
+    let path = settings_path().ok_or_else(|| "settings path unavailable".to_string())?;
+    let current = std::fs::read_to_string(&path).unwrap_or_default();
+    let backup = path.with_file_name(backup_name_now());
+    std::fs::write(&backup, &current).map_err(|e| format!("write {}: {e}", backup.display()))?;
+    Ok(backup)
+}
+
+#[cfg(feature = "gamepad")]
+pub fn export_settings_to(path: &std::path::Path) -> Result<(), String> {
+    let src = settings_path().ok_or_else(|| "settings path unavailable".to_string())?;
+    let text = std::fs::read_to_string(&src).unwrap_or_else(|_| SETTINGS_TEMPLATE.to_string());
+    std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+#[cfg(all(feature = "gamepad", windows))]
+pub fn reset_settings_to_shipped() -> Result<std::path::PathBuf, String> {
+    let path = settings_path().ok_or_else(|| "settings path unavailable".to_string())?;
+    let current = std::fs::read_to_string(&path).unwrap_or_default();
+    let backup = backup_settings()?;
+    let tmp = path.with_extension("ini.tmp");
+    std::fs::write(&tmp, shipped_settings_text(&current))
+        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("rename to {}: {e}", path.display()))?;
+    Ok(backup)
+}
+
+#[cfg(feature = "gamepad")]
+static SETTINGS_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(feature = "gamepad")]
+fn is_profile_key(key: &str) -> bool {
+    key == "app_profiles" || key.starts_with("profile.")
+}
+
+#[cfg(feature = "gamepad")]
+pub fn replace_profile_settings(lines: &[(String, String)]) -> Result<(), String> {
+    for (key, value) in lines {
+        validate_gamepad_setting(key, value)?;
+    }
+    let path = settings_path().ok_or_else(|| "settings path unavailable".to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create settings dir: {e}"))?;
+    }
+    let _guard = SETTINGS_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let current = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut text: String = current
+        .lines()
+        .filter(|line| {
+            let t = line.trim_start();
+            t.starts_with('#') || !t.split_once('=').is_some_and(|(k, _)| is_profile_key(k.trim()))
+        })
+        .flat_map(|line| [line, "
+"])
+        .collect();
+    for (key, value) in lines {
+        text.push_str(&format!("{key}={value}
+"));
+    }
+    let tmp = path.with_extension("ini.tmp");
+    std::fs::write(&tmp, text).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("rename to {}: {e}", path.display()))?;
+    invalidate_gamepad_settings_cache();
+    Ok(())
+}
+
+#[cfg(feature = "gamepad")]
 pub fn set_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
     validate_gamepad_setting(key, value)?;
     let path = settings_path()
@@ -604,21 +856,45 @@ pub fn set_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create settings dir: {e}"))?;
     }
-    let mut entries = std::collections::BTreeMap::<String, String>::new();
-    if let Ok(text) = std::fs::read_to_string(&path) {
-        for line in text.lines() {
-            let Some((k, v)) = line.split_once('=') else {
-                continue;
-            };
-            entries.insert(k.trim().to_string(), v.trim().to_string());
-        }
+    let _guard = SETTINGS_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let current = std::fs::read_to_string(&path).unwrap_or_default();
+    let text = upsert_setting_line(&current, key, value);
+    let tmp = path.with_extension("ini.tmp");
+    std::fs::write(&tmp, text).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("rename to {}: {e}", path.display()))?;
+    invalidate_gamepad_settings_cache();
+    // Turning voice off must unload the engine now, not on the next R3 press.
+    #[cfg(windows)]
+    if key == "voice_enabled" {
+        crate::win::speech_input::enforce_voice_enabled();
     }
-    entries.insert(key.to_string(), value.to_string());
-    let text = entries
-        .into_iter()
-        .map(|(k, v)| format!("{k}={v}\n"))
-        .collect::<String>();
-    std::fs::write(&path, text).map_err(|e| format!("write {}: {e}", path.display()))
+    Ok(())
+}
+
+#[cfg(feature = "gamepad")]
+fn upsert_setting_line(text: &str, key: &str, value: &str) -> String {
+    let mut found = false;
+    let mut out = String::with_capacity(text.len() + key.len() + value.len() + 2);
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let matches = !trimmed.starts_with('#')
+            && trimmed
+                .split_once('=')
+                .is_some_and(|(k, _)| k.trim() == key);
+        if matches {
+            found = true;
+            out.push_str(&format!("{key}={value}"));
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    if !found {
+        out.push_str(&format!("{key}={value}\n"));
+    }
+    out
 }
 
 #[cfg(feature = "gamepad")]
@@ -656,6 +932,8 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
             .map(|_| ())
             .ok_or_else(|| format!("{key} must be >= 0.0 and < 0.95")),
         "natural_scroll"
+        | "touchpad_gestures"
+        | "touchpad_tap_click"
         | "cursor_enabled"
         | "gamepad_cursor"
         | "sleep_on_game"
@@ -666,7 +944,12 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
         | "stop_when_game_active"
         | "prompt_userland_debug"
         | "signin_hints"
-        | "guide_launch" => match value.trim().to_ascii_lowercase().as_str() {
+        | "guide_launch"
+        | "multi_controller"
+        | "update_check"
+        | "voice_enabled"
+        | "app_profiles"
+        | "vk_side_tips" => match value.trim().to_ascii_lowercase().as_str() {
             "true" | "false" | "1" | "0" | "yes" | "no" | "on" | "off" => Ok(()),
             _ => Err(format!("{key} must be a boolean")),
         },
@@ -687,13 +970,36 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
         | "keyboard_border" => parse_theme_color(value)
             .map(|_| ())
             .ok_or_else(|| format!("{key} must be a #RRGGBB color")),
+        "led_color" | "led_secondary_color" => parse_theme_color(value)
+            .map(|_| ())
+            .ok_or_else(|| format!("{key} must be a #RRGGBB color")),
+        "led_brightness" | "led_saturation" => value
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|v| (0.0..=1.0).contains(v))
+            .map(|_| ())
+            .ok_or_else(|| format!("{key} must be between 0.0 and 1.0")),
+        "led_effect" => match value.trim().to_ascii_lowercase().as_str() {
+            "solid" | "breathing" | "rainbow" | "gradient" | "off" => Ok(()),
+            _ => Err("led_effect must be solid, breathing, rainbow, gradient or off".to_string()),
+        },
         "vk_mode" => match value.trim().to_ascii_lowercase().as_str() {
             "docked" | "floating" => Ok(()),
             _ => Err("vk_mode must be docked or floating".to_string()),
         },
+        "vk_sheet_opens" => value
+            .trim()
+            .parse::<u32>()
+            .map(|_| ())
+            .map_err(|_| "vk_sheet_opens must be a whole number".to_string()),
         "vk_style" => match value.trim().to_ascii_lowercase().as_str() {
-            "normal" | "mono" | "refined" | "apple" => Ok(()),
-            _ => Err("vk_style must be normal or mono".to_string()),
+            "normal" | "mono" | "refined" | "apple" | "modern" | "tv" => Ok(()),
+            _ => Err("vk_style must be normal, mono, refined, apple, modern or tv".to_string()),
+        },
+        "vk_display" => match value.trim().to_ascii_lowercase().as_str() {
+            "auto" | "tv" | "desk" => Ok(()),
+            _ => Err("vk_display must be auto, tv or desk".to_string()),
         },
         "vk_bar_scale" => value
             .parse::<f32>()
@@ -712,6 +1018,13 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
                 Err("vocabulary must not contain newlines or '='".to_string())
             } else {
                 Ok(())
+            }
+        }
+        _ if key.starts_with("profile.") => {
+            if crate::app_profiles::valid_setting(key, value) {
+                Ok(())
+            } else {
+                Err(format!("{key} must be a key combo like ctrl+w, or none"))
             }
         }
         _ => Err(format!("unknown setting: {key}")),
@@ -776,6 +1089,102 @@ pub fn vocabulary() -> Vocabulary {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn settings_import_keeps_only_valid_known_keys() {
+        let plan = parse_settings_import(
+            "\u{feff}# exported\n\ncursor_speed = 20\ncursor_deadzone=2.0\nbogus_key=1\n\
+             no equals here\nvk_style=mono\nvk_sheet_opens=9\nkeyboard_accent=#FF0000\n\
+             led_effect=breathing\ncursor_speed=25\n  # indented comment\n",
+        );
+        assert_eq!(
+            plan.accepted,
+            vec![
+                ("vk_style".to_string(), "mono".to_string()),
+                ("keyboard_accent".to_string(), "#FF0000".to_string()),
+                ("led_effect".to_string(), "breathing".to_string()),
+                ("cursor_speed".to_string(), "25".to_string()),
+            ]
+        );
+        assert_eq!(
+            plan.rejected,
+            vec![
+                "cursor_deadzone=2.0".to_string(),
+                "bogus_key=1".to_string(),
+                "no equals here".to_string(),
+                "vk_sheet_opens=9".to_string(),
+            ]
+        );
+        assert!(parse_settings_import("; ini comment\n;cursor_speed=9\n")
+            .accepted
+            .is_empty());
+        assert!(parse_settings_import("# only comments\n\n")
+            .accepted
+            .is_empty());
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn touchpad_settings_default_on_and_validate() {
+        let mut s = GamepadSettings::default();
+        assert!(s.touchpad_gestures && s.touchpad_tap_click);
+        apply_gamepad_settings_text(&mut s, "touchpad_gestures=false
+touchpad_tap_click=off
+");
+        assert!(!s.touchpad_gestures && !s.touchpad_tap_click);
+        assert!(validate_gamepad_setting("touchpad_gestures", "true").is_ok());
+        assert!(validate_gamepad_setting("touchpad_tap_click", "maybe").is_err());
+        assert!(SETTINGS_TEMPLATE.contains("# touchpad_gestures = true"));
+        assert!(SETTINGS_TEMPLATE.contains("# touchpad_tap_click = true"));
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn backup_names_sort_by_time() {
+        assert_eq!(
+            settings_backup_name(2026, 10, 7, 23, 5, 9),
+            "settings.ini.bak-20261007-230509"
+        );
+        assert!(
+            settings_backup_name(2026, 1, 2, 3, 4, 5) < settings_backup_name(2026, 1, 2, 3, 4, 6)
+        );
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn shipped_reset_drops_user_settings_but_keeps_required_state() {
+        let current = "cursor_speed=33\nvk_style=modern\nled_color=#FF3B30\nrun_mode=signin\n\
+                       vk_sheet_opens=3\nkeyboard_accent=#FF0000\nvocabulary=off, herdr, MyProject\n";
+        let text = shipped_settings_text(current);
+        assert!(text.starts_with(SETTINGS_TEMPLATE));
+        for gone in ["cursor_speed", "vk_style", "led_color", "run_mode"] {
+            assert_eq!(setting_value(&text, gone), None, "{gone}");
+        }
+        assert_eq!(setting_value(&text, "vk_sheet_opens").as_deref(), Some("3"));
+        assert_eq!(
+            setting_value(&text, "keyboard_accent").as_deref(),
+            Some("#FF0000")
+        );
+        let vocab = parse_vocabulary(Some(&text));
+        assert_eq!(vocab.coding, parse_vocabulary(None).coding);
+        assert_eq!(
+            vocab.words,
+            vec!["herdr".to_string(), "MyProject".to_string()]
+        );
+        let mut settings = GamepadSettings::default();
+        apply_gamepad_settings_text(&mut settings, &text);
+        assert_eq!(
+            settings.cursor_speed,
+            GamepadSettings::default().cursor_speed
+        );
+        assert_eq!(
+            parse_run_mode(setting_value(&text, "run_mode").as_deref()),
+            RunMode::Always
+        );
+        let plain = shipped_settings_text("cursor_speed=33\n");
+        assert_eq!(plain, SETTINGS_TEMPLATE);
+    }
+
     #[test]
     fn vocabulary_round_trips_through_settings_value() {
         for raw in ["coding", "off", "herdr, MyProject", "coding, herdr, Jonas"] {
@@ -783,8 +1192,14 @@ mod tests {
             assert_eq!(format_vocabulary(&v), raw);
         }
         assert_eq!(format_vocabulary(&parse_vocabulary(None)), "coding");
-        assert_eq!(format_vocabulary(&parse_vocabulary(Some("vocabulary = none"))), "off");
-        assert_eq!(format_vocabulary(&parse_vocabulary(Some("vocabulary ="))), "off");
+        assert_eq!(
+            format_vocabulary(&parse_vocabulary(Some("vocabulary = none"))),
+            "off"
+        );
+        assert_eq!(
+            format_vocabulary(&parse_vocabulary(Some("vocabulary ="))),
+            "off"
+        );
         assert_eq!(
             format_vocabulary(&parse_vocabulary(Some("vocabulary = herdr ,coding,HERDR"))),
             "coding, herdr"
@@ -836,7 +1251,52 @@ mod tests {
     fn vk_layout_defaults_to_floating() {
         assert_eq!(parse_vk_layout_mode(None), VkLayoutMode::Floating);
         assert_eq!(parse_vk_layout_mode(Some("docked")), VkLayoutMode::Docked);
-        assert_eq!(parse_vk_layout_mode(Some(" Floating ")), VkLayoutMode::Floating);
+        assert_eq!(
+            parse_vk_layout_mode(Some(" Floating ")),
+            VkLayoutMode::Floating
+        );
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn setting_value_last_line_wins() {
+        let text = "vk_style=mono\n# vk_style = normal\nvk_style = modern\n";
+        assert_eq!(setting_value(text, "vk_style").as_deref(), Some("modern"));
+        assert_eq!(setting_value(text, "vk_mode"), None);
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn upsert_setting_line_preserves_unrelated_lines() {
+        let text = "# header\n# vk_mode = docked\nvk_mode = floating\n\nvoice_enabled=true\n";
+        assert_eq!(
+            upsert_setting_line(text, "vk_mode", "docked"),
+            "# header\n# vk_mode = docked\nvk_mode=docked\n\nvoice_enabled=true\n"
+        );
+        assert_eq!(
+            upsert_setting_line(text, "vk_style", "modern"),
+            format!("{text}vk_style=modern\n")
+        );
+        assert_eq!(upsert_setting_line("", "a", "1"), "a=1\n");
+        assert_eq!(upsert_setting_line("x=1", "x", "2"), "x=2\n");
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn vk_display_parses_and_validates() {
+        assert_eq!(parse_vk_display(None), VkDisplay::Auto);
+        assert_eq!(parse_vk_display(Some("auto")), VkDisplay::Auto);
+        assert_eq!(parse_vk_display(Some(" TV ")), VkDisplay::Tv);
+        assert_eq!(parse_vk_display(Some("Desk")), VkDisplay::Desk);
+        assert_eq!(parse_vk_display(Some("bogus")), VkDisplay::Auto);
+        assert!(validate_gamepad_setting("led_color", "#B6A0FF").is_ok());
+        assert!(validate_gamepad_setting("led_color", "lavender").is_err());
+        assert!(validate_gamepad_setting("led_effect", "Breathing").is_ok());
+        assert!(validate_gamepad_setting("led_effect", "strobe").is_err());
+        assert!(validate_gamepad_setting("vk_display", "tv").is_ok());
+        assert!(validate_gamepad_setting("vk_display", "Desk").is_ok());
+        assert!(validate_gamepad_setting("vk_display", "auto").is_ok());
+        assert!(validate_gamepad_setting("vk_display", "big").is_err());
     }
 
     #[cfg(feature = "gamepad")]
@@ -851,6 +1311,15 @@ mod tests {
         assert!(validate_gamepad_setting("vk_style", "refined").is_ok());
         assert!(validate_gamepad_setting("vk_style", "Normal").is_ok());
         assert!(validate_gamepad_setting("vk_style", "ios").is_err());
+        assert_eq!(parse_vk_style(Some("Modern")), VkStyle::Modern);
+        assert!(validate_gamepad_setting("vk_style", "modern").is_ok());
+        assert!(validate_gamepad_setting("vk_side_tips", "off").is_ok());
+        assert!(validate_gamepad_setting("vk_sheet_opens", "3").is_ok());
+        assert!(validate_gamepad_setting("vk_sheet_opens", "-1").is_err());
+        let mut settings = GamepadSettings::default();
+        assert_eq!(settings.vk_sheet_opens, 0);
+        apply_gamepad_settings_text(&mut settings, "vk_sheet_opens=2\n");
+        assert_eq!(settings.vk_sheet_opens, 2);
     }
 
     #[cfg(feature = "gamepad")]
@@ -901,5 +1370,22 @@ mod tests {
 
         apply_gamepad_settings_text(&mut settings, "cursor_enabled=false\ngamepad_cursor=true\n");
         assert!(!settings.cursor_enabled);
+    }
+
+    #[cfg(feature = "gamepad")]
+    #[test]
+    fn voice_enabled_defaults_on_and_can_be_turned_off() {
+        let mut settings = GamepadSettings::default();
+        assert!(settings.voice_enabled);
+
+        apply_gamepad_settings_text(&mut settings, "voice_enabled = false\n");
+        assert!(!settings.voice_enabled);
+        apply_gamepad_settings_text(&mut settings, "voice_enabled=off\n");
+        assert!(!settings.voice_enabled);
+        apply_gamepad_settings_text(&mut settings, "voice_enabled=on\n");
+        assert!(settings.voice_enabled);
+
+        assert!(validate_gamepad_setting("voice_enabled", "false").is_ok());
+        assert!(validate_gamepad_setting("voice_enabled", "nope").is_err());
     }
 }

@@ -4,7 +4,9 @@
 
 # warmUP Companion
 
-Type anywhere in Windows with the controller already in your hands. warmUP Companion is an open-source controller keyboard for Xbox and PlayStation controllers, including desktop apps, UAC prompts, the lock screen, and sign-in screen.
+Use an Xbox or PlayStation controller as a mouse and keyboard on Windows, including the sign-in screen, lock screen, and UAC.
+
+warmUP Companion is an open-source Windows app. Left stick moves the pointer, right stick scrolls, A / Cross clicks, and L3 opens a native on-screen keyboard. It types into desktop apps, UAC prompts, the lock screen, and the sign-in screen, and it works without Steam.
 
 [Download for Windows](https://github.com/warmUP-corp/warmup-companion/releases/latest)
 · [Join the Discord](https://discord.gg/z2zmB4v2Bn)
@@ -17,8 +19,10 @@ Type anywhere in Windows with the controller already in your hands. warmUP Compa
 - Opens a native on-screen keyboard and shows Xbox or PlayStation button hints.
 - Types into desktop apps, UAC prompts, lock screens, and sign-in screens.
 - Offers local English word suggestions without reading text from the focused app.
-- Supports optional offline voice typing with Whisper.cpp or NVIDIA Parakeet.
+- Supports optional offline voice typing with Whisper.cpp, NVIDIA Parakeet or Parakeet Redux (a lighter Parakeet).
 - Sleeps controller input while a game is active, then wakes for desktop use.
+- Control Center to change every setting with the controller, mouse or keyboard.
+- Uses the DualSense / DualShock 4 touchpad as a trackpad: tap to click, two-finger scroll, desktop swipes.
 
 ![Controller-driven virtual keyboard in warmUP on Windows](assets/promo/warmup-keyboard-library.png)
 
@@ -27,6 +31,22 @@ Type anywhere in Windows with the controller already in your hands. warmUP Compa
 | Normal | Mono |
 | --- | --- |
 | ![Normal keyboard style with word suggestions](assets/promo/keyboard-normal.png) | ![Mono keyboard style](assets/promo/keyboard-mono.png) |
+
+### Control Center
+
+Hold **Create + Options** (View + Menu on Xbox) or press **Ctrl+Alt+C** to open it. While it is open the controller only drives this window.
+
+The **Voice** tab lists every voice typing model (Parakeet Redux, Parakeet, Whisper Tiny to Medium) with its size. Pick an installed model to make it active right away, or pick one that is not installed to download it in the background; it becomes active when the download finishes.
+
+| General | Keyboard | Controller |
+| --- | --- | --- |
+| ![Control Center, General tab](assets/promo/controller-center-general.png) | ![Control Center, Keyboard tab](assets/promo/controller-center-keyboard.png) | ![Control Center, Controller tab](assets/promo/controller-center-controller.png) |
+
+### Tray
+
+| Tray menu |
+| --- |
+| ![Tray menu with the Keyboard submenu open](assets/promo/tray-menu.png) |
 
 ---
 
@@ -47,6 +67,8 @@ Linux on KDE Plasma gaming distributions (SteamOS desktop mode, Bazzite, CachyOS
 - PlayStation DualSense and DualSense Edge
 - Other compatible HID gamepads recognized through the controller mapping database
 
+> **Xbox controllers on the sign-in screen.** Newer Windows 11 builds (24H2 and later) no longer pass Xbox controller input to other programs on the sign-in screen; only Windows' own sign-in screen receives it. This affects every third-party controller tool, not just warmUP Companion. So when only Xbox controllers are connected, the companion hands sign-in to Windows' built-in controller keyboard and navigation (D-pad and A, no mouse cursor). With a PlayStation controller connected, the warmUP keyboard is used as usual. UAC prompts and the normal desktop are not affected.
+
 ## Controller controls
 
 ![Shortcut legend overlay](assets/promo/shortcut-legend.png)
@@ -59,6 +81,10 @@ Linux on KDE Plasma gaming distributions (SteamOS desktop mode, Bazzite, CachyOS
 | Right stick | Right stick | Scroll |
 | <img src="controller-icons/x_face_a_colored.svg" alt="A" width="28" align="middle"> | <img src="controller-icons/p5_face_cross_colored.svg" alt="Cross" width="28" align="middle"> | Click |
 | <img src="controller-icons/x_l3_click.svg" alt="L3" width="28" align="middle"> | <img src="controller-icons/p5_l3_click.svg" alt="L3" width="28" align="middle"> | Open the keyboard |
+| <img src="controller-icons/x_menu_view.svg" alt="View" width="28" align="middle"> + <img src="controller-icons/x_menu_menu.svg" alt="Menu" width="28" align="middle"> | <img src="controller-icons/p5_share.svg" alt="Create" width="28" align="middle"> + <img src="controller-icons/p5_options.svg" alt="Options" width="28" align="middle"> | Open or close the Control Center |
+| – | Touchpad tap / two-finger tap | Left click / right click |
+| – | Touchpad two-finger drag | Scroll |
+| – | Hold touchpad click + swipe | Switch desktop (left/right), Task View (up), show desktop (down) |
 
 ### Keyboard open
 
@@ -82,14 +108,15 @@ Linux on KDE Plasma gaming distributions (SteamOS desktop mode, Bazzite, CachyOS
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| Sign-in only | Off | Runs the companion only on the sign-in and lock screen (`run_mode = signin`). After you sign in or unlock, its worker process exits and the service idles with no input, tray or voice engine until you lock the PC again. To reach the tray and Controller Center while it sleeps, open **Warmup Companion** from the Start menu (or run `warmup-companion.exe wake`); it stays awake until the next sign-in or unlock. |
-| Guide opens warmUP | On | Pressing Guide (Xbox) or PS (PlayStation) while warmUP is closed starts it. If warmUP is already open nothing changes, repeat presses during startup are ignored, and it never fires on the sign-in screen. Turn off with `guide_launch = false` or in the Controller Center. |
+| Sign-in only | Off | Runs the companion only on the sign-in and lock screen (`run_mode = signin`). After you sign in or unlock, its worker process exits and the service idles with no input, tray or voice engine until you lock the PC again. To reach the tray and Control Center while it sleeps, open **Warmup Companion** from the Start menu (or run `warmup-companion.exe wake`); it stays awake until the next sign-in or unlock. |
+| Guide opens warmUP | On | Pressing Guide (Xbox) or PS (PlayStation) while warmUP is closed starts it. If warmUP is already open nothing changes, repeat presses during startup are ignored, and it never fires on the sign-in screen. Turn off with `guide_launch = false` or in the Control Center. |
 | Game sleep | On | Stops companion mouse and keyboard input while a fullscreen game is active. Press Guide or PS to wake it. |
-| Voice typing | Off until installed | Uses an optional local speech engine on the normal desktop. It is unavailable on lock and sign-in screens. |
-| Dictation vocabulary | Coding | Primes voice typing with terminal and coding-agent terms (git, npm, Claude Code, herdr, …) and fixes common mishearings. Add your own comma-separated words in the Controller Center, or set `vocabulary = off` in `settings.ini`. |
+| Voice typing | On, once installed | Uses an optional local speech engine on the normal desktop. It is unavailable on lock and sign-in screens. Turn it off completely in the tray (Voice typing), in Control Center under General, or with `voice_enabled = false` in `settings.ini`. R3, Ctrl+Alt+V and the mic key then do nothing, the mic key on the keyboard shows disabled, and the speech engine unloads. |
+| Dictation vocabulary | Coding | Primes voice typing with terminal and coding-agent terms (git, npm, Claude Code, herdr, …) and fixes common mishearings. Add your own comma-separated words in the Control Center, or set `vocabulary = off` in `settings.ini`. |
 | Suggestions | On | Keeps a local, English-only prefix buffer from characters typed by the companion. |
+| Touchpad gestures | On | Tap to click, two-finger scroll and desktop swipes on the DualSense / DualShock 4 touchpad (`touchpad_gestures`, `touchpad_tap_click`). |
 
-Use the tray icon to check status and privacy settings. To manage game sleep from a terminal:
+Change settings in the Control Center (tray icon, Create + Options, or Ctrl+Alt+C). It can also export, import and reset all settings; import and reset back up `settings.ini` first. Use the tray icon to check status and privacy settings. To manage game sleep from a terminal:
 
 ```powershell
 warmup-companion.exe settings sleep-on-game get
@@ -152,3 +179,23 @@ cargo check
 - [Domain glossary](CONTEXT.md)
 - [IPC protocol](docs/companion-ipc-protocol.md)
 - [Release process](docs/RELEASES.md)
+
+## FAQ
+
+### Is this an alternative to Gopher360, JoyToKey, or Controller Companion?
+
+Yes, for using a controller as a mouse and keyboard on the Windows desktop. Left stick moves the pointer, right stick scrolls, A / Cross left-clicks, and B / Circle right-clicks. L3 opens the on-screen keyboard. It is open source, installs from GitHub Releases, and does not need Steam.
+
+It is not a per-game remapper. Companion does not assign controller buttons to arbitrary keys inside games.
+
+### How does it compare to the Windows 11 Gamepad keyboard?
+
+Windows 11 has a built-in Gamepad keyboard. Companion draws its own on-screen keyboard and injects keys with Win32 `SendInput`, including on UAC prompts, the lock screen, and the sign-in screen.
+
+### When does another tool fit better?
+
+Use JoyToKey, reWASD, or Steam Input when you need to remap controller buttons to keys or macros inside a game. Game sleep is on by default here: companion mouse and keyboard input stop while a fullscreen game is active.
+
+### Why does setup install a Windows service?
+
+Secure-desktop input is not available to a normal desktop application. The installer adds `WarmupVkSvc` under LocalSystem so the companion can type at UAC, lock, and sign-in. Read the [privacy policy](PRIVACY.md) and [security policy](SECURITY.md) before installing.

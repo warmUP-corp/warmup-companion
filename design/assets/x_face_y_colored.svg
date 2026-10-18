@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32.000000 32.000000" fill="none"><g transform="translate(-0.000000,-0.000000)">
+<circle cx="16" cy="16" r="11.5" fill="#2A2A2A" stroke="#232323" />
+<mask id="path-30-outside-7_401_1984" maskUnits="userSpaceOnUse" x="10" y="10" width="12" height="13" fill="black">
+<rect fill="white" x="10" y="10" width="12" height="13" />
+<path d="M10.72 10.36H13.1L15.95 15.51H16.06L18.91 10.36H21.29L17.05 17.66V22H14.95V17.66L10.72 10.36Z" />
+</mask>
+<path d="M10.72 10.36H13.1L15.95 15.51H16.06L18.91 10.36H21.29L17.05 17.66V22H14.95V17.66L10.72 10.36Z" fill="#FDE24F" />
+<path d="M10.72 10.36V10.16C10.65 10.16 10.58 10.2 10.55 10.26C10.51 10.33 10.51 10.4 10.55 10.46L10.72 10.36ZM13.1 10.36L13.28 10.27C13.24 10.2 13.17 10.16 13.1 10.16V10.36ZM15.95 15.51L15.77 15.61C15.81 15.67 15.87 15.71 15.95 15.71V15.51ZM16.06 15.51V15.71C16.13 15.71 16.2 15.67 16.24 15.61L16.06 15.51ZM18.91 10.36V10.16C18.83 10.16 18.77 10.2 18.73 10.27L18.91 10.36ZM21.29 10.36L21.46 10.46C21.5 10.4 21.5 10.33 21.46 10.26C21.43 10.2 21.36 10.16 21.29 10.16V10.36ZM17.05 17.66L16.88 17.56C16.86 17.59 16.85 17.62 16.85 17.66H17.05ZM17.05 22V22.2C17.17 22.2 17.25 22.11 17.25 22H17.05ZM14.95 22H14.75C14.75 22.11 14.84 22.2 14.95 22.2V22ZM14.95 17.66H15.15C15.15 17.62 15.14 17.59 15.13 17.56L14.95 17.66ZM10.72 10.56H13.1V10.16H10.72V10.56ZM12.93 10.46L15.77 15.61L16.12 15.41L13.28 10.27L12.93 10.46ZM15.95 15.71H16.06V15.31H15.95V15.71ZM16.24 15.61L19.08 10.46L18.73 10.27L15.89 15.41L16.24 15.61ZM18.91 10.56H21.29V10.16H18.91V10.56ZM21.11 10.26L16.88 17.56L17.23 17.76L21.46 10.46L21.11 10.26ZM16.85 17.66V22H17.25V17.66H16.85ZM17.05 21.8H14.95V22.2H17.05V21.8ZM15.15 22V17.66H14.75V22H15.15ZM15.13 17.56L10.89 10.26L10.55 10.46L14.78 17.76L15.13 17.56Z" fill="#FDE24F" mask="url(#path-30-outside-7_401_1984)" />
+<rect width="32" height="32" fill="white" transform="translate(42 252)" />
+<rect width="32" height="32" fill="white" transform="translate(42 168)" />
+<rect width="32" height="32" fill="white" transform="translate(0 210)" />
+<rect width="32" height="32" fill="white" transform="translate(0 294)" />
+<rect width="32" height="32" fill="white" transform="translate(126 210)" />
+<rect width="32" height="32" fill="white" transform="translate(84 168)" />
+<rect width="32" height="32" fill="white" transform="translate(126 294)" />
+<rect width="32" height="32" fill="white" transform="translate(84 252)" />
+</g></svg>

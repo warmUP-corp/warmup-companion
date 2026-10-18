@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
+static HELD_LED: std::sync::Mutex<Option<(u8, u8, u8)>> = std::sync::Mutex::new(None);
 
 use crate::gamepad_backend::{Button, ButtonChange, GamepadBackend, SdlBackend, SdlThreadBackend};
 use crate::pc_cursor::PcCursor;
@@ -17,11 +18,10 @@ use crate::xinput_backend::XInputBackend;
 const VK_BUTTON: Button = Button::L3;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(8);
-/// Idle poll cadence: once no pad is connected and the VK is closed for
-/// `IDLE_AFTER`, drop from 125Hz to ~8Hz to cut idle CPU / handheld battery.
-/// Restored to `POLL_INTERVAL` immediately on connect / VK-open. (P2)
 const POLL_INTERVAL_IDLE: Duration = Duration::from_millis(125);
+const POLL_INTERVAL_NOPAD: Duration = Duration::from_millis(1000);
 const IDLE_AFTER: Duration = Duration::from_secs(2);
+const SERVICE_BACKEND_SYNC_MIN: Duration = Duration::from_millis(500);
 const WARMUP_LAUNCH_DEBOUNCE: Duration = Duration::from_secs(2);
 const GUIDE_LAUNCH_DEBOUNCE: Duration = Duration::from_secs(10);
 /// Ignore spurious X/dpad from misaligned HID for a moment after VK opens.
@@ -103,6 +103,70 @@ fn view_chord_step(
         }
         _ => ViewChordAction::None,
     }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct CenterChord {
+    select: bool,
+    start: bool,
+    fired: bool,
+}
+
+impl CenterChord {
+    fn step(&mut self, change: ButtonChange) -> bool {
+        match change.button {
+            Button::Select => self.select = change.pressed,
+            Button::Start => self.start = change.pressed,
+            _ => return false,
+        }
+        if !(self.select && self.start) {
+            self.fired = false;
+            return false;
+        }
+        if self.fired {
+            return false;
+        }
+        self.fired = true;
+        true
+    }
+}
+
+fn native_vk_request_action(open: bool, vk_open: bool, center_open: bool) -> Option<VkLoopAction> {
+    if open == vk_open || (open && center_open) {
+        return None;
+    }
+    Some(if open {
+        VkLoopAction::Toggle
+    } else {
+        VkLoopAction::Close
+    })
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn center_vk_actions(vk_open: bool) -> Vec<VkLoopAction> {
+    if vk_open {
+        vec![VkLoopAction::Close]
+    } else {
+        Vec::new()
+    }
+}
+
+fn track_down(down: &mut Vec<Button>, change: ButtonChange) {
+    down.retain(|b| *b != change.button);
+    if change.pressed {
+        down.push(change.button);
+    }
+}
+
+fn swallow_held_releases(held: &mut Vec<Button>, changes: Vec<ButtonChange>) -> Vec<ButtonChange> {
+    changes
+        .into_iter()
+        .filter(|c| {
+            let was_held = held.contains(&c.button);
+            held.retain(|b| *b != c.button);
+            c.pressed || !was_held
+        })
+        .collect()
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -247,11 +311,27 @@ impl Backend {
         }
     }
 
+    fn pads(&self) -> Vec<crate::gamepad_backend::PadBattery> {
+        match self {
+            Backend::Sdl(b) => b.pads(),
+            #[cfg(windows)]
+            Backend::XInput(b) => b.pads(),
+        }
+    }
+
     fn set_led(&mut self, r: u8, g: u8, b: u8) {
         match self {
             Backend::Sdl(be) => be.set_led(r, g, b),
             #[cfg(windows)]
             Backend::XInput(be) => be.set_led(r, g, b),
+        }
+    }
+
+    fn release_led(&mut self) {
+        match self {
+            Backend::Sdl(be) => be.release_led(),
+            #[cfg(windows)]
+            Backend::XInput(be) => be.release_led(),
         }
     }
 
@@ -274,9 +354,29 @@ impl Backend {
     /// Apply queued device-write commands (LED/rumble) from inbound IPC frames.
     fn apply_device_commands(&mut self) {
         use crate::gamepad_backend::PadCommand;
-        for cmd in crate::pipe_server::drain_device_commands() {
+        let cmds = crate::pipe_server::drain_device_commands();
+        let mut held = HELD_LED.lock().unwrap_or_else(|e| e.into_inner());
+        if cmds.is_empty() && held.is_none() {
+            return;
+        }
+        if crate::gamepad_backend::game_owns_controller() {
+            match cmds.iter().rev().find_map(|cmd| match *cmd {
+                PadCommand::Led { r, g, b } => Some(Some((r, g, b))),
+                PadCommand::LedRelease => Some(None),
+                _ => None,
+            }) {
+                Some(led) => *held = led,
+                None => {}
+            }
+            return;
+        }
+        if let Some((r, g, b)) = held.take() {
+            self.set_led(r, g, b);
+        }
+        for cmd in cmds {
             match cmd {
                 PadCommand::Led { r, g, b } => self.set_led(r, g, b),
+                PadCommand::LedRelease => self.release_led(),
                 PadCommand::Rumble { strong, weak, ms } => self.rumble(strong, weak, ms),
                 PadCommand::TriggerRumble { left, right, ms } => {
                     self.trigger_rumble(left, right, ms)
@@ -301,6 +401,8 @@ impl Backend {
     fn publish_device_features(&self, tp: &crate::gamepad_backend::TouchpadFrame) {
         let bat = self.battery();
         crate::pipe_server::publish_battery(bat.percent, bat.charging, bat.wired);
+        crate::pipe_server::publish_usb(bat.usb);
+        crate::pipe_server::publish_pads(&self.pads());
 
         // Only publish when a finger slot is present this poll — avoids spamming empty frames.
         if !tp.fingers.is_empty() {
@@ -325,6 +427,10 @@ pub struct GamepadPoll {
     vk_down: bool,
     a_cursor_down: bool,
     touchpad_cursor_down: bool,
+    touchpad_gestures: crate::touchpad_gestures::TouchpadGestures,
+    touchpad_click_held: bool,
+    touchpad_click_routed: bool,
+    touchpad_drag_down: bool,
     b_cursor_down: bool,
     last_vk_open: bool,
     /// The L3 press that opened the VK is still physically down; close only on the
@@ -348,10 +454,16 @@ pub struct GamepadPoll {
     launch_armed: bool,
     last_launch: Instant,
     last_desktop_log: Instant,
+    center_chord: CenterChord,
+    center_owned: bool,
+    center_held: Vec<Button>,
+    pad_down: Vec<Button>,
     #[cfg(windows)]
     last_input_desktop: Option<String>,
     #[cfg(windows)]
     last_desktop_watch: Option<(String, String)>,
+    #[cfg(windows)]
+    last_service_backend_sync: Instant,
 }
 
 impl GamepadPoll {
@@ -411,33 +523,36 @@ impl GamepadPoll {
             .unwrap_or(false)
     }
 
-    /// Switch between SDL3 (Default) and HID+XInput (Winlogon) when the service crosses desktops.
     #[cfg(windows)]
     fn sync_service_backend(&mut self) {
         if !crate::config::service_mode() {
             return;
         }
         let on_winlogon = Self::input_desktop_is_winlogon();
-        let xbox_pad = on_winlogon && self.backend.controller_label().starts_with("XInput");
-        crate::win::native_keyboard::set_logon_pad_is_xbox(xbox_pad);
+        let using_xinput = matches!(self.backend, Backend::XInput(_));
+        let matched = on_winlogon == using_xinput;
+        if matched && self.last_service_backend_sync.elapsed() < SERVICE_BACKEND_SYNC_MIN {
+            return;
+        }
+        self.last_service_backend_sync = Instant::now();
+        if !on_winlogon {
+            crate::xinput_backend::clear_logon_pad_presence();
+        }
+        let (xbox_pad, hid_pad) = if on_winlogon && using_xinput {
+            crate::xinput_backend::logon_pad_presence()
+        } else {
+            (None, None)
+        };
+        crate::win::native_keyboard::set_logon_pads(xbox_pad, hid_pad);
         let signin = on_winlogon
             && crate::xinput_backend::logon_credential_window()
                 .is_none_or(crate::win::native_keyboard::window_is_logonui);
         crate::win::native_keyboard::set_logon_signin_surface(signin);
-        // Publish each poll so the per-keystroke UIA focus redirect (vk_nav send
-        // path) gates correctly and records this loop thread's apartment.
         crate::win::logon_focus::set_active(on_winlogon);
-        // Keep a hide sweep alive the whole time we're on the secure desktop.
-        // `EnableDesktopModeAutoInvoke` is already 0 on some machines yet the
-        // touch keyboard is still summoned by the shell's CoreWindow gamepad
-        // navigation when an XInput (Xbox) pad drives the lock screen — the
-        // registry switch doesn't gate that path, so the panel must be hidden
-        // on sight. Idempotent: `suppress_for` no-ops while a sweep is running.
         if on_winlogon && !crate::win::native_keyboard::yield_logon_to_native() {
             crate::win::native_keyboard::suppress_for(std::time::Duration::from_secs(3));
         }
-        let using_xinput = matches!(self.backend, Backend::XInput(_));
-        if on_winlogon == using_xinput {
+        if matched {
             if !on_winlogon {
                 let current = crate::win::current_desktop_name().unwrap_or_else(|| "?".into());
                 if !current.eq_ignore_ascii_case("default") {
@@ -497,6 +612,10 @@ impl GamepadPoll {
             vk_down: false,
             a_cursor_down: false,
             touchpad_cursor_down: false,
+            touchpad_gestures: crate::touchpad_gestures::TouchpadGestures::new(),
+            touchpad_click_held: false,
+            touchpad_click_routed: false,
+            touchpad_drag_down: false,
             b_cursor_down: false,
             last_vk_open: false,
             vk_toggle_need_release: false,
@@ -518,10 +637,16 @@ impl GamepadPoll {
             launch_armed: true,
             last_launch: crate::time_util::stale(WARMUP_LAUNCH_DEBOUNCE),
             last_desktop_log: crate::time_util::stale(DESKTOP_SYNC_LOG_INTERVAL),
+            center_chord: CenterChord::default(),
+            center_owned: false,
+            center_held: Vec::new(),
+            pad_down: Vec::new(),
             #[cfg(windows)]
             last_input_desktop: None,
             #[cfg(windows)]
             last_desktop_watch: None,
+            #[cfg(windows)]
+            last_service_backend_sync: crate::time_util::stale(SERVICE_BACKEND_SYNC_MIN),
         }
     }
 
@@ -529,7 +654,7 @@ impl GamepadPoll {
     pub fn reset_vk_controls(&mut self) {
         self.vk_down = false;
         self.a_cursor_down = false;
-        self.touchpad_cursor_down = false;
+        self.clear_touchpad();
         self.b_cursor_down = false;
         self.vk_toggle_need_release = false;
         self.vk_nav_grace_until = None;
@@ -589,6 +714,7 @@ impl GamepadPoll {
             self.shot_rb_down = false;
             self.shot_select_down = false;
             self.reset_view_hold();
+            self.clear_touchpad();
             return Ok(Vec::new());
         }
 
@@ -597,7 +723,7 @@ impl GamepadPoll {
             self.reset_view_hold();
             self.backend.haptic_confirm();
             self.a_cursor_down = false;
-            self.touchpad_cursor_down = false;
+            self.clear_touchpad();
             self.b_cursor_down = false;
             cursor.set_left_button(false);
             cursor.set_right_button(false);
@@ -614,13 +740,13 @@ impl GamepadPoll {
         }
 
         // Desktop `native_vk` request (open/close the companion keyboard via IPC).
+        #[cfg(windows)]
+        let center_open = crate::win::controller_center::owns_pad();
+        #[cfg(not(windows))]
+        let center_open = false;
         if let Some(open) = crate::pipe_server::take_native_vk_request() {
-            if open != vk_open {
-                return Ok(vec![if open {
-                    VkLoopAction::Toggle
-                } else {
-                    VkLoopAction::Close
-                }]);
+            if let Some(action) = native_vk_request_action(open, vk_open, center_open) {
+                return Ok(vec![action]);
             }
         }
 
@@ -644,6 +770,62 @@ impl GamepadPoll {
             crate::pipe_server::game_active() && !crate::pipe_server::launcher_foreground_nav();
         let cursor_injection_enabled =
             allows_cursor_injection(game_owns_input, crate::pipe_server::clicks_enabled());
+        #[cfg(windows)]
+        {
+            let name = self.backend.controller_label();
+            let input = if crate::config::service_mode() {
+                self.backend.live_input_summary()
+            } else {
+                String::new()
+            };
+            crate::debug_state::set_gamepad(self.backend.is_connected(), name, input);
+        }
+
+        for c in &changes {
+            track_down(&mut self.pad_down, *c);
+        }
+        #[cfg(windows)]
+        let changes = {
+            let chord_allowed = !game_owns_input
+                && (center_open || !crate::pipe_server::launcher_foreground_nav())
+                && !crate::gamepad_backend::poll_mode_is_sleep()
+                && !Self::service_signin_desktop();
+            let mut kept = Vec::with_capacity(changes.len());
+            let mut toggled = None;
+            for c in changes {
+                if self.center_chord.step(c) && chord_allowed {
+                    toggled = Some(crate::win::controller_center::toggle());
+                    self.backend.haptic_confirm();
+                    continue;
+                }
+                kept.push(c);
+            }
+            let owned = toggled.unwrap_or_else(crate::win::controller_center::owns_pad);
+            if owned {
+                if !self.center_owned {
+                    self.center_owned = true;
+                    for b in &self.pad_down {
+                        crate::pipe_server::publish_button(b.as_str(), false);
+                    }
+                    self.release_for_center(cursor);
+                }
+                self.center_held = self.pad_down.clone();
+                for c in &kept {
+                    crate::win::controller_center::push_pad_edge(c.button.as_str(), c.pressed);
+                }
+                let bat = self.backend.battery();
+                crate::pipe_server::publish_battery(bat.percent, bat.charging, bat.wired);
+                crate::pipe_server::publish_usb(bat.usb);
+                crate::pipe_server::publish_pads(&self.backend.pads());
+                crate::win::shortcut_sheet::set_shown(false);
+                return Ok(center_vk_actions(vk_open));
+            }
+            if toggled == Some(false) {
+                self.center_held = self.pad_down.clone();
+            }
+            self.center_owned = false;
+            swallow_held_releases(&mut self.center_held, kept)
+        };
         if !game_owns_input {
             self.backend.publish_device_features(&touchpad);
         }
@@ -653,23 +835,42 @@ impl GamepadPoll {
         }
 
         #[cfg(windows)]
-        if crate::config::service_mode() {
-            let name = self.backend.controller_label();
-            let input = self.backend.live_input_summary();
-            crate::debug_state::set_gamepad(self.backend.is_connected(), name, input);
-        }
-
-        #[cfg(windows)]
         let desktop_reopen = self.reopen_on_input_desktop_change(vk_open);
         #[cfg(not(windows))]
         let desktop_reopen = None;
 
         if vk_open {
-            self.sync_stick_nav(lx, ly);
-            let now = Instant::now();
-            if crate::vk_nav::tick_dpad_hold(now) || crate::vk_nav::tick_key_repeat(now) {
-                self.backend.haptic_tick();
-                crate::vk_nav::request_ui_repaint();
+            #[cfg(windows)]
+            if Self::service_signin_desktop()
+                && crate::win::native_keyboard::yield_logon_to_native()
+            {
+                service_log("native kbd: closing warmUP VK, sign-in yielded to Windows keyboard");
+                return Ok(vec![VkLoopAction::Close]);
+            }
+            {
+                if !self.backend.is_connected() {
+                    self.pad_down.clear();
+                    self.stick_nav = None;
+                    crate::vk_nav::release_holds();
+                }
+                #[cfg(windows)]
+                if self.backend.is_connected() && Self::service_signin_desktop() {
+                    crate::vk_nav::cancel_key_repeat();
+                }
+                self.sync_stick_nav(lx, ly);
+                let now = Instant::now();
+                #[cfg(windows)]
+                let ticked = crate::win::vk_ui::tick_dpad_hold(now);
+                #[cfg(not(windows))]
+                let ticked = crate::vk_nav::tick_dpad_hold(now) | crate::vk_nav::tick_key_repeat(now);
+                if ticked {
+                    self.backend.haptic_tick();
+                    crate::vk_nav::request_ui_repaint();
+                }
+                if crate::vk_nav::tick_modifier_hold(now) {
+                    self.backend.haptic_alert();
+                    crate::vk_nav::request_ui_repaint();
+                }
             }
             let mut edges = Vec::new();
             if let Some(edge) = desktop_reopen {
@@ -695,9 +896,9 @@ impl GamepadPoll {
             cursor.set_left_button(false);
             cursor.set_right_button(false);
             self.a_cursor_down = false;
-            self.touchpad_cursor_down = false;
+            self.clear_touchpad();
             self.b_cursor_down = false;
-            if !crate::win::native_keyboard::logon_pad_is_xbox() {
+            if crate::win::native_keyboard::logon_hid_pad_present() {
                 for change in &changes {
                     if change.pressed && crate::vk_nav::inject_logon_pin(change.button) {
                         self.backend.haptic_tick();
@@ -716,8 +917,9 @@ impl GamepadPoll {
         if !cursor_injection_enabled {
             cursor.set_left_button(false);
             cursor.set_right_button(false);
+            self.clear_touchpad();
         } else {
-            cursor.move_touchpad(touchpad.delta);
+            self.drive_touchpad(cursor, &touchpad, &changes, dt_secs);
             cursor.move_stick(lx, ly, dt_secs);
             cursor.scroll_stick(rx, ry, dt_secs);
         }
@@ -759,6 +961,23 @@ impl GamepadPoll {
                 }
                 continue;
             }
+            #[cfg(windows)]
+            if change.pressed
+                && !self.view_down
+                && !crate::pipe_server::native_vk_suppressed()
+                && !Self::service_signin_desktop()
+                && !(self.shot_lb_down && self.shot_rb_down)
+                && cursor_injection_enabled
+                && crate::config::gamepad_settings().cursor_enabled
+            {
+                if let Some(chord) =
+                    crate::app_profiles::chord_for_foreground(change.button.as_str())
+                {
+                    cursor.tap_chord(chord);
+                    self.backend.haptic_tick();
+                    continue;
+                }
+            }
             let view_action = view_chord_step(&mut self.view_down, &mut self.view_chorded, change);
             // Use one mode snapshot for forwarding and local handling. Sending L3 to warmUP
             // while also opening the native VK lets a delayed launcher event open/focus its dock
@@ -779,7 +998,8 @@ impl GamepadPoll {
                 Self::service_signin_desktop(),
             ) && crate::config::gamepad_settings().guide_launch
             {
-                if self.last_launch.elapsed() >= GUIDE_LAUNCH_DEBOUNCE && crate::warmup_installed() {
+                if self.last_launch.elapsed() >= GUIDE_LAUNCH_DEBOUNCE && crate::warmup_installed()
+                {
                     self.last_launch = Instant::now();
                     self.backend.haptic_alert();
                     edges.push(VkLoopAction::LaunchWarmup);
@@ -790,14 +1010,14 @@ impl GamepadPoll {
             // focused app is a single click — no need to open the keyboard first.
             #[cfg(any(windows, all(target_os = "linux", feature = "speech")))]
             if change.button == Button::R3 && change.pressed && !native_vk_suppressed {
-                crate::vk_nav::start_voice_input();
-                self.backend.haptic_alert();
+                if crate::config::voice_enabled() {
+                    crate::vk_nav::start_voice_input();
+                    self.backend.haptic_alert();
+                }
                 continue;
             }
             #[cfg(windows)]
-            if matches!(change.button, Button::Lt | Button::Rt)
-                && !Self::service_signin_desktop()
-            {
+            if matches!(change.button, Button::Lt | Button::Rt) && !Self::service_signin_desktop() {
                 let chord_held = self.shot_lb_down && self.shot_rb_down;
                 if chord_held && change.pressed {
                     let window_only = change.button == Button::Lt;
@@ -816,10 +1036,13 @@ impl GamepadPoll {
                 // click can't get stuck down if the mode flips while A is held.
                 match change.button {
                     Button::A => self.a_cursor_down = change.pressed,
-                    Button::Touchpad => self.touchpad_cursor_down = change.pressed,
+                    Button::Touchpad => {
+                        self.touchpad_cursor_down = change.pressed && !self.touchpad_click_routed
+                    }
                     _ => {}
                 }
-                let any_click_down = self.a_cursor_down || self.touchpad_cursor_down;
+                let any_click_down =
+                    self.a_cursor_down || self.touchpad_cursor_down || self.touchpad_drag_down;
                 cursor.set_left_button(
                     any_click_down
                         && cursor_injection_enabled
@@ -941,6 +1164,97 @@ impl GamepadPoll {
         true
     }
 
+    fn clear_touchpad(&mut self) {
+        self.touchpad_cursor_down = false;
+        self.touchpad_gestures.reset();
+        self.touchpad_click_held = false;
+        self.touchpad_drag_down = false;
+    }
+
+    fn drive_touchpad(
+        &mut self,
+        cursor: &mut PcCursor,
+        touchpad: &crate::gamepad_backend::TouchpadFrame,
+        changes: &[ButtonChange],
+        dt_secs: f32,
+    ) {
+        use crate::touchpad_gestures::{Config, Contact, Output};
+        for c in changes {
+            if c.button == Button::Touchpad {
+                self.touchpad_click_held = c.pressed;
+            }
+        }
+        #[cfg(windows)]
+        let on_winlogon = crate::config::service_mode() && Self::input_desktop_is_winlogon();
+        #[cfg(not(windows))]
+        let on_winlogon = false;
+        let settings = crate::config::gamepad_settings();
+        if on_winlogon || !settings.cursor_enabled {
+            self.touchpad_click_routed = false;
+            self.touchpad_gestures.reset();
+            if self.touchpad_drag_down {
+                self.touchpad_drag_down = false;
+                cursor.set_left_button(self.a_cursor_down || self.touchpad_cursor_down);
+            }
+            cursor.move_touchpad(touchpad.delta);
+            return;
+        }
+        self.touchpad_click_routed = settings.touchpad_gestures;
+        let contacts: Vec<Contact> = touchpad
+            .fingers
+            .iter()
+            .filter(|f| f.down)
+            .map(|f| Contact {
+                id: f.index,
+                x: f.x,
+                y: f.y,
+            })
+            .collect();
+        let cfg = Config {
+            gestures: settings.touchpad_gestures,
+            tap_click: settings.touchpad_tap_click,
+            accel: settings.cursor_accel,
+        };
+        let outputs =
+            self.touchpad_gestures
+                .step(&contacts, self.touchpad_click_held, dt_secs, &cfg);
+        for out in outputs {
+            match out {
+                Output::Move(dx, dy) => cursor.move_touchpad(Some((dx, dy))),
+                Output::Scroll(dx, dy) => cursor.scroll_touchpad(dx, dy),
+                Output::Press(_) | Output::Release(_) => {
+                    self.touchpad_drag_down = matches!(out, Output::Press(_));
+                    cursor.set_left_button(
+                        self.a_cursor_down || self.touchpad_cursor_down || self.touchpad_drag_down,
+                    );
+                }
+                Output::Click(button) => cursor.click(button),
+                Output::Swipe(swipe) => {
+                    cursor.desktop_swipe(swipe);
+                    self.backend.haptic_tick();
+                }
+            }
+        }
+    }
+
+    fn release_for_center(&mut self, cursor: &mut PcCursor) {
+        cursor.set_left_button(false);
+        cursor.set_right_button(false);
+        self.a_cursor_down = false;
+        self.clear_touchpad();
+        self.b_cursor_down = false;
+        self.vk_down = false;
+        self.stick_nav = None;
+        self.vk_select_down = false;
+        self.vk_select_chord_used = false;
+        self.view_sheet = ViewSheetHold::default();
+        self.reset_view_hold();
+        self.reset_launch_hotkey();
+        crate::vk_nav::release_holds();
+        #[cfg(windows)]
+        crate::win::shortcut_sheet::set_shown(false);
+    }
+
     fn reset_view_hold(&mut self) {
         self.view_down = false;
         self.view_chorded = false;
@@ -1005,6 +1319,43 @@ impl GamepadPoll {
             self.view_sheet.other_press();
         }
 
+        #[cfg(feature = "vk-panels")]
+        if change.button == Button::A && change.pressed && self.vk_select_down {
+            self.vk_select_chord_used = true;
+            vk_ui::vk_panels::toggle();
+            self.backend.haptic_confirm();
+            return None;
+        }
+        #[cfg(feature = "vk-panels")]
+        if vk_ui::vk_panels::is_open() {
+            use vk_ui::vk_panels::PanelInput;
+            let input = match change.button {
+                Button::Up => Some(PanelInput::Up),
+                Button::Down => Some(PanelInput::Down),
+                Button::Left => Some(PanelInput::Left),
+                Button::Right => Some(PanelInput::Right),
+                Button::Lb => Some(PanelInput::PrevTab),
+                Button::Rb => Some(PanelInput::NextTab),
+                Button::A | Button::Touchpad => Some(PanelInput::Insert),
+                _ => None,
+            };
+            match (input, change.pressed) {
+                (Some(input), true) => {
+                    vk_ui::vk_panels::press(input);
+                    self.backend.haptic_tick();
+                }
+                (Some(input), false) => vk_ui::vk_panels::release(input),
+                (None, true) if change.button == Button::B => {
+                    vk_ui::vk_panels::close();
+                    self.backend.haptic_tick();
+                }
+                _ => {}
+            }
+            if !matches!(change.button, VK_BUTTON | Button::Select) {
+                return None;
+            }
+        }
+
         // Select=engage suggestion strip, LB/RB=caret (Select+LB/RB=word; chips when
         // strip engaged), Start=Enter, LT=symbols, RT=shift, R3=voice, D-pad/L-stick
         // axis=move focus. Select chords: Select+X=copy, Select+Y=paste, Select+B=clear.
@@ -1041,8 +1392,7 @@ impl GamepadPoll {
                     vk_nav::after_insert();
                     // A landed suggestion commit — a firmer confirm than a key tap.
                     self.backend.haptic_confirm();
-                } else {
-                    vk_nav::activate_selection();
+                } else if vk_nav::activate_selection() {
                     vk_nav::repeat_pressed(vk_nav::RepeatKey::Activate);
                     self.backend.haptic_tick();
                 }
@@ -1133,11 +1483,10 @@ impl GamepadPoll {
                 None
             }
             (Button::Lb, true) => {
-                match vk_nav::shoulder_nav(
-                    self.vk_select_down,
-                    crate::vk_predict::strip_engaged(),
-                ) {
+                match vk_nav::shoulder_nav(self.vk_select_down, crate::vk_predict::strip_engaged())
+                {
                     vk_nav::ShoulderNav::CycleSuggestions => {
+                        vk_nav::flash_shoulder(false);
                         if crate::vk_predict::cycle_prev() {
                             self.backend.haptic_tick();
                             vk_nav::request_ui_repaint();
@@ -1163,11 +1512,10 @@ impl GamepadPoll {
                 None
             }
             (Button::Rb, true) => {
-                match vk_nav::shoulder_nav(
-                    self.vk_select_down,
-                    crate::vk_predict::strip_engaged(),
-                ) {
+                match vk_nav::shoulder_nav(self.vk_select_down, crate::vk_predict::strip_engaged())
+                {
                     vk_nav::ShoulderNav::CycleSuggestions => {
+                        vk_nav::flash_shoulder(true);
                         if crate::vk_predict::cycle_next() {
                             self.backend.haptic_tick();
                             vk_nav::request_ui_repaint();
@@ -1194,18 +1542,31 @@ impl GamepadPoll {
             }
             (Button::Lt, true) => {
                 vk_nav::toggle_symbols();
+                vk_nav::modifier_hold_pressed(vk_nav::ModifierHold::Symbol);
                 self.backend.haptic_confirm();
+                None
+            }
+            (Button::Lt, false) => {
+                vk_nav::modifier_hold_released(vk_nav::ModifierHold::Symbol);
                 None
             }
             (Button::Rt, true) => {
                 vk_nav::toggle_shift();
+                vk_nav::modifier_hold_pressed(vk_nav::ModifierHold::Shift);
                 self.backend.haptic_confirm();
                 None
             }
+            (Button::Rt, false) => {
+                vk_nav::modifier_hold_released(vk_nav::ModifierHold::Shift);
+                None
+            }
             (Button::R3, true) => {
-                vk_nav::start_voice_input();
-                vk_nav::request_ui_repaint();
-                self.backend.haptic_alert();
+                if crate::config::voice_enabled() {
+                    vk_nav::start_voice_input();
+                    vk_nav::flash_voice();
+                    vk_nav::request_ui_repaint();
+                    self.backend.haptic_alert();
+                }
                 None
             }
             (Button::Start, true) => {
@@ -1401,6 +1762,9 @@ where
     } else {
         RUNNING.store(true, Ordering::SeqCst);
     }
+    crate::led_engine::load_saved_led();
+    #[cfg(all(windows, feature = "vk-panels"))]
+    crate::clipboard_history::start();
     let mut cursor = if service_mode {
         #[cfg(windows)]
         {
@@ -1437,7 +1801,14 @@ where
         println!("  LT           → &123 symbols");
         println!("  RT           → shift");
         println!("  L3           → close keyboard");
-        println!("  R3           → voice input");
+        println!(
+            "  R3           → {}",
+            if crate::config::voice_enabled() {
+                "voice input"
+            } else {
+                "voice input is off"
+            }
+        );
         println!("Ctrl+C to stop.");
     } else {
         service_log(&format!(
@@ -1451,10 +1822,18 @@ where
     }
     let mut last_tick = Instant::now();
     let mut last_active = Instant::now();
+    let mut next_voice_check = Instant::now();
     while RUNNING.load(Ordering::SeqCst) {
         let now = Instant::now();
         let dt = now.duration_since(last_tick).as_secs_f32();
         last_tick = now;
+        // settings.ini edits do not go through set_gamepad_setting, so poll the
+        // switch and unload the engine within a second of it being turned off.
+        #[cfg(windows)]
+        if now >= next_voice_check {
+            next_voice_check = now + Duration::from_secs(1);
+            crate::win::speech_input::enforce_voice_enabled();
+        }
 
         // Publish the current controller connection state to the pipe server (#347).
         crate::pipe_server::publish_from_label(&poll.controller_label());
@@ -1532,10 +1911,13 @@ where
         // Idle backoff (P2): slow the poll once nothing has needed input for a
         // while, to cut idle CPU / handheld battery. Snap back to full rate the
         // moment a pad is connected or the VK is open.
-        if poll.is_connected() || vk_open() {
+        let connected = poll.is_connected();
+        if connected || vk_open() {
             last_active = now;
         }
-        let interval = if last_active.elapsed() >= IDLE_AFTER {
+        let interval = if !connected && !vk_open() {
+            POLL_INTERVAL_NOPAD
+        } else if last_active.elapsed() >= IDLE_AFTER {
             POLL_INTERVAL_IDLE
         } else {
             POLL_INTERVAL
@@ -1554,9 +1936,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        allows_cursor_injection, companion_owns_stick_click, forward_only_while_sleeping,
-        is_guide_launch, sleep_screenshot_due, view_chord_step, Button, ButtonChange,
-        ViewChordAction, ViewRelease, ViewSheetHold, SLEEP_SCREENSHOT_HOLD, VIEW_SHEET_HOLD,
+        allows_cursor_injection, center_vk_actions, companion_owns_stick_click,
+        forward_only_while_sleeping, is_guide_launch, native_vk_request_action,
+        sleep_screenshot_due, swallow_held_releases, track_down, view_chord_step, Button,
+        ButtonChange, CenterChord, ViewChordAction, ViewRelease, ViewSheetHold, VkLoopAction,
+        SLEEP_SCREENSHOT_HOLD, VIEW_SHEET_HOLD,
     };
     use std::time::{Duration, Instant};
 
@@ -1636,6 +2020,88 @@ mod tests {
             false,
             false,
         ));
+    }
+
+    fn bc(button: Button, pressed: bool) -> ButtonChange {
+        ButtonChange { button, pressed }
+    }
+
+    #[test]
+    fn select_start_chord_fires_once_per_hold_in_either_order() {
+        let mut c = CenterChord::default();
+        assert!(!c.step(bc(Button::Select, true)));
+        assert!(c.step(bc(Button::Start, true)));
+        assert!(!c.step(bc(Button::A, true)));
+        assert!(!c.step(bc(Button::Start, false)));
+        assert!(c.step(bc(Button::Start, true)));
+        assert!(!c.step(bc(Button::Select, false)));
+        assert!(!c.step(bc(Button::Start, false)));
+        assert!(!c.step(bc(Button::Start, true)));
+        assert!(c.step(bc(Button::Select, true)));
+        let mut launch = CenterChord::default();
+        for b in [Button::Select, Button::Lb, Button::X] {
+            assert!(!launch.step(bc(b, true)));
+        }
+    }
+
+    #[test]
+    fn select_start_is_not_an_existing_chord() {
+        let mut down = false;
+        let mut chorded = false;
+        let _ = view_chord_step(&mut down, &mut chorded, bc(Button::Select, true));
+        assert_eq!(
+            view_chord_step(&mut down, &mut chorded, bc(Button::Start, true)),
+            ViewChordAction::None
+        );
+        assert_eq!(
+            view_chord_step(&mut down, &mut chorded, bc(Button::Select, false)),
+            ViewChordAction::None
+        );
+    }
+
+    #[test]
+    fn buttons_held_when_the_center_closes_do_not_release_elsewhere() {
+        let mut down = Vec::new();
+        for c in [
+            bc(Button::B, true),
+            bc(Button::A, true),
+            bc(Button::A, false),
+        ] {
+            track_down(&mut down, c);
+        }
+        assert_eq!(down, vec![Button::B]);
+        let mut held = down.clone();
+        let out = swallow_held_releases(
+            &mut held,
+            vec![
+                bc(Button::B, false),
+                bc(Button::Y, false),
+                bc(Button::X, true),
+            ],
+        );
+        let kept: Vec<(Button, bool)> = out.iter().map(|c| (c.button, c.pressed)).collect();
+        assert_eq!(kept, vec![(Button::Y, false), (Button::X, true)]);
+        assert!(held.is_empty());
+        let mut held = vec![Button::L3];
+        let out =
+            swallow_held_releases(&mut held, vec![bc(Button::L3, true), bc(Button::L3, false)]);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn open_center_closes_the_keyboard_and_blocks_reopen_requests() {
+        assert_eq!(center_vk_actions(true), vec![VkLoopAction::Close]);
+        assert!(center_vk_actions(false).is_empty());
+        assert_eq!(native_vk_request_action(true, false, true), None);
+        assert_eq!(
+            native_vk_request_action(true, false, false),
+            Some(VkLoopAction::Toggle)
+        );
+        assert_eq!(
+            native_vk_request_action(false, true, true),
+            Some(VkLoopAction::Close)
+        );
+        assert_eq!(native_vk_request_action(true, true, false), None);
     }
 
     #[test]

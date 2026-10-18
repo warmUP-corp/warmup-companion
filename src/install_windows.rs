@@ -4,12 +4,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::install::log_line;
+
 pub const SERVICE_NAME: &str = "WarmupVkSvc";
 const DISPLAY_NAME: &str = "Warmup Companion";
 const DESCRIPTION: &str =
     "Companion service for Warmup gamepad input, sign-in keyboard, and UAC support.";
 
 pub use crate::paths::{DATA_DIR, DEV_EXE_PATH, INSTALL_DIR};
+pub const CLEAN_EXIT_MARKER: &str = r"C:\ProgramData\WarmupVk\companion-clean-exit";
 
 /// No spaces — `sc.exe` breaks on quoted paths under Program Files.
 const EXE_NAME: &str = "warmup-companion.exe";
@@ -28,8 +31,12 @@ const TEST_SERVICE_NAMES: &[&str] = &[
     "WarmupVkTest6",
 ];
 
+pub fn install_service(debug_ui: bool) -> Result<(), String> {
+    install_inner(debug_ui, None)
+}
+
 pub fn run_install(debug_ui: bool) {
-    if let Err(e) = install_inner(debug_ui, None) {
+    if let Err(e) = install_service(debug_ui) {
         eprintln!("install failed: {e}");
         std::process::exit(1);
     }
@@ -61,6 +68,10 @@ pub fn run_install_dev(path: &Path) {
     println!("Installed Warmup Companion in DEV mode.");
     println!("Trusted DEV client: {}", path.display());
     println!("Log: {DATA_DIR}\\{LOG_NAME}");
+}
+
+pub fn uninstall_service() -> Result<(), String> {
+    uninstall_inner()
 }
 
 pub fn run_uninstall() {
@@ -191,10 +202,36 @@ pub fn run_stop() {
 /// (LocalSystem) token, which has `SERVICE_STOP` rights, so a detached `sc stop`
 /// reaches the launcher's control handler — which tears the worker down. Spawned
 /// with `CREATE_NO_WINDOW` so no console flashes on the secure desktop.
+pub fn write_clean_exit_marker() {
+    let path = Path::new(CLEAN_EXIT_MARKER);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    match fs::write(path, b"") {
+        Ok(()) => log_line("wrote companion-clean-exit marker"),
+        Err(e) => log_line(&format!("companion-clean-exit marker write failed: {e}")),
+    }
+}
+
 pub fn request_service_stop() {
-    crate::install::log_line("service stop requested (sc stop)");
+    write_clean_exit_marker();
+    log_line("service stop requested (sc stop)");
     if let Err(e) = hidden_command("sc").args(["stop", SERVICE_NAME]).spawn() {
-        crate::install::log_line(&format!("sc stop spawn failed: {e}"));
+        log_line(&format!("sc stop spawn failed: {e}"));
+    }
+}
+
+pub fn run_grant_interactive_control() {
+    if let Err(e) = require_admin() {
+        eprintln!("grant-service-acl failed: {e}");
+        std::process::exit(1);
+    }
+    match grant_interactive_start_stop() {
+        Ok(()) => println!("Granted interactive users RP+WP on {SERVICE_NAME}."),
+        Err(e) => {
+            eprintln!("grant-service-acl failed: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -269,12 +306,13 @@ fn install_inner(debug_ui: bool, dev_exe: Option<&Path>) -> Result<(), String> {
         "actions=",
         "restart/60000/restart/60000",
     ]) {
-        crate::install::log_line(&format!("sc failure (auto-restart) config failed: {e}"));
+        log_line(&format!("sc failure (auto-restart) config failed: {e}"));
     }
+    grant_interactive_start_stop()?;
     // LocalSystem (default) — required for winlogon / sign-in desktop.
     sc(&["start", SERVICE_NAME])?;
     verify_service_running()?;
-    crate::install::log_line(&format!(
+    log_line(&format!(
         "installed from {} -> {} (debug_ui={debug_ui}, mode={})",
         src.display(),
         dest.display(),
@@ -314,7 +352,7 @@ fn uninstall_inner() -> Result<(), String> {
     let _ = fs::remove_file(icon);
     let _ = fs::remove_file(DEBUG_UI_FLAG);
     let _ = fs::remove_file(DEV_EXE_PATH);
-    crate::install::log_line("uninstalled");
+    log_line("uninstalled");
     Ok(())
 }
 
@@ -338,10 +376,10 @@ fn set_debug_ui_flag(enabled: bool) -> Result<(), String> {
     let flag = Path::new(DEBUG_UI_FLAG);
     if enabled {
         fs::write(flag, b"1\n").map_err(|e| format!("write debug UI flag: {e}"))?;
-        crate::install::log_line("debug ui enabled by installer flag");
+        log_line("debug ui enabled by installer flag");
     } else {
         let _ = fs::remove_file(flag);
-        crate::install::log_line("debug ui disabled (no installer flag)");
+        log_line("debug ui disabled (no installer flag)");
     }
     Ok(())
 }
@@ -372,10 +410,10 @@ fn kill_other_companion_processes() {
             );
             let msg = msg.trim();
             if !msg.is_empty() {
-                crate::install::log_line(&format!("taskkill other {EXE_NAME}: {msg}"));
+                log_line(&format!("taskkill other {EXE_NAME}: {msg}"));
             }
         }
-        Err(e) => crate::install::log_line(&format!("taskkill other {EXE_NAME} failed: {e}")),
+        Err(e) => log_line(&format!("taskkill other {EXE_NAME} failed: {e}")),
     }
 }
 
@@ -385,7 +423,7 @@ fn copy_installed_exe(src: &Path, dest: &Path) -> Result<(), String> {
         match fs::copy(src, dest) {
             Ok(_) => return Ok(()),
             Err(e) if e.raw_os_error() == Some(32) => {
-                crate::install::log_line(&format!(
+                log_line(&format!(
                     "install copy locked (attempt {attempt}): {e}; retrying"
                 ));
                 last = Some(e);
@@ -408,10 +446,40 @@ enum StopOutcome {
     NotInstalled,
 }
 
+fn grant_interactive_start_stop() -> Result<(), String> {
+    let current = sc_sdshow()?;
+    let next = crate::service_acl::ensure_iu_rp_wp(&current);
+    if next == current {
+        log_line(&format!("{SERVICE_NAME} ACL already grants IU RP+WP"));
+        return Ok(());
+    }
+    sc(&["sdset", SERVICE_NAME, &next])?;
+    log_line(&format!("{SERVICE_NAME} ACL granted IU RP+WP"));
+    Ok(())
+}
+
+fn sc_sdshow() -> Result<String, String> {
+    let out = hidden_command("sc.exe")
+        .args(["sdshow", SERVICE_NAME])
+        .output()
+        .map_err(|e| format!("sc.exe sdshow: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        return Err(format!(
+            "sc sdshow {SERVICE_NAME} failed ({}): {stdout}{stderr}",
+            out.status
+        ));
+    }
+    crate::service_acl::sddl_from_sdshow(&stdout)
+        .ok_or_else(|| format!("sc sdshow {SERVICE_NAME}: no SDDL in output: {stdout}"))
+}
+
 /// Issue `sc stop`, then poll `sc query` until STOPPED or timeout.
 /// Avoids the race where `sc delete` runs before the worker child has fully exited
 /// and released its handle on the install dir exe.
 fn stop_service_blocking() -> Result<StopOutcome, String> {
+    write_clean_exit_marker();
     match query_service_state()? {
         Some(state) if state == "STOPPED" => return Ok(StopOutcome::AlreadyStopped),
         None => return Ok(StopOutcome::NotInstalled),
@@ -463,7 +531,7 @@ fn remove_legacy_install_artifacts() {
             .output();
         std::thread::sleep(std::time::Duration::from_millis(500));
         if fs::remove_file(&legacy_exe).is_ok() {
-            crate::install::log_line(&format!("removed legacy {}", legacy_exe.display()));
+            log_line(&format!("removed legacy {}", legacy_exe.display()));
         }
         let _ = fs::remove_dir(legacy_dir);
     }
@@ -473,7 +541,7 @@ fn remove_test_services() {
     for name in TEST_SERVICE_NAMES {
         let _ = sc(&["stop", name]);
         if let Ok(()) = sc(&["delete", name]) {
-            crate::install::log_line(&format!("removed test service {name}"))
+            log_line(&format!("removed test service {name}"))
         }
     }
 }
@@ -484,11 +552,11 @@ fn copy_gamecontroller_db() -> Result<(), String> {
     for c in candidates.into_iter().flatten() {
         if c.is_file() {
             fs::copy(&c, &dest).map_err(|e| format!("copy controller DB: {e}"))?;
-            crate::install::log_line(&format!("controller DB -> {}", dest.display()));
+            log_line(&format!("controller DB -> {}", dest.display()));
             return Ok(());
         }
     }
-    crate::install::log_line("warning: gamecontrollerdb.txt not found; set WARMUP_GAMECONTROLLER_DB");
+    log_line("warning: gamecontrollerdb.txt not found; set WARMUP_GAMECONTROLLER_DB");
     Ok(())
 }
 

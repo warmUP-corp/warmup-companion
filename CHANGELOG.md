@@ -21,6 +21,83 @@
 - Gaming distributions already allow the virtual pointer. Other distributions can install the bundled device rule so the companion can create it.
 - The desktop talks to the companion through a socket that only your user can open.
 
+## v0.10.3
+
+- **A held key can no longer get stuck on the sign-in screen.** On the PIN/password screen, a held button (A, B, Y, LB/RB) acts once instead of auto-repeating, so a lost button release can't keep typing into the PIN box. Turning the controller off now clears any held key or move while the keyboard is open.
+
+## v0.10.2
+
+- **Every connected controller's battery reaches warmUP.** A new additive `pads` frame lists each connected pad with its name, type and battery (the active pad keeps the Windows Bluetooth refinement), sent when the list or a level changes. warmUP shows two controllers stacked in its Home battery pill; older warmUP builds ignore the frame.
+- **Saturation slider.** The Lightbar panel gets a Saturation slider next to Brightness (saved as `led_saturation`, mirrored with warmUP via the optional `ledSaturation` config field); lower values mix the colour toward white.
+- **Battery reaches warmUP right after a reconnect.** The pipe re-sends the level whenever the controller connection changes; before, a pad that came back with the same level stayed "unknown" in warmUP for up to a minute.
+- **Charging bolt.** While a controller charges over the cable, the Controller Center battery chip shows a bolt after the percentage (for example "95% ⚡").
+- **Lightbar changes preview live and save on Apply.** Colour, effect, brightness and saturation show on the controller as you pick them; Apply saves them (and syncs warmUP), and closing without Apply puts the previous lighting back. Colours picked in warmUP select the matching swatch.
+- **Lightbar brightness in the Controller Center.** The Lightbar panel has a Brightness slider (5 % steps), saved to `led_brightness` and mirrored with warmUP. While the panel is open the live input view steps aside to make room.
+- **Off is the real PlayStation lighting again.** Off restores the player colour and the white player lights. Before, a colour picked earlier stayed on the lightbar, because SDL keeps the last custom colour while the pad is open.
+- **Custom colours keep the white player lights on.** Picking a colour no longer turns off the lights under the touchpad.
+- **Scroll acceleration syncs with warmUP.** The Cursor tab's Scroll acceleration now travels over the pipe like the other cursor settings (`scrollAccel` on the config frame, additive), so a change in either app shows up in the other.
+
+## v0.10.1
+
+- **Per-app controller profiles.** A new Apps tab in the Control Center maps controller buttons to keys or shortcuts for a specific program (or for every browser at once). Pick an installed app or type its program name; profiles switch automatically when that app is in front.
+- **Parakeet Redux voice engine.** A lighter 1.58-bit build of Parakeet TDT v3 (moondream/parakeet-redux, ~420 MB instead of ~670 MB), multilingual. Pick it in setup, in the tray under Voice engine, or in the Control Center. It reuses the ONNX Runtime from an existing Parakeet install.
+- **Voice tab in the Control Center.** Lists Parakeet Redux, Parakeet and Whisper Tiny to Medium with their size and state (Active, Installed, Download, Downloading %). Pick an installed model to switch to it right away, or download one in the background; it becomes active when the download finishes. Works with the controller, mouse and keyboard.
+- Voice engines run on the CPU only. Parakeet no longer uses the GPU (DirectML), so starting dictation no longer competes with a running game for the graphics card. The live transcript shown while speaking is gone; text is transcribed once when you stop.
+- Picking the voice model that is already active no longer unloads and reloads it.
+- On-screen keyboard: holding LT (symbols / numbers) or RT (shift) for 0.4 s locks that layer until the trigger is tapped again, with a firmer rumble when the lock engages. The quick double-tap still works; a single tap stays one-shot. The locked key keeps its pill marker.
+- Opening and closing the on-screen keyboard is smoother: the controller no longer freezes for a moment after closing it, and the app behind it is resized in one step instead of being animated.
+- Fixed repeated rumble and keyboard moves with no button held, after opening the Control Center while a button was held on the keyboard. The Control Center's own hold-to-repeat also stops when a dialog or the tray menu opens.
+- The Apps tab no longer stalls while it lists installed programs; the list is built once in the background. Long app names are shortened with "…" instead of running outside the row.
+- Lightbar presets are fully saturated colours, so they look vivid on the controller instead of washed out.
+- Every companion window follows Windows display scaling.
+- One key press on the sign-in screen no longer types twice.
+- The Controller Center is now called the **Control Center**.
+
+## v0.10.0
+
+- **Several controllers at once.** Every connected controller now drives the mouse, keyboard and warmUP together, with no switching: buttons from all pads count, the stick pushed furthest wins, and a press held on two pads fires once. Rumble goes to the pad you used last, the lightbar to every pad. Works on the desktop and on the sign-in and UAC screens (PlayStation pads). Turn it off with `multi_controller = false` in `settings.ini`.
+- **Settings shared with warmUP.** Deadzone, cursor, lightbar colour, effect and brightness live in `settings.ini` for both apps. A change in the Controller Center shows up in warmUP right away and the other way round, without polling.
+- **Battery.** Bluetooth controllers show the level Windows reports (for example 80% on an Xbox Wireless Controller instead of a rough 10%). Wired Xbox controllers show as wired instead of a made-up percentage.
+- **Lighter when idle.** Solid and Off lightbar colours are applied once instead of 30 times a second, controller and desktop checks slow down when no pad is connected, and settings are only re-read when the file changes.
+- **New installer.** Setup is rebuilt in the Controller Center look: a step rail (Welcome, License, Features, Install, Finish), feature cards and a voice engine list (Parakeet, Whisper Tiny to Medium) with sizes. Engines already on disk show as Installed and are preselected, and the footer shows the download size. The engine you pick becomes the active one. Setup asks for administrator rights itself and shows a Retry if UAC is declined; errors show the real message and the log path. `/S` still installs silently with the same defaults.
+- **Setup and the uninstaller work with a controller.** PlayStation, Xbox, Switch and generic pads: ✕ / A selects, ○ / B goes back (same as the Back / Cancel button, and nothing while installing or removing), D-pad or left stick moves with key repeat, right stick scrolls the license. Input only counts while the window is in front. With a pad connected, the footer shows its button icons instead of the folder line.
+- **warmUP Game Launcher promo.** When warmUP is not installed, the tray menu shows **Get warmUP Game Launcher** and the Controller Center sidebar shows a launcher card. Both open the newest warmUP installer download in your browser. The card is a stop in the L1/R1 / Ctrl+Tab tab cycle and below Cancel / Apply.
+- Lightbar "off" now hands the DualSense / DS4 lightbar back to the controller's own player-indicator lighting instead of switching it black, and the companion stops writing the lightbar while it is off. warmUP sends "off" whenever its Custom lightbar switch is off (the new default).
+- The Controller Center no longer opens hidden behind the warmUP launcher: while the launcher has the foreground, Create + Options (View + Menu) only closes an already-open Controller Center.
+- On the sign-in screen, when only Xbox controllers are connected, the companion leaves sign-in to Windows' own controller keyboard (Windows 11 24H2 and newer); with a PlayStation controller connected, the warmUP keyboard stays. Newer Windows 11 builds no longer pass Xbox controller input to other programs on the sign-in screen, so the companion cannot drive its own keyboard or cursor with an Xbox controller there. The companion now also switches Windows' controller keyboard back on for these sign-ins (`ControllerToVKMapping`), which an earlier version could leave turned off.
+
+## v0.9.2
+
+- **Updates from inside the companion.** The companion checks GitHub once a day (15 seconds after start, retrying after 10 minutes if offline) and shows a Windows notification with **Install** and **Later** when a newer release is out.
+- New update window in the Controller Center style: release notes and size, then download progress, SHA-256 verification against the release checksum and a silent install. Works with the controller (A / B, D-pad), mouse and keyboard. Hide it with B while it downloads.
+- Tray **Updates** submenu: Install update / Check for updates, What's new, Check automatically and the last check time. The tray header shows the new version and the Updates row gets a dot while an update is waiting.
+- Turn the daily check off in the tray (Updates → Check automatically) or with `update_check = false` in `settings.ini`.
+- The Quick menu (hold PS / Guide) is removed for now. PS / Guide opens warmUP on press again.
+
+## v0.9.1
+
+- The keyboard now shows above the Start menu and Windows Search, so you can type a search with the controller. The companion process gets UI Access from the service, the same layer the Windows touch keyboard uses.
+
+## v0.9.0
+
+- **New Controller Center.** Rebuilt in the mono keyboard look and coloured by your keyboard theme: General, Mouse, Keyboard and Controller tabs with toggles, sliders and keyboard-style preview cards for Keyboard style and Display. It works with the mouse, the keyboard and the controller (D-pad, A select, B back, L1/R1 tabs). Apply saves and closes, Cancel discards. The window has a taskbar icon.
+- Open or close the Controller Center with **Create + Options** (View + Menu on Xbox) or **Ctrl+Alt+C**. Not on the sign-in screen or during a game.
+- While the Controller Center is open, the controller only drives that window: no mouse cursor, clicks, keyboard, dictation or warmUP navigation. An open keyboard closes when it opens.
+- Controller tab: live stick and button view, the real connection type (USB or Bluetooth), battery, Test rumble, and a Lightbar picker (eight colours or Off, Solid / Breathing / Rainbow) that previews live and is kept across restarts.
+- Reset the current tab to defaults with Triangle / Y, Ctrl+R or the Reset hint (applies on Apply). General has Export, Import and Reset all: Import and Reset all back up `settings.ini` first, Reset all restores the shipped settings and keeps your keyboard colours and custom words.
+- **Quick menu.** Hold PS / Guide for half a second (a short press still opens warmUP): now playing with media controls, volume and brightness sliders, audio output, screenshot, record clip, app switcher, show desktop, close window, keyboard, dictate, magnifier, Controller Center, lock, and a Power submenu (sleep, restart, shut down, sign out; restart and shut down ask once more).
+- **New tray menu** in the same mono style, with submenus, keyboard shortcuts shown, and controller navigation.
+- **Touchpad as a trackpad.** Tap to click, two-finger tap for right click, two-finger scroll with a short glide, tap-and-drag, and hold the pad click and swipe to switch desktops (left/right), open Task View (up) or show the desktop (down). Turn off with `touchpad_gestures = false` or `touchpad_tap_click = false` in `settings.ini`.
+- Opening warmUP no longer overwrites the companion's settings. The companion sends its own settings to warmUP when warmUP connects, and only applies settings warmUP actually changes; older warmUP builds can no longer reset them either.
+- Modern keyboard style, with layout, sizes and the shortcut sheet shared across styles.
+- TV mode enlarges every keyboard style to the TV layout: bigger keys and text, a number row, larger suggestions, a shortcut hint above the keys and a full-screen shortcut sheet. Your keyboard style and colours stay as they are. Pick Auto, TV or Desk under Keyboard ▸ Display in the tray (`vk_display` in `settings.ini`). On first start warmUP picks TV or Desk from the biggest connected screen.
+- Games that set the DualSense / DS4 lightbar keep their colour. While a game owns the controller the companion stops writing to the pad (lightbar and warmUP haptics) and restores warmUP's colour when you return to warmUP or the game ends.
+- Unelevated warmUP can close the companion over the existing pipe (`shut_down`). The service writes `C:\ProgramData\WarmupVk\companion-clean-exit` and stops itself. Kid Mode blocking refuses the request and stays running. Install/repair grants interactive users start and stop (`RP`+`WP`) on `WarmupVkSvc` via `sc sdset`.
+
+## v0.8.1
+
+- Voice typing can be turned off completely. R3, Ctrl+Alt+V and the mic key do nothing, the mic key on the keyboard shows disabled, and any recording in progress is discarded instead of transcribed. The speech engine unloads. Turn it off in the tray (Voice engine → Off, or Voice typing before speech is installed), in Controller Center under General, or with `voice_enabled = false` in `settings.ini`.
+
 ## v0.7.3
 
 - New setting to hide the controller hints on the sign-in and lock screen ("Connect controller", "Press ... for keyboard", "Connected"). Turn it off in the tray (Sign-in controller hints), in Controller Center under General, or with `signin_hints = false` in `settings.ini`. The keyboard still opens from the pad when the hints are hidden.

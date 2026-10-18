@@ -120,7 +120,7 @@ fn row_pixel_width(row: &KeyRow, kw: f32, gap: f32) -> f32 {
         + gap * (row.keys.len().saturating_sub(1) as f32)
 }
 
-fn key_metrics(
+pub fn key_metrics(
     scale_w: f32,
     client_h: f32,
     rows: &[KeyRow],

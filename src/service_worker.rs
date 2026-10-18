@@ -14,7 +14,8 @@ use windows::Win32::Security::Authorization::{
 use windows::Win32::Security::{
     AdjustTokenPrivileges, AllocateAndInitializeSid, DuplicateTokenEx, FreeSid,
     InitializeSecurityDescriptor, LookupPrivilegeValueW, SecurityIdentification,
-    SetSecurityDescriptorDacl, SetTokenInformation, TokenPrimary, TokenSessionId, ACL,
+    SetSecurityDescriptorDacl, SetTokenInformation, TokenPrimary, TokenSessionId, TokenUIAccess,
+    ACL,
     PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SECURITY_NT_AUTHORITY,
     SE_PRIVILEGE_ENABLED, SE_TAKE_OWNERSHIP_NAME, TOKEN_ACCESS_MASK, TOKEN_PRIVILEGES,
 };
@@ -189,6 +190,17 @@ unsafe fn duplicate_primary_token_for_session(
         let _ = CloseHandle(primary);
         format!("SetTokenInformation(TokenSessionId): {e}")
     })?;
+    let ui_access: u32 = 1;
+    if let Err(e) = SetTokenInformation(
+        primary,
+        TokenUIAccess,
+        (&ui_access as *const u32).cast(),
+        std::mem::size_of::<u32>() as u32,
+    ) {
+        install::log_line(&format!(
+            "SetTokenInformation(TokenUIAccess): {e} (continuing)"
+        ));
+    }
     if let Err(e) = enable_take_ownership(primary) {
         let _ = CloseHandle(primary);
         return Err(e);

@@ -13,10 +13,10 @@
   whisper-server.exe (+ its DLLs) into the speech dir yourself — same result.
 
   Models (multilingual, incl. German): tiny ~75MB, base ~142MB, small ~466MB,
-  medium ~1.5GB. Bigger = more accurate, slower per utterance.
+  medium ~1.5GB, large-v3-turbo-q5_0 ~574MB. Bigger = more accurate, slower per utterance.
 #>
 param(
-    [ValidateSet("tiny", "base", "small", "medium")]
+    [ValidateSet("tiny", "base", "small", "medium", "large-v3-turbo-q5_0")]
     [string]$Model = "medium",
     [string]$Dest = "C:\ProgramData\WarmupVk\speech",
     # whisper.cpp release tag whose whisper-bin-x64.zip ships whisper-server.exe
@@ -62,7 +62,7 @@ function Save-WithProgress {
                 $out.Write($buf, 0, $n); $sofar += $n
                 if ($total -gt 0) {
                     $pct = [int](100 * $sofar / $total)
-                    if ($pct -ge $lastPct + 5) {
+                    if ($pct -ge $lastPct + 1) {
                         Write-Host ("  {0}: {1}% ({2:n0}/{3:n0} MB)" -f $Label, $pct, ($sofar / 1MB), ($total / 1MB))
                         $lastPct = $pct
                     }

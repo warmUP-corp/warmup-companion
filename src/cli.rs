@@ -8,6 +8,16 @@ pub fn dispatch_install_or_service(args: &[String]) {
         crate::win::toast::show_screenshot_toast(path, copied);
         std::process::exit(0);
     }
+    if let Some(i) = args.iter().position(|a| a == "--update-toast-helper") {
+        let version = args.get(i + 1).map(String::as_str).unwrap_or_default();
+        crate::win::toast::show_update_toast(version);
+        std::process::exit(0);
+    }
+    #[cfg(feature = "gamepad")]
+    if let Some(i) = args.iter().position(|a| a == "--update-url") {
+        crate::updater::signal_from_url(args.get(i + 1).map(String::as_str).unwrap_or_default());
+        std::process::exit(0);
+    }
     // Mic recognition runs here, as the real logged-in user (the worker spawns us
     // via CreateProcessAsUserW). Short-lived: recognize until silence, then exit.
     if args.iter().any(|a| a == "--speech-helper") {
@@ -33,6 +43,30 @@ pub fn dispatch_install_or_service(args: &[String]) {
         std::process::exit(code);
     }
     match args.get(1).map(String::as_str) {
+        Some("setup") => {
+            #[cfg(feature = "gamepad")]
+            {
+                let code = crate::win::installer_ui::run(args);
+                std::process::exit(code);
+            }
+            #[cfg(not(feature = "gamepad"))]
+            {
+                eprintln!("setup UI requires the gamepad feature");
+                std::process::exit(1);
+            }
+        }
+        Some("uninstall-ui") => {
+            #[cfg(feature = "gamepad")]
+            {
+                let code = crate::win::installer_ui::run(args);
+                std::process::exit(code);
+            }
+            #[cfg(not(feature = "gamepad"))]
+            {
+                eprintln!("uninstall UI requires the gamepad feature");
+                std::process::exit(3);
+            }
+        }
         Some("install") => {
             let debug_ui = args.iter().any(|a| a == "--debug-ui" || a == "--debug");
             crate::install::run_install(debug_ui);
@@ -58,10 +92,16 @@ pub fn dispatch_install_or_service(args: &[String]) {
             crate::install::run_stop();
             std::process::exit(0);
         }
+        Some("grant-service-acl") => {
+            crate::install::run_grant_interactive_control();
+            std::process::exit(0);
+        }
         Some("restore-keyboard") | Some("restore-native-keyboard") => {
             crate::win::native_keyboard::restore_auto_invoke();
             crate::win::native_keyboard::ensure_search_service_running();
-            crate::install::log_line("restore-keyboard: requested Windows keyboard service restore");
+            crate::install::log_line(
+                "restore-keyboard: requested Windows keyboard service restore",
+            );
             println!("Requested Windows touch keyboard/search service restore.");
             std::process::exit(0);
         }
@@ -265,6 +305,7 @@ fn print_gamepad_settings() {
     println!("sleep_on_game={}", s.sleep_on_game);
     println!("auto_stop_on_game={}", s.auto_stop_on_game);
     println!("signin_hints={}", s.signin_hints);
+    println!("voice_enabled={}", s.voice_enabled);
     println!("cursor_deadzone={}", s.cursor_deadzone);
     println!("cursor_speed={}", s.cursor_speed);
     println!("cursor_accel={}", s.cursor_accel);

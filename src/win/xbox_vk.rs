@@ -35,17 +35,16 @@ impl VkSession {
         "WarmupXboxVkWindow (native UI)"
     }
 
-    pub fn close(mut self) {
-        if let Some(ui) = self.ui.take() {
-            let _ = ui.hide();
-        }
-    }
+    pub fn close(self) {}
 }
 
 impl Drop for VkSession {
     fn drop(&mut self) {
         if let Some(ui) = self.ui.take() {
             let _ = ui.hide();
+            let _ = std::thread::Builder::new()
+                .name("vk-ui-reaper".into())
+                .spawn(move || drop(ui));
         }
     }
 }

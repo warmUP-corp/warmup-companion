@@ -1,7 +1,7 @@
-//! Lightbar animation state and ~30 Hz render loop (config / one-shot LED frames).
+//! Lightbar animation state and render loop (config / one-shot LED frames).
 
 use crate::gamepad_backend::PadCommand;
-use std::sync::{Mutex, Once, OnceLock};
+use std::sync::{Condvar, Mutex, Once, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Lightbar animation the companion drives. Mirrors the desktop `ledEffect` vocabulary.
@@ -24,6 +24,10 @@ impl LedEffect {
             _ => Self::Solid,
         }
     }
+
+    fn animated(self) -> bool {
+        matches!(self, Self::Breathing | Self::Rainbow | Self::Gradient)
+    }
 }
 
 /// Desired lightbar state, set from `config` frames and rendered by the LED engine thread.
@@ -40,29 +44,43 @@ pub(crate) struct LedState {
     pub(crate) b2: u8,
     /// 0.0–1.0 brightness multiplier.
     pub(crate) brightness: f32,
+    /// 0.0 (white) – 1.0 (full colour) saturation.
+    pub(crate) saturation: f32,
 }
 
 impl Default for LedState {
     fn default() -> Self {
-        // warmUP primary #b6a0ff.
         Self {
             effect: LedEffect::Solid,
-            r: 0xb6,
-            g: 0xa0,
+            r: 0x7c,
+            g: 0x3a,
             b: 0xff,
             r2: 0x4c,
             g2: 0x7b,
             b2: 0x99,
             brightness: 1.0,
+            saturation: 1.0,
         }
     }
 }
 
 static LED_STATE: OnceLock<Mutex<LedState>> = OnceLock::new();
 static LED_ENGINE: Once = Once::new();
+static LED_WAKE: OnceLock<(Mutex<()>, Condvar)> = OnceLock::new();
 
 pub(crate) fn led_state() -> &'static Mutex<LedState> {
     LED_STATE.get_or_init(|| Mutex::new(LedState::default()))
+}
+
+fn led_wake() -> &'static (Mutex<()>, Condvar) {
+    LED_WAKE.get_or_init(|| (Mutex::new(()), Condvar::new()))
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn wake_led_engine() {
+    let (lock, cv) = led_wake();
+    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+    cv.notify_one();
 }
 
 fn scale_channel(c: u8, f: f32) -> u8 {
@@ -94,8 +112,24 @@ pub(crate) fn blend_channel(a: u8, b: u8, t: f32, brightness: f32) -> u8 {
     scale_channel(c.round() as u8, brightness)
 }
 
+/// Mixes a channel toward white as saturation drops (1.0 keeps it, 0.0 gives white).
+fn desaturate_channel(c: u8, saturation: f32) -> u8 {
+    let s = saturation.clamp(0.0, 1.0);
+    (c as f32 + (255.0 - c as f32) * (1.0 - s)).round() as u8
+}
+
 /// Effective lightbar colour for `state` at elapsed time `t` seconds.
 pub(crate) fn led_color_at(state: &LedState, t: f32) -> (u8, u8, u8) {
+    let s = state.saturation;
+    let state = &LedState {
+        r: desaturate_channel(state.r, s),
+        g: desaturate_channel(state.g, s),
+        b: desaturate_channel(state.b, s),
+        r2: desaturate_channel(state.r2, s),
+        g2: desaturate_channel(state.g2, s),
+        b2: desaturate_channel(state.b2, s),
+        ..*state
+    };
     match state.effect {
         LedEffect::Off => (0, 0, 0),
         LedEffect::Solid => (
@@ -114,7 +148,7 @@ pub(crate) fn led_color_at(state: &LedState, t: f32) -> (u8, u8, u8) {
             )
         }
         // ~6 s hue sweep; the base colour is replaced by the cycling hue.
-        LedEffect::Rainbow => hsv_to_rgb((t / 6.0).fract(), 1.0, state.brightness),
+        LedEffect::Rainbow => hsv_to_rgb((t / 6.0).fract(), s.clamp(0.0, 1.0), state.brightness),
         LedEffect::Gradient => {
             // Smoothly ping-pong between the two configured colours over ~5 seconds.
             let mix = 0.5 - 0.5 * (t * std::f32::consts::TAU / 5.0).cos();
@@ -127,8 +161,7 @@ pub(crate) fn led_color_at(state: &LedState, t: f32) -> (u8, u8, u8) {
     }
 }
 
-/// Spawn the LED engine once. It re-renders the current [`LedState`] at ~30 Hz and pushes a
-/// `Led` device command only when the colour changes, so static effects cost one command.
+/// Spawn the LED engine once. Animated effects tick at ~30 Hz; solid/off apply once and park.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn ensure_led_engine() {
     LED_ENGINE.call_once(|| {
@@ -137,13 +170,26 @@ pub(crate) fn ensure_led_engine() {
             .spawn(|| {
                 let start = Instant::now();
                 let mut last: Option<(u8, u8, u8)> = None;
+                let mut released = false;
+                let (lock, cv) = led_wake();
                 loop {
-                    // Guard the body so a panic (push failure, future logic) can't
-                    // silently kill the LED thread and freeze the lightbar until a
-                    // service restart. Sleep stays outside, so a persistent panic
-                    // paces at 33ms instead of busy-spinning.
+                    let mut park = Duration::from_millis(5000);
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        if crate::gamepad_backend::game_owns_controller() {
+                            last = None;
+                            released = false;
+                            return;
+                        }
                         let state = led_state().lock().map(|s| *s).unwrap_or_default();
+                        if state.effect == LedEffect::Off {
+                            if !released {
+                                crate::device_commands::push_device_command(PadCommand::LedRelease);
+                                released = true;
+                            }
+                            last = None;
+                            return;
+                        }
+                        released = false;
                         let color = led_color_at(&state, start.elapsed().as_secs_f32());
                         if last != Some(color) {
                             crate::device_commands::push_device_command(PadCommand::Led {
@@ -153,74 +199,171 @@ pub(crate) fn ensure_led_engine() {
                             });
                             last = Some(color);
                         }
+                        if state.effect.animated() {
+                            park = Duration::from_millis(33);
+                        }
                     }));
-                    std::thread::sleep(Duration::from_millis(33));
+                    let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    let _ = cv.wait_timeout(guard, park);
                 }
             });
     });
+    wake_led_engine();
 }
 
 /// Update the lightbar state from a `config` frame (colour / effect / brightness) and make
 /// sure the engine is running. Absent fields keep the current value.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn apply_led_config(p: &crate::protocol::ConfigPayload) {
+    set_led_fields(
+        p.led_color.as_deref(),
+        p.led_secondary_color.as_deref(),
+        p.led_effect.as_deref(),
+        p.led_brightness,
+        p.led_saturation,
+    );
+    ensure_led_engine();
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn set_led_fields(
+    color: Option<&str>,
+    secondary: Option<&str>,
+    effect: Option<&str>,
+    brightness: Option<f32>,
+    saturation: Option<f32>,
+) {
     if let Ok(mut st) = led_state().lock() {
         // `parse_theme_color` yields a Windows COLORREF (0x00BBGGRR); extract true RGB
         // channels (the earlier `>>16 = r` read swapped red and blue).
-        if let Some(cref) = p
-            .led_color
-            .as_deref()
-            .and_then(crate::config::parse_theme_color)
-        {
+        if let Some(cref) = color.and_then(crate::config::parse_theme_color) {
             st.r = (cref & 0xff) as u8;
             st.g = ((cref >> 8) & 0xff) as u8;
             st.b = ((cref >> 16) & 0xff) as u8;
         }
-        if let Some(cref) = p
-            .led_secondary_color
-            .as_deref()
-            .and_then(crate::config::parse_theme_color)
-        {
+        if let Some(cref) = secondary.and_then(crate::config::parse_theme_color) {
             st.r2 = (cref & 0xff) as u8;
             st.g2 = ((cref >> 8) & 0xff) as u8;
             st.b2 = ((cref >> 16) & 0xff) as u8;
         }
-        if let Some(effect) = p.led_effect.as_deref() {
+        if let Some(effect) = effect {
             st.effect = LedEffect::parse(effect);
         }
-        if let Some(brightness) = p.led_brightness {
+        if let Some(brightness) = brightness {
             st.brightness = brightness.clamp(0.0, 1.0);
+        }
+        if let Some(saturation) = saturation {
+            st.saturation = saturation.clamp(0.0, 1.0);
+        }
+    }
+    wake_led_engine();
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn apply_led_choice(color: Option<&str>, effect: Option<&str>) {
+    if let Ok(mut st) = led_state().lock() {
+        if let Some(cref) = color.and_then(crate::config::parse_theme_color) {
+            st.r = (cref & 0xff) as u8;
+            st.g = ((cref >> 8) & 0xff) as u8;
+            st.b = ((cref >> 16) & 0xff) as u8;
+        }
+        if let Some(effect) = effect {
+            st.effect = LedEffect::parse(effect);
         }
     }
     ensure_led_engine();
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn apply_led_brightness(brightness: f32) {
+    if let Ok(mut st) = led_state().lock() {
+        st.brightness = brightness.clamp(0.0, 1.0);
+    }
+    wake_led_engine();
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn apply_led_saturation(saturation: f32) {
+    if let Ok(mut st) = led_state().lock() {
+        st.saturation = saturation.clamp(0.0, 1.0);
+    }
+    wake_led_engine();
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn led_snapshot() -> LedState {
+    led_state().lock().map(|s| *s).unwrap_or_default()
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn restore_led(state: LedState) {
+    if let Ok(mut st) = led_state().lock() {
+        *st = state;
+    }
+    wake_led_engine();
+}
+
+#[cfg(feature = "gamepad")]
+pub(crate) fn load_saved_led() {
+    let color = crate::config::raw_setting("led_color");
+    let secondary = crate::config::raw_setting("led_secondary_color");
+    let effect = crate::config::raw_setting("led_effect").map(|e| e.to_ascii_lowercase());
+    let brightness =
+        crate::config::raw_setting("led_brightness").and_then(|b| b.parse::<f32>().ok());
+    let saturation =
+        crate::config::raw_setting("led_saturation").and_then(|s| s.parse::<f32>().ok());
+    if color.is_some()
+        || secondary.is_some()
+        || effect.is_some()
+        || brightness.is_some()
+        || saturation.is_some()
+    {
+        set_led_fields(
+            color.as_deref(),
+            secondary.as_deref(),
+            effect.as_deref(),
+            brightness,
+            saturation,
+        );
+        ensure_led_engine();
+    }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn apply_led(p: &crate::protocol::LedPayload) {
-    crate::install::log_line("pipe inbound led");
     let mut immediate = None;
+    let mut changed = false;
     if let Ok(mut st) = led_state().lock() {
         match st.effect {
             LedEffect::Solid => {
-                st.effect = LedEffect::Solid;
-                st.r = p.r;
-                st.g = p.g;
-                st.b = p.b;
-                immediate = Some(led_color_at(&st, 0.0));
+                if st.r != p.r || st.g != p.g || st.b != p.b {
+                    st.r = p.r;
+                    st.g = p.g;
+                    st.b = p.b;
+                    changed = true;
+                    immediate = Some(led_color_at(&st, 0.0));
+                }
             }
-            LedEffect::Off => {
-                immediate = Some((0, 0, 0));
-            }
+            LedEffect::Off => {}
             LedEffect::Breathing | LedEffect::Gradient => {
-                st.r = p.r;
-                st.g = p.g;
-                st.b = p.b;
+                if st.r != p.r || st.g != p.g || st.b != p.b {
+                    st.r = p.r;
+                    st.g = p.g;
+                    st.b = p.b;
+                    changed = true;
+                }
             }
             LedEffect::Rainbow => {}
         }
     } else {
+        changed = true;
         immediate = Some((p.r, p.g, p.b));
     }
+    if !changed {
+        return;
+    }
+    crate::install::log_line("pipe inbound led");
+    wake_led_engine();
     if let Some(color) = immediate {
         crate::device_commands::push_device_command(PadCommand::Led {
             r: color.0,
@@ -233,8 +376,8 @@ pub(crate) fn apply_led(p: &crate::protocol::LedPayload) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gamepad_backend::PadCommand;
     use crate::device_commands::drain_device_commands;
+    use crate::gamepad_backend::PadCommand;
     use std::sync::{Mutex, OnceLock};
 
     static TEST_LED_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -254,11 +397,14 @@ mod tests {
             acceleration_exp: 2.0,
             scroll_sensitivity: 5.0,
             enabled: true,
+            cursor_enabled: None,
             clicks_enabled: true,
             led_color: led_color.map(str::to_string),
             led_secondary_color: None,
             led_effect: led_effect.map(str::to_string),
             led_brightness,
+            led_saturation: None,
+            scroll_accel: None,
             natural_scroll: false,
             cursor_smoothing: 0.0,
             keyboard_theme: None,
@@ -349,9 +495,7 @@ mod tests {
         });
 
         let cmds = drain_device_commands();
-        assert!(cmds
-            .iter()
-            .any(|cmd| matches!(cmd, PadCommand::Led { r: 0, g: 0, b: 0 })));
+        assert!(!cmds.iter().any(|cmd| matches!(cmd, PadCommand::Led { .. })));
         let st = *led_state().lock().unwrap();
         assert_eq!(st.effect, LedEffect::Off);
         assert_eq!(led_color_at(&st, 0.0), (0, 0, 0));

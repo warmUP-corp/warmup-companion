@@ -2,17 +2,20 @@ use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
+use std::sync::atomic::Ordering;
+
 use crate::protocol::{
     is_supported_protocol_version, AxisPayload, BatteryPayload, ConnectionPayload, DownFrame,
-    Hello, UpFrame, PROTOCOL_VERSION,
+    Hello, PadBatteryPayload, PadsPayload, UpFrame, PROTOCOL_VERSION,
 };
 use crate::tracking_owner::TrackingOwner;
 
 use super::{
     apply_companion_settings, apply_config, apply_led, apply_library_watch, apply_mode,
-    apply_parental_guard, apply_play_sessions_ack, apply_rumble, current, current_axis,
-    current_battery, drain_buttons, drain_parental_blocked, set_native_vk_request,
-    take_cursor_moved, take_touchpad,
+    apply_parental_guard, apply_play_sessions_ack, apply_rumble, companion_snapshot, current,
+    current_axis, current_battery, current_pads, drain_buttons, drain_parental_blocked,
+    ensure_settings_watcher, set_native_vk_request, take_cursor_moved, take_touchpad,
+    SettingsSync, SETTINGS_GEN,
 };
 
 const KEEPALIVE: Duration = Duration::from_secs(1);
@@ -138,20 +141,12 @@ impl<R: Read, W: Write> Session<R, W> {
 pub(super) fn handshake<R: Read, W: Write>(
     session: &mut Session<R, W>,
     identity: &ClientIdentity,
-) -> std::io::Result<HashSet<String>> {
+) -> std::io::Result<(HashSet<String>, SettingsSync)> {
     let line = session.read_line()?;
     let protocol_version = match DownFrame::parse_line(line.trim_end()) {
         Ok(DownFrame::Hello(hello)) if is_supported_protocol_version(hello.protocol_version) => {
-            if let Some(config) = hello.config {
-                if let Ok(payload) = serde_json::from_value(config) {
-                    apply_config(&payload);
-                }
-            }
             if let Some(mode) = hello.mode {
                 apply_mode(&mode);
-            }
-            if let Some(settings) = hello.companion_settings {
-                apply_companion_settings(&settings);
             }
             if let Some(guard) = hello.parental_guard {
                 apply_parental_guard(&guard);
@@ -169,11 +164,14 @@ pub(super) fn handshake<R: Read, W: Write>(
         }
         _ => return Err(io_err("hello rejected: missing or invalid hello frame")),
     };
+    let (config_snapshot, settings_snapshot) = companion_snapshot();
+    let mut sync = SettingsSync::new(settings_snapshot.clone());
+    sync.config_reference = Some(config_snapshot.clone());
     let reply = UpFrame::Hello(Hello {
         protocol_version,
-        config: None,
+        config: serde_json::to_value(config_snapshot).ok(),
         mode: None,
-        companion_settings: None,
+        companion_settings: Some(settings_snapshot),
         parental_guard: None,
         library_watch: None,
     });
@@ -182,10 +180,10 @@ pub(super) fn handshake<R: Read, W: Write>(
     {
         crate::playtime_tracker::on_desktop_connected(&identity.owner);
         if protocol_version == PROTOCOL_VERSION {
-            return flush_play_sessions(session, &identity.owner);
+            return flush_play_sessions(session, &identity.owner).map(|issued| (issued, sync));
         }
     }
-    Ok(HashSet::new())
+    Ok((HashSet::new(), sync))
 }
 
 #[cfg(all(windows, feature = "gamepad"))]
@@ -210,22 +208,45 @@ pub(super) fn stream<R: Read, W: Write>(
     session: &mut Session<R, W>,
     owner: &TrackingOwner,
     mut issued_session_ids: HashSet<String>,
+    mut sync: SettingsSync,
 ) {
     let mut last: Option<ConnectionPayload> = None;
     let mut last_battery: Option<BatteryPayload> = None;
+    let mut last_pads: Option<Vec<PadBatteryPayload>> = None;
     let mut last_axis: Option<AxisPayload> = None;
     let mut last_conn_write = Instant::now()
         .checked_sub(KEEPALIVE)
         .unwrap_or_else(Instant::now);
     let mut last_cursor_write = Instant::now();
+    ensure_settings_watcher();
+    let mut seen = SETTINGS_GEN.load(Ordering::Acquire);
+    let mut last_input = Instant::now()
+        .checked_sub(Duration::from_secs(2))
+        .unwrap_or_else(Instant::now);
     loop {
-        if drain_inbound(session, owner, &mut issued_session_ids).is_err() {
+        let gen = SETTINGS_GEN.load(Ordering::Acquire);
+        if gen != seen {
+            seen = gen;
+            crate::config::invalidate_gamepad_settings_cache();
+            let (config, settings) = companion_snapshot();
+            if let Some(changed) = sync.absorb_snapshot(&config, &settings) {
+                crate::install::log_line("pipe settings_changed sent");
+                if session
+                    .write_frame(UpFrame::SettingsChanged(changed).to_ndjson_line().as_bytes())
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }
+        if drain_inbound(session, owner, &mut issued_session_ids, &mut sync).is_err() {
             return;
         }
         if session.eof && session.pending.is_empty() {
             return;
         }
         for edge in drain_buttons() {
+            last_input = Instant::now();
             if session
                 .write_frame(UpFrame::Button(edge).to_ndjson_line().as_bytes())
                 .is_err()
@@ -253,8 +274,17 @@ pub(super) fn stream<R: Read, W: Write>(
                 last_battery = Some(snapshot);
             }
         }
+        let pads = current_pads();
+        if last_pads.as_ref() != Some(&pads) {
+            let frame = UpFrame::Pads(PadsPayload { pads: pads.clone() });
+            if session.write_frame(frame.to_ndjson_line().as_bytes()).is_err() {
+                return;
+            }
+            last_pads = Some(pads);
+        }
         if last_cursor_write.elapsed() >= CURSOR_HINT_INTERVAL {
             if let Some(hint) = take_cursor_moved() {
+                last_input = Instant::now();
                 if session
                     .write_frame(UpFrame::CursorMoved(hint).to_ndjson_line().as_bytes())
                     .is_err()
@@ -265,6 +295,7 @@ pub(super) fn stream<R: Read, W: Write>(
             let axis = current_axis();
             if axis.is_some() && axis != last_axis {
                 if let Some(snapshot) = axis {
+                    last_input = Instant::now();
                     if session
                         .write_frame(UpFrame::Axis(snapshot).to_ndjson_line().as_bytes())
                         .is_err()
@@ -275,6 +306,7 @@ pub(super) fn stream<R: Read, W: Write>(
                 }
             }
             if let Some(touchpad) = take_touchpad() {
+                last_input = Instant::now();
                 if session
                     .write_frame(UpFrame::Touchpad(touchpad).to_ndjson_line().as_bytes())
                     .is_err()
@@ -285,6 +317,10 @@ pub(super) fn stream<R: Read, W: Write>(
             last_cursor_write = Instant::now();
         }
         let connection = current();
+        if last.as_ref() != Some(&connection) {
+            last_battery = None;
+            last_pads = None;
+        }
         if last.as_ref() != Some(&connection) || last_conn_write.elapsed() >= KEEPALIVE {
             if session
                 .write_frame(
@@ -299,7 +335,12 @@ pub(super) fn stream<R: Read, W: Write>(
             last = Some(connection);
             last_conn_write = Instant::now();
         }
-        std::thread::sleep(Duration::from_millis(5));
+        let idle = if last_input.elapsed() < Duration::from_secs(1) {
+            Duration::from_millis(5)
+        } else {
+            Duration::from_millis(50)
+        };
+        std::thread::sleep(idle);
     }
 }
 
@@ -307,6 +348,7 @@ fn drain_inbound<R: Read, W: Write>(
     session: &mut Session<R, W>,
     owner: &TrackingOwner,
     issued_session_ids: &mut HashSet<String>,
+    sync: &mut SettingsSync,
 ) -> std::io::Result<()> {
     session.fill_available()?;
     while let Some(line) = session.pop_line()? {
@@ -315,11 +357,11 @@ fn drain_inbound<R: Read, W: Write>(
             continue;
         }
         match DownFrame::parse_line(trimmed) {
-            Ok(DownFrame::Config(payload)) => apply_config(&payload),
+            Ok(DownFrame::Config(payload)) => apply_config(sync, &payload),
             Ok(DownFrame::Mode(payload)) => apply_mode(&payload),
             Ok(DownFrame::Rumble(payload)) => apply_rumble(&payload),
             Ok(DownFrame::Led(payload)) => apply_led(&payload),
-            Ok(DownFrame::CompanionSettings(payload)) => apply_companion_settings(&payload),
+            Ok(DownFrame::CompanionSettings(payload)) => apply_companion_settings(sync, &payload),
             Ok(DownFrame::NativeVk(payload)) => set_native_vk_request(&payload),
             Ok(DownFrame::ParentalGuard(payload)) => apply_parental_guard(&payload),
             Ok(DownFrame::LibraryWatch(payload)) => apply_library_watch(owner, &payload),
@@ -330,6 +372,7 @@ fn drain_inbound<R: Read, W: Write>(
                         .retain(|external_id| !payload.external_ids.contains(external_id));
                 }
             }
+            Ok(DownFrame::ShutDown(_)) => handle_shut_down(),
             Err(error) => {
                 crate::install::log_line(&format!("pipe inbound frame parse error: {error}"));
             }
@@ -340,6 +383,20 @@ fn drain_inbound<R: Read, W: Write>(
         return Err(io_err("connection closed"));
     }
     Ok(())
+}
+
+fn handle_shut_down() {
+    #[cfg(all(windows, feature = "gamepad"))]
+    {
+        if crate::parental_guard::is_blocking_active() {
+            crate::install::log_line("pipe shut_down refused: Kid Mode blocking is active");
+            crate::parental_guard::log_refused_shutdown();
+            return;
+        }
+    }
+    crate::install::request_service_stop();
+    #[cfg(feature = "gamepad")]
+    crate::gamepad::request_stop();
 }
 
 fn io_err(message: &str) -> std::io::Error {
@@ -454,9 +511,9 @@ fn serve_client(client: std::os::unix::net::UnixStream) {
     };
     super::DESKTOP_CONNECTED.store(true, Ordering::Relaxed);
     let mut session = Session::new(client, writer);
-    if let Ok(issued) = handshake(&mut session, &identity) {
+    if let Ok((issued, sync)) = handshake(&mut session, &identity) {
         super::reset_button_stream();
-        stream(&mut session, &identity.owner, issued);
+        stream(&mut session, &identity.owner, issued, sync);
     }
     super::DESKTOP_CONNECTED.store(false, Ordering::Relaxed);
     super::clear_desktop_mode();

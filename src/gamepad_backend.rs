@@ -4,9 +4,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-pub use warmup_gamepad::{Button, ButtonChange, GamepadInput, PollMode, TouchpadSample};
+pub use warmup_gamepad::{
+    Button, ButtonChange, GamepadInput, PadBattery, PollMode, TouchpadSample,
+};
 
 static USERLAND_POLL_PAUSED: AtomicBool = AtomicBool::new(false);
 
@@ -39,6 +41,7 @@ pub struct BatteryFrame {
     pub percent: i32,
     pub charging: bool,
     pub wired: bool,
+    pub usb: Option<bool>,
 }
 
 impl Default for BatteryFrame {
@@ -47,6 +50,7 @@ impl Default for BatteryFrame {
             percent: -1,
             charging: false,
             wired: false,
+            usb: None,
         }
     }
 }
@@ -57,6 +61,7 @@ impl Default for BatteryFrame {
 #[derive(Clone, Copy, Debug)]
 pub enum PadCommand {
     Led { r: u8, g: u8, b: u8 },
+    LedRelease,
     Rumble { strong: f32, weak: f32, ms: u32 },
     TriggerRumble { left: f32, right: f32, ms: u32 },
 }
@@ -68,7 +73,20 @@ fn effective_userland_poll_mode() -> PollMode {
     let desktop_connected = crate::pipe_server::desktop_connected();
     let raw_game_active = crate::pipe_server::game_active();
     let launcher_nav = crate::pipe_server::launcher_foreground_nav();
-    let detected_game_active = settings.sleep_on_game && standalone_game_active_now();
+    let detected_game_active = !desktop_connected
+        && settings.sleep_on_game
+        && standalone_game_active_now();
+    static VOICE_GAME_SEEN: AtomicBool = AtomicBool::new(false);
+    let any_game = raw_game_active || detected_game_active;
+    if any_game && !VOICE_GAME_SEEN.swap(any_game, Ordering::SeqCst) {
+        crate::install::log_line("game started; unloading voice engine");
+        #[cfg(windows)]
+        let _ = std::thread::Builder::new()
+            .name("voice-unload".into())
+            .spawn(crate::win::speech_input::unload_engine);
+    } else if !any_game {
+        VOICE_GAME_SEEN.store(false, Ordering::SeqCst);
+    }
     let game_active = should_sleep_for_game(
         desktop_connected,
         raw_game_active,
@@ -100,6 +118,28 @@ fn effective_userland_poll_mode() -> PollMode {
         }
     }
     mode
+}
+
+fn sleep_on_game_cached() -> bool {
+    static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    match *cache {
+        Some((at, value)) if at.elapsed() < Duration::from_millis(500) => value,
+        _ => {
+            let value = crate::config::gamepad_settings().sleep_on_game;
+            *cache = Some((Instant::now(), value));
+            value
+        }
+    }
+}
+
+pub fn game_owns_controller() -> bool {
+    should_sleep_for_game(
+        crate::pipe_server::desktop_connected(),
+        crate::pipe_server::game_active(),
+        crate::pipe_server::launcher_foreground_nav(),
+        sleep_on_game_cached() && standalone_game_active_now(),
+    )
 }
 
 pub fn poll_mode_is_sleep() -> bool {
@@ -174,8 +214,13 @@ pub trait GamepadBackend {
     fn battery(&self) -> BatteryFrame {
         BatteryFrame::default()
     }
+    /// Every connected pad with its battery (multi-controller input). Empty when unsupported.
+    fn pads(&self) -> Vec<PadBattery> {
+        Vec::new()
+    }
     /// Set the lightbar/LED colour. No-op if the pad has no LED.
     fn set_led(&mut self, _r: u8, _g: u8, _b: u8) {}
+    fn release_led(&mut self) {}
     /// Fire a main rumble effect (`strong`/`weak` in 0..=1).
     fn rumble(&mut self, _strong: f32, _weak: f32, _duration_ms: u32) {}
     /// Fire a trigger (adaptive) rumble effect (`left`/`right` in 0..=1).
@@ -188,6 +233,7 @@ pub struct SdlBackend {
     touchpad: TouchpadFrame,
     gyro: Option<(f32, f32, f32)>,
     battery: BatteryFrame,
+    pads: Vec<PadBattery>,
     /// Gyro must be enabled once after each (re)connect before `read_gyro` returns data.
     gyro_enabled: bool,
 }
@@ -203,6 +249,7 @@ impl SdlBackend {
             touchpad: TouchpadFrame::default(),
             gyro: None,
             battery: BatteryFrame::default(),
+            pads: Vec::new(),
             gyro_enabled,
         })
     }
@@ -241,13 +288,17 @@ impl SdlBackend {
             percent,
             charging,
             wired,
+            usb: self.input.connection_wired(),
         };
+        self.pads = self.input.pads_battery();
     }
 }
 
 impl GamepadBackend for SdlBackend {
     fn poll(&mut self) -> Result<(), String> {
         let mode = effective_userland_poll_mode();
+        self.input
+            .set_merge(crate::config::gamepad_settings().multi_controller);
         let connected_change = self.input.poll_events_with_mode(mode);
         self.pending = self.input.detect_button_changes();
         self.capture_features(mode, connected_change);
@@ -266,8 +317,16 @@ impl GamepadBackend for SdlBackend {
         self.battery
     }
 
+    fn pads(&self) -> Vec<PadBattery> {
+        self.pads.clone()
+    }
+
     fn set_led(&mut self, r: u8, g: u8, b: u8) {
         self.input.set_led(r, g, b);
+    }
+
+    fn release_led(&mut self) {
+        self.input.release_led();
     }
 
     fn rumble(&mut self, strong: f32, weak: f32, duration_ms: u32) {
@@ -315,6 +374,7 @@ struct SdlShared {
     touchpad: Mutex<TouchpadFrame>,
     gyro: Mutex<Option<(f32, f32, f32)>>,
     battery: Mutex<BatteryFrame>,
+    pads: Mutex<Vec<PadBattery>>,
 }
 
 /// `GamepadBackend` proxy whose `GamepadInput` (and SDL's windows) live entirely
@@ -339,6 +399,7 @@ impl SdlThreadBackend {
             touchpad: Mutex::new(TouchpadFrame::default()),
             gyro: Mutex::new(None),
             battery: Mutex::new(BatteryFrame::default()),
+            pads: Mutex::new(Vec::new()),
         });
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel::<Result<(), String>>();
@@ -417,39 +478,8 @@ fn sdl_thread_main(
     // Arm gyro on whatever pad is already open; re-armed on each hotplug below.
     let mut gyro_enabled = input.enable_gyro();
     while !stop.load(Ordering::Relaxed) {
-        // Apply queued writes (LED/rumble) first — they must run on this thread
-        // because it owns the pad. Drain the whole backlog, newest wins for LED.
-        let mut last_led = None;
-        while let Ok(cmd) = cmd_rx.try_recv() {
-            match cmd {
-                // No per-command log: animated LED effects (breathing/rainbow) push ~30
-                // commands/s — a log_line per write would be a disk write per frame.
-                PadCommand::Led { .. } => last_led = Some(cmd),
-                PadCommand::Rumble { strong, weak, ms } => {
-                    let pad = input
-                        .active_controller_name()
-                        .unwrap_or_else(|| "none".to_string());
-                    let ok = input.rumble(strong, weak, ms);
-                    crate::install::log_line(&format!(
-                        "SDL apply rumble full strong={strong} weak={weak} ms={ms} pad={pad} ok={ok}"
-                    ));
-                }
-                PadCommand::TriggerRumble { left, right, ms } => {
-                    let pad = input
-                        .active_controller_name()
-                        .unwrap_or_else(|| "none".to_string());
-                    let ok = input.trigger_rumble(left, right, ms);
-                    crate::install::log_line(&format!(
-                        "SDL apply rumble triggers left={left} right={right} ms={ms} pad={pad} ok={ok}"
-                    ));
-                }
-            }
-        }
-        if let Some(PadCommand::Led { r, g, b }) = last_led {
-            input.set_led(r, g, b);
-        }
-
         let mode = effective_userland_poll_mode();
+        input.set_merge(crate::config::gamepad_settings().multi_controller);
         let connected_change = input.poll_events_with_mode(mode);
         if connected_change {
             // Pad connected/disconnected: re-arm gyro on the new device.
@@ -461,6 +491,7 @@ fn sdl_thread_main(
                     .unwrap_or_else(|| "none".to_string()),
             );
         }
+        let pad_present = input.active_controller_name().is_some();
         let changes = input.detect_button_changes();
         if !changes.is_empty() {
             if let Ok(mut q) = shared.changes.lock() {
@@ -468,9 +499,9 @@ fn sdl_thread_main(
             }
         }
         if let Ok(mut a) = shared.axes.lock() {
-            *a = match mode {
-                PollMode::Full => input.axes(),
-                PollMode::Sleep => (0.0, 0.0, 0.0, 0.0),
+            *a = match (mode, pad_present) {
+                (PollMode::Full, true) => input.axes(),
+                _ => (0.0, 0.0, 0.0, 0.0),
             };
         }
         if let Ok(mut l) = shared.label.lock() {
@@ -480,12 +511,13 @@ fn sdl_thread_main(
         }
         if let Ok(mut s) = shared.summary.lock() {
             *s = match mode {
-                PollMode::Full => input.live_input_summary(),
+                PollMode::Full if pad_present => input.live_input_summary(),
+                PollMode::Full => String::new(),
                 PollMode::Sleep => "sleep (guide + record/screenshot chords)".to_string(),
             };
         }
         // Device-feature reads — only in Full mode (Sleep keeps the pad quiet).
-        let (touchpad, gyro) = if mode == PollMode::Full {
+        let (touchpad, gyro) = if mode == PollMode::Full && pad_present {
             let (delta, fingers) = input.poll_touchpad();
             let tp = TouchpadFrame {
                 delta,
@@ -506,15 +538,77 @@ fn sdl_thread_main(
         if let Ok(mut g) = shared.gyro.lock() {
             *g = gyro;
         }
-        if let Ok(mut bat) = shared.battery.lock() {
-            let (percent, charging, wired) = input.battery();
-            *bat = BatteryFrame {
-                percent,
-                charging,
-                wired,
+        if pad_present {
+            if let Ok(mut bat) = shared.battery.lock() {
+                let (percent, charging, wired) = input.battery();
+                *bat = BatteryFrame {
+                    percent,
+                    charging,
+                    wired,
+                    usb: input.connection_wired(),
+                };
+            }
+        }
+        if let Ok(mut p) = shared.pads.lock() {
+            *p = if pad_present {
+                input.pads_battery()
+            } else {
+                Vec::new()
             };
         }
-        std::thread::sleep(Duration::from_millis(4));
+        let mut pending = Vec::new();
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            pending.push(cmd);
+        }
+        apply_pad_commands(&mut input, pending);
+        let timeout = if pad_present {
+            Duration::from_millis(4)
+        } else {
+            Duration::from_millis(1000)
+        };
+        match cmd_rx.recv_timeout(timeout) {
+            Ok(cmd) => {
+                let mut pending = vec![cmd];
+                while let Ok(extra) = cmd_rx.try_recv() {
+                    pending.push(extra);
+                }
+                apply_pad_commands(&mut input, pending);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
+fn apply_pad_commands(input: &mut GamepadInput, cmds: Vec<PadCommand>) {
+    let mut last_led = None;
+    for cmd in cmds {
+        match cmd {
+            PadCommand::Led { .. } | PadCommand::LedRelease => last_led = Some(cmd),
+            PadCommand::Rumble { strong, weak, ms } => {
+                let pad = input
+                    .active_controller_name()
+                    .unwrap_or_else(|| "none".to_string());
+                let ok = input.rumble(strong, weak, ms);
+                crate::install::log_line(&format!(
+                    "SDL apply rumble full strong={strong} weak={weak} ms={ms} pad={pad} ok={ok}"
+                ));
+            }
+            PadCommand::TriggerRumble { left, right, ms } => {
+                let pad = input
+                    .active_controller_name()
+                    .unwrap_or_else(|| "none".to_string());
+                let ok = input.trigger_rumble(left, right, ms);
+                crate::install::log_line(&format!(
+                    "SDL apply rumble triggers left={left} right={right} ms={ms} pad={pad} ok={ok}"
+                ));
+            }
+        }
+    }
+    match last_led {
+        Some(PadCommand::Led { r, g, b }) => input.set_led(r, g, b),
+        Some(PadCommand::LedRelease) => input.release_led(),
+        _ => {}
     }
 }
 
@@ -572,8 +666,20 @@ impl GamepadBackend for SdlThreadBackend {
         self.shared.battery.lock().map(|b| *b).unwrap_or_default()
     }
 
+    fn pads(&self) -> Vec<PadBattery> {
+        self.shared
+            .pads
+            .lock()
+            .map(|p| p.clone())
+            .unwrap_or_default()
+    }
+
     fn set_led(&mut self, r: u8, g: u8, b: u8) {
         self.send_cmd(PadCommand::Led { r, g, b });
+    }
+
+    fn release_led(&mut self) {
+        self.send_cmd(PadCommand::LedRelease);
     }
 
     fn rumble(&mut self, strong: f32, weak: f32, duration_ms: u32) {

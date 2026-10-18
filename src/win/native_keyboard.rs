@@ -8,7 +8,7 @@
 
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -104,7 +104,7 @@ fn wide(s: &str) -> Vec<u16> {
 /// profile, saving the prior value for [`restore_auto_invoke`]. Idempotent:
 /// once overridden, repeated calls are no-ops (the prior value stays captured).
 pub fn disable_auto_invoke() {
-    disable_controller_to_vk_mapping();
+    override_controller_to_vk_mapping(0);
     let Ok(mut saved) = AUTO_INVOKE_SAVED.lock() else {
         return;
     };
@@ -139,13 +139,10 @@ pub fn restore_auto_invoke() {
     crate::install::log_line("native kbd: restored TabletTip keyboard values");
 }
 
-fn disable_controller_to_vk_mapping() {
+fn override_controller_to_vk_mapping(desired: u32) {
     let Ok(mut saved) = CONTROLLER_VK_SAVED.lock() else {
         return;
     };
-    if saved.is_some() {
-        return;
-    }
     unsafe {
         let subkey_w = wide(CONTROLLER_VK_SUBKEY);
         let mut hkey = HKEY::default();
@@ -169,13 +166,20 @@ fn disable_controller_to_vk_mapping() {
         }
         let value_w = wide(CONTROLLER_VK_VALUE);
         let prior = read_dword(hkey, &value_w);
-        let desired = 0u32.to_le_bytes();
-        let rc = RegSetValueExW(hkey, PCWSTR(value_w.as_ptr()), 0, REG_DWORD, Some(&desired));
+        let rc = RegSetValueExW(
+            hkey,
+            PCWSTR(value_w.as_ptr()),
+            0,
+            REG_DWORD,
+            Some(&desired.to_le_bytes()),
+        );
         let _ = RegCloseKey(hkey);
         if rc.0 == 0 {
-            *saved = Some(prior);
+            if saved.is_none() {
+                *saved = Some(prior);
+            }
             crate::install::log_line(&format!(
-                "native kbd: set ControllerToVKMapping\\Enabled=0 (prior={prior:?})"
+                "native kbd: set ControllerToVKMapping\\Enabled={desired} (prior={prior:?})"
             ));
         } else {
             crate::install::log_line(&format!(
@@ -184,6 +188,10 @@ fn disable_controller_to_vk_mapping() {
             ));
         }
     }
+}
+
+pub fn enable_controller_to_vk_mapping() {
+    override_controller_to_vk_mapping(1);
 }
 
 fn restore_controller_to_vk_mapping() {
@@ -572,28 +580,86 @@ unsafe fn read_dword(hkey: HKEY, value_name: &[u16]) -> Option<u32> {
 }
 
 /// Windows 11 24H2 KB5062660+ ships a gamepad PIN keyboard on LogonUI.
-/// Detected for logs only — we do not yield to it unless
-/// `WARMUP_NATIVE_LOGON_VK` is a non-zero value. The OS keyboard overlaps
-/// our overlay (CoreInputView Gamepad / TabTip) and L3 then does nothing.
 const NATIVE_LOGON_VK_BUILD: u32 = 26100;
 const NATIVE_LOGON_VK_UBR: u32 = 4762;
 
-static NATIVE_LOGON_VK: OnceLock<bool> = OnceLock::new();
-
-static LOGON_XBOX_PAD: AtomicBool = AtomicBool::new(false);
-
-pub fn set_logon_pad_is_xbox(xbox: bool) {
-    LOGON_XBOX_PAD.store(xbox, Ordering::SeqCst);
+#[derive(Clone, Copy)]
+struct NativeLogonVk {
+    forced: Option<bool>,
+    os_has_native: bool,
 }
 
-pub fn logon_pad_is_xbox() -> bool {
-    LOGON_XBOX_PAD.load(Ordering::SeqCst)
+static NATIVE_LOGON_VK: OnceLock<NativeLogonVk> = OnceLock::new();
+
+static LOGON_XBOX_PAD: AtomicU8 = AtomicU8::new(0);
+static LOGON_HID_PAD: AtomicU8 = AtomicU8::new(0);
+
+fn store_presence(slot: &AtomicU8, present: Option<bool>) {
+    let v = match present {
+        None => 0,
+        Some(false) => 1,
+        Some(true) => 2,
+    };
+    slot.store(v, Ordering::SeqCst);
+}
+
+fn load_presence(slot: &AtomicU8) -> Option<bool> {
+    match slot.load(Ordering::SeqCst) {
+        0 => None,
+        v => Some(v == 2),
+    }
+}
+
+pub fn set_logon_pads(xbox: Option<bool>, hid: Option<bool>) {
+    store_presence(&LOGON_XBOX_PAD, xbox);
+    store_presence(&LOGON_HID_PAD, hid);
+}
+
+pub fn logon_hid_pad_present() -> bool {
+    load_presence(&LOGON_HID_PAD) == Some(true)
 }
 
 static LOGON_SIGNIN_SURFACE: AtomicBool = AtomicBool::new(false);
+static LOGON_DECISION_LOGGED: Mutex<Option<(bool, &'static str)>> = Mutex::new(None);
 
 pub fn set_logon_signin_surface(signin: bool) {
     LOGON_SIGNIN_SURFACE.store(signin, Ordering::SeqCst);
+    let decision = signin.then(logon_decision);
+    let Ok(mut logged) = LOGON_DECISION_LOGGED.lock() else {
+        return;
+    };
+    if *logged == decision {
+        return;
+    }
+    *logged = decision;
+    if let Some((native, reason)) = decision {
+        let target = if native {
+            "Windows controller keyboard"
+        } else {
+            "warmUP overlay"
+        };
+        crate::install::log_line(&format!("native kbd: sign-in → {target} ({reason})"));
+    }
+}
+
+fn logon_decision() -> (bool, &'static str) {
+    let vk = native_logon_vk();
+    match vk.forced {
+        Some(true) => return (true, "forced by WARMUP_NATIVE_LOGON_VK"),
+        Some(false) => return (false, "forced by WARMUP_NATIVE_LOGON_VK=0"),
+        None => {}
+    }
+    if !vk.os_has_native {
+        return (false, "os has no native controller keyboard");
+    }
+    match (
+        load_presence(&LOGON_XBOX_PAD),
+        load_presence(&LOGON_HID_PAD),
+    ) {
+        (_, Some(true)) => (false, "playstation pad present"),
+        (Some(true), Some(false)) => (true, "xbox only"),
+        _ => (false, "no xbox pad"),
+    }
 }
 
 pub fn window_is_logonui(hwnd: HWND) -> bool {
@@ -604,7 +670,7 @@ pub fn window_is_logonui(hwnd: HWND) -> bool {
 }
 
 pub fn yield_logon_to_native() -> bool {
-    native_logon_keyboard_available() && LOGON_SIGNIN_SURFACE.load(Ordering::SeqCst)
+    LOGON_SIGNIN_SURFACE.load(Ordering::SeqCst) && logon_decision().0
 }
 
 fn build_has_native_logon_vk(build: u32, ubr: u32) -> bool {
@@ -617,22 +683,25 @@ fn native_logon_vk_opt_in(env: Option<&str>) -> bool {
     env.is_some_and(|v| v != "0")
 }
 
-pub fn native_logon_keyboard_available() -> bool {
+fn native_logon_vk() -> NativeLogonVk {
     *NATIVE_LOGON_VK.get_or_init(|| {
         let env = std::env::var("WARMUP_NATIVE_LOGON_VK").ok();
-        let native = native_logon_vk_opt_in(env.as_deref());
+        let forced = env.as_deref().map(|v| native_logon_vk_opt_in(Some(v)));
         let (build, ubr) = current_windows_build();
         let os_has_native = match (build, ubr) {
             (Some(b), Some(u)) => build_has_native_logon_vk(b, u),
             _ => false,
         };
         crate::install::log_line(&format!(
-            "native kbd: logon VK native={native} os_has_native={os_has_native} build={}.{} env={}",
+            "native kbd: logon VK forced={forced:?} os_has_native={os_has_native} build={}.{} env={}",
             build.map(|b| b.to_string()).unwrap_or_else(|| "?".into()),
             ubr.map(|u| u.to_string()).unwrap_or_else(|| "?".into()),
             env.as_deref().unwrap_or("(unset)"),
         ));
-        native
+        NativeLogonVk {
+            forced,
+            os_has_native,
+        }
     })
 }
 
@@ -680,6 +749,9 @@ unsafe fn read_sz(hkey: HKEY, value_name: &[u16]) -> Option<String> {
 }
 
 pub fn suppress() {
+    if yield_logon_to_native() {
+        return;
+    }
     unsafe {
         let _ = EnumWindows(Some(enum_window), LPARAM(0));
     }

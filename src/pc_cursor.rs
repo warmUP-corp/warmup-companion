@@ -8,11 +8,13 @@
 //! is resolution-independent.
 
 #[cfg(not(target_os = "linux"))]
-use enigo::{Axis, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
+use enigo::{Axis, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
+use enigo::Key;
 
 const BASE_SPEED: f32 = 100.0;
 const BASE_SCROLL_SPEED: f32 = 20.0;
 const TOUCHPAD_PIXEL_SCALE: f32 = 1.5;
+const TOUCHPAD_WHEEL_PER_UNIT: f32 = 480.0;
 
 /// Reference resolution: sensitivity constants are tuned for
 /// 1080p and scaled by `actual/reference` per axis (`FUN_00422dd0`).
@@ -72,6 +74,8 @@ pub struct PcCursor {
     /// EMA-smoothed cursor delta carried between frames (cursor_smoothing).
     smooth_dx: f32,
     smooth_dy: f32,
+    wheel_rem_x: f32,
+    wheel_rem_y: f32,
 }
 
 impl PcCursor {
@@ -110,6 +114,8 @@ impl PcCursor {
             right_held: false,
             smooth_dx: 0.0,
             smooth_dy: 0.0,
+            wheel_rem_x: 0.0,
+            wheel_rem_y: 0.0,
         }
     }
 
@@ -132,6 +138,8 @@ impl PcCursor {
             right_held: false,
             smooth_dx: 0.0,
             smooth_dy: 0.0,
+            wheel_rem_x: 0.0,
+            wheel_rem_y: 0.0,
         }
     }
 
@@ -154,6 +162,8 @@ impl PcCursor {
             right_held: false,
             smooth_dx: 0.0,
             smooth_dy: 0.0,
+            wheel_rem_x: 0.0,
+            wheel_rem_y: 0.0,
         }
     }
 
@@ -285,6 +295,49 @@ impl PcCursor {
         }
     }
 
+    pub fn scroll_touchpad(&mut self, dx: f32, dy: f32) {
+        let settings = crate::config::gamepad_settings();
+        if !settings.cursor_enabled {
+            self.wheel_rem_x = 0.0;
+            self.wheel_rem_y = 0.0;
+            return;
+        }
+        let (h, v) = touchpad_wheel(dx, dy, settings.scroll_speed, settings.natural_scroll);
+        let total_x = h + self.wheel_rem_x;
+        let total_y = v + self.wheel_rem_y;
+        let (int_x, int_y) = (total_x as i32, total_y as i32);
+        self.wheel_rem_x = total_x - int_x as f32;
+        self.wheel_rem_y = total_y - int_y as f32;
+        if int_x != 0 || int_y != 0 {
+            self.dispatch(Cmd::Wheel(int_x, int_y));
+        }
+    }
+
+    pub fn click(&mut self, button: crate::touchpad_gestures::MouseButton) {
+        use crate::touchpad_gestures::MouseButton;
+        if !crate::config::gamepad_settings().cursor_enabled {
+            return;
+        }
+        match button {
+            MouseButton::Left if !self.left_held => {
+                self.dispatch(Cmd::ButtonDown);
+                self.dispatch(Cmd::ButtonUp);
+            }
+            MouseButton::Right if !self.right_held => {
+                self.dispatch(Cmd::RButtonDown);
+                self.dispatch(Cmd::RButtonUp);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn desktop_swipe(&mut self, swipe: crate::touchpad_gestures::Swipe) {
+        if !crate::config::gamepad_settings().cursor_enabled {
+            return;
+        }
+        self.dispatch(Cmd::Swipe(swipe));
+    }
+
     /// Drive the left mouse button as a real HOLD, edge-tracked
     /// (DOWN on press-edge, UP on release-edge) instead of an
     /// instant click. Giving XAML/LogonUI a genuine press duration is what makes
@@ -316,6 +369,10 @@ impl PcCursor {
     /// dispatch the cursor uses (so it lands on the user's desktop post-login).
     pub fn tap_enter(&mut self) {
         self.dispatch(Cmd::EnterTap);
+    }
+
+    pub fn tap_chord(&mut self, keys: Vec<Key>) {
+        self.dispatch(Cmd::Chord(keys));
     }
 
     pub fn screenshot(&mut self, window_only: bool) {
@@ -384,6 +441,27 @@ fn apply_cmd(enigo: &mut Enigo, cmd: Cmd) {
         Cmd::EnterTap => {
             let _ = enigo.key(Key::Return, Direction::Click);
         }
+        Cmd::Wheel(h, v) => {
+            #[cfg(windows)]
+            send_wheel(h, v);
+            #[cfg(not(windows))]
+            let _ = (h, v);
+        }
+        Cmd::Swipe(swipe) => {
+            use crate::touchpad_gestures::Swipe;
+            let (mods, key): (&[Key], Key) = match swipe {
+                Swipe::Left => (&[Key::Control, Key::Meta], Key::LeftArrow),
+                Swipe::Right => (&[Key::Control, Key::Meta], Key::RightArrow),
+                Swipe::Up => (&[Key::Meta], Key::Tab),
+                Swipe::Down => (&[Key::Meta], Key::Other(0x44)),
+            };
+            tap_keys(enigo, mods, key);
+        }
+        Cmd::Chord(keys) => {
+            if let Some((key, mods)) = keys.split_last() {
+                tap_keys(enigo, mods, *key);
+            }
+        }
         Cmd::Screenshot { window_only } => {
             #[cfg(windows)]
             copy_screen_to_clipboard(window_only);
@@ -391,8 +469,52 @@ fn apply_cmd(enigo: &mut Enigo, cmd: Cmd) {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+fn tap_keys(enigo: &mut Enigo, mods: &[Key], key: Key) {
+    for m in mods {
+        let _ = enigo.key(*m, Direction::Press);
+    }
+    let _ = enigo.key(key, Direction::Click);
+    for m in mods.iter().rev() {
+        let _ = enigo.key(*m, Direction::Release);
+    }
+}
+
+fn touchpad_wheel(dx: f32, dy: f32, speed: f32, natural: bool) -> (f32, f32) {
+    let k = speed * TOUCHPAD_WHEEL_PER_UNIT;
+    let sign = if natural { -1.0 } else { 1.0 };
+    (sign * dx * k, -sign * dy * k)
+}
+
 #[cfg(windows)]
-fn copy_screen_to_clipboard(window_only: bool) {
+fn send_wheel(h: i32, v: i32) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_WHEEL, MOUSEINPUT,
+    };
+    let make = |flags, data: i32| INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                mouseData: data as u32,
+                dwFlags: flags,
+                ..Default::default()
+            },
+        },
+    };
+    let mut inputs = Vec::with_capacity(2);
+    if v != 0 {
+        inputs.push(make(MOUSEEVENTF_WHEEL, v));
+    }
+    if h != 0 {
+        inputs.push(make(MOUSEEVENTF_HWHEEL, h));
+    }
+    if !inputs.is_empty() {
+        unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn copy_screen_to_clipboard(window_only: bool) {
     use windows::Win32::Foundation::RECT;
     use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
     use windows::Win32::Graphics::Gdi::{
@@ -517,22 +639,24 @@ fn copy_screen_to_clipboard(window_only: bool) {
         }
         let seq = copied.then(|| windows::Win32::System::DataExchange::GetClipboardSequenceNumber());
         if let Some((rgba, stem)) = capture {
-            std::thread::spawn(move || {
-                let path = crate::image_paste::save_png(
-                    &stem,
-                    width as u32,
-                    height as u32,
-                    &rgba,
-                    "screenshot",
-                );
-                if let Some(path) = path {
-                    if let Some(seq) = seq {
-                        crate::image_paste::remember_screenshot(path.clone(), seq);
+            let _ = std::thread::Builder::new()
+                .name("warmup-screenshot-save".into())
+                .spawn(move || {
+                    let path = crate::image_paste::save_png(
+                        &stem,
+                        width as u32,
+                        height as u32,
+                        &rgba,
+                        "screenshot",
+                    );
+                    if let Some(path) = path {
+                        if let Some(seq) = seq {
+                            crate::image_paste::remember_screenshot(path.clone(), seq);
+                        }
+                        let _ = MessageBeep(MB_OK);
+                        spawn_toast_helper(&path, copied);
                     }
-                    let _ = MessageBeep(MB_OK);
-                    spawn_toast_helper(&path, copied);
-                }
-            });
+                });
         }
     }
 }
@@ -559,7 +683,7 @@ fn spawn_toast_helper(path: &std::path::Path, copied: bool) {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Cmd {
     Move(i32, i32),
     ScrollV(i32),
@@ -569,7 +693,10 @@ enum Cmd {
     RButtonDown,
     RButtonUp,
     EnterTap,
+    Wheel(i32, i32),
+    Swipe(crate::touchpad_gestures::Swipe),
     Screenshot { window_only: bool },
+    Chord(Vec<Key>),
 }
 
 /// Dedicated cursor-injection thread. Owns its own Enigo and runs on whatever
@@ -704,6 +831,20 @@ fn open_enter_key() -> Result<evdev::uinput::VirtualDevice, String> {
     use evdev::{AttributeSet, BusType, InputId, KeyCode};
     let mut keys = AttributeSet::<KeyCode>::new();
     keys.insert(KeyCode::KEY_ENTER);
+    for key in [
+        Key::Control, Key::Shift, Key::Alt, Key::Meta, Key::Tab, Key::Escape, Key::Space,
+        Key::Backspace, Key::LeftArrow, Key::RightArrow, Key::UpArrow, Key::DownArrow,
+        Key::PageUp, Key::PageDown, Key::Home, Key::End, Key::F5, Key::F11,
+    ] {
+        if let Some(code) = uinput_key(key) {
+            keys.insert(code);
+        }
+    }
+    for code in (b'A'..=b'Z').chain(b'0'..=b'9') {
+        if let Some(code) = uinput_vk(code as u32) {
+            keys.insert(code);
+        }
+    }
     evdev::uinput::VirtualDevice::builder()
         .map_err(uinput_error)?
         .name("warmup-companion keyboard")
@@ -773,9 +914,112 @@ fn apply_uinput(
             emit_key(keyboard, evdev::KeyCode::KEY_ENTER, 1);
             emit_key(keyboard, evdev::KeyCode::KEY_ENTER, 0);
         }
+        Cmd::Wheel(h, v) => {
+            let mut axes = Vec::with_capacity(4);
+            if v != 0 {
+                axes.push((evdev::RelativeAxisCode::REL_WHEEL_HI_RES, v));
+                if v / 120 != 0 {
+                    axes.push((evdev::RelativeAxisCode::REL_WHEEL, v / 120));
+                }
+            }
+            if h != 0 {
+                axes.push((evdev::RelativeAxisCode::REL_HWHEEL_HI_RES, h));
+                if h / 120 != 0 {
+                    axes.push((evdev::RelativeAxisCode::REL_HWHEEL, h / 120));
+                }
+            }
+            if !axes.is_empty() {
+                emit_rel(mouse, &axes);
+            }
+        }
+        Cmd::Swipe(swipe) => {
+            use crate::touchpad_gestures::Swipe;
+            let keys = match swipe {
+                Swipe::Left => vec![Key::Control, Key::Meta, Key::LeftArrow],
+                Swipe::Right => vec![Key::Control, Key::Meta, Key::RightArrow],
+                Swipe::Up => vec![Key::Meta, Key::Tab],
+                Swipe::Down => vec![Key::Meta, Key::Other(0x44)],
+            };
+            if let Some(keyboard) = keyboard {
+                tap_uinput_chord(keyboard, &keys);
+            }
+        }
+        Cmd::Chord(keys) => {
+            if let Some(keyboard) = keyboard {
+                tap_uinput_chord(keyboard, &keys);
+            }
+        }
         Cmd::Screenshot { .. } => {
             crate::install::log_line("screenshot is not available on linux in this stage");
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn tap_uinput_chord(keyboard: &mut evdev::uinput::VirtualDevice, keys: &[Key]) {
+    let codes: Vec<evdev::KeyCode> = keys.iter().filter_map(|key| uinput_key(*key)).collect();
+    if codes.len() != keys.len() {
+        crate::install::log_line(&format!("uinput chord has unmapped keys: {keys:?}"));
+        return;
+    }
+    let Some((last, mods)) = codes.split_last() else {
+        return;
+    };
+    for code in mods {
+        emit_key(keyboard, *code, 1);
+    }
+    emit_key(keyboard, *last, 1);
+    emit_key(keyboard, *last, 0);
+    for code in mods.iter().rev() {
+        emit_key(keyboard, *code, 0);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn uinput_key(key: Key) -> Option<evdev::KeyCode> {
+    use evdev::KeyCode as K;
+    Some(match key {
+        Key::Control => K::KEY_LEFTCTRL,
+        Key::Shift => K::KEY_LEFTSHIFT,
+        Key::Alt => K::KEY_LEFTALT,
+        Key::Meta => K::KEY_LEFTMETA,
+        Key::Tab => K::KEY_TAB,
+        Key::Return => K::KEY_ENTER,
+        Key::Escape => K::KEY_ESC,
+        Key::Space => K::KEY_SPACE,
+        Key::Backspace => K::KEY_BACKSPACE,
+        Key::LeftArrow => K::KEY_LEFT,
+        Key::RightArrow => K::KEY_RIGHT,
+        Key::UpArrow => K::KEY_UP,
+        Key::DownArrow => K::KEY_DOWN,
+        Key::PageUp => K::KEY_PAGEUP,
+        Key::PageDown => K::KEY_PAGEDOWN,
+        Key::Home => K::KEY_HOME,
+        Key::End => K::KEY_END,
+        Key::F5 => K::KEY_F5,
+        Key::F11 => K::KEY_F11,
+        Key::Other(code) => return uinput_vk(code),
+        _ => return None,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn uinput_vk(code: u32) -> Option<evdev::KeyCode> {
+    use evdev::KeyCode as K;
+    const LETTERS: [K; 26] = [
+        K::KEY_A, K::KEY_B, K::KEY_C, K::KEY_D, K::KEY_E, K::KEY_F, K::KEY_G, K::KEY_H, K::KEY_I,
+        K::KEY_J, K::KEY_K, K::KEY_L, K::KEY_M, K::KEY_N, K::KEY_O, K::KEY_P, K::KEY_Q, K::KEY_R,
+        K::KEY_S, K::KEY_T, K::KEY_U, K::KEY_V, K::KEY_W, K::KEY_X, K::KEY_Y, K::KEY_Z,
+    ];
+    const DIGITS: [K; 10] = [
+        K::KEY_0, K::KEY_1, K::KEY_2, K::KEY_3, K::KEY_4, K::KEY_5, K::KEY_6, K::KEY_7, K::KEY_8,
+        K::KEY_9,
+    ];
+    let c = char::from_u32(code)?;
+    match c {
+        'A'..='Z' => Some(LETTERS[(c as u8 - b'A') as usize]),
+        '0'..='9' => Some(DIGITS[(c as u8 - b'0') as usize]),
+        _ => None,
     }
 }
 
@@ -796,6 +1040,22 @@ fn emit_key(device: &mut evdev::uinput::VirtualDevice, code: evdev::KeyCode, val
     let event = evdev::InputEvent::from(evdev::KeyEvent::new_now(code, value));
     if let Err(error) = device.emit(&[event]) {
         crate::install::log_line(&format!("uinput emit failed: {error}"));
+    }
+}
+
+#[cfg(test)]
+mod touchpad_wheel_tests {
+    use super::touchpad_wheel;
+
+    #[test]
+    fn touchpad_wheel_follows_scroll_direction_setting() {
+        let (h, v) = touchpad_wheel(0.1, -0.1, 5.0, false);
+        assert!(v > 0.0 && h > 0.0);
+        let (h, v) = touchpad_wheel(0.1, -0.1, 5.0, true);
+        assert!(v < 0.0 && h < 0.0);
+        let (_, slow) = touchpad_wheel(0.0, 0.1, 1.0, false);
+        let (_, fast) = touchpad_wheel(0.0, 0.1, 10.0, false);
+        assert!(fast.abs() > slow.abs());
     }
 }
 

@@ -4982,7 +4982,7 @@ dependencies = [
 
 [[package]]
 name = "warmup-companion"
-version = "0.8.0"
+version = "0.10.3"
 dependencies = [
  "cosmic-text",
  "cpal",
@@ -5019,6 +5019,7 @@ name = "warmup-gamepad"
 version = "0.1.0"
 dependencies = [
  "sdl3",
+ "windows 0.58.0",
 ]
 
 [[package]]

@@ -1,7 +1,6 @@
 //! Interactive companion tray icon.
 
 use std::mem::size_of;
-use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use std::os::windows::ffi::OsStrExt;
@@ -18,13 +17,11 @@ use windows::Win32::UI::Shell::{
     NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, GetCursorPos, GetMessageW, KillTimer, LoadIconW, LoadImageW, MessageBoxW,
-    PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetTimer,
-    TrackPopupMenu, TranslateMessage, HICON, IDI_APPLICATION, IMAGE_ICON, LR_LOADFROMFILE,
-    MB_ICONINFORMATION, MB_OK, MF_CHECKED, MF_DISABLED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG,
-    SW_SHOWNORMAL, TPM_BOTTOMALIGN, TPM_LEFTALIGN, WM_APP, WM_COMMAND, WM_DESTROY, WM_HOTKEY,
-    WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
+    KillTimer, LoadIconW, LoadImageW, MessageBoxW, PostQuitMessage, RegisterClassW,
+    RegisterWindowMessageW, SetForegroundWindow, SetTimer, TranslateMessage, HICON,
+    IDI_APPLICATION, IMAGE_ICON, LR_LOADFROMFILE, MB_ICONINFORMATION, MB_OK, MSG, SW_SHOWNORMAL,
+    WM_APP, WM_COMMAND, WM_DESTROY, WM_HOTKEY, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
 };
 
 const CLASS_NAME: windows::core::PCWSTR = w!("WarmupCompanionTray");
@@ -47,6 +44,8 @@ const TRAY_UID: u32 = 1;
 const WM_TRAY: u32 = WM_APP + 10;
 const ADD_RETRY_TIMER_ID: usize = 1;
 const ADD_RETRY_TIMER_MS: u32 = 1000;
+const VOICE_SYNC_TIMER_ID: usize = 2;
+const VOICE_SYNC_TIMER_MS: u32 = 1000;
 const MENU_TOGGLE_POLL: usize = 1001;
 const MENU_OPEN_LOG: usize = 1002;
 const MENU_DIAGNOSTICS: usize = 1003;
@@ -71,10 +70,23 @@ const MENU_STYLE_MONO: usize = 1019;
 const MENU_CONTROLLER_TIPS: usize = 1020;
 const MENU_SIGNIN_HINTS: usize = 1021;
 const MENU_UNLOAD_VOICE: usize = 1022;
+const MENU_VOICE_ENABLED: usize = 1023;
+const MENU_VOICE_OFF: usize = 1024;
+const MENU_STYLE_MODERN: usize = 1025;
+const MENU_SIDE_TIPS: usize = 1026;
+const MENU_DISPLAY_AUTO: usize = 1027;
+const MENU_DISPLAY_TV: usize = 1028;
+const MENU_DISPLAY_DESK: usize = 1029;
+const MENU_UPDATE: usize = 1030;
+const MENU_UPDATE_AUTO: usize = 1031;
+const MENU_UPDATE_NOTES: usize = 1032;
+const MENU_GET_LAUNCHER: usize = 1033;
+const MENU_ENGINE_REDUX: usize = 1034;
 /// Mic device i is `MENU_MIC_BASE + i` (capped at 32 devices in the menu).
 const MENU_MIC_BASE: usize = 1100;
 /// Global hotkey id for "toggle voice dictation" (Ctrl+Alt+V).
 const HOTKEY_VOICE: i32 = 0xB001;
+const HOTKEY_CENTER: i32 = 0xB002;
 
 const SERVICE_LOG_PATH: &str = r"C:\ProgramData\WarmupVk\service.log";
 
@@ -89,10 +101,12 @@ pub fn spawn() {
     let _ = std::thread::Builder::new()
         .name("warmup-tray".into())
         .spawn(tray_thread);
+    crate::updater::spawn_auto_check();
 }
 
 fn tray_thread() {
     unsafe {
+        crate::win::monitor::detect_display_once();
         let Ok(instance) = GetModuleHandleW(None) else {
             return;
         };
@@ -125,12 +139,16 @@ fn tray_thread() {
         );
         // Ctrl+Alt+V toggles voice dictation (mirrors R3), even with the keyboard
         // closed. MOD_NOREPEAT so holding the combo doesn't thrash the toggle.
+        // The timer drops the hotkey while voice typing is off, so the combo is
+        // not swallowed when transcription is disabled.
+        sync_voice_hotkey(hwnd);
         let _ = RegisterHotKey(
             hwnd,
-            HOTKEY_VOICE,
+            HOTKEY_CENTER,
             MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
-            0x56,
+            0x43,
         );
+        let _ = SetTimer(hwnd, VOICE_SYNC_TIMER_ID, VOICE_SYNC_TIMER_MS, None);
         try_add_icon(hwnd);
         if !ICON_ADDED.load(Ordering::SeqCst) {
             let _ = SetTimer(hwnd, ADD_RETRY_TIMER_ID, ADD_RETRY_TIMER_MS, None);
@@ -141,6 +159,7 @@ fn tray_thread() {
             DispatchMessageW(&msg);
         }
         let _ = UnregisterHotKey(hwnd, HOTKEY_VOICE);
+        let _ = UnregisterHotKey(hwnd, HOTKEY_CENTER);
         delete_icon(hwnd);
         let _ = DestroyWindow(hwnd);
     }
@@ -255,12 +274,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             LRESULT(0)
         }
+        WM_TIMER if wparam.0 == VOICE_SYNC_TIMER_ID => {
+            sync_voice_hotkey(hwnd);
+            LRESULT(0)
+        }
         WM_TRAY if lparam.0 as u32 == WM_RBUTTONUP => {
             show_menu(hwnd);
             LRESULT(0)
         }
         WM_HOTKEY if wparam.0 as i32 == HOTKEY_VOICE => {
-            crate::vk_nav::start_voice_input();
+            if crate::config::voice_enabled() {
+                crate::vk_nav::start_voice_input();
+            }
+            LRESULT(0)
+        }
+        WM_HOTKEY if wparam.0 as i32 == HOTKEY_CENTER => {
+            crate::win::controller_center::toggle();
             LRESULT(0)
         }
         msg if msg == TASKBAR_CREATED.load(Ordering::SeqCst) => {
@@ -297,10 +326,39 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 MENU_VK_FLOATING => toggle_vk_mode(),
                 MENU_STYLE_NORMAL => set_vk_style("normal"),
                 MENU_STYLE_MONO => set_vk_style("mono"),
+                MENU_STYLE_MODERN => set_vk_style("modern"),
+                MENU_DISPLAY_AUTO => set_vk_display("auto"),
+                MENU_DISPLAY_TV => set_vk_display("tv"),
+                MENU_DISPLAY_DESK => set_vk_display("desk"),
+                MENU_SIDE_TIPS => toggle_setting_bool(
+                    "vk_side_tips",
+                    crate::config::gamepad_settings().vk_side_tips,
+                ),
                 MENU_EDIT_SETTINGS => edit_settings(),
-                MENU_ENGINE_WHISPER => crate::win::speech_input::set_engine("whisper"),
-                MENU_ENGINE_PARAKEET => crate::win::speech_input::set_engine("parakeet"),
+                MENU_UPDATE => crate::updater::open(),
+                MENU_UPDATE_NOTES => crate::updater::open_release_page(),
+                MENU_GET_LAUNCHER => crate::updater::download_launcher(),
+                MENU_UPDATE_AUTO => toggle_setting_bool(
+                    "update_check",
+                    crate::config::gamepad_settings().update_check,
+                ),
+                MENU_ENGINE_WHISPER => {
+                    crate::win::speech_input::set_engine("whisper");
+                    set_voice_enabled(hwnd, true);
+                }
+                MENU_ENGINE_PARAKEET => {
+                    crate::win::speech_input::set_engine("parakeet");
+                    set_voice_enabled(hwnd, true);
+                }
+                MENU_ENGINE_REDUX => {
+                    crate::win::speech_input::set_engine("parakeet-redux");
+                    set_voice_enabled(hwnd, true);
+                }
                 MENU_MIC_DEFAULT => crate::win::speech_input::set_mic_choice(""),
+                MENU_VOICE_ENABLED => {
+                    set_voice_enabled(hwnd, !crate::config::gamepad_settings().voice_enabled)
+                }
+                MENU_VOICE_OFF => set_voice_enabled(hwnd, false),
                 MENU_UNLOAD_VOICE => {
                     let _ = std::thread::Builder::new()
                         .name("voice-unload".into())
@@ -335,201 +393,202 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
 }
 
-unsafe fn show_menu(hwnd: HWND) {
-    let menu = CreatePopupMenu().unwrap_or_default();
-    if menu.0.is_null() {
-        return;
-    }
+fn menu_entries() -> Vec<crate::win::tray_menu::Entry> {
+    use crate::win::tray_menu::Entry;
     let gs = crate::config::gamepad_settings();
-    let chk = |on: bool| MF_STRING | if on { MF_CHECKED } else { Default::default() };
+    let mut root = vec![
+        Entry::Header,
+        Entry::Separator,
+        Entry::toggle(
+            "Pause gamepad input",
+            MENU_TOGGLE_POLL,
+            crate::gamepad_backend::userland_poll_paused(),
+        ),
+        Entry::toggle("Gamepad cursor", MENU_CURSOR_ENABLED, gs.cursor_enabled),
+        Entry::command("Control Center…", MENU_CONTROLLER_CENTER).with_accel("Ctrl+Alt+C"),
+        Entry::command("Show controller tips", MENU_CONTROLLER_TIPS),
+        Entry::toggle(
+            "Sign-in controller hints",
+            MENU_SIGNIN_HINTS,
+            gs.signin_hints,
+        ),
+    ];
 
-    // Non-clickable header so the menu reads as one app's, not a loose pile of items.
-    let _ = AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, w!("Warmup Companion"));
-    let build_info = wide(BUILD_INFO);
-    let _ = AppendMenuW(
-        menu,
-        MF_STRING | MF_DISABLED,
-        0,
-        PCWSTR(build_info.as_ptr()),
-    );
-    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-
-    // Primary control stays top-level (a stable label + check, not a verb that swaps).
-    let paused = crate::gamepad_backend::userland_poll_paused();
-    let _ = AppendMenuW(
-        menu,
-        chk(paused),
-        MENU_TOGGLE_POLL,
-        w!("Pause gamepad input"),
-    );
-    let _ = AppendMenuW(
-        menu,
-        chk(gs.cursor_enabled),
-        MENU_CURSOR_ENABLED,
-        w!("Gamepad cursor"),
-    );
-    let _ = AppendMenuW(
-        menu,
-        MF_STRING,
-        MENU_CONTROLLER_CENTER,
-        w!("Controller Center..."),
-    );
-    let _ = AppendMenuW(
-        menu,
-        MF_STRING,
-        MENU_CONTROLLER_TIPS,
-        w!("Show controller tips"),
-    );
-    let _ = AppendMenuW(
-        menu,
-        chk(gs.signin_hints),
-        MENU_SIGNIN_HINTS,
-        w!("Sign-in controller hints"),
-    );
-
-    // Keyboard.
-    let kb = CreatePopupMenu().unwrap_or_default();
-    if !kb.0.is_null() {
-        let _ = AppendMenuW(
-            kb,
-            chk(crate::config::vk_bar_scale() < 1.0),
+    let style = crate::config::vk_style();
+    let mut kb = vec![
+        Entry::toggle(
+            "Compact size",
             MENU_COMPACT,
-            w!("Compact size"),
-        );
-        let floating = crate::config::vk_layout_mode() == crate::config::VkLayoutMode::Floating;
-        let _ = AppendMenuW(kb, chk(floating), MENU_VK_FLOATING, w!("Floating layout"));
-        let style_menu = CreatePopupMenu().unwrap_or_default();
-        if !style_menu.0.is_null() {
-            let style = crate::config::vk_style();
-            let _ = AppendMenuW(
-                style_menu,
-                chk(style == crate::config::VkStyle::Normal),
-                MENU_STYLE_NORMAL,
-                w!("Normal"),
-            );
-            let _ = AppendMenuW(
-                style_menu,
-                chk(style == crate::config::VkStyle::Mono),
-                MENU_STYLE_MONO,
-                w!("Mono"),
-            );
-            let _ = AppendMenuW(kb, MF_POPUP, style_menu.0 as usize, w!("Keyboard style"));
-        }
-        let _ = AppendMenuW(menu, MF_POPUP, kb.0 as usize, w!("Keyboard"));
+            crate::config::vk_bar_scale() < 1.0,
+        ),
+        Entry::toggle(
+            "Floating layout",
+            MENU_VK_FLOATING,
+            crate::config::vk_layout_mode() == crate::config::VkLayoutMode::Floating,
+        ),
+        Entry::submenu(
+            "Keyboard style",
+            vec![
+                Entry::radio(
+                    "Normal",
+                    MENU_STYLE_NORMAL,
+                    style == crate::config::VkStyle::Normal,
+                ),
+                Entry::radio(
+                    "Mono",
+                    MENU_STYLE_MONO,
+                    style == crate::config::VkStyle::Mono,
+                ),
+                Entry::radio(
+                    "Modern",
+                    MENU_STYLE_MODERN,
+                    style == crate::config::VkStyle::Modern,
+                ),
+            ],
+        ),
+    ];
+    if crate::win::vk_ui::vk_look().tv_layout() {
+        kb.push(Entry::toggle(
+            "Show shortcut hint",
+            MENU_SIDE_TIPS,
+            gs.vk_side_tips,
+        ));
     }
+    let display = crate::config::vk_display();
+    kb.push(Entry::submenu(
+        "Display",
+        vec![
+            Entry::radio(
+                "Auto (detect)",
+                MENU_DISPLAY_AUTO,
+                display == crate::config::VkDisplay::Auto,
+            ),
+            Entry::radio(
+                "TV",
+                MENU_DISPLAY_TV,
+                display == crate::config::VkDisplay::Tv,
+            ),
+            Entry::radio(
+                "Desk",
+                MENU_DISPLAY_DESK,
+                display == crate::config::VkDisplay::Desk,
+            ),
+        ],
+    ));
+    root.push(Entry::submenu("Keyboard", kb));
 
-    // Game detection.
-    let game = CreatePopupMenu().unwrap_or_default();
-    if !game.0.is_null() {
-        let _ = AppendMenuW(
-            game,
-            chk(gs.sleep_on_game),
-            MENU_SLEEP_ON_GAME,
-            w!("Pause input while a game is running"),
-        );
-        let _ = AppendMenuW(
-            game,
-            chk(gs.auto_stop_on_game),
-            MENU_AUTOSTOP_ON_GAME,
-            w!("Guide-only input while a game is running"),
-        );
-        let _ = AppendMenuW(menu, MF_POPUP, game.0 as usize, w!("Game detection"));
-    }
+    root.push(Entry::submenu(
+        "Game detection",
+        vec![
+            Entry::toggle(
+                "Pause input while a game is running",
+                MENU_SLEEP_ON_GAME,
+                gs.sleep_on_game,
+            ),
+            Entry::toggle(
+                "Guide-only input while a game is running",
+                MENU_AUTOSTOP_ON_GAME,
+                gs.auto_stop_on_game,
+            ),
+        ],
+    ));
 
-    // Voice typing — only when the optional speech sidecar is installed. The wide
-    // mic-name buffers must outlive TrackPopupMenu, so they live in this scope.
-    let mut mic_labels: Vec<Vec<u16>> = Vec::new();
-    if crate::win::speech_input::available_cached() {
-        // Engine picker — only when Parakeet is installed (else whisper is the only
-        // choice and a one-item menu is noise).
+    let voice_on = gs.voice_enabled;
+    if !crate::win::speech_input::available_cached() {
+        root.push(Entry::toggle("Voice typing", MENU_VOICE_ENABLED, voice_on));
+    } else {
+        let engine = crate::win::speech_input::engine();
+        let parakeet =
+            crate::win::speech_input::parakeet_available() && engine.starts_with("parakeet");
+        let mut eng = vec![
+            Entry::radio("Off", MENU_VOICE_OFF, !voice_on),
+            Entry::radio("Whisper", MENU_ENGINE_WHISPER, voice_on && !parakeet),
+        ];
         if crate::win::speech_input::parakeet_available() {
-            let eng = CreatePopupMenu().unwrap_or_default();
-            if !eng.0.is_null() {
-                let parakeet = crate::win::speech_input::engine() == "parakeet";
-                let _ = AppendMenuW(eng, chk(!parakeet), MENU_ENGINE_WHISPER, w!("Whisper"));
-                let _ = AppendMenuW(
-                    eng,
-                    chk(parakeet),
-                    MENU_ENGINE_PARAKEET,
-                    w!("Parakeet (NVIDIA)"),
-                );
-                let _ = AppendMenuW(menu, MF_POPUP, eng.0 as usize, w!("Voice engine"));
-            }
+            eng.push(Entry::radio(
+                "Parakeet (NVIDIA)",
+                MENU_ENGINE_PARAKEET,
+                voice_on && parakeet && engine == "parakeet",
+            ));
         }
-        let sub = CreatePopupMenu().unwrap_or_default();
-        if !sub.0.is_null() {
+        if crate::win::speech_input::redux_available() {
+            eng.push(Entry::radio(
+                "Parakeet Redux",
+                MENU_ENGINE_REDUX,
+                voice_on && parakeet && engine == "parakeet-redux",
+            ));
+        }
+        root.push(Entry::submenu("Voice engine", eng));
+        if voice_on {
             let cur = crate::win::speech_input::mic_choice();
-            let _ = AppendMenuW(
-                sub,
-                chk(cur.is_none()),
+            let mut mics = vec![Entry::radio(
+                "Default (system)",
                 MENU_MIC_DEFAULT,
-                w!("Default (system)"),
-            );
+                cur.is_none(),
+            )];
             for (i, name) in crate::win::speech_input::list_mics()
                 .iter()
                 .enumerate()
                 .take(32)
             {
                 let on = cur.as_deref().map(|c| name.contains(c)).unwrap_or(false);
-                mic_labels.push(wide(name));
-                let label = mic_labels.last().unwrap();
-                let _ = AppendMenuW(sub, chk(on), MENU_MIC_BASE + i, PCWSTR(label.as_ptr()));
+                mics.push(Entry::radio(name.clone(), MENU_MIC_BASE + i, on));
             }
-            let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, w!("Microphone"));
+            root.push(Entry::submenu("Microphone", mics));
         }
-        let _ = AppendMenuW(
-            menu,
-            MF_STRING,
-            MENU_UNLOAD_VOICE,
-            w!("Unload voice engine (free memory)"),
-        );
     }
 
-    // Diagnostics.
-    let diag = CreatePopupMenu().unwrap_or_default();
-    if !diag.0.is_null() {
-        let _ = AppendMenuW(diag, MF_STRING, MENU_OPEN_LOG, w!("Open service log"));
-        let _ = AppendMenuW(diag, MF_STRING, MENU_DIAGNOSTICS, w!("Run diagnostics"));
-        let _ = AppendMenuW(
-            diag,
-            MF_STRING,
-            MENU_EDIT_SETTINGS,
-            w!("Edit settings file…"),
-        );
-        let _ = AppendMenuW(diag, MF_STRING, MENU_PRIVACY, w!("Privacy & trust model"));
-        let _ = AppendMenuW(menu, MF_POPUP, diag.0 as usize, w!("Diagnostics"));
+    let available = crate::updater::available_version();
+    let mut updates = match &available {
+        Some(v) => vec![
+            Entry::command(format!("Install update v{v}…"), MENU_UPDATE),
+            Entry::command("What's new", MENU_UPDATE_NOTES),
+        ],
+        None => vec![Entry::command("Check for updates", MENU_UPDATE)],
+    };
+    updates.push(Entry::Separator);
+    updates.push(Entry::toggle(
+        "Check automatically",
+        MENU_UPDATE_AUTO,
+        gs.update_check,
+    ));
+    if let Some(at) = crate::updater::snapshot().last_checked {
+        updates.push(Entry::command(format!("Last checked {at}"), 0).disabled(true));
     }
+    root.push(Entry::submenu("Updates", updates).with_dot(available.is_some()));
 
-    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-    let _ = AppendMenuW(
-        menu,
-        MF_STRING,
+    root.push(Entry::submenu(
+        "Diagnostics",
+        vec![
+            Entry::command("Open service log", MENU_OPEN_LOG),
+            Entry::command("Run diagnostics", MENU_DIAGNOSTICS),
+            Entry::command("Edit settings file…", MENU_EDIT_SETTINGS),
+            Entry::command("Privacy & trust model", MENU_PRIVACY),
+        ],
+    ));
+    root.push(Entry::Separator);
+    root.push(Entry::command(
+        "Restore Windows keyboard services",
         MENU_RESTORE_NATIVE_KBD,
-        w!("Restore Windows keyboard services"),
-    );
-    let _ = AppendMenuW(
-        menu,
-        MF_STRING,
+    ));
+    root.push(Entry::command(
+        "Uninstall Warmup Companion…",
         MENU_UNINSTALL,
-        w!("Uninstall Warmup Companion…"),
-    );
-    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-    let _ = AppendMenuW(menu, MF_STRING, MENU_EXIT, w!("Exit"));
+    ));
+    root.push(Entry::Separator);
+    if !launcher_installed() {
+        root.push(Entry::promo("Get warmUP Game Launcher", MENU_GET_LAUNCHER));
+        root.push(Entry::Separator);
+    }
+    root.push(Entry::command("Exit", MENU_EXIT));
+    root
+}
 
+unsafe fn show_menu(hwnd: HWND) {
     let mut pt = POINT::default();
     let _ = GetCursorPos(&mut pt);
     let _ = SetForegroundWindow(hwnd);
-    let _ = TrackPopupMenu(
-        menu,
-        TPM_LEFTALIGN | TPM_BOTTOMALIGN,
-        pt.x,
-        pt.y,
-        0,
-        hwnd,
-        Some(null_mut()),
-    );
-    // Destroying the root frees the attached submenus too.
-    let _ = DestroyMenu(menu);
+    crate::win::tray_menu::show(hwnd, pt, menu_entries(), BUILD_INFO);
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -583,7 +642,37 @@ fn toggle_compact() {
     }
 }
 
+/// Register Ctrl+Alt+V only while voice typing is on. Unregistering releases
+/// the combo so another app can use it when transcription is disabled.
+unsafe fn sync_voice_hotkey(hwnd: HWND) {
+    static REGISTERED: AtomicBool = AtomicBool::new(false);
+    let want = crate::config::voice_enabled();
+    if want == REGISTERED.load(Ordering::SeqCst) {
+        return;
+    }
+    if want {
+        let ok = RegisterHotKey(
+            hwnd,
+            HOTKEY_VOICE,
+            MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
+            0x56,
+        )
+        .is_ok();
+        REGISTERED.store(ok, Ordering::SeqCst);
+    } else {
+        let _ = UnregisterHotKey(hwnd, HOTKEY_VOICE);
+        REGISTERED.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Flip a settings.ini boolean (read live by `gamepad_settings`).
+unsafe fn set_voice_enabled(hwnd: HWND, on: bool) {
+    if crate::config::gamepad_settings().voice_enabled != on {
+        toggle_setting_bool("voice_enabled", !on);
+    }
+    sync_voice_hotkey(hwnd);
+}
+
 fn toggle_setting_bool(key: &str, current: bool) {
     let next = if current { "false" } else { "true" };
     if let Err(e) = crate::config::set_gamepad_setting(key, next) {
@@ -603,6 +692,12 @@ fn toggle_vk_mode() {
 fn set_vk_style(style: &str) {
     if let Err(e) = crate::config::set_gamepad_setting("vk_style", style) {
         crate::install::log_line(&format!("tray: set vk_style failed: {e}"));
+    }
+}
+
+fn set_vk_display(display: &str) {
+    if let Err(e) = crate::config::set_gamepad_setting("vk_display", display) {
+        crate::install::log_line(&format!("tray: set vk_display failed: {e}"));
     }
 }
 
@@ -646,6 +741,12 @@ fn installed_uninstaller() -> Option<PathBuf> {
         std::env::var_os("ProgramW6432").or_else(|| std::env::var_os("ProgramFiles"))?;
     let path = installed_uninstaller_path(Path::new(&program_files));
     path.is_file().then_some(path)
+}
+
+pub(crate) fn launcher_installed() -> bool {
+    std::env::var_os("ProgramW6432")
+        .or_else(|| std::env::var_os("ProgramFiles"))
+        .is_some_and(|p| Path::new(&p).join("warmUP").join("warmup.exe").is_file())
 }
 
 unsafe fn uninstall(hwnd: HWND) {

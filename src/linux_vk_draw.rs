@@ -157,7 +157,7 @@ fn spec_for(style: VkStyle) -> Spec {
             separator_h: 28.0,
             separator_alpha: 0x99 as f32 / 255.0,
         },
-        VkStyle::Normal => Spec {
+        VkStyle::Normal | VkStyle::Modern => Spec {
             mono: false,
             family: "Noto Sans",
             design_kh: 102.0,
@@ -302,7 +302,7 @@ pub fn floating_bottom_margin(output_h: f32) -> i32 {
 
 pub fn layout_scale(style: VkStyle) -> f32 {
     let key_w = match style {
-        VkStyle::Normal => 138.0,
+        VkStyle::Normal | VkStyle::Modern => 138.0,
         VkStyle::Mono => 137.0,
     };
     key_w / REF_KEY_W
@@ -1180,7 +1180,7 @@ fn draw_strip(
 
 fn palette(style: VkStyle, theme: &KeyboardTheme) -> Pal {
     let mut pal = match style {
-        VkStyle::Normal => Pal {
+        VkStyle::Normal | VkStyle::Modern => Pal {
             bg: rgb(0x15161C),
             key: rgb(0x2A2B36),
             key_action: rgb(0x1F2029),

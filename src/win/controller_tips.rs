@@ -42,12 +42,34 @@ pub static CUES: [&[TipToken]; 5] = [
     ],
 ];
 
+fn dictate_cue(cue: &[TipToken]) -> bool {
+    cue.iter()
+        .any(|token| matches!(token, Text(text) if text.starts_with("Dictate")))
+}
+
+/// Cues the first-run pill walks through. The dictate step is skipped while
+/// voice typing is off, so the tour does not teach a button that does nothing.
+fn playback_len() -> usize {
+    if crate::config::voice_enabled() {
+        CUES.len()
+    } else {
+        CUES.iter().filter(|cue| !dictate_cue(cue)).count()
+    }
+}
+
 pub fn cue_count() -> usize {
-    CUES.len()
+    playback_len()
 }
 
 pub fn cue(index: usize) -> &'static [TipToken] {
-    CUES.get(index).copied().unwrap_or(&[])
+    if crate::config::voice_enabled() {
+        return CUES.get(index).copied().unwrap_or(&[]);
+    }
+    CUES.iter()
+        .copied()
+        .filter(|cue| !dictate_cue(cue))
+        .nth(index)
+        .unwrap_or(&[])
 }
 
 pub fn should_show(stored: Option<&str>, current: &str) -> bool {

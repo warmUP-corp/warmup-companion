@@ -234,3 +234,7 @@ fn systemctl(args: &[&str]) -> Result<String, String> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     Err(format!("{stdout}{stderr}"))
 }
+
+pub fn request_service_stop() {
+    crate::install::log_line("service stop requested");
+}
