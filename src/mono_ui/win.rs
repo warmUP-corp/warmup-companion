@@ -282,7 +282,11 @@ impl Gfx {
         } else {
             DWRITE_WORD_WRAPPING_NO_WRAP
         });
-        self.formats.borrow_mut().insert(key, f.clone());
+        let mut formats = self.formats.borrow_mut();
+        if formats.len() >= 64 {
+            formats.clear();
+        }
+        formats.insert(key, f.clone());
         Some(f)
     }
 

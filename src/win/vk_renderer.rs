@@ -2179,12 +2179,12 @@ impl VkRenderer {
                     let g = &mut self.gfx;
                     g.ring(
                         crate::mono_ui::Rect {
-                            x: key_rect.left,
-                            y: key_rect.top,
-                            w: key_rect.right - key_rect.left,
-                            h: key_rect.bottom - key_rect.top,
+                            x: key_rect.left - 1.0,
+                            y: key_rect.top - 1.0,
+                            w: key_rect.right - key_rect.left + 2.0,
+                            h: key_rect.bottom - key_rect.top + 2.0,
                         },
-                        radius,
+                        radius + 1.0,
                         2.0,
                         pal.accent,
                         halo_alpha,
@@ -2252,12 +2252,13 @@ impl VkRenderer {
                 let glyph = styled_glyph(spec, &key.action, glyph);
                 if !glyph.is_empty() {
                     let corner = spec.corner_sublabel && key.sublabel.is_some() && !symbol_font;
-                    let (weight, families, halign, valign) = if corner {
+                    let (weight, families, halign, valign, wrap) = if corner {
                         (
                             spec.label_weight,
                             spec.families,
                             crate::mono_ui::Align::Left,
                             crate::mono_ui::VAlign::Bottom,
+                            false,
                         )
                     } else if symbol_font {
                         (
@@ -2265,6 +2266,7 @@ impl VkRenderer {
                             &["Segoe UI Symbol"] as &[&str],
                             crate::mono_ui::Align::Center,
                             crate::mono_ui::VAlign::Center,
+                            true,
                         )
                     } else if glyph.chars().count() > 1 {
                         (
@@ -2272,6 +2274,7 @@ impl VkRenderer {
                             spec.families,
                             crate::mono_ui::Align::Center,
                             crate::mono_ui::VAlign::Center,
+                            false,
                         )
                     } else {
                         (
@@ -2279,6 +2282,7 @@ impl VkRenderer {
                             spec.families,
                             crate::mono_ui::Align::Center,
                             crate::mono_ui::VAlign::Center,
+                            false,
                         )
                     };
                     let px = if symbol_font {
@@ -2311,7 +2315,7 @@ impl VkRenderer {
                         1.0,
                         halign,
                         valign,
-                        false,
+                        wrap,
                     );
                 }
             }
@@ -2345,7 +2349,7 @@ impl VkRenderer {
                         1.0,
                         crate::mono_ui::Align::Center,
                         crate::mono_ui::VAlign::Top,
-                        false,
+                        true,
                     );
                 }
             }
