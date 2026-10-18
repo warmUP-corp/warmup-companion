@@ -870,6 +870,10 @@ pub fn set_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
     if key == "voice_enabled" {
         crate::win::speech_input::enforce_voice_enabled();
     }
+    #[cfg(all(target_os = "linux", feature = "speech"))]
+    if key == "voice_enabled" {
+        crate::linux_speech::enforce_voice_enabled();
+    }
     Ok(())
 }
 

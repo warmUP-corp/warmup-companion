@@ -1850,6 +1850,11 @@ where
             next_voice_check = now + Duration::from_secs(1);
             crate::win::speech_input::enforce_voice_enabled();
         }
+        #[cfg(all(target_os = "linux", feature = "speech"))]
+        if now >= next_voice_check {
+            next_voice_check = now + Duration::from_secs(1);
+            crate::linux_speech::enforce_voice_enabled();
+        }
 
         // Publish the current controller connection state to the pipe server (#347).
         crate::pipe_server::publish_from_label(&poll.controller_label());

@@ -84,6 +84,10 @@ fn effective_userland_poll_mode() -> PollMode {
         let _ = std::thread::Builder::new()
             .name("voice-unload".into())
             .spawn(crate::win::speech_input::unload_engine);
+        #[cfg(all(target_os = "linux", feature = "speech"))]
+        let _ = std::thread::Builder::new()
+            .name("voice-unload".into())
+            .spawn(crate::linux_speech::unload_engine);
     } else if !any_game {
         VOICE_GAME_SEEN.store(false, Ordering::SeqCst);
     }
