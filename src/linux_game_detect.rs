@@ -402,6 +402,50 @@ fn hypr_json(sock: &std::path::Path, cmd: &str) -> Result<serde_json::Value, Str
     serde_json::from_str(text).map_err(|error| format!("parse {cmd}: {error}"))
 }
 
+pub fn hypr_dispatch(lua: &str) -> bool {
+    let Some((command, _)) = hypr_runtime() else {
+        return false;
+    };
+    let mut stream = match UnixStream::connect(&command) {
+        Ok(stream) => stream,
+        Err(_) => return false,
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
+    let cmd = format!("dispatch {lua}");
+    if stream.write_all(cmd.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 1024];
+    loop {
+        match stream.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::TimedOut
+                    || error.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                break;
+            }
+            Err(_) => return false,
+        }
+    }
+    drop(stream);
+    hypr_reply_ok(&String::from_utf8_lossy(&buf))
+}
+
+fn hypr_reply_ok(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() {
+        return false;
+    }
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("error") || lower.contains("expected") {
+        return false;
+    }
+    text.lines().any(|line| line.trim() == "ok")
+}
+
 fn json_string(value: &serde_json::Value, key: &str) -> String {
     value
         .get(key)

@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, a swipe left or right on the touchpad moves to the previous or next workspace on Hyprland. Swipe up and swipe down send the overview and show-desktop shortcuts.
 - On Linux, a controller button can send the shortcut for the focused app. In a browser, B closes the tab, Y opens a tab, and the triggers move between tabs.
 - The on-screen keyboard is drawn on the GPU. The card stays on the graphics card, and moving the highlight uploads the selected key.
 - The voice cloud no longer waits for the graphics card to go idle. If a game is already using the GPU, that cloud frame is skipped so the game is not stalled.

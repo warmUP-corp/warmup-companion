@@ -934,11 +934,19 @@ fn apply_uinput(
         }
         Cmd::Swipe(swipe) => {
             use crate::touchpad_gestures::Swipe;
+            let lua = match swipe {
+                Swipe::Left => Some(r#"hl.dsp.focus({ workspace = "e-1" })"#),
+                Swipe::Right => Some(r#"hl.dsp.focus({ workspace = "e+1" })"#),
+                Swipe::Up | Swipe::Down => None,
+            };
+            if lua.is_some_and(crate::linux_game_detect::hypr_dispatch) {
+                return;
+            }
             let keys = match swipe {
                 Swipe::Left => vec![Key::Control, Key::Meta, Key::LeftArrow],
                 Swipe::Right => vec![Key::Control, Key::Meta, Key::RightArrow],
-                Swipe::Up => vec![Key::Meta, Key::Tab],
-                Swipe::Down => vec![Key::Meta, Key::Other(0x44)],
+                Swipe::Up => vec![Key::Meta, Key::Other(b'W' as u32)],
+                Swipe::Down => vec![Key::Meta, Key::Other(b'D' as u32)],
             };
             if let Some(keyboard) = keyboard {
                 tap_uinput_chord(keyboard, &keys);
