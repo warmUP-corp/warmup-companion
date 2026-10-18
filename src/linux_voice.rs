@@ -118,6 +118,7 @@ struct Pill {
     level: f32,
     level_at: Option<Instant>,
     shown_gen: u64,
+    gfx: crate::mono_ui::Gfx,
 }
 
 impl Pill {
@@ -174,6 +175,7 @@ impl Pill {
             level: 0.0,
             level_at: None,
             shown_gen: u64::MAX,
+            gfx: crate::mono_ui::Gfx::new(1, 1)?,
         })
     }
 
@@ -186,11 +188,15 @@ impl Pill {
         if self.border_drawn && self.border_phase == phase {
             return;
         }
-        let accent = crate::config::keyboard_theme().accent.unwrap_or(0xA6D1FF);
-        let Some(pixmap) = crate::linux_vk::paint_voice_screen(width, height, phase, 0.0, false, None, 0, accent) else {
+        let accent = crate::config::keyboard_theme()
+            .accent
+            .unwrap_or(crate::vk_paint::rgb(0xA6D1FF));
+        if !crate::linux_vk::paint_voice_screen(&mut self.gfx, width, height, phase, 0.0, false, None, 0, accent) {
             return;
-        };
-        if !self.upload(&pixmap, qh, true) {
+        }
+        let pixels = crate::linux_vk::draw_argb(self.gfx.pixels());
+        let size = (self.gfx.width(), self.gfx.height());
+        if !self.upload(&pixels, size, qh, true) {
             return;
         }
         self.border_phase = phase;
@@ -253,7 +259,8 @@ impl Pill {
         let Some(pixmap) = crate::linux_vk::paint_voice_orb(side, phase, self.level, &bytes, px) else {
             return;
         };
-        if self.upload(&pixmap, qh, false) {
+        let pixels = crate::linux_vk::draw_argb(pixmap.data());
+        if self.upload(&pixels, (pixmap.width(), pixmap.height()), qh, false) {
             self.shown_gen = crate::linux_nimbus::frame_generation();
             self.orb_visible = true;
         }
@@ -269,10 +276,9 @@ impl Pill {
         self.shown_gen = u64::MAX;
     }
 
-    fn upload(&mut self, pixmap: &tiny_skia::Pixmap, qh: &QueueHandle<Self>, border: bool) -> bool {
-        let pixels = crate::linux_vk::draw_argb(pixmap);
-        let buffer_w = pixmap.width() as i32;
-        let buffer_h = pixmap.height() as i32;
+    fn upload(&mut self, pixels: &[u8], size: (u32, u32), qh: &QueueHandle<Self>, border: bool) -> bool {
+        let buffer_w = size.0 as i32;
+        let buffer_h = size.1 as i32;
         let pool = if border { &mut self.border_pool } else { &mut self.orb_pool };
         let Ok((buffer, canvas)) = pool.create_buffer(
             buffer_w,

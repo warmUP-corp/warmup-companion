@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, the glow around the screen during dictation uses the keyboard accent colour the same way Windows does. A custom accent no longer shows with red and blue swapped.
 - On Linux, the on-screen keyboard stays on the graphics card once it has started there. Pressing a key other than the highlighted one, or a GPU hiccup, no longer switches the keyboard to a software picture that Hyprland rejects; the GPU is opened again instead, and after three failures in a row the keyboard closes.
 - On Linux, an Xbox controller on Bluetooth shows its battery level when the driver reports one (xpadneo or the kernel's HID battery).
 - On Linux, the bundled device rule also lets the companion read a DualSense or DualShock 4 battery and set its lightbar. The install guide explains when that rule is needed, how to update, and which features need Hyprland.

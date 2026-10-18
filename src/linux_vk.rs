@@ -54,6 +54,7 @@ pub fn paint_voice_orb(
 
 #[cfg(feature = "speech")]
 pub fn paint_voice_screen(
+    g: &mut Gfx,
     width: u32,
     height: u32,
     phase: u8,
@@ -62,13 +63,13 @@ pub fn paint_voice_screen(
     orb: Option<&[u8]>,
     orb_px: u32,
     accent: u32,
-) -> Option<tiny_skia::Pixmap> {
-    draw::paint_voice_screen(width, height, phase, level, show_orb, orb, orb_px, accent)
+) -> bool {
+    draw::paint_voice_screen(g, width, height, phase, level, show_orb, orb, orb_px, accent)
 }
 
 #[cfg(feature = "speech")]
-pub fn draw_argb(pixmap: &tiny_skia::Pixmap) -> Vec<u8> {
-    draw::to_argb(pixmap.data())
+pub fn draw_argb(pixels: &[u8]) -> Vec<u8> {
+    draw::to_argb(pixels)
 }
 
 static STOP: AtomicBool = AtomicBool::new(false);

@@ -1796,6 +1796,7 @@ pub fn paint_voice_orb(side: u32, phase: u8, level: f32, orb: &[u8], orb_px: u32
 }
 
 pub fn paint_voice_screen(
+    g: &mut Gfx,
     width: u32,
     height: u32,
     phase: u8,
@@ -1804,12 +1805,11 @@ pub fn paint_voice_screen(
     orb: Option<&[u8]>,
     orb_px: u32,
     accent: u32,
-) -> Option<Pixmap> {
+) -> bool {
     if width == 0 || height == 0 {
-        return None;
+        return false;
     }
-    let mut pixmap = Pixmap::new(width, height)?;
-    let scale = (height as f32 / 1080.0).clamp(0.85, 2.0);
+    g.begin(width, height);
     let border_alpha = if phase == 2 {
         let t = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1820,14 +1820,20 @@ pub fn paint_voice_screen(
     } else {
         1.0
     };
-    paint_voice_border(&mut pixmap, accent, border_alpha.min(1.0), scale);
+    if unsafe {
+        crate::vk_paint::paint_display_border(g, width as f32, height as f32, accent, border_alpha.min(1.0))
+    }
+    .is_err()
+    {
+        return false;
+    }
     if show_orb {
         if let Some(orb) = orb {
             let (x, y, side) = voice_screen_slot(width as f32, height as f32, phase, level);
-            blit_premul(&mut pixmap, orb, orb_px, x, y, side);
+            blit_premul(g.canvas().0, orb, orb_px, x, y, side);
         }
     }
-    Some(pixmap)
+    true
 }
 
 fn voice_screen_slot(width: f32, height: f32, phase: u8, level: f32) -> (f32, f32, f32) {
@@ -1841,70 +1847,6 @@ fn voice_screen_slot(width: f32, height: f32, phase: u8, level: f32) -> (f32, f3
     let cx = left + size * 0.5;
     let cy = top + size * 0.5;
     (cx - side * 0.5, cy - side * 0.5, side)
-}
-
-fn paint_voice_border(pixmap: &mut Pixmap, accent: u32, alpha: f32, scale: f32) {
-    let layers: [(f32, f32); 7] = [
-        (22.0, 0.02),
-        (14.0, 0.028),
-        (9.0, 0.038),
-        (5.5, 0.05),
-        (3.2, 0.065),
-        (1.8, 0.08),
-        (1.0, 0.07),
-    ];
-    let width = pixmap.width();
-    let height = pixmap.height();
-    if width == 0 || height == 0 {
-        return;
-    }
-    let r = ((accent >> 16) & 0xFF) as u8;
-    let g = ((accent >> 8) & 0xFF) as u8;
-    let b = (accent & 0xFF) as u8;
-    let max_depth = (layers[0].0 * scale).ceil() as u32;
-    let pixels = pixmap.data_mut();
-    let paint = |pixels: &mut [u8], x: u32, y: u32| {
-        let from_x = x.min(width - 1 - x);
-        let from_y = y.min(height - 1 - y);
-        let dist = from_x.min(from_y);
-        if dist >= max_depth {
-            return;
-        }
-        let mut covered = 0.0f32;
-        for (depth, layer_alpha) in layers {
-            if (dist as f32) < depth * scale {
-                covered = layer_alpha * alpha + covered * (1.0 - layer_alpha * alpha);
-            }
-        }
-        if covered <= 0.0 {
-            return;
-        }
-        let a = (covered.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let i = ((y * width + x) * 4) as usize;
-        let sa = a as u32;
-        let inv = 255 - sa;
-        pixels[i] = ((r as u32 * sa + pixels[i] as u32 * inv) / 255) as u8;
-        pixels[i + 1] = ((g as u32 * sa + pixels[i + 1] as u32 * inv) / 255) as u8;
-        pixels[i + 2] = ((b as u32 * sa + pixels[i + 2] as u32 * inv) / 255) as u8;
-        pixels[i + 3] = (sa + pixels[i + 3] as u32 * inv / 255) as u8;
-    };
-    let band = max_depth.min(height).min(width);
-    for y in 0..band {
-        for x in 0..width {
-            paint(pixels, x, y);
-            if height > band {
-                paint(pixels, x, height - 1 - y);
-            }
-        }
-    }
-    for y in band..height.saturating_sub(band) {
-        for x in 0..band {
-            paint(pixels, x, y);
-            if width > band {
-                paint(pixels, width - 1 - x, y);
-            }
-        }
-    }
 }
 
 fn blit_premul(pixmap: &mut Pixmap, src: &[u8], src_px: u32, x: f32, y: f32, size: f32) {
@@ -1993,10 +1935,11 @@ mod tests {
     #[test]
     fn voice_screen_is_a_border_with_a_cloud() {
         let orb = vec![255u8, 255, 255, 255];
-        let pixmap = super::paint_voice_screen(800, 480, 1, 1.0, true, Some(&orb), 1, 0xA6D1FF).expect("screen");
-        assert_eq!((pixmap.width(), pixmap.height()), (800, 480));
-        let edge = pixmap.data()[3];
-        let centre = pixmap.data()[((240 * 800 + 400) * 4 + 3) as usize];
+        let mut g = Gfx::new(1, 1).expect("gfx");
+        assert!(super::paint_voice_screen(&mut g, 800, 480, 1, 1.0, true, Some(&orb), 1, 0xA6D1FF));
+        assert_eq!((g.width(), g.height()), (800, 480));
+        let edge = g.pixels()[3];
+        let centre = g.pixels()[((240 * 800 + 400) * 4 + 3) as usize];
         assert!(edge > 0, "edge {edge}");
         assert_eq!(centre, 0);
     }
