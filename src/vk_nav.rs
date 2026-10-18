@@ -1228,12 +1228,13 @@ pub fn enter() {
 }
 
 pub fn start_voice_input() {
-    if !crate::config::voice_enabled() {
-        set_voice_input_active(false);
-        return;
-    }
     #[cfg(all(target_os = "linux", feature = "speech"))]
     {
+        crate::linux_speech::enforce_voice_enabled();
+        if !crate::config::voice_enabled() {
+            set_voice_input_active(false);
+            return;
+        }
         crate::linux_speech::toggle();
         return;
     }

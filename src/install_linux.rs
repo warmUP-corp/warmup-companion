@@ -205,7 +205,7 @@ WantedBy=graphical-session.target\n",
     )
 }
 
-fn systemctl_ok(args: &[&str]) -> Result<(), String> {
+pub fn systemctl_ok(args: &[&str]) -> Result<(), String> {
     let output = Command::new("systemctl")
         .args(args)
         .output()
@@ -222,7 +222,7 @@ fn systemctl_ok(args: &[&str]) -> Result<(), String> {
     ))
 }
 
-fn systemctl(args: &[&str]) -> Result<String, String> {
+pub fn systemctl(args: &[&str]) -> Result<String, String> {
     let output = Command::new("systemctl")
         .args(args)
         .output()

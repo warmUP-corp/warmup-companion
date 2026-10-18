@@ -60,6 +60,8 @@ pub struct PcCursor {
     mouse: Option<evdev::uinput::VirtualDevice>,
     #[cfg(target_os = "linux")]
     keyboard: Option<evdev::uinput::VirtualDevice>,
+    #[cfg(target_os = "linux")]
+    notch_rem: (i32, i32),
     remainder_x: f32,
     remainder_y: f32,
     scroll_remainder_x: f32,
@@ -152,6 +154,7 @@ impl PcCursor {
         Self {
             mouse,
             keyboard,
+            notch_rem: (0, 0),
             remainder_x: 0.0,
             remainder_y: 0.0,
             scroll_remainder_x: 0.0,
@@ -300,6 +303,10 @@ impl PcCursor {
         if !settings.cursor_enabled {
             self.wheel_rem_x = 0.0;
             self.wheel_rem_y = 0.0;
+            #[cfg(target_os = "linux")]
+            {
+                self.notch_rem = (0, 0);
+            }
             return;
         }
         let (h, v) = touchpad_wheel(dx, dy, settings.scroll_speed, settings.natural_scroll);
@@ -401,7 +408,12 @@ impl PcCursor {
         }
         #[cfg(target_os = "linux")]
         {
-            apply_uinput(self.mouse.as_mut(), self.keyboard.as_mut(), cmd);
+            apply_uinput(
+                self.mouse.as_mut(),
+                self.keyboard.as_mut(),
+                &mut self.notch_rem,
+                cmd,
+            );
         }
         #[cfg(not(any(windows, target_os = "linux")))]
         {
@@ -840,10 +852,8 @@ fn open_enter_key() -> Result<evdev::uinput::VirtualDevice, String> {
             keys.insert(code);
         }
     }
-    for code in (b'A'..=b'Z').chain(b'0'..=b'9') {
-        if let Some(code) = uinput_vk(code as u32) {
-            keys.insert(code);
-        }
+    for code in crate::linux_type::chord_codes() {
+        keys.insert(*code);
     }
     evdev::uinput::VirtualDevice::builder()
         .map_err(uinput_error)?
@@ -870,6 +880,7 @@ fn uinput_error(error: std::io::Error) -> String {
 fn apply_uinput(
     mouse: Option<&mut evdev::uinput::VirtualDevice>,
     keyboard: Option<&mut evdev::uinput::VirtualDevice>,
+    notch_rem: &mut (i32, i32),
     cmd: Cmd,
 ) {
     let Some(mouse) = mouse else {
@@ -918,14 +929,16 @@ fn apply_uinput(
             let mut axes = Vec::with_capacity(4);
             if v != 0 {
                 axes.push((evdev::RelativeAxisCode::REL_WHEEL_HI_RES, v));
-                if v / 120 != 0 {
-                    axes.push((evdev::RelativeAxisCode::REL_WHEEL, v / 120));
+                let notches = take_notches(&mut notch_rem.1, v);
+                if notches != 0 {
+                    axes.push((evdev::RelativeAxisCode::REL_WHEEL, notches));
                 }
             }
             if h != 0 {
                 axes.push((evdev::RelativeAxisCode::REL_HWHEEL_HI_RES, h));
-                if h / 120 != 0 {
-                    axes.push((evdev::RelativeAxisCode::REL_HWHEEL, h / 120));
+                let notches = take_notches(&mut notch_rem.0, h);
+                if notches != 0 {
+                    axes.push((evdev::RelativeAxisCode::REL_HWHEEL, notches));
                 }
             }
             if !axes.is_empty() {
@@ -934,11 +947,28 @@ fn apply_uinput(
         }
         Cmd::Swipe(swipe) => {
             use crate::touchpad_gestures::Swipe;
+            if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
+                let lua = match swipe {
+                    Swipe::Left => r#"hl.dsp.focus({ workspace = "e-1" })"#,
+                    Swipe::Right => r#"hl.dsp.focus({ workspace = "e+1" })"#,
+                    Swipe::Up | Swipe::Down => return,
+                };
+                let _ = std::thread::Builder::new()
+                    .name("hypr-swipe".into())
+                    .spawn(move || crate::linux_game_detect::hypr_dispatch(lua));
+                return;
+            }
+            let kde = std::env::var("XDG_CURRENT_DESKTOP")
+                .map(|d| d.split(':').any(|p| p.eq_ignore_ascii_case("KDE")))
+                .unwrap_or(false);
+            if !kde {
+                return;
+            }
             let keys = match swipe {
                 Swipe::Left => vec![Key::Control, Key::Meta, Key::LeftArrow],
                 Swipe::Right => vec![Key::Control, Key::Meta, Key::RightArrow],
-                Swipe::Up => vec![Key::Meta, Key::Tab],
-                Swipe::Down => vec![Key::Meta, Key::Other(0x44)],
+                Swipe::Up => vec![Key::Meta, Key::Other(b'W' as u32)],
+                Swipe::Down => vec![Key::Meta, Key::Other(b'D' as u32)],
             };
             if let Some(keyboard) = keyboard {
                 tap_uinput_chord(keyboard, &keys);
@@ -953,6 +983,16 @@ fn apply_uinput(
             crate::install::log_line("screenshot is not available on linux in this stage");
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn take_notches(rem: &mut i32, hi_res: i32) -> i32 {
+    if (*rem > 0 && hi_res < 0) || (*rem < 0 && hi_res > 0) {
+        *rem = 0;
+    }
+    let total = rem.saturating_add(hi_res);
+    *rem = total % 120;
+    total / 120
 }
 
 #[cfg(target_os = "linux")]
@@ -1016,6 +1056,11 @@ fn uinput_vk(code: u32) -> Option<evdev::KeyCode> {
         K::KEY_9,
     ];
     let c = char::from_u32(code)?;
+    if c.is_ascii_alphanumeric() {
+        if let Some(code) = crate::linux_type::chord_code(c) {
+            return Some(code);
+        }
+    }
     match c {
         'A'..='Z' => Some(LETTERS[(c as u8 - b'A') as usize]),
         '0'..='9' => Some(DIGITS[(c as u8 - b'0') as usize]),

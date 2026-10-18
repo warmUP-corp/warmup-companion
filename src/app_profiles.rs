@@ -198,6 +198,79 @@ pub fn chord_for_foreground(button: &str) -> Option<Vec<Key>> {
     chord_for(&settings, &crate::vk_nav::foreground_exe(), button)
 }
 
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+pub fn profile_candidates(exe: &str, class_name: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    push_profile_id(&mut ids, exe);
+    push_profile_id(&mut ids, class_name);
+    let aliases: Vec<&str> = ids.iter().filter_map(|id| browser_alias(id)).collect();
+    for alias in aliases {
+        push_profile_id(&mut ids, alias);
+    }
+    ids
+}
+
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+fn push_profile_id(ids: &mut Vec<String>, raw: &str) {
+    let trimmed = raw.trim();
+    let base = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed).trim();
+    if base.is_empty() || ids.iter().any(|id| id.eq_ignore_ascii_case(base)) {
+        return;
+    }
+    ids.push(base.to_string());
+}
+
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+fn browser_alias(name: &str) -> Option<&'static str> {
+    let trimmed = name.trim();
+    let base = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed).trim();
+    let stem = base
+        .strip_suffix(".exe")
+        .or_else(|| base.strip_suffix(".EXE"))
+        .unwrap_or(base);
+    Some(match stem.to_ascii_lowercase().as_str() {
+        "firefox" | "firefox-bin" | "firefox-esr" => "firefox.exe",
+        "google-chrome"
+        | "google-chrome-stable"
+        | "google-chrome-beta"
+        | "google-chrome-unstable"
+        | "chromium"
+        | "chromium-browser"
+        | "chrome" => "chrome.exe",
+        "microsoft-edge"
+        | "microsoft-edge-stable"
+        | "microsoft-edge-beta"
+        | "microsoft-edge-dev"
+        | "msedge" => "msedge.exe",
+        "brave" | "brave-browser" => "brave.exe",
+        "opera" | "opera-stable" => "opera.exe",
+        "vivaldi" | "vivaldi-bin" | "vivaldi-stable" => "vivaldi.exe",
+        _ => return None,
+    })
+}
+
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+pub fn chord_for_foreground(button: &str) -> Option<Vec<Key>> {
+    let settings = crate::config::settings_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    let (exe, class_name) = crate::linux_game_detect::foreground_identity()?;
+    for id in profile_candidates(&exe, &class_name) {
+        if setting(&settings, &format!("profile.{id}.{button}"))
+            .is_some_and(|value| value.eq_ignore_ascii_case("none"))
+        {
+            return None;
+        }
+        if setting(&settings, &format!("profile.{id}")).is_some_and(is_off) {
+            return None;
+        }
+        if let Some(chord) = chord_for(&settings, &id, button) {
+            return Some(chord);
+        }
+    }
+    None
+}
+
 fn split_key(key: &str) -> Option<(&str, Option<&str>)> {
     let rest = key.trim().strip_prefix("profile.")?;
     match rest.rsplit_once('.') {

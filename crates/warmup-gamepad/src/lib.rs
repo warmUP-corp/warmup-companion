@@ -1030,12 +1030,40 @@ fn pnp_battery_percent(addr: &str) -> Option<i32> {
     None
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn hid_bluetooth_address(vid: u16, pid: u16) -> Option<String> {
+    let want = format!("0005:{vid:04X}:{pid:04X}.");
+    std::fs::read_dir("/sys/class/power_supply")
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|supply| {
+            std::fs::canonicalize(supply.join("device"))
+                .ok()
+                .and_then(|dev| {
+                    dev.file_name()
+                        .map(|n| n.to_string_lossy().to_ascii_uppercase())
+                })
+                .is_some_and(|name| name.starts_with(&want))
+        })
+        .map(|supply| supply.to_string_lossy().into_owned())
+}
+
+#[cfg(target_os = "linux")]
+fn pnp_battery_percent(addr: &str) -> Option<i32> {
+    let text = std::fs::read_to_string(std::path::Path::new(addr).join("capacity")).ok()?;
+    text.trim()
+        .parse::<i32>()
+        .ok()
+        .filter(|v| (0..=100).contains(v))
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn hid_bluetooth_address(_vid: u16, _pid: u16) -> Option<String> {
     None
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn pnp_battery_percent(_addr: &str) -> Option<i32> {
     None
 }

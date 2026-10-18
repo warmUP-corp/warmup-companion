@@ -54,6 +54,10 @@ mod linux_diag;
 mod linux_game_detect;
 #[cfg(all(windows, feature = "gamepad"))]
 mod updater;
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
+mod release_feed;
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+mod linux_update;
 
 #[cfg(windows)]
 mod debug_state;

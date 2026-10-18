@@ -19,16 +19,16 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 
-const LATEST_URL: &str =
-    "https://api.github.com/repos/warmUP-corp/warmup-companion/releases/latest";
-const DOWNLOAD_PREFIX: &str = "https://github.com/warmUP-corp/warmup-companion/releases/download/";
-const PAGE_PREFIX: &str = "https://github.com/warmUP-corp/warmup-companion/releases/";
+pub(crate) use crate::release_feed::CURRENT;
+use crate::release_feed::{
+    asset, download_url, is_newer, page_url, release_notes, sidecar_sha, tag_version, LATEST_URL,
+};
+
 const SETUP_NAME: &str = "warmup-companion-setup.exe";
 const LAUNCHER_FEED: &str =
     "https://github.com/warmUP-corp/warmup-releases/releases/latest/download/latest.json";
 const LAUNCHER_PREFIX: &str = "https://github.com/warmUP-corp/warmup-releases/";
 const LAUNCHER_PAGE: &str = "https://github.com/warmUP-corp/warmup-releases/releases/latest";
-pub(crate) const CURRENT: &str = env!("CARGO_PKG_VERSION");
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(15);
 const RETRY_AFTER: Duration = Duration::from_secs(10 * 60);
 const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -226,39 +226,18 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
 fn check() -> Result<Option<Release>, String> {
     let json: serde_json::Value =
         serde_json::from_str(&get_string(LATEST_URL)?).map_err(|e| format!("bad reply: {e}"))?;
-    let version = json["tag_name"]
-        .as_str()
-        .ok_or("reply has no tag_name")?
-        .trim_start_matches('v')
-        .to_string();
-    let asset = |name: &str| {
-        json["assets"]
-            .as_array()?
-            .iter()
-            .find(|a| a["name"] == name)
-            .cloned()
-    };
-    let url_of = |a: &serde_json::Value| {
-        a["browser_download_url"]
-            .as_str()
-            .filter(|u| u.starts_with(DOWNLOAD_PREFIX))
-            .map(str::to_string)
-    };
+    let version = tag_version(&json)?;
     let newer = is_newer(&version, CURRENT);
     let rel = if newer {
-        let setup = asset(SETUP_NAME).ok_or("release has no installer")?;
-        let sha = asset(&format!("{SETUP_NAME}.sha256")).ok_or("release has no checksum")?;
+        let setup = asset(&json, SETUP_NAME).ok_or("release has no installer")?;
+        let sha = asset(&json, &format!("{SETUP_NAME}.sha256")).ok_or("release has no checksum")?;
         Some(Release {
             notes: release_notes(json["body"].as_str().unwrap_or_default()),
             size: setup["size"].as_u64().unwrap_or(0),
-            page: json["html_url"]
-                .as_str()
-                .filter(|u| u.starts_with(PAGE_PREFIX))
-                .unwrap_or(PAGE_PREFIX)
-                .to_string(),
+            page: page_url(&json),
             sha: String::new(),
-            setup_url: url_of(&setup).ok_or("installer URL is not on GitHub")?,
-            sha_url: url_of(&sha).ok_or("checksum URL is not on GitHub")?,
+            setup_url: download_url(&setup).ok_or("installer URL is not on GitHub")?,
+            sha_url: download_url(&sha).ok_or("checksum URL is not on GitHub")?,
             version,
         })
     } else {
@@ -276,37 +255,13 @@ fn check() -> Result<Option<Release>, String> {
     Ok(rel)
 }
 
-fn is_newer(candidate: &str, current: &str) -> bool {
-    fn parse(v: &str) -> Option<(u32, u32, u32)> {
-        let mut p = v.split('.').map(|s| s.parse().ok());
-        Some((p.next()??, p.next()??, p.next()??))
-    }
-    matches!((parse(candidate), parse(current)), (Some(a), Some(b)) if a > b)
-}
-
-fn release_notes(body: &str) -> Vec<String> {
-    body.lines()
-        .filter_map(|l| l.trim().strip_prefix("- "))
-        .map(|l| match l.strip_prefix("**").and_then(|r| r.split_once("**")) {
-            Some((head, _)) => head.trim_end_matches('.').to_string(),
-            None => l.split(". ").next().unwrap_or(l).replace('`', ""),
-        })
-        .filter(|l| !l.is_empty())
-        .take(3)
-        .collect()
-}
-
 fn stamp() -> String {
     let t = unsafe { GetLocalTime() };
     format!("today, {:02}:{:02}", t.wHour, t.wMinute)
 }
 
 fn download_and_install(rel: &Release) -> Result<(), String> {
-    let expected = get_string(&rel.sha_url)?
-        .split_whitespace()
-        .next()
-        .ok_or("empty checksum file")?
-        .to_ascii_lowercase();
+    let expected = sidecar_sha(&get_string(&rel.sha_url)?).ok_or("empty checksum file")?;
     let bytes = download(&rel.setup_url, rel.size)?;
     set_phase(Phase::Verifying);
     let started = std::time::Instant::now();
