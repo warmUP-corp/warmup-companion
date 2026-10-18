@@ -346,7 +346,12 @@ fn tv_layout_wanted() -> bool {
     crate::win::vk_ui::vk_look().tv_layout()
 }
 
-#[cfg(all(not(test), not(windows)))]
+#[cfg(all(not(test), target_os = "linux", feature = "gamepad"))]
+fn tv_layout_wanted() -> bool {
+    crate::linux_vk::look().tv_layout()
+}
+
+#[cfg(all(not(test), not(windows), not(all(target_os = "linux", feature = "gamepad"))))]
 fn tv_layout_wanted() -> bool {
     crate::config::vk_display() == crate::config::VkDisplay::Tv
         || crate::config::vk_style() == crate::config::VkStyle::Modern

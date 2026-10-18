@@ -37,6 +37,16 @@ mod gpu;
 
 static KEYBOARD_OPEN: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_GONE: AtomicBool = AtomicBool::new(false);
+static OUTPUT_IS_TV: AtomicBool = AtomicBool::new(false);
+
+pub fn look() -> crate::vk_paint::VkLook {
+    let tv = match crate::config::vk_display() {
+        crate::config::VkDisplay::Tv => true,
+        crate::config::VkDisplay::Desk => false,
+        crate::config::VkDisplay::Auto => OUTPUT_IS_TV.load(Ordering::SeqCst),
+    };
+    crate::vk_paint::VkLook { style: vk_style(), tv }
+}
 
 pub fn keyboard_open() -> bool {
     KEYBOARD_OPEN.load(Ordering::SeqCst)
@@ -291,7 +301,6 @@ struct Shell {
     conn: Connection,
     gpu: Option<gpu::Presenter>,
     gpu_failed: bool,
-    gpu_used: bool,
     gpu_presented: bool,
     gpu_errors: u32,
     voice_gen: u64,
@@ -349,7 +358,6 @@ impl Shell {
             conn,
             gpu: None,
             gpu_failed: false,
-            gpu_used: false,
             gpu_presented: false,
             gpu_errors: 0,
             voice_gen: 0,
@@ -433,16 +441,10 @@ impl Shell {
     }
 
     fn look(&self) -> crate::vk_paint::VkLook {
-        let tv = match crate::config::vk_display() {
-            crate::config::VkDisplay::Tv => true,
-            crate::config::VkDisplay::Desk => false,
-            crate::config::VkDisplay::Auto => self
-                .output
-                .as_ref()
-                .and_then(|output| self.output_state.info(output))
-                .is_some_and(|info| is_tv(info.physical_size)),
-        };
-        crate::vk_paint::VkLook { style: vk_style(), tv }
+        if let Some(info) = self.output.as_ref().and_then(|output| self.output_state.info(output)) {
+            OUTPUT_IS_TV.store(is_tv(info.physical_size), Ordering::SeqCst);
+        }
+        look()
     }
 
     fn buffer_scale(&self) -> f64 {
@@ -508,23 +510,20 @@ impl Shell {
                 Err(error) => {
                     crate::install::log_line(&format!("keyboard gpu: {error}"));
                     self.gpu = None;
-                    if self.gpu_used && !self.gpu_presented {
+                    if !self.gpu_presented {
                         crate::install::log_line("keyboard: drawing in software on a new surface");
                         self.gpu_failed = true;
                         self.fresh_surface(qh);
                         return;
                     }
-                    if self.gpu_used {
-                        self.gpu_errors += 1;
-                        if self.gpu_errors >= 3 {
-                            crate::install::log_line("keyboard closed: the GPU keeps failing");
-                            self.exit = true;
-                        } else {
-                            self.dirty = true;
-                        }
-                        return;
+                    self.gpu_errors += 1;
+                    if self.gpu_errors >= 3 {
+                        crate::install::log_line("keyboard closed: the GPU keeps failing");
+                        self.exit = true;
+                    } else {
+                        self.dirty = true;
                     }
-                    self.gpu_failed = true;
+                    return;
                 }
             }
         }
@@ -573,7 +572,6 @@ impl Shell {
         if self.gpu.is_none() {
             let surface = self.layer.wl_surface().id().as_ptr() as *mut std::ffi::c_void;
             self.gpu = Some(gpu::Presenter::open(self.display, surface)?);
-            self.gpu_used = true;
         }
         #[cfg(feature = "speech")]
         let orb_hold = crate::linux_speech::visual_active().then(crate::linux_nimbus::latest_frame).flatten();
