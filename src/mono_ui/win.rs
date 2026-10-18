@@ -37,33 +37,16 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, UpdateLayeredWindow, ULW_ALPHA};
 use std::mem::ManuallyDrop;
 
-use crate::win::vk_renderer::{self, VkPalette};
+use crate::win::vk_renderer;
 
 use super::{
-    Align, DIM_ALPHA, Icon, Rect, Theme, VAlign, cover_bgra, icon_svg, logo_bgra, rect, shadow_alpha,
+    Align, Icon, Rect, Theme, VAlign, cover_bgra, icon_svg, logo_bgra, rect, shadow_alpha,
     svg_bgra, svg_bgra_scaled, FONT_NORMAL, FONT_SEMI_BOLD,
 };
 
-pub(crate) fn theme_from(pal: &VkPalette) -> Theme {
-    Theme {
-        bg: pal.bg,
-        tile: pal.key_action,
-        hi: pal.key,
-        ring: pal.sel_ring,
-        accent: pal.accent,
-        on_accent: pal.sel_text,
-        text: pal.text,
-        dim: pal.text_dim,
-        line: pal.panel_stroke,
-        line_alpha: pal.panel_stroke_alpha,
-        toggle_off: vk_renderer::mix_color(pal.text, pal.key, 0.07),
-        idle_dot: vk_renderer::mix_color(pal.text_dim, pal.bg, DIM_ALPHA),
-    }
-}
-
 pub(crate) fn current_theme() -> Theme {
     let dark = crate::win::vk_ui::is_dark_theme();
-    theme_from(&crate::win::vk_ui::vk_palette(
+    crate::vk_theme::theme_from(&crate::win::vk_ui::vk_palette(
         dark,
         crate::config::VkStyle::Mono,
     ))

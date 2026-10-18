@@ -32,6 +32,8 @@ mod install;
 mod mono_ui;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod vk_paint;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod vk_theme;
 #[cfg(all(target_os = "linux", feature = "service"))]
 mod linux_service;
 #[cfg(all(windows, feature = "service"))]
