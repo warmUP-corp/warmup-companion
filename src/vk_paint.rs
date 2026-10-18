@@ -1,4 +1,5 @@
 use crate::config::VkStyle;
+use crate::mono_ui::{Gfx, Rect};
 
 pub fn colorref_hex(c: u32) -> String {
     let r = c & 0xff;
@@ -651,4 +652,116 @@ pub const LEGEND_MIN_TEXT_PX: f32 = 11.0;
 
 pub fn text_px(design: f32, u: f32) -> f32 {
     (design * u).max(LEGEND_MIN_TEXT_PX)
+}
+
+pub unsafe fn paint_voice_orb(
+    g: &mut Gfx,
+    accent: u32,
+    level: f32,
+    transcribing: bool,
+    cx: f32,
+    cy: f32,
+    unit: f32,
+    alpha_scale: f32,
+    elapsed: f32,
+) {
+    let t = elapsed;
+    let amp = if transcribing {
+        (t * std::f32::consts::TAU * crate::vk_motion::TRANSCRIBE_PULSE_HZ).sin() * 0.5 + 0.5
+    } else {
+        level.clamp(0.0, 1.0)
+    };
+    let idle = (t * std::f32::consts::TAU * 0.25).sin() * 0.5 + 0.5;
+    let energy = amp.max(idle * 0.10).clamp(0.0, 1.0);
+    let max_r = unit * 0.92;
+    let blobs: [(u32, f32, f32); 4] = [
+        (shift_hue(accent, -34.0), 0.0, 0.85),
+        (shift_hue(accent, -10.0), 2.1, 1.10),
+        (shift_hue(accent, 16.0), 4.2, 0.70),
+        (shift_hue(accent, 38.0), 1.0, 1.30),
+    ];
+    let drift = unit * (0.05 + 0.08 * energy);
+    let base_r = unit * (0.42 + 0.24 * energy);
+    let wob = 0.5 + 1.5 * energy;
+    let jitter = |seed: f32| {
+        let sp = 0.6 + 1.8 * energy;
+        ((seed * 2.3999632 + t * sp).sin() + (seed * 5.197 - t * sp * 0.62).sin()) * 0.5 * wob
+    };
+    const LAYERS: usize = 11;
+    for (bi, (color, phase, freq)) in blobs.into_iter().enumerate() {
+        let ang = t * freq * 0.45 + phase;
+        let bx = cx + ang.cos() * drift;
+        let by = cy + ang.sin() * drift;
+        let dist = ((bx - cx).powi(2) + (by - cy).powi(2)).sqrt();
+        let r = (base_r * (0.90 + 0.12 * (ang * 1.3).sin()))
+            .min(max_r - dist)
+            .max(unit * 0.12);
+        let seed0 = bi as f32 * 9.71;
+        for k in 0..LAYERS {
+            let kf = k as f32 / (LAYERS - 1) as f32;
+            let s = seed0 + k as f32;
+            let rr = r * (1.0 - 0.80 * kf) * (1.0 + 0.20 * jitter(s));
+            let jx = bx + unit * 0.06 * jitter(s + 1.3);
+            let jy = by + unit * 0.06 * jitter(s + 7.7);
+            let a = ((0.13 + 0.08 * energy) * (0.22 + 0.78 * kf * kf)) * alpha_scale;
+            g.fill_ellipse(jx, jy, rr, rr, color, a);
+        }
+    }
+    for k in 0..LAYERS {
+        let kf = k as f32 / (LAYERS - 1) as f32;
+        let rr = unit * (0.04 + (0.10 + 0.08 * energy) * (1.0 - kf));
+        let a = ((0.022 + 0.09 * energy) * kf * kf) * alpha_scale;
+        g.fill_ellipse(cx, cy, rr, rr, 0x00FFFFFF, a);
+    }
+}
+
+pub unsafe fn paint_outer_shadow(
+    g: &mut Gfx,
+    shape: Rect,
+    radius: f32,
+    dy: f32,
+    blur: f32,
+    alpha: f32,
+) -> Result<(), String> {
+    g.push_shadow_layer(shape, radius, dy, blur)?;
+    for (spread, a) in blur_shadow_layers(blur, alpha) {
+        let r = (radius + spread).max(0.0);
+        g.fill(
+            Rect {
+                x: shape.x - spread,
+                y: shape.y - spread + dy,
+                w: shape.w + spread * 2.0,
+                h: shape.h + spread * 2.0,
+            },
+            r,
+            0x000000,
+            a,
+        );
+    }
+    g.pop_layer();
+    Ok(())
+}
+
+pub unsafe fn paint_display_border(
+    g: &mut Gfx,
+    cw: f32,
+    ch: f32,
+    accent: u32,
+    alpha: f32,
+) -> Result<(), String> {
+    let scale = (ch / 1080.0).clamp(0.85, 2.0);
+    let radius = 8.0 * scale;
+    let layers: [(f32, f32); 7] = [
+        (22.0, 0.02),
+        (14.0, 0.028),
+        (9.0, 0.038),
+        (5.5, 0.05),
+        (3.2, 0.065),
+        (1.8, 0.08),
+        (1.0, 0.07),
+    ];
+    for (depth, layer_alpha) in layers {
+        g.fill_edge_band(cw, ch, depth * scale, radius, accent, layer_alpha * alpha)?;
+    }
+    Ok(())
 }

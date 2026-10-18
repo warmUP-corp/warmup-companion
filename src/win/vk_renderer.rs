@@ -59,6 +59,7 @@ use super::controller_tips::TipToken;
 use super::nimbus_orb::{drive_scale, mood_drive, NimbusMood, NimbusOrb, ORB_FRAME_FILL};
 use super::shortcut_sheet::{self, Line};
 use crate::config::VkStyle;
+use crate::mono_ui::Gfx;
 use crate::vk_nav::{KeyAction, KeyCell, KeyPos, KeyRow};
 pub use crate::vk_paint::{
     FLOATING_PANEL_INSET,
@@ -285,6 +286,7 @@ pub struct VkRenderer {
     dip_scale: f32,
     swapchain: IDXGISwapChain1,
     d2d_context: ID2D1DeviceContext,
+    gfx: Option<Gfx>,
     /// Owns the swapchain buffer. Must be dropped before `ResizeBuffers`, or the
     /// resize fails and every later draw is left with no target (the last pill
     /// frame stays on screen).
@@ -1475,6 +1477,7 @@ impl VkRenderer {
             swapchain,
             d2d_context,
             d2d_target: Some(d2d_target),
+            gfx: None,
             dwrite,
             text_format,
             glyph_format,
@@ -1517,6 +1520,13 @@ impl VkRenderer {
         } else {
             1.0
         };
+    }
+
+    unsafe fn gfx(&mut self) -> Result<&mut Gfx, String> {
+        if self.gfx.is_none() {
+            self.gfx = Some(Gfx::wrap(&self.d2d_context)?);
+        }
+        self.gfx.as_mut().ok_or("keyboard graphics unavailable".into())
     }
 
     unsafe fn dip_canvas(&self) -> (f32, f32) {
@@ -1871,71 +1881,10 @@ impl VkRenderer {
         alpha_scale: f32,
     ) -> Result<(), String> {
         let t = self.prompt_started.elapsed().as_secs_f32();
-        let amp = if transcribing {
-            (t * std::f32::consts::TAU * crate::vk_motion::TRANSCRIBE_PULSE_HZ).sin() * 0.5 + 0.5
-        } else {
-            level.clamp(0.0, 1.0)
-        };
-        let idle = (t * std::f32::consts::TAU * 0.25).sin() * 0.5 + 0.5;
-        let energy = amp.max(idle * 0.10).clamp(0.0, 1.0);
-        let max_r = unit * 0.92;
-
-        let blobs: [(u32, f32, f32); 4] = [
-            (shift_hue(accent, -34.0), 0.0, 0.85),
-            (shift_hue(accent, -10.0), 2.1, 1.10),
-            (shift_hue(accent, 16.0), 4.2, 0.70),
-            (shift_hue(accent, 38.0), 1.0, 1.30),
-        ];
-        let drift = unit * (0.05 + 0.08 * energy);
-        let base_r = unit * (0.42 + 0.24 * energy);
-        let wob = 0.5 + 1.5 * energy;
-        let jitter = |seed: f32| {
-            let sp = 0.6 + 1.8 * energy;
-            ((seed * 2.3999632 + t * sp).sin() + (seed * 5.197 - t * sp * 0.62).sin()) * 0.5 * wob
-        };
-        const LAYERS: usize = 11;
-        for (bi, (color, phase, freq)) in blobs.into_iter().enumerate() {
-            let ang = t * freq * 0.45 + phase;
-            let bx = cx + ang.cos() * drift;
-            let by = cy + ang.sin() * drift;
-            let dist = ((bx - cx).powi(2) + (by - cy).powi(2)).sqrt();
-            let r = (base_r * (0.90 + 0.12 * (ang * 1.3).sin()))
-                .min(max_r - dist)
-                .max(unit * 0.12);
-            let brush = solid_brush(&self.d2d_context, colorref(color))?;
-            let seed0 = bi as f32 * 9.71;
-            for k in 0..LAYERS {
-                let kf = k as f32 / (LAYERS - 1) as f32;
-                let s = seed0 + k as f32;
-                let rr = r * (1.0 - 0.80 * kf) * (1.0 + 0.20 * jitter(s));
-                let jx = bx + unit * 0.06 * jitter(s + 1.3);
-                let jy = by + unit * 0.06 * jitter(s + 7.7);
-                brush.SetOpacity(((0.13 + 0.08 * energy) * (0.22 + 0.78 * kf * kf)) * alpha_scale);
-                self.d2d_context.FillEllipse(
-                    &D2D1_ELLIPSE {
-                        point: D2D_POINT_2F { x: jx, y: jy },
-                        radiusX: rr,
-                        radiusY: rr,
-                    },
-                    &brush,
-                );
-            }
-        }
-
-        let core_brush = solid_brush(&self.d2d_context, colorref(0x00FFFFFF))?;
-        for k in 0..LAYERS {
-            let kf = k as f32 / (LAYERS - 1) as f32;
-            let rr = unit * (0.04 + (0.10 + 0.08 * energy) * (1.0 - kf));
-            core_brush.SetOpacity(((0.022 + 0.09 * energy) * kf * kf) * alpha_scale);
-            self.d2d_context.FillEllipse(
-                &D2D1_ELLIPSE {
-                    point: D2D_POINT_2F { x: cx, y: cy },
-                    radiusX: rr,
-                    radiusY: rr,
-                },
-                &core_brush,
-            );
-        }
+        let g = self.gfx()?;
+        crate::vk_paint::paint_voice_orb(
+            g, accent, level, transcribing, cx, cy, unit, alpha_scale, t,
+        );
         Ok(())
     }
 
@@ -4032,60 +3981,25 @@ impl VkRenderer {
     }
 
     unsafe fn draw_outer_shadow(
-        &self,
+        &mut self,
         shape: &D2D1_ROUNDED_RECT,
         (dy, blur, alpha): (f32, f32, f32),
     ) -> Result<(), String> {
-        let resource: ID2D1Resource = self
-            .d2d_context
-            .cast()
-            .map_err(|e| format!("d2d resource: {e}"))?;
-        let factory: ID2D1Factory = resource
-            .GetFactory()
-            .map_err(|e| format!("d2d factory: {e}"))?;
-        let reach = blur * 2.0 + dy.abs();
         let r = shape.rect;
-        let outer = factory
-            .CreateRectangleGeometry(&D2D_RECT_F {
-                left: r.left - reach,
-                top: r.top - reach,
-                right: r.right + reach,
-                bottom: r.bottom + reach,
-            })
-            .map_err(|e| format!("shadow rect: {e}"))?;
-        let inner = factory
-            .CreateRoundedRectangleGeometry(shape)
-            .map_err(|e| format!("shadow shape: {e}"))?;
-        let group = factory
-            .CreateGeometryGroup(
-                D2D1_FILL_MODE_ALTERNATE,
-                &[
-                    Some(outer.cast::<ID2D1Geometry>().map_err(|e| format!("{e}"))?),
-                    Some(inner.cast::<ID2D1Geometry>().map_err(|e| format!("{e}"))?),
-                ],
-            )
-            .map_err(|e| format!("shadow mask: {e}"))?;
-        let mut params = D2D1_LAYER_PARAMETERS1 {
-            contentBounds: D2D_RECT_F {
-                left: f32::MIN,
-                top: f32::MIN,
-                right: f32::MAX,
-                bottom: f32::MAX,
+        let g = self.gfx()?;
+        crate::vk_paint::paint_outer_shadow(
+            g,
+            crate::mono_ui::Rect {
+                x: r.left,
+                y: r.top,
+                w: r.right - r.left,
+                h: r.bottom - r.top,
             },
-            geometricMask: ManuallyDrop::new(Some(
-                group.cast::<ID2D1Geometry>().map_err(|e| format!("{e}"))?,
-            )),
-            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-            maskTransform: IDENTITY,
-            opacity: 1.0,
-            opacityBrush: ManuallyDrop::new(None),
-            layerOptions: D2D1_LAYER_OPTIONS1_NONE,
-        };
-        self.d2d_context.PushLayer(&params, None::<&ID2D1Layer>);
-        let drawn = draw_blur_shadow(&self.d2d_context, r, shape.radiusX, dy, blur, alpha);
-        self.d2d_context.PopLayer();
-        ManuallyDrop::drop(&mut params.geometricMask);
-        drawn
+            shape.radiusX,
+            dy,
+            blur,
+            alpha,
+        )
     }
 
     unsafe fn draw_prompt_card_spec(
@@ -4404,29 +4318,10 @@ impl VkRenderer {
     /// Glow sitting on the screen edge. The outside of the band is the screen
     /// rectangle, so the corner wedges are filled. Only the inner edge has a
     /// small radius.
-    unsafe fn draw_display_border(&self, accent: u32, alpha: f32) -> Result<(), String> {
+    unsafe fn draw_display_border(&mut self, accent: u32, alpha: f32) -> Result<(), String> {
         let (cw, ch) = self.dip_canvas();
-        let scale = (ch / 1080.0).clamp(0.85, 2.0);
-        let radius = 8.0 * scale;
-        // How far the glow reaches in from the bezel, faintest first. Each band
-        // starts at the screen edge, so the corners stay filled.
-        let layers: [(f32, f32); 7] = [
-            (22.0, 0.02),
-            (14.0, 0.028),
-            (9.0, 0.038),
-            (5.5, 0.05),
-            (3.2, 0.065),
-            (1.8, 0.08),
-            (1.0, 0.07),
-        ];
-        for (depth, layer_alpha) in layers {
-            let brush = solid_brush(
-                &self.d2d_context,
-                colorref_alpha(accent, layer_alpha * alpha),
-            )?;
-            fill_edge_band(&self.d2d_context, cw, ch, depth * scale, radius, &brush)?;
-        }
-        Ok(())
+        let g = self.gfx()?;
+        crate::vk_paint::paint_display_border(g, cw, ch, accent, alpha)
     }
 
     /// Dictation pill for the keyboard-closed case: the audio-reactive orb on the

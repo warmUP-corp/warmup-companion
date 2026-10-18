@@ -171,7 +171,7 @@ impl Gfx {
         self.pixmap.height()
     }
 
-    pub(crate) fn transform(&mut self, scale: f32, dx: f32, dy: f32) {
+    pub(crate) unsafe fn transform(&mut self, scale: f32, dx: f32, dy: f32) {
         self.transform = Transform::from_row(scale, 0.0, 0.0, scale, dx, dy);
     }
 
@@ -377,12 +377,12 @@ impl Gfx {
         self.art.get(key).cloned()
     }
 
-    pub(crate) fn measure(&mut self, s: &str, px: f32, bold: bool) -> f32 {
+    pub(crate) unsafe fn measure(&mut self, s: &str, px: f32, bold: bool) -> f32 {
         let weight = weight_for(if bold { 600 } else { 400 });
         self.measure_full(s, px, weight.0 as i32, &["Inter", "Selawik"])
     }
 
-    pub(crate) fn measure_full(
+    pub(crate) unsafe fn measure_full(
         &mut self,
         s: &str,
         px: f32,
@@ -393,7 +393,7 @@ impl Gfx {
         self.shape_width(s, px, weight_for(weight), family)
     }
 
-    pub(crate) fn text(
+    pub(crate) unsafe fn text(
         &mut self,
         s: &str,
         r: Rect,
@@ -407,7 +407,7 @@ impl Gfx {
         self.text_full(s, r, px, weight.0 as i32, &["Inter", "Selawik"], c, alpha, align, VAlign::Center, false);
     }
 
-    pub(crate) fn text_full(
+    pub(crate) unsafe fn text_full(
         &mut self,
         s: &str,
         r: Rect,
@@ -424,7 +424,7 @@ impl Gfx {
         self.draw_text_runs(s, r, px, weight_for(weight), family, c, alpha, halign, valign, wrap);
     }
 
-    pub(crate) fn fill(&mut self, r: Rect, radius: f32, c: u32, alpha: f32) {
+    pub(crate) unsafe fn fill(&mut self, r: Rect, radius: f32, c: u32, alpha: f32) {
         let Some(path) = rounded_path(r.x, r.y, r.w, r.h, radius) else {
             return;
         };
@@ -433,7 +433,7 @@ impl Gfx {
             .fill_path(&path, &paint, FillRule::Winding, self.transform, self.masks.last());
     }
 
-    pub(crate) fn fill_rect(&mut self, r: Rect, c: u32, alpha: f32) {
+    pub(crate) unsafe fn fill_rect(&mut self, r: Rect, c: u32, alpha: f32) {
         let Some(rect) = SkRect::from_xywh(r.x, r.y, r.w, r.h) else {
             return;
         };
@@ -442,7 +442,7 @@ impl Gfx {
             .fill_rect(rect, &paint, self.transform, self.masks.last());
     }
 
-    pub(crate) fn gradient(
+    pub(crate) unsafe fn gradient(
         &mut self,
         r: Rect,
         radius: f32,
@@ -481,7 +481,7 @@ impl Gfx {
             .fill_path(&path, &paint, FillRule::Winding, self.transform, self.masks.last());
     }
 
-    pub(crate) fn ring(&mut self, r: Rect, radius: f32, width: f32, c: u32, alpha: f32) {
+    pub(crate) unsafe fn ring(&mut self, r: Rect, radius: f32, width: f32, c: u32, alpha: f32) {
         let half = width / 2.0;
         let Some(path) = rounded_path(
             r.x + half,
@@ -501,7 +501,7 @@ impl Gfx {
             .stroke_path(&path, &paint, &stroke, self.transform, self.masks.last());
     }
 
-    pub(crate) fn circle(&mut self, cx: f32, cy: f32, radius: f32, c: u32) {
+    pub(crate) unsafe fn circle(&mut self, cx: f32, cy: f32, radius: f32, c: u32) {
         let Some(path) = PathBuilder::from_circle(cx, cy, radius) else {
             return;
         };
@@ -510,7 +510,7 @@ impl Gfx {
             .fill_path(&path, &paint, FillRule::Winding, self.transform, self.masks.last());
     }
 
-    pub(crate) fn ellipse(
+    pub(crate) unsafe fn ellipse(
         &mut self,
         cx: f32,
         cy: f32,
@@ -535,7 +535,7 @@ impl Gfx {
             .stroke_path(&path, &paint, &stroke, self.transform, self.masks.last());
     }
 
-    pub(crate) fn fill_ellipse(
+    pub(crate) unsafe fn fill_ellipse(
         &mut self,
         cx: f32,
         cy: f32,
@@ -555,7 +555,7 @@ impl Gfx {
             .fill_path(&path, &paint, FillRule::Winding, self.transform, self.masks.last());
     }
 
-    pub(crate) fn line(
+    pub(crate) unsafe fn line(
         &mut self,
         x0: f32,
         y0: f32,
@@ -580,7 +580,7 @@ impl Gfx {
             .stroke_path(&path, &paint, &stroke, self.transform, self.masks.last());
     }
 
-    pub(crate) fn icon(&mut self, icon: Icon, r: Rect, tint: u32, alpha: f32, scale: f32) {
+    pub(crate) unsafe fn icon(&mut self, icon: Icon, r: Rect, tint: u32, alpha: f32, scale: f32) {
         let px = (r.w.max(r.h) * scale).round().max(1.0) as u32;
         let Some(card) = self.cached_icon(icon, px, tint) else {
             return;
@@ -588,7 +588,7 @@ impl Gfx {
         self.draw_cached_pixmap(&card, r, alpha, false);
     }
 
-    pub(crate) fn draw_svg(
+    pub(crate) unsafe fn draw_svg(
         &mut self,
         svg: &str,
         px: u32,
@@ -603,7 +603,7 @@ impl Gfx {
         self.draw_cached_pixmap(&card, dst, alpha, cubic);
     }
 
-    pub(crate) fn draw_art(
+    pub(crate) unsafe fn draw_art(
         &mut self,
         key: &str,
         png: &[u8],
@@ -620,7 +620,7 @@ impl Gfx {
         self.draw_cached_pixmap(&card, dst, alpha, cubic);
     }
 
-    pub(crate) fn set_image(&mut self, key: &str, w: u32, h: u32, rgba_premul: &[u8]) {
+    pub(crate) unsafe fn set_image(&mut self, key: &str, w: u32, h: u32, rgba_premul: &[u8]) {
         let Some(size) = tiny_skia::IntSize::from_wh(w, h) else {
             return;
         };
@@ -632,14 +632,14 @@ impl Gfx {
         }
     }
 
-    pub(crate) fn draw_image(&mut self, key: &str, dst: Rect, alpha: f32, cubic: bool) {
+    pub(crate) unsafe fn draw_image(&mut self, key: &str, dst: Rect, alpha: f32, cubic: bool) {
         let Some(card) = self.images.get(key).cloned() else {
             return;
         };
         self.draw_cached_pixmap(&card, dst, alpha, cubic);
     }
 
-    pub(crate) fn draw_shadow(&mut self, cards: &[Rect], radius: f32, sigma: f32) {
+    pub(crate) unsafe fn draw_shadow(&mut self, cards: &[Rect], radius: f32, sigma: f32) {
         let (w, h) = (self.pixmap.width() as usize, self.pixmap.height() as usize);
         let s = self.transform.sx;
         let mapped: Vec<Rect> = cards
@@ -674,7 +674,7 @@ impl Gfx {
         );
     }
 
-    pub(crate) fn push_clip(&mut self, r: Rect, antialiased: bool) {
+    pub(crate) unsafe fn push_clip(&mut self, r: Rect, antialiased: bool) {
         let Some(rect) = SkRect::from_xywh(r.x, r.y, r.w, r.h) else {
             return;
         };
@@ -682,11 +682,11 @@ impl Gfx {
         self.push_mask_path(&path, FillRule::Winding, antialiased);
     }
 
-    pub(crate) fn pop_clip(&mut self) {
+    pub(crate) unsafe fn pop_clip(&mut self) {
         self.masks.pop();
     }
 
-    pub(crate) fn push_shadow_layer(
+    pub(crate) unsafe fn push_shadow_layer(
         &mut self,
         shape: Rect,
         radius: f32,
@@ -715,11 +715,11 @@ impl Gfx {
         Ok(())
     }
 
-    pub(crate) fn pop_layer(&mut self) {
+    pub(crate) unsafe fn pop_layer(&mut self) {
         self.masks.pop();
     }
 
-    pub(crate) fn radial_fill(
+    pub(crate) unsafe fn radial_fill(
         &mut self,
         cx: f32,
         cy: f32,
@@ -763,7 +763,7 @@ impl Gfx {
             .fill_path(&path, &paint, FillRule::Winding, self.transform, self.masks.last());
     }
 
-    pub(crate) fn fill_edge_band(
+    pub(crate) unsafe fn fill_edge_band(
         &mut self,
         cw: f32,
         ch: f32,
@@ -791,7 +791,7 @@ impl Gfx {
         Ok(())
     }
 
-    pub(crate) fn clear(&mut self, c: u32, alpha: f32) {
+    pub(crate) unsafe fn clear(&mut self, c: u32, alpha: f32) {
         let (w, h) = (self.pixmap.width() as f32, self.pixmap.height() as f32);
         self.fill_rect(Rect { x: 0.0, y: 0.0, w, h }, c, alpha);
     }
