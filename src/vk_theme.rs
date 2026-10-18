@@ -112,6 +112,9 @@ pub(crate) fn theme_from(pal: &VkPalette) -> Theme {
     }
 }
 
+#[cfg(windows)]
+pub(crate) use crate::win::vk_ui::is_dark_theme;
+
 #[cfg(not(windows))]
 pub(crate) fn is_dark_theme() -> bool {
     use std::sync::Mutex;

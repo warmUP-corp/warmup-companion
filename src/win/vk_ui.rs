@@ -79,7 +79,9 @@ static LAST_REFLOW_HWND: AtomicIsize = AtomicIsize::new(0);
 /// Class background brush colour (dark default; per-paint theme overrides it).
 const BG_FILL: u32 = 0x001f1f1f;
 
-pub(crate) use crate::vk_theme::{themed_palette, vk_palette};
+pub(crate) use crate::vk_theme::vk_palette;
+#[cfg(test)]
+use crate::vk_theme::themed_palette;
 
 /// Dark flag, read live from the OS theme.
 /// `HKCU\...\Themes\Personalize\AppsUseLightTheme` (0 = dark). Defaults to dark.
