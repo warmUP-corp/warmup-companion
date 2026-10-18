@@ -164,42 +164,6 @@ impl Gfx {
         })
     }
 
-    pub(crate) unsafe fn wrap(device: &ID2D1DeviceContext) -> Result<Self, String> {
-        let rt: ID2D1RenderTarget = device
-            .cast()
-            .map_err(|e| format!("DeviceContext as target: {e}"))?;
-        let brush = rt
-            .CreateSolidColorBrush(&color(0, 1.0), None)
-            .map_err(|e| format!("CreateSolidColorBrush: {e}"))?;
-        let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)
-            .map_err(|e| format!("DWriteCreateFactory: {e}"))?;
-        let mut fonts: Option<IDWriteFontCollection> = None;
-        dwrite
-            .GetSystemFontCollection(&mut fonts, false)
-            .map_err(|e| format!("GetSystemFontCollection: {e}"))?;
-        let fonts = fonts.ok_or("GetSystemFontCollection returned null")?;
-        let family = vk_renderer::resolve_family(&fonts, vk_renderer::MONO_FAMILIES);
-        Ok(Gfx {
-            dwrite,
-            fonts,
-            family,
-            rt,
-            device: Some(device.clone()),
-            brush,
-            formats: HashMap::new(),
-            icons: HashMap::new(),
-            svg_icons: HashMap::new(),
-            art: HashMap::new(),
-            images: HashMap::new(),
-            shadow: None,
-            dc_rt: None,
-            dc: HDC::default(),
-            bmp: HBITMAP::default(),
-            old: HGDIOBJ::default(),
-            size: (0, 0),
-        })
-    }
-
     pub(crate) unsafe fn resolve(&self, families: &[&str]) -> HSTRING {
         for name in families {
             let family = HSTRING::from(*name);
@@ -348,36 +312,6 @@ impl Gfx {
         let family = self.family.to_string();
         let weight = if bold { FONT_SEMI_BOLD } else { FONT_NORMAL };
         let Some(f) = self.format_full(px, weight, &family, align, VAlign::Center, false) else {
-            return;
-        };
-        self.brush.SetColor(&color(c, alpha));
-        let text: Vec<u16> = s.encode_utf16().collect();
-        self.rt.DrawText(
-            &text,
-            &f,
-            &r.d2d(),
-            &self.brush,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-            DWRITE_MEASURING_MODE_NATURAL,
-        );
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) unsafe fn text_full(
-        &mut self,
-        s: &str,
-        r: Rect,
-        px: f32,
-        weight: i32,
-        families: &[&str],
-        c: u32,
-        alpha: f32,
-        halign: Align,
-        valign: VAlign,
-        wrap: bool,
-    ) {
-        let family = self.resolve(families).to_string();
-        let Some(f) = self.format_full(px, weight, &family, halign, valign, wrap) else {
             return;
         };
         self.brush.SetColor(&color(c, alpha));
@@ -723,6 +657,72 @@ impl Gfx {
         let family = self.family.to_string();
         let weight = if bold { FONT_SEMI_BOLD } else { FONT_NORMAL };
         self.format_full(px, weight, &family, Align::Center, VAlign::Center, false)
+    }
+
+    pub(crate) unsafe fn wrap(device: &ID2D1DeviceContext) -> Result<Self, String> {
+        let rt: ID2D1RenderTarget = device
+            .cast()
+            .map_err(|e| format!("DeviceContext as target: {e}"))?;
+        let brush = rt
+            .CreateSolidColorBrush(&color(0, 1.0), None)
+            .map_err(|e| format!("CreateSolidColorBrush: {e}"))?;
+        let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)
+            .map_err(|e| format!("DWriteCreateFactory: {e}"))?;
+        let mut fonts: Option<IDWriteFontCollection> = None;
+        dwrite
+            .GetSystemFontCollection(&mut fonts, false)
+            .map_err(|e| format!("GetSystemFontCollection: {e}"))?;
+        let fonts = fonts.ok_or("GetSystemFontCollection returned null")?;
+        let family = vk_renderer::resolve_family(&fonts, vk_renderer::MONO_FAMILIES);
+        Ok(Gfx {
+            dwrite,
+            fonts,
+            family,
+            rt,
+            device: Some(device.clone()),
+            brush,
+            formats: HashMap::new(),
+            icons: HashMap::new(),
+            svg_icons: HashMap::new(),
+            art: HashMap::new(),
+            images: HashMap::new(),
+            shadow: None,
+            dc_rt: None,
+            dc: HDC::default(),
+            bmp: HBITMAP::default(),
+            old: HGDIOBJ::default(),
+            size: (0, 0),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) unsafe fn text_full(
+        &mut self,
+        s: &str,
+        r: Rect,
+        px: f32,
+        weight: i32,
+        families: &[&str],
+        c: u32,
+        alpha: f32,
+        halign: Align,
+        valign: VAlign,
+        wrap: bool,
+    ) {
+        let family = self.resolve(families).to_string();
+        let Some(f) = self.format_full(px, weight, &family, halign, valign, wrap) else {
+            return;
+        };
+        self.brush.SetColor(&color(c, alpha));
+        let text: Vec<u16> = s.encode_utf16().collect();
+        self.rt.DrawText(
+            &text,
+            &f,
+            &r.d2d(),
+            &self.brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
     }
 
     pub(crate) unsafe fn begin_draw(&self) {
