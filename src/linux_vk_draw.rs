@@ -991,6 +991,7 @@ fn draw_strip(
         }
         return;
     }
+    let chip_look = spec.strip == crate::vk_paint::StripLook::Chips;
     let button_w = spec.strip_button_w * unit;
     let button_h = spec.strip_button_h * unit;
     let gap = spec.strip_button_gap * unit;
@@ -1025,12 +1026,14 @@ fn draw_strip(
         let word = &strip.visible[slot];
         let selected = slot == strip.highlight_slot;
         if selected {
-            round_rect(g, x0 * scale, inner_t * scale, chip_w * scale, (inner_b - inner_t) * scale, chip_r * scale, pal.chip_sel, fade_u8(1.0));
+            let sel_fill = if chip_look { pal.accent } else { pal.chip_sel };
+            round_rect(g, x0 * scale, inner_t * scale, chip_w * scale, (inner_b - inner_t) * scale, chip_r * scale, sel_fill, fade_u8(1.0));
         }
         let alpha = fade_u8(if selected { 1.0 } else { spec.chip_text_alpha });
         let weight = if selected { weight(spec.chip_sel_weight) } else { Weight::NORMAL };
         let label = (x0 + chip_r * 0.5, inner_t, x0 + chip_w - chip_r * 0.5, inner_b);
-        text(g, word, label, spec.chip_px * unit * scale, weight, pal.text, alpha, scale, spec.families);
+        let color = if selected && chip_look { pal.sel_text } else { pal.text };
+        text(g, word, label, spec.chip_px * unit * scale, weight, color, alpha, scale, spec.families);
     }
 }
 
