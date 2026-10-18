@@ -314,6 +314,93 @@ fn print_gamepad_settings() {
     println!("scroll_accel={}", s.scroll_accel);
 }
 
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+fn run_update_command(args: &[String]) -> i32 {
+    use crate::linux_update::{Check, Options, Outcome, Restart};
+    let flag = |name: &str| args.iter().any(|a| a == name);
+    if flag("--check") {
+        return match crate::linux_update::check() {
+            Ok(Check::UpToDate(version)) => {
+                println!(
+                    "Up to date: v{} (latest release v{version}).",
+                    crate::release_feed::CURRENT
+                );
+                0
+            }
+            Ok(Check::NoLinuxBuild(version)) => {
+                println!(
+                    "v{version} is out, but it has no Linux build ({}).",
+                    crate::linux_update::asset_name()
+                );
+                0
+            }
+            Ok(Check::Available(release)) => {
+                println!(
+                    "v{} is available ({} bytes).",
+                    release.version, release.size
+                );
+                for note in &release.notes {
+                    println!("  - {note}");
+                }
+                println!("{}", release.page);
+                0
+            }
+            Err(error) => {
+                eprintln!("update check failed: {error}");
+                1
+            }
+        };
+    }
+    let mut options = Options::installed();
+    options.restart = Restart::Wait;
+    options.dry_run = flag("--dry-run");
+    if let Some(i) = args.iter().position(|a| a == "--dir") {
+        let Some(dir) = args.get(i + 1) else {
+            eprintln!("usage: warmup-companion update [--check] [--dry-run] [--dir <path>]");
+            return 2;
+        };
+        options.dir = std::path::PathBuf::from(dir);
+        options.restart = Restart::Skip;
+    }
+    match crate::linux_update::update(&options) {
+        Ok(Outcome::UpToDate(version)) => {
+            println!(
+                "Up to date: v{} (latest release v{version}).",
+                crate::release_feed::CURRENT
+            );
+            0
+        }
+        Ok(Outcome::NoLinuxBuild(version)) => {
+            println!("v{version} is out, but it has no Linux build. Nothing was changed.");
+            0
+        }
+        Ok(Outcome::Verified(release)) => {
+            println!(
+                "Dry run: v{} downloaded and its checksum matches. Nothing was replaced.",
+                release.version
+            );
+            0
+        }
+        Ok(Outcome::Installed { release, restarted }) => {
+            println!(
+                "Installed v{} in {}.",
+                release.version,
+                options.dir.display()
+            );
+            if restarted {
+                println!("Restarted warmup-companion.service.");
+            } else {
+                println!("The service was not restarted.");
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("update failed: {error}");
+            1
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub fn dispatch_install_or_service(args: &[String]) {
     #[cfg(feature = "speech")]
@@ -388,6 +475,10 @@ pub fn dispatch_install_or_service(args: &[String]) {
         Some("settings") => {
             run_settings_command(args);
             std::process::exit(0);
+        }
+        #[cfg(feature = "gamepad")]
+        Some("update") => {
+            std::process::exit(run_update_command(args));
         }
         _ => {}
     }

@@ -1,6 +1,16 @@
 # Linux self-update
 
-This is a plan only. The Windows updater in `src/updater.rs` stays Windows-only. Do not port that module, and do not download or replace the binary from this document.
+The Windows updater in `src/updater.rs` stays Windows-only. The Linux updater is `src/linux_update.rs`. Both read the release feed through `src/release_feed.rs`: the GitHub URLs, the tag and version compare, the asset lookup, the release notes, and the `.sha256` sidecar format.
+
+## What is built
+
+- `warmup-companion update` checks the latest release, downloads the Linux build, verifies its checksum, renames it over the installed binary, and runs `systemctl --user restart warmup-companion.service`.
+- `warmup-companion update --check` only reports what the latest release has.
+- `warmup-companion update --dry-run` downloads and verifies, then deletes the download. Nothing is replaced and nothing restarts.
+- `warmup-companion update --dir <path>` installs into another folder and never restarts the service. Use it to test.
+- The service checks 15 seconds after start, retries after 10 minutes when a check fails, and checks again a day after a successful check, while `update_check` is on. A newer release with a Linux build shows a notification that says to run `warmup-companion update`. A release without a Linux build is only logged.
+- `linux_update::start_update()` runs the same update on a background thread and queues the restart with `systemctl --user --no-block restart`, so it can be called from inside the service. Nothing calls it yet. The tray or Controller Center can add a button for it.
+- Downloads use `curl` with HTTPS only, including redirects. The checksum is computed with `sha256sum`. Both ship with every distribution the install guide covers, so the companion needs no TLS or hash crate.
 
 ## What Windows does today
 
@@ -36,9 +46,18 @@ Settings, the log, the runtime status, and the socket stay in place. Uninstall a
 
 ## The release asset does not exist yet
 
-GitHub releases do not publish a Linux binary today. The Windows updater requires `warmup-companion-setup.exe`. A Linux updater must not download that installer.
+GitHub releases do not publish a Linux binary today. The Windows updater requires `warmup-companion-setup.exe`. The Linux updater never downloads that installer.
 
-A release would need a Linux asset under the same download prefix, plus a sibling `.sha256` file. The asset name is not chosen yet. Until that file is on the release, the check should say there is no Linux build. It should not fall back to the Windows installer.
+Until a release carries the Linux asset, `warmup-companion update` prints that the release has no Linux build and changes nothing.
+
+The release workflow has to upload two files to the GitHub release:
+
+| File | Contents |
+| --- | --- |
+| `warmup-companion-linux-x86_64` | The release binary from `cargo build --release` on Linux, uploaded as is (not archived). |
+| `warmup-companion-linux-x86_64.sha256` | The SHA-256 of that file as lowercase hex, as the first word of the file. The output of `sha256sum warmup-companion-linux-x86_64` works. |
+
+The suffix is Rust's `std::env::consts::ARCH`. An ARM build would be `warmup-companion-linux-aarch64` with its own `.sha256`. The updater reads only the asset for the architecture it runs on.
 
 Both URLs stay restricted to `https://github.com/warmUP-corp/warmup-companion/releases/download/`. Verify SHA-256 before the new bytes replace anything. A mismatch deletes the download and leaves the installed binary as it is.
 
@@ -46,20 +65,21 @@ Both URLs stay restricted to `https://github.com/warmUP-corp/warmup-companion/re
 
 The service is the process executing the installed binary. Opening that file for writing fails with `ETXTBSY`, but `rename()` over it succeeds: the running process keeps the old inode until it exits.
 
-Download next to it, for example `warmup-companion.new`, in the same directory. Verify the checksum there. Then a short helper that is not the running binary should:
+So the service does not have to stop first:
 
-1. `systemctl --user stop warmup-companion.service`
-2. Rename `warmup-companion.new` onto `warmup-companion` (keep the previous file only until the rename succeeds)
-3. `systemctl --user start warmup-companion.service`
+1. Download to `warmup-companion.new` in the same directory, so the rename stays on one filesystem.
+2. Verify the checksum there and make it executable. A mismatch deletes the download.
+3. Rename `warmup-companion.new` onto `warmup-companion`.
+4. `systemctl --user restart warmup-companion.service`. `Restart=on-failure` does not restart a clean exit, so the explicit restart is what picks up the new binary.
 
-So the swap can happen while the service runs: write `warmup-companion.new`, rename it over `warmup-companion`, then `systemctl --user restart warmup-companion.service`. `Restart=on-failure` does not restart a clean exit, so the explicit restart is what picks up the new binary. The helper can be `systemd-run --user` or another short-lived command. It must not be the binary that is about to be replaced.
+From the CLI the restart waits for systemd. From inside the service it is queued with `--no-block`: the restart stops the service's own cgroup, and a queued job finishes even after the caller is gone. No separate helper process is needed.
 
-The unit file does not need a rewrite when the path stays the same. Do not `daemon-reload` unless the unit text changed. Do not enable the unit again if it is already enabled.
+If the download, the checksum, or the rename fails, the old binary stays in place and the running service is not touched. If the restart fails after the rename, the new binary is already installed and the service keeps running the old one until it next starts. The error says so.
 
-If stop or rename fails, start the service again on the old binary and report the failure. Do not leave the user with no companion.
+The restart is skipped when the user unit file does not exist, and always with `--dir`. The unit file does not need a rewrite when the path stays the same, so the updater never runs `daemon-reload` or `enable`.
 
 ## How the user hears about it
 
-The service already notifies through `linux_notify`. A newer build, a failed check, and a finished install can use that. The first check, the 10 minute retry, and the daily check are the cadence to mirror.
+The service notifies through `linux_notify` when a newer release has a Linux build. `start_update()` also notifies when the release has no Linux build, when the installed version is current, and when the update fails.
 
-Controller Center and the tray menu are owned by the UI work. A "Check for updates" button, progress, and the `update_check` switch in those screens stay there. This plan does not add them. The setting can already be written with `warmup-companion settings`.
+Controller Center and the tray menu are owned by the UI work. A "Check for updates" button, progress, and the `update_check` switch in those screens stay there. The setting can already be written with `warmup-companion settings`.
