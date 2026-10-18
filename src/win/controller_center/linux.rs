@@ -181,8 +181,9 @@ pub(super) unsafe fn pick_file(
     let dir = documents_dir();
     if save {
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let (y, mo, d, ..) = crate::time_util::local_now();
-        return Ok(Some(dir.join(export_file_name(y, mo, d))));
+        let (y, mo, d, h, mi, sec) = crate::time_util::local_now();
+        let name = export_file_name(y, mo, d).replace(".ini", &format!("-{h:02}{mi:02}{sec:02}.ini"));
+        return Ok(Some(dir.join(name)));
     }
     newest_export(&dir)
         .map(Some)
