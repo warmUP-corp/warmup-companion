@@ -14,13 +14,13 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory, ID2D1Factory1,
-    ID2D1Geometry, ID2D1Layer, ID2D1RenderTarget, ID2D1Resource, ID2D1SolidColorBrush,
+    ID2D1RenderTarget, ID2D1Resource, ID2D1SolidColorBrush,
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL,
     D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET,
     D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAMMA_2_2, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
-    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAMMA_2_2,
+    D2D1_INTERPOLATION_MODE_LINEAR,
     D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT, D2D1_SWEEP_DIRECTION_CLOCKWISE,
     D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
 };
@@ -68,7 +68,6 @@ pub use crate::vk_paint::{
     StyleSpec,
     VkLook,
     VkPalette,
-    blur_shadow_layers,
     colorref_mix,
     floating_pad,
     lerp,
@@ -76,7 +75,6 @@ pub use crate::vk_paint::{
     prompt_spec,
     ref_key_h,
     ref_unit,
-    shift_hue,
     strip_band_height,
     strip_slots,
     style_palette,
@@ -264,8 +262,10 @@ pub struct VkRenderer {
     dwrite: IDWriteFactory,
     text_format: IDWriteTextFormat,
     glyph_format: IDWriteTextFormat,
+    glyph_px: f32,
     /// Small font for sublabels, badges, and the legend strip.
     hint_format: IDWriteTextFormat,
+    hint_px: f32,
     style_fonts: Option<StyleFonts>,
     /// Fixed large font for the connect/keyboard prompt pills (10-foot UI).
     prompt_format: IDWriteTextFormat,
@@ -1443,7 +1443,9 @@ impl VkRenderer {
             dwrite,
             text_format,
             glyph_format,
+            glyph_px: label_px * 1.1,
             hint_format,
+            hint_px: (label_px * 0.5).clamp(10.0, 20.0),
             style_fonts: None,
             prompt_format,
             prompt_fonts: None,
@@ -1953,26 +1955,6 @@ impl VkRenderer {
             self.d2d_context.Clear(Some(&colorref(pal.bg)));
         }
 
-        let key_brush = solid_brush(&self.d2d_context, colorref(pal.key))?;
-        let action_brush = solid_brush(&self.d2d_context, colorref(pal.key_action))?;
-        let enter_brush = solid_brush(&self.d2d_context, colorref(pal.key_enter))?;
-        let enter_text_brush = solid_brush(&self.d2d_context, colorref(pal.enter_text))?;
-        let accent_brush = solid_brush(&self.d2d_context, colorref(pal.accent))?;
-        let text_brush = solid_brush(&self.d2d_context, colorref(pal.text))?;
-        let sel_text_brush = solid_brush(&self.d2d_context, colorref(pal.sel_text))?;
-        let dim_brush = solid_brush(
-            &self.d2d_context,
-            colorref_alpha(pal.text_dim, spec.number_alpha),
-        )?;
-        let sel_dim_brush = solid_brush(
-            &self.d2d_context,
-            colorref_alpha(pal.sel_text, spec.number_alpha),
-        )?;
-        let shadow_brush = solid_brush(
-            &self.d2d_context,
-            colorref_alpha(0x000000, spec.key_shadow_alpha),
-        )?;
-        let sel_ring_brush = solid_brush(&self.d2d_context, colorref(pal.sel_ring))?;
         let radius = spec.key_radius * unit;
         #[cfg(feature = "vk-panels")]
         let panel_open = vk_panels::is_open();
@@ -2029,41 +2011,39 @@ impl VkRenderer {
                 }
             } else if spec.key_shadow_dy > 0.0 {
                 let dy = (spec.key_shadow_dy * unit).max(1.0);
-                self.d2d_context.FillRoundedRectangle(
-                    &rounded(
-                        D2D_RECT_F {
-                            top: key_rect.top + dy,
-                            bottom: key_rect.bottom + dy,
-                            ..key_rect
-                        },
-                        radius,
-                    ),
-                    &shadow_brush,
+                let g = &mut self.gfx;
+                g.fill(
+                    crate::mono_ui::Rect {
+                        x: key_rect.left,
+                        y: key_rect.top + dy,
+                        w: key_rect.right - key_rect.left,
+                        h: key_rect.bottom - key_rect.top,
+                    },
+                    radius,
+                    0x000000,
+                    spec.key_shadow_alpha,
                 );
             }
             let modifier_active = !selected
                 && ((matches!(key.action, KeyAction::Shift) && modifiers.shift)
                     || (matches!(key.action, KeyAction::Symbols) && modifiers.symbol));
-            let modifier_tint_brush;
-            let (fill, fill_color, label_brush, dim) = if selected {
-                (&accent_brush, pal.accent, &sel_text_brush, &sel_dim_brush)
+            let fill_color = if selected {
+                pal.accent
             } else if modifier_active || (press.is_some() && pal.mod_tint.is_some()) {
-                let tint_color = pal
-                    .mod_tint
+                pal.mod_tint
                     .map(|(fill, _)| fill)
-                    .unwrap_or_else(|| colorref_mix(pal.accent, pal.key, 0.35));
-                modifier_tint_brush = solid_brush(&self.d2d_context, colorref(tint_color))?;
-                (&modifier_tint_brush, tint_color, &text_brush, &dim_brush)
+                    .unwrap_or_else(|| colorref_mix(pal.accent, pal.key, 0.35))
             } else if style == VkStyle::Modern && is_enter_key(&key.action) {
-                (&enter_brush, pal.key_enter, &enter_text_brush, &dim_brush)
+                pal.key_enter
             } else if action_key
                 || (spec.tonal_function_keys
                     && (is_function_key(&key.action) || (kr.pos.row == 0 && rows.len() == 5)))
             {
-                (&action_brush, pal.key_action, &text_brush, &dim_brush)
+                pal.key_action
             } else {
-                (&key_brush, pal.key, &text_brush, &dim_brush)
+                pal.key
             };
+            let dim_color = if selected { pal.sel_text } else { pal.text_dim };
             let label_color = if selected {
                 pal.sel_text
             } else if style == VkStyle::Modern && is_enter_key(&key.action) && !modifier_active {
@@ -2071,7 +2051,18 @@ impl VkRenderer {
             } else {
                 pal.text
             };
-            self.d2d_context.FillRoundedRectangle(&rect, fill);
+            let g = &mut self.gfx;
+            g.fill(
+                crate::mono_ui::Rect {
+                    x: key_rect.left,
+                    y: key_rect.top,
+                    w: key_rect.right - key_rect.left,
+                    h: key_rect.bottom - key_rect.top,
+                },
+                radius,
+                fill_color,
+                1.0,
+            );
 
             let locked = (matches!(key.action, KeyAction::Shift) && modifiers.caps)
                 || (matches!(key.action, KeyAction::Symbols) && modifiers.symbol_locked);
@@ -2080,20 +2071,23 @@ impl VkRenderer {
                 let pill_h = (3.0 * unit).max(2.0);
                 let cx = (key_rect.left + key_rect.right) * 0.5;
                 let bottom = key_rect.bottom - 5.0 * unit;
-                let pill_rect = D2D_RECT_F {
-                    left: cx - pill_w * 0.5,
-                    right: cx + pill_w * 0.5,
-                    top: bottom - pill_h,
-                    bottom,
-                };
                 let pill_color = match (selected, pal.mod_tint) {
                     (true, _) => pal.sel_text,
                     (false, Some((_, bar))) => bar,
                     (false, None) => pal.accent,
                 };
-                let pill_brush = solid_brush(&self.d2d_context, colorref(pill_color))?;
-                self.d2d_context
-                    .FillRoundedRectangle(&rounded(pill_rect, pill_h * 0.5), &pill_brush);
+                let g = &mut self.gfx;
+                g.fill(
+                    crate::mono_ui::Rect {
+                        x: cx - pill_w * 0.5,
+                        y: bottom - pill_h,
+                        w: pill_w,
+                        h: pill_h,
+                    },
+                    pill_h * 0.5,
+                    pill_color,
+                    1.0,
+                );
             }
 
             let is_space = matches!(key.action, KeyAction::Vk(vk) if vk == windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE);
@@ -2103,13 +2097,24 @@ impl VkRenderer {
                 } else {
                     band_at(key_rect, key_rect.top + spec.number_cy * unit, key_h)
                 };
-                self.d2d_context.DrawText(
-                    &wide(sub),
-                    &fonts.number,
-                    &band,
-                    dim,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    DWRITE_MEASURING_MODE_NATURAL,
+                let families = style_spec(look).families;
+                let g = &mut self.gfx;
+                g.text_full(
+                    sub,
+                    crate::mono_ui::Rect {
+                        x: band.left,
+                        y: band.top,
+                        w: band.right - band.left,
+                        h: band.bottom - band.top,
+                    },
+                    spec.number_px * unit,
+                    400,
+                    families,
+                    dim_color,
+                    spec.number_alpha,
+                    crate::mono_ui::Align::Center,
+                    crate::mono_ui::VAlign::Center,
+                    false,
                 );
             }
 
@@ -2134,9 +2139,15 @@ impl VkRenderer {
                         .min(rect.rect.bottom - rect.rect.top)
                         .max(1.0);
                     let transcribing = matches!(voice_phase, VoicePhase::Transcribing);
-                    self.d2d_context.PushAxisAlignedClip(
-                        &rect.rect,
-                        windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                    let g = &mut self.gfx;
+                    g.push_clip(
+                        crate::mono_ui::Rect {
+                            x: rect.rect.left,
+                            y: rect.rect.top,
+                            w: rect.rect.right - rect.rect.left,
+                            h: rect.rect.bottom - rect.rect.top,
+                        },
+                        true,
                     );
                     // The cloud fills its square, so keep it inside the old blob's
                     // footprint instead of edge to edge on the key.
@@ -2155,7 +2166,7 @@ impl VkRenderer {
                             1.25,
                         )?;
                     }
-                    self.d2d_context.PopAxisAlignedClip();
+                    self.gfx.pop_clip();
                     let halo_alpha = match voice_phase {
                         VoicePhase::Starting => 0.18,
                         VoicePhase::Listening => 0.28 + 0.34 * voice_level.clamp(0.0, 1.0),
@@ -2165,32 +2176,63 @@ impl VkRenderer {
                             0.28 + 0.42 * pulse
                         }
                     };
-                    let halo =
-                        solid_brush(&self.d2d_context, colorref_alpha(pal.accent, halo_alpha))?;
-                    self.d2d_context
-                        .DrawRoundedRectangle(&rect, &halo, 2.0, None);
+                    let g = &mut self.gfx;
+                    g.ring(
+                        crate::mono_ui::Rect {
+                            x: key_rect.left,
+                            y: key_rect.top,
+                            w: key_rect.right - key_rect.left,
+                            h: key_rect.bottom - key_rect.top,
+                        },
+                        radius,
+                        2.0,
+                        pal.accent,
+                        halo_alpha,
+                    );
                 } else {
                     self.draw_svg_icon_sized(VkIcon::Mic, key_rect, label_color, 1.0, icon_px)?;
                 }
             } else if is_space {
                 let space_px = spec.space_icon_px * unit;
+                let families = spec.families;
                 if let Some(text) = spec.space_label {
-                    self.d2d_context.DrawText(
-                        &wide(text),
-                        &fonts.space,
-                        &key_rect,
-                        label_brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        DWRITE_MEASURING_MODE_NATURAL,
+                    let g = &mut self.gfx;
+                    g.text_full(
+                        text,
+                        crate::mono_ui::Rect {
+                            x: key_rect.left,
+                            y: key_rect.top,
+                            w: key_rect.right - key_rect.left,
+                            h: key_rect.bottom - key_rect.top,
+                        },
+                        spec.space_label_px * unit,
+                        400,
+                        families,
+                        label_color,
+                        1.0,
+                        crate::mono_ui::Align::Center,
+                        crate::mono_ui::VAlign::Center,
+                        false,
                     );
                 } else if let Some(sub) = key.sublabel.as_deref() {
-                    self.d2d_context.DrawText(
-                        &wide(sub),
-                        &fonts.number,
-                        &band_at(key_rect, key_rect.top + spec.caption_cy * unit, key_h),
-                        dim,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        DWRITE_MEASURING_MODE_NATURAL,
+                    let band = band_at(key_rect, key_rect.top + spec.caption_cy * unit, key_h);
+                    let g = &mut self.gfx;
+                    g.text_full(
+                        sub,
+                        crate::mono_ui::Rect {
+                            x: band.left,
+                            y: band.top,
+                            w: band.right - band.left,
+                            h: band.bottom - band.top,
+                        },
+                        spec.number_px * unit,
+                        400,
+                        families,
+                        dim_color,
+                        spec.number_alpha,
+                        crate::mono_ui::Align::Center,
+                        crate::mono_ui::VAlign::Center,
+                        false,
                     );
                     let icon_rect =
                         band_at(key_rect, key_rect.top + spec.space_icon_cy * unit, key_h);
@@ -2209,15 +2251,43 @@ impl VkRenderer {
                 let (glyph, symbol_font) = key_glyph(key);
                 let glyph = styled_glyph(spec, &key.action, glyph);
                 if !glyph.is_empty() {
-                    let format = if symbol_font {
-                        &self.glyph_format
-                    } else if glyph.chars().count() > 1 {
-                        &fonts.word
-                    } else {
-                        &fonts.label
-                    };
                     let corner = spec.corner_sublabel && key.sublabel.is_some() && !symbol_font;
-                    let format = if corner { &fonts.label_corner } else { format };
+                    let (weight, families, halign, valign) = if corner {
+                        (
+                            spec.label_weight,
+                            spec.families,
+                            crate::mono_ui::Align::Left,
+                            crate::mono_ui::VAlign::Bottom,
+                        )
+                    } else if symbol_font {
+                        (
+                            400,
+                            &["Segoe UI Symbol"] as &[&str],
+                            crate::mono_ui::Align::Center,
+                            crate::mono_ui::VAlign::Center,
+                        )
+                    } else if glyph.chars().count() > 1 {
+                        (
+                            spec.word_weight,
+                            spec.families,
+                            crate::mono_ui::Align::Center,
+                            crate::mono_ui::VAlign::Center,
+                        )
+                    } else {
+                        (
+                            spec.label_weight,
+                            spec.families,
+                            crate::mono_ui::Align::Center,
+                            crate::mono_ui::VAlign::Center,
+                        )
+                    };
+                    let px = if symbol_font {
+                        self.glyph_px
+                    } else if glyph.chars().count() > 1 {
+                        spec.word_px * unit
+                    } else {
+                        spec.label_px * unit
+                    };
                     let label_rect = if corner {
                         deflate(key_rect, spec.hint_inset * 1.5 * unit)
                     } else if key.sublabel.is_some() {
@@ -2225,13 +2295,23 @@ impl VkRenderer {
                     } else {
                         key_rect
                     };
-                    self.d2d_context.DrawText(
-                        &wide(&glyph),
-                        format,
-                        &label_rect,
-                        label_brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        DWRITE_MEASURING_MODE_NATURAL,
+                    let g = &mut self.gfx;
+                    g.text_full(
+                        &glyph,
+                        crate::mono_ui::Rect {
+                            x: label_rect.left,
+                            y: label_rect.top,
+                            w: label_rect.right - label_rect.left,
+                            h: label_rect.bottom - label_rect.top,
+                        },
+                        px,
+                        weight,
+                        families,
+                        label_color,
+                        1.0,
+                        halign,
+                        valign,
+                        false,
                     );
                 }
             }
@@ -2248,18 +2328,24 @@ impl VkRenderer {
                 if let Some(icon) = controller_icons.hint_icon(hint) {
                     self.draw_svg_icon(icon, badge, pal.text)?;
                 } else {
-                    let badge_brush = if selected {
-                        &sel_text_brush
-                    } else {
-                        &accent_brush
-                    };
-                    self.d2d_context.DrawText(
-                        &wide(hint),
-                        &self.hint_format,
-                        &badge,
-                        badge_brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        DWRITE_MEASURING_MODE_NATURAL,
+                    let badge_color = if selected { pal.sel_text } else { pal.accent };
+                    let g = &mut self.gfx;
+                    g.text_full(
+                        hint,
+                        crate::mono_ui::Rect {
+                            x: badge.left,
+                            y: badge.top,
+                            w: badge.right - badge.left,
+                            h: badge.bottom - badge.top,
+                        },
+                        self.hint_px,
+                        600,
+                        &["Segoe UI"],
+                        badge_color,
+                        1.0,
+                        crate::mono_ui::Align::Center,
+                        crate::mono_ui::VAlign::Top,
+                        false,
                     );
                 }
             }
@@ -2273,10 +2359,6 @@ impl VkRenderer {
         // button presses as one piece.
         if let Some(ring) = self.anim_sel.filter(|_| !panel_open) {
             let ring_w = (spec.sel_ring_w * unit).max(1.0);
-            let rr = rounded(
-                deflate(ring, ring_w * 0.5),
-                (radius - ring_w * 0.5).max(0.0),
-            );
             let ring_press = pressed
                 .filter(|(p, _)| p.row == sel.row && p.col == sel.col)
                 .map(|(_, s)| s);
@@ -2287,8 +2369,19 @@ impl VkRenderer {
                 (ring.top + ring.bottom) * 0.5,
             ));
             }
-            self.d2d_context
-                .DrawRoundedRectangle(&rr, &sel_ring_brush, ring_w, None);
+            let g = &mut self.gfx;
+            g.ring(
+                crate::mono_ui::Rect {
+                    x: ring.left,
+                    y: ring.top,
+                    w: ring.right - ring.left,
+                    h: ring.bottom - ring.top,
+                },
+                radius,
+                ring_w,
+                pal.sel_ring,
+                1.0,
+            );
             if ring_press.is_some() {
                 self.set_transform(&IDENTITY);
             }
@@ -2308,12 +2401,6 @@ impl VkRenderer {
                 1.0,
             )?;
         }
-
-        drop(key_brush);
-        drop(action_brush);
-        drop(accent_brush);
-        drop(text_brush);
-        drop(sel_text_brush);
 
         // Suggestion pill last, so it floats on top of the keys (and the ring).
         if let Some(strip) = candidates.filter(|_| !panel_open) {
@@ -4702,7 +4789,7 @@ impl VkRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vk_paint::{BLUR_SHADOW_STEPS, LEGEND_MIN_TEXT_PX};
+    use crate::vk_paint::{BLUR_SHADOW_STEPS, LEGEND_MIN_TEXT_PX, blur_shadow_layers};
 
     fn overlaps(a: &D2D_RECT_F, b: &D2D_RECT_F) -> bool {
         a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
