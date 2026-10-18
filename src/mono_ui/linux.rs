@@ -166,6 +166,10 @@ impl Gfx {
         self.pixmap.data()
     }
 
+    pub(crate) fn canvas(&mut self) -> (&mut Pixmap, &mut FontSystem, &mut SwashCache) {
+        (&mut self.pixmap, &mut self.fonts, &mut self.swash)
+    }
+
     pub(crate) fn width(&self) -> u32 {
         self.pixmap.width()
     }

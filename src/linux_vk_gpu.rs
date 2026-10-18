@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use super::draw::{self, Frame, Glide};
+use crate::mono_ui::Gfx;
 
 pub struct Orb<'a> {
     pub pixels: &'a [u8],
@@ -30,7 +31,15 @@ pub struct Presenter {
     alpha: wgpu::CompositeAlphaMode,
     present_mode: wgpu::PresentMode,
     shown: u32,
-    showing_sheet: bool,
+    mode: Mode,
+    configured_once: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Keys,
+    Sheet,
+    Full,
 }
 
 struct Image {
@@ -236,75 +245,86 @@ impl Presenter {
             alpha,
             present_mode,
             shown: 0,
-            showing_sheet: false,
+            mode: Mode::Keys,
+            configured_once: false,
         })
+    }
+
+    pub fn configured_once(&self) -> bool {
+        self.configured_once
     }
 
     pub fn present(
         &mut self,
         frame: &Frame,
-        fonts: &mut cosmic_text::FontSystem,
-        cache: &mut cosmic_text::SwashCache,
+        g: &mut Gfx,
         glide: &mut Glide,
         orb: Option<&Orb<'_>>,
     ) -> Result<(), String> {
-        if !frame.sheet && frame.pressed.is_some_and(|(pos, _)| pos != frame.sel) {
-            return Err("cpu".into());
-        }
         let width = (frame.logical_w * frame.scale.max(1.0)).round().max(1.0) as u32;
         let height = (frame.logical_h * frame.scale.max(1.0)).round().max(1.0) as u32;
         self.configure(width, height)?;
         let target = self.acquire()?;
         let started = Instant::now();
-        let stamp = draw::keyboard_stamp(frame);
-        let strip_live = strip_live(glide, frame);
+        let key_id = (frame.sel.row, frame.sel.col);
+        let pressed_elsewhere = frame.pressed.is_some_and(|(pos, _)| pos != frame.sel);
+        let mut full = frame.sheet || pressed_elsewhere;
         let mut raster = false;
-        if frame.sheet {
-            if !self.showing_sheet {
-                let pixmap = draw::draw(frame, fonts, cache, glide).ok_or_else(|| "sheet raster failed".to_string())?;
-                self.base = Some(upload(&self.device, &self.queue, "keyboard-sheet", pixmap.data(), pixmap.width(), pixmap.height()));
-                self.keys.clear();
+        if !full {
+            if self.mode != Mode::Keys {
+                self.mode = Mode::Keys;
+                self.base = None;
                 self.stamp = 0;
-                self.showing_sheet = true;
+                self.keys.clear();
+            }
+            let stamp = draw::keyboard_stamp(frame);
+            let strip_live = strip_live(glide, frame);
+            if strip_live || self.base.is_none() || self.stamp != stamp {
+                draw::paint_base(g, frame, glide);
+                self.base = Some(upload(&self.device, &self.queue, "keyboard-base", g.pixels(), g.width(), g.height()));
+                self.keys.clear();
+                self.stamp = if strip_live { !stamp } else { stamp };
                 raster = true;
             }
-        } else if self.showing_sheet {
-            self.showing_sheet = false;
-            self.base = None;
-            self.stamp = 0;
-            self.keys.clear();
+            if !self.keys.contains_key(&key_id) {
+                match draw::paint_selected_key(g, frame, 1.0) {
+                    Some(patch) => {
+                        let image = upload(&self.device, &self.queue, "keyboard-key", g.pixels(), g.width(), g.height());
+                        self.keys.insert(
+                            key_id,
+                            KeyGpu {
+                                image,
+                                patch: Patch {
+                                    dest_x: patch.dest_x,
+                                    dest_y: patch.dest_y,
+                                    width: patch.width as f32,
+                                    height: patch.height as f32,
+                                    body_x: patch.body_x,
+                                    body_y: patch.body_y,
+                                    body_w: patch.body_w,
+                                    body_h: patch.body_h,
+                                    radius: patch.radius,
+                                    ring: patch.ring,
+                                    ring_w: patch.ring_w,
+                                },
+                            },
+                        );
+                        raster = true;
+                    }
+                    None => full = true,
+                }
+            }
         }
-        if !frame.sheet && (strip_live || self.base.is_none() || self.stamp != stamp) {
-            let pixmap = draw::raster_unselected(frame, fonts, cache, glide).ok_or_else(|| "keyboard raster failed".to_string())?;
-            self.base = Some(upload(&self.device, &self.queue, "keyboard-base", pixmap.data(), pixmap.width(), pixmap.height()));
-            self.keys.clear();
-            self.stamp = if strip_live { !stamp } else { stamp };
-            raster = true;
-        }
-        let key_id = (frame.sel.row, frame.sel.col);
-        if !frame.sheet && !self.keys.contains_key(&key_id) {
-            let patch = draw::raster_selected_key(frame, fonts, cache, 1.0).ok_or_else(|| "cpu".to_string())?;
-            let image = upload(&self.device, &self.queue, "keyboard-key", &patch.pixels, patch.width, patch.height);
-            self.keys.insert(
-                key_id,
-                KeyGpu {
-                    image,
-                    patch: Patch {
-                        dest_x: patch.dest_x,
-                        dest_y: patch.dest_y,
-                        width: patch.width as f32,
-                        height: patch.height as f32,
-                        body_x: patch.body_x,
-                        body_y: patch.body_y,
-                        body_w: patch.body_w,
-                        body_h: patch.body_h,
-                        radius: patch.radius,
-                        ring: patch.ring,
-                        ring_w: patch.ring_w,
-                    },
-                },
-            );
-            raster = true;
+        if full {
+            let mode = if frame.sheet { Mode::Sheet } else { Mode::Full };
+            if mode != Mode::Sheet || self.mode != Mode::Sheet || self.base.is_none() {
+                draw::paint_frame(g, frame, glide);
+                self.base = Some(upload(&self.device, &self.queue, "keyboard-frame", g.pixels(), g.width(), g.height()));
+                self.keys.clear();
+                self.stamp = 0;
+                raster = true;
+            }
+            self.mode = mode;
         }
         if let Some(orb) = orb {
             if orb.px > 0 && orb.pixels.len() >= (orb.px * orb.px * 4) as usize {
@@ -316,7 +336,7 @@ impl Presenter {
             self.orb_live = false;
         }
         let raster_ms = started.elapsed().as_secs_f32() * 1000.0;
-        let patch = if frame.sheet {
+        let patch = if full {
             Patch {
                 dest_x: 0.0,
                 dest_y: 0.0,
@@ -334,7 +354,7 @@ impl Presenter {
             self.keys.get(&key_id).ok_or_else(|| "missing selected key".to_string())?.patch
         };
         let press = frame.pressed.filter(|(pos, _)| *pos == frame.sel).map(|(_, scale)| scale).unwrap_or(1.0);
-        let show_key = if frame.sheet { 0.0 } else { 1.0 };
+        let show_key = if full { 0.0 } else { 1.0 };
         let orb_box = orb
             .filter(|_| self.orb_live)
             .map(|orb| [orb.x, orb.y, orb.size, orb.size])
@@ -351,7 +371,7 @@ impl Presenter {
         let gpu_at = Instant::now();
         let base = self.base.as_ref().ok_or_else(|| "missing keyboard texture".to_string())?;
         let key_fallback;
-        let key_view = if frame.sheet {
+        let key_view = if full {
             key_fallback = None;
             &self.orb.view
         } else {
@@ -467,6 +487,7 @@ impl Presenter {
             return Err(message);
         }
         self.target_size = (width, height);
+        self.configured_once = true;
         self.base = None;
         self.keys.clear();
         self.stamp = 0;

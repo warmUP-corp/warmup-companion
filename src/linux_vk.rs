@@ -28,6 +28,7 @@ use wayland_protocols::wp::fractional_scale::v1::client::{
 use wayland_protocols::wp::viewporter::client::{wp_viewport, wp_viewporter};
 
 use crate::config::{vk_layout_mode, vk_style, VkLayoutMode, VkStyle};
+use crate::mono_ui::Gfx;
 
 #[path = "linux_vk_draw.rs"]
 mod draw;
@@ -67,7 +68,7 @@ pub fn paint_voice_screen(
 
 #[cfg(feature = "speech")]
 pub fn draw_argb(pixmap: &tiny_skia::Pixmap) -> Vec<u8> {
-    draw::to_argb(pixmap)
+    draw::to_argb(pixmap.data())
 }
 
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -260,8 +261,7 @@ struct Shell {
     dirty: bool,
     frame_pending: bool,
     exit: bool,
-    fonts: cosmic_text::FontSystem,
-    cache: cosmic_text::SwashCache,
+    gfx: Gfx,
     buffer: Option<Buffer>,
     ps5: bool,
     glide: draw::Glide,
@@ -270,6 +270,8 @@ struct Shell {
     conn: Connection,
     gpu: Option<gpu::Presenter>,
     gpu_failed: bool,
+    gpu_used: bool,
+    gpu_errors: u32,
     voice_gen: u64,
 }
 
@@ -319,8 +321,7 @@ impl Shell {
             dirty: true,
             frame_pending: false,
             exit: false,
-            fonts: draw::font_system(),
-            cache: cosmic_text::SwashCache::new(),
+            gfx: Gfx::new(1, 1)?,
             buffer: None,
             ps5: ps5_pad(),
             glide: draw::Glide::default(),
@@ -329,6 +330,8 @@ impl Shell {
             conn,
             gpu: None,
             gpu_failed: false,
+            gpu_used: false,
+            gpu_errors: 0,
             voice_gen: 0,
         };
         shell.apply_layout();
@@ -429,21 +432,42 @@ impl Shell {
             floating,
             sheet: crate::vk_sheet::shown(),
         };
-        if self.try_present_gpu(qh, &frame) {
-            return;
+        if !self.gpu_failed {
+            match self.present_gpu(qh, &frame) {
+                Ok(()) => {
+                    self.gpu_errors = 0;
+                    return;
+                }
+                Err(error) => {
+                    crate::install::log_line(&format!("keyboard gpu: {error}"));
+                    let used = self.gpu_used
+                        || self.gpu.as_ref().is_some_and(|gpu| gpu.configured_once());
+                    self.gpu = None;
+                    if used {
+                        self.gpu_used = true;
+                        self.gpu_errors += 1;
+                        if self.gpu_errors >= 3 {
+                            crate::install::log_line("keyboard closed: the GPU keeps failing");
+                            self.exit = true;
+                        } else {
+                            self.dirty = true;
+                        }
+                        return;
+                    }
+                    self.gpu_failed = true;
+                }
+            }
         }
-        let Some(mut pixmap) = draw::draw(&frame, &mut self.fonts, &mut self.cache, &mut self.glide) else {
-            return;
-        };
+        draw::paint_frame(&mut self.gfx, &frame, &mut self.glide);
         #[cfg(feature = "speech")]
         if crate::linux_speech::visual_active() {
             if let Some((px, bytes)) = crate::linux_nimbus::latest_frame() {
-                draw::paint_voice_key(&mut pixmap, &frame, &bytes, px);
+                draw::paint_voice_key(self.gfx.canvas().0, &frame, &bytes, px);
             }
         }
-        let pixels = draw::to_argb(&pixmap);
-        let buffer_w = pixmap.width() as i32;
-        let buffer_h = pixmap.height() as i32;
+        let pixels = draw::to_argb(self.gfx.pixels());
+        let buffer_w = self.gfx.width() as i32;
+        let buffer_h = self.gfx.height() as i32;
         let stride = buffer_w * 4;
         let Ok((buffer, canvas)) = self.pool.create_buffer(
             buffer_w,
@@ -474,21 +498,14 @@ impl Shell {
         self.layer.commit();
     }
 
-    fn try_present_gpu(&mut self, qh: &QueueHandle<Self>, frame: &draw::Frame) -> bool {
-        if self.gpu_failed || self.logical_w == 0 || self.logical_h == 0 {
-            return false;
+    fn present_gpu(&mut self, qh: &QueueHandle<Self>, frame: &draw::Frame) -> Result<(), String> {
+        if self.logical_w == 0 || self.logical_h == 0 {
+            return Err("the keyboard has no size yet".into());
         }
         let _ = self.conn.flush();
         if self.gpu.is_none() {
             let surface = self.layer.wl_surface().id().as_ptr() as *mut std::ffi::c_void;
-            match gpu::Presenter::open(self.display, surface) {
-                Ok(presenter) => self.gpu = Some(presenter),
-                Err(error) => {
-                    crate::install::log_line(&format!("keyboard gpu unavailable: {error}"));
-                    self.gpu_failed = true;
-                    return false;
-                }
-            }
+            self.gpu = Some(gpu::Presenter::open(self.display, surface)?);
         }
         #[cfg(feature = "speech")]
         let orb_hold = crate::linux_speech::visual_active().then(crate::linux_nimbus::latest_frame).flatten();
@@ -520,23 +537,12 @@ impl Shell {
             })
         });
         self.queue_gpu_frame(qh);
-        let Some(presenter) = self.gpu.as_mut() else {
-            return false;
-        };
-        match presenter.present(frame, &mut self.fonts, &mut self.cache, &mut self.glide, orb.as_ref()) {
-            Ok(()) => {
-                self.frame_pending = true;
-                self.dirty = self.glide.animating;
-                true
-            }
-            Err(error) if error == "cpu" => false,
-            Err(error) => {
-                crate::install::log_line(&format!("keyboard gpu: {error}"));
-                self.gpu = None;
-                self.gpu_failed = true;
-                false
-            }
-        }
+        let presenter = self.gpu.as_mut().ok_or("keyboard gpu is gone")?;
+        presenter.present(frame, &mut self.gfx, &mut self.glide, orb.as_ref())?;
+        self.gpu_used = true;
+        self.frame_pending = true;
+        self.dirty = self.glide.animating;
+        Ok(())
     }
 
     fn queue_gpu_frame(&self, qh: &QueueHandle<Self>) {
@@ -616,8 +622,7 @@ struct Prompt {
     layer: LayerSurface,
     exit: bool,
     drawn: bool,
-    fonts: cosmic_text::FontSystem,
-    cache: cosmic_text::SwashCache,
+    gfx: Gfx,
     buffer: Option<Buffer>,
 }
 
@@ -653,24 +658,16 @@ impl Prompt {
             layer,
             exit: false,
             drawn: false,
-            fonts: draw::font_system(),
-            cache: cosmic_text::SwashCache::new(),
+            gfx: Gfx::new(1, 1)?,
             buffer: None,
-            })
+        })
     }
 
     fn draw(&mut self, qh: &QueueHandle<Self>) {
-        let Some(pixmap) = draw::draw_prompt(
-            "Press L3 to open the keyboard",
-            1.0,
-            &mut self.fonts,
-            &mut self.cache,
-        ) else {
-            return;
-        };
-        let pixels = draw::to_argb(&pixmap);
-        let buffer_w = pixmap.width() as i32;
-        let buffer_h = pixmap.height() as i32;
+        draw::paint_prompt(&mut self.gfx, "Press L3 to open the keyboard", 1.0);
+        let pixels = draw::to_argb(self.gfx.pixels());
+        let buffer_w = self.gfx.width() as i32;
+        let buffer_h = self.gfx.height() as i32;
         let Ok((buffer, canvas)) = self.pool.create_buffer(
             buffer_w,
             buffer_h,

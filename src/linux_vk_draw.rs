@@ -4,6 +4,7 @@ use cosmic_text::{Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shap
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
 use crate::config::{KeyboardTheme, VkStyle};
+use crate::mono_ui::Gfx;
 use crate::vk_geom::{self, KeyRect};
 use crate::vk_key::{VK_BACK, VK_DOWN, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP};
 use crate::vk_motion::{self, concentric_radius};
@@ -268,30 +269,6 @@ impl Default for Glide {
     }
 }
 
-pub fn font_system() -> FontSystem {
-    let mut db = fontdb::Database::new();
-    for path in [
-        "/usr/share/fonts/inter/Inter.ttc",
-        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/noto/NotoSans-Medium.ttf",
-        "/usr/share/fonts/noto/NotoSans-Bold.ttf",
-    ] {
-        if std::path::Path::new(path).is_file() {
-            let _ = db.load_font_file(path);
-        }
-    }
-    db.load_font_data(include_bytes!("../assets/fonts/Selawik-Regular.ttf").to_vec());
-    db.load_font_data(include_bytes!("../assets/fonts/Selawik-Bold.ttf").to_vec());
-    let sans = if db.faces().any(|face| face.families.iter().any(|(name, _)| name == "Inter")) {
-        "Inter"
-    } else {
-        "Selawik"
-    };
-    db.set_sans_serif_family(sans);
-    db.set_serif_family(sans);
-    FontSystem::new_with_locale_and_db("en-US".to_string(), db)
-}
-
 pub fn ui_scale() -> f32 {
     crate::config::vk_bar_scale() / crate::config::COMPACT_BAR_SCALE
 }
@@ -347,48 +324,57 @@ fn ref_unit(scale: f32, spec: &Spec) -> f32 {
     REF_KEY_W * scale.max(0.05) * spec.key_aspect / spec.design_kh
 }
 
-pub fn draw(
-    frame: &Frame,
-    fonts: &mut FontSystem,
-    cache: &mut SwashCache,
-    glide: &mut Glide,
-) -> Option<Pixmap> {
+pub fn frame_px(frame: &Frame) -> (u32, u32) {
+    let scale = frame.scale.max(1.0);
+    (
+        (frame.logical_w * scale).round().max(1.0) as u32,
+        (frame.logical_h * scale).round().max(1.0) as u32,
+    )
+}
+
+pub fn paint_frame(g: &mut Gfx, frame: &Frame, glide: &mut Glide) {
     let _ = sheet_metrics_are_the_windows_ones();
+    let (width, height) = frame_px(frame);
+    g.begin(width, height);
+    let (pixmap, fonts, cache) = g.canvas();
     if frame.sheet {
         glide.base = None;
         glide.animating = false;
-        return draw_sheet_frame(frame, fonts, cache);
+        draw_sheet_frame(pixmap, frame, fonts, cache);
+        return;
     }
     let now = Instant::now();
     if strip_blocking(glide, frame, now) {
         glide.base = None;
-        return render_keyboard(frame, fonts, cache, glide, true);
+        render_keyboard(pixmap, frame, fonts, cache, glide, true);
+        return;
     }
     let stamp = keyboard_stamp(frame);
-    if glide.base.as_ref().map(|(s, _)| *s) != Some(stamp) {
-        let mut base = render_keyboard(frame, fonts, cache, glide, false)?;
-        if let Some(copy) = clone_pixmap(&base) {
-            glide.base = Some((stamp, copy));
-        }
-        paint_live(&mut base, frame, fonts, cache, glide, false);
-        return Some(base);
+    let cached = glide
+        .base
+        .as_ref()
+        .filter(|(s, base)| *s == stamp && base.data().len() == pixmap.data().len());
+    if let Some((_, base)) = cached {
+        pixmap.data_mut().copy_from_slice(base.data());
+        paint_live(pixmap, frame, fonts, cache, glide, true);
+        return;
     }
-    let mut shown = glide.base.as_ref().and_then(|(_, pixmap)| clone_pixmap(pixmap))?;
-    paint_live(&mut shown, frame, fonts, cache, glide, true);
-    Some(shown)
+    render_keyboard(pixmap, frame, fonts, cache, glide, false);
+    if let Some(copy) = clone_pixmap(pixmap) {
+        glide.base = Some((stamp, copy));
+    }
+    paint_live(pixmap, frame, fonts, cache, glide, false);
 }
 
 fn render_keyboard(
+    pixmap: &mut Pixmap,
     frame: &Frame,
     fonts: &mut FontSystem,
     cache: &mut SwashCache,
     glide: &mut Glide,
     highlight: bool,
-) -> Option<Pixmap> {
+) {
     let scale = frame.scale.max(1.0);
-    let width = (frame.logical_w * scale).round().max(1.0) as u32;
-    let height = (frame.logical_h * scale).round().max(1.0) as u32;
-    let mut pixmap = Pixmap::new(width, height)?;
     let spec = spec_for(frame.style);
     let pal = palette(frame.style, &frame.theme);
     let lu = ref_unit(ui_scale(), &spec);
@@ -419,9 +405,9 @@ fn render_keyboard(
         let y = FLOATING_PANEL_INSET * scale;
         let w = (frame.logical_w - 2.0 * FLOATING_PANEL_INSET) * scale;
         let h = (frame.logical_h - 2.0 * FLOATING_PANEL_INSET) * scale;
-        round_rect(&mut pixmap, x, y, w, h, panel_r * scale, pal.bg, 255);
+        round_rect(pixmap, x, y, w, h, panel_r * scale, pal.bg, 255);
         stroke_rect(
-            &mut pixmap,
+            pixmap,
             x + 0.5 * scale,
             y + 0.5 * scale,
             (w - scale).max(1.0),
@@ -433,7 +419,7 @@ fn render_keyboard(
         );
         Some((x, y, w, h, panel_r * scale))
     } else {
-        fill(&mut pixmap, pal.bg, 255);
+        fill(pixmap, pal.bg, 255);
         None
     };
     for rect in &rects {
@@ -443,10 +429,10 @@ fn render_keyboard(
         } else {
             1.0
         };
-        paint_key(&mut pixmap, fonts, cache, frame, &spec, &pal, rect, unit, key_h, scale, radius, selected, press, true);
+        paint_key(pixmap, fonts, cache, frame, &spec, &pal, rect, unit, key_h, scale, radius, selected, press, true);
     }
     if highlight {
-        stroke_ring(&mut pixmap, glide, &spec, &pal, unit, scale, radius);
+        stroke_ring(pixmap, glide, &spec, &pal, unit, scale, radius);
     }
     let (strip_alpha, strip_dy) = if frame.strip.is_some() {
         if glide.strip_at.is_none() {
@@ -462,18 +448,17 @@ fn render_keyboard(
         (1.0, 0.0)
     };
     if let Some(strip) = &frame.strip {
-        draw_strip(&mut pixmap, fonts, cache, &spec, &pal, strip, &rects, unit, scale, frame.ps5, strip_dy, strip_alpha);
+        draw_strip(pixmap, fonts, cache, &spec, &pal, strip, &rects, unit, scale, frame.ps5, strip_dy, strip_alpha);
     }
-    draw_legend(&mut pixmap, fonts, cache, &spec, &pal, &rects, frame.logical_w, frame.logical_h, lu, scale, frame.ps5);
+    draw_legend(pixmap, fonts, cache, &spec, &pal, &rects, frame.logical_w, frame.logical_h, lu, scale, frame.ps5);
     if let Some((x, y, w, h, radius)) = panel {
-        clip_round(&mut pixmap, x, y, w, h, radius);
+        clip_round(pixmap, x, y, w, h, radius);
     }
     let strip_moving = glide
         .strip_at
         .is_some_and(|t| t.elapsed().as_secs_f32() * 1000.0 < vk_motion::STRIP_ENTER_MS);
     let pressing = frame.pressed.is_some_and(|(_, s)| s < 0.999);
     glide.animating = strip_moving || pressing;
-    Some(pixmap)
 }
 
 #[derive(Clone, Copy)]
@@ -877,20 +862,17 @@ fn paint_live(pixmap: &mut Pixmap, frame: &Frame, fonts: &mut FontSystem, cache:
     }
 }
 
-fn draw_sheet_frame(frame: &Frame, fonts: &mut FontSystem, cache: &mut SwashCache) -> Option<Pixmap> {
+fn draw_sheet_frame(pixmap: &mut Pixmap, frame: &Frame, fonts: &mut FontSystem, cache: &mut SwashCache) {
     let (spec, pal, _, unit, scale, _, _) = scene(frame);
-    let width = (frame.logical_w * scale).round().max(1.0) as u32;
-    let height = (frame.logical_h * scale).round().max(1.0) as u32;
-    let mut pixmap = Pixmap::new(width, height)?;
     let panel = if frame.floating {
         let panel_r = spec.panel_radius * unit;
         let x = FLOATING_PANEL_INSET * scale;
         let y = FLOATING_PANEL_INSET * scale;
         let w = (frame.logical_w - 2.0 * FLOATING_PANEL_INSET) * scale;
         let h = (frame.logical_h - 2.0 * FLOATING_PANEL_INSET) * scale;
-        round_rect(&mut pixmap, x, y, w, h, panel_r * scale, rgb(0x1F1F1F), 255);
+        round_rect(pixmap, x, y, w, h, panel_r * scale, rgb(0x1F1F1F), 255);
         stroke_rect(
-            &mut pixmap,
+            pixmap,
             x + 0.5 * scale,
             y + 0.5 * scale,
             (w - scale).max(1.0),
@@ -902,14 +884,13 @@ fn draw_sheet_frame(frame: &Frame, fonts: &mut FontSystem, cache: &mut SwashCach
         );
         Some((x, y, w, h, panel_r * scale))
     } else {
-        fill(&mut pixmap, rgb(0x1F1F1F), 255);
+        fill(pixmap, rgb(0x1F1F1F), 255);
         None
     };
-    paint_sheet(&mut pixmap, fonts, cache, frame.logical_w, frame.logical_h, scale, frame.ps5);
+    paint_sheet(pixmap, fonts, cache, frame.logical_w, frame.logical_h, scale, frame.ps5);
     if let Some((x, y, w, h, radius)) = panel {
-        clip_round(&mut pixmap, x, y, w, h, radius);
+        clip_round(pixmap, x, y, w, h, radius);
     }
-    Some(pixmap)
 }
 
 enum SheetLine {
@@ -1669,7 +1650,6 @@ fn cached_svg(svg: &str, px: u32, tint: Option<Rgb>) -> Option<std::sync::Arc<Ve
 }
 
 pub struct KeyPatch {
-    pub pixels: Vec<u8>,
     pub width: u32,
     pub height: u32,
     pub dest_x: f32,
@@ -1683,13 +1663,11 @@ pub struct KeyPatch {
     pub ring_w: f32,
 }
 
-pub fn raster_unselected(
-    frame: &Frame,
-    fonts: &mut FontSystem,
-    cache: &mut SwashCache,
-    glide: &mut Glide,
-) -> Option<Pixmap> {
-    render_keyboard(frame, fonts, cache, glide, false)
+pub fn paint_base(g: &mut Gfx, frame: &Frame, glide: &mut Glide) {
+    let (width, height) = frame_px(frame);
+    g.begin(width, height);
+    let (pixmap, fonts, cache) = g.canvas();
+    render_keyboard(pixmap, frame, fonts, cache, glide, false);
 }
 
 pub fn voice_spot(frame: &Frame) -> Option<(f32, f32, f32)> {
@@ -1707,12 +1685,7 @@ pub fn voice_spot(frame: &Frame) -> Option<(f32, f32, f32)> {
     Some((cx - side * 0.5, cy - side * 0.5, side))
 }
 
-pub fn raster_selected_key(
-    frame: &Frame,
-    fonts: &mut FontSystem,
-    cache: &mut SwashCache,
-    press: f32,
-) -> Option<KeyPatch> {
+pub fn paint_selected_key(g: &mut Gfx, frame: &Frame, press: f32) -> Option<KeyPatch> {
     let (spec, pal, rects, unit, scale, radius, key_h) = scene(frame);
     let rect = rects.iter().find(|rect| rect.pos == frame.sel)?;
     let pad = 8.0;
@@ -1725,9 +1698,10 @@ pub fn raster_selected_key(
     };
     let width = (local.right * scale).ceil().max(1.0) as u32;
     let height = (local.bottom * scale).ceil().max(1.0) as u32;
-    let mut pixmap = Pixmap::new(width, height)?;
+    g.begin(width, height);
+    let (pixmap, fonts, cache) = g.canvas();
     paint_key(
-        &mut pixmap,
+        pixmap,
         fonts,
         cache,
         frame,
@@ -1743,7 +1717,6 @@ pub fn raster_selected_key(
         true,
     );
     Some(KeyPatch {
-        pixels: pixmap.data().to_vec(),
         width,
         height,
         dest_x: (rect.left - pad) * scale,
@@ -1981,9 +1954,9 @@ fn blit_premul(pixmap: &mut Pixmap, src: &[u8], src_px: u32, x: f32, y: f32, siz
     }
 }
 
-pub fn to_argb(pixmap: &Pixmap) -> Vec<u8> {
-    let mut out = Vec::with_capacity(pixmap.data().len());
-    for px in pixmap.data().chunks_exact(4) {
+pub fn to_argb(pixels: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(pixels.len());
+    for px in pixels.chunks_exact(4) {
         out.push(px[2]);
         out.push(px[1]);
         out.push(px[0]);
@@ -1992,19 +1965,20 @@ pub fn to_argb(pixmap: &Pixmap) -> Vec<u8> {
     out
 }
 
-pub fn draw_prompt(text_value: &str, scale: f32, fonts: &mut FontSystem, cache: &mut SwashCache) -> Option<Pixmap> {
+pub fn paint_prompt(g: &mut Gfx, text_value: &str, scale: f32) {
     let scale = scale.max(1.0);
     let logical_w = 520.0;
     let logical_h = 72.0;
-    let mut pixmap = Pixmap::new((logical_w * scale) as u32, (logical_h * scale) as u32)?;
-    fill(&mut pixmap, rgb(0x15161C), 235);
-    text(&mut pixmap, fonts, cache, text_value, (16.0, 16.0, logical_w - 16.0, logical_h - 16.0), 22.0 * scale, Weight::MEDIUM, rgb(0xFFFFFF), 255, 1.0, "Noto Sans");
-    Some(pixmap)
+    g.begin((logical_w * scale) as u32, (logical_h * scale) as u32);
+    let (pixmap, fonts, cache) = g.canvas();
+    fill(pixmap, rgb(0x15161C), 235);
+    text(pixmap, fonts, cache, text_value, (16.0, 16.0, logical_w - 16.0, logical_h - 16.0), 22.0 * scale, Weight::MEDIUM, rgb(0xFFFFFF), 255, 1.0, "Noto Sans");
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{draw, font_system, Frame, Glide};
+    use super::{paint_frame, Frame, Glide};
+    use crate::mono_ui::Gfx;
     use crate::config::{KeyboardTheme, VkStyle};
     use crate::vk_nav::{rows_for_test, KeyPos};
 
@@ -2029,8 +2003,7 @@ mod tests {
 
     #[test]
     fn keyboard_frame_uses_the_windows_palette() {
-        let mut fonts = font_system();
-        let mut cache = cosmic_text::SwashCache::new();
+        let mut g = Gfx::new(1, 1).expect("gfx");
         let mut frame = Frame {
             logical_w: 1200.0,
             logical_h: 460.0,
@@ -2052,17 +2025,19 @@ mod tests {
         };
         let mut glide = Glide::default();
         let started = std::time::Instant::now();
-        let pixmap = draw(&frame, &mut fonts, &mut cache, &mut glide).expect("pixmap");
+        paint_frame(&mut g, &frame, &mut glide);
+        let pixmap = g.pixels().to_vec();
         let cold = started.elapsed();
-        assert!(pixmap.width() > 1000);
-        assert!(pixmap.data().iter().any(|byte| *byte != 0));
+        assert!(g.width() > 1000);
+        assert!(pixmap.iter().any(|byte| *byte != 0));
         frame.sel = KeyPos { row: 0, col: 0 };
         let started = std::time::Instant::now();
-        let moved = draw(&frame, &mut fonts, &mut cache, &mut glide).expect("moved");
+        paint_frame(&mut g, &frame, &mut glide);
+        let moved = g.pixels().to_vec();
         let warm = started.elapsed();
         let mut same = 0usize;
         let mut total = 0usize;
-        for (left, right) in pixmap.data().chunks_exact(4).zip(moved.data().chunks_exact(4)) {
+        for (left, right) in pixmap.chunks_exact(4).zip(moved.chunks_exact(4)) {
             total += 1;
             if left == right {
                 same += 1;
@@ -2077,23 +2052,22 @@ mod tests {
         sheet.sheet = true;
         sheet.logical_w = 1600.0;
         sheet.logical_h = 546.0;
-        let covered = draw(&sheet, &mut fonts, &mut cache, &mut Glide::default()).expect("sheet");
-        assert_eq!((covered.width(), covered.height()), (1600, 546));
+        paint_frame(&mut g, &sheet, &mut Glide::default());
+        assert_eq!((g.width(), g.height()), (1600, 546));
         let inset = (12 * 1600 + 80) * 4;
-        assert_eq!(&covered.data()[inset..inset + 4], &[0x1F, 0x1F, 0x1F, 0xFF]);
+        assert_eq!(&g.pixels()[inset..inset + 4], &[0x1F, 0x1F, 0x1F, 0xFF]);
     }
 
     #[test]
     fn shortcut_overlay_matches_the_pen_frame() {
         let (w, h) = super::sheet_size(3072.0, 1728.0);
         assert_eq!((w, h), (1600, 546));
-        let mut fonts = font_system();
-        let (total, combos) = super::sheet_layout(&mut fonts);
+        let mut g = Gfx::new(1, 1).expect("gfx");
+        let (total, combos) = super::sheet_layout(g.canvas().1);
         for (got, want) in combos.iter().zip([86.0, 183.0, 140.0]) {
             assert!((got - want).abs() <= 16.0, "combos {combos:?} total {total}");
         }
         assert!(total < 1600.0 - 96.0, "content {total} leaves the pen's side inset");
-        let mut cache = cosmic_text::SwashCache::new();
         let frame = Frame {
             logical_w: 1600.0,
             logical_h: 546.0,
@@ -2113,8 +2087,8 @@ mod tests {
             floating: true,
             sheet: true,
         };
-        let pixmap = draw(&frame, &mut fonts, &mut cache, &mut Glide::default()).expect("overlay");
-        assert!(pixmap.data().chunks_exact(4).any(|px| px[0] != 0x1F || px[1] != 0x1F || px[2] != 0x1F));
+        paint_frame(&mut g, &frame, &mut Glide::default());
+        assert!(g.pixels().chunks_exact(4).any(|px| px[0] != 0x1F || px[1] != 0x1F || px[2] != 0x1F));
         let mut docked = frame;
         docked.sheet = false;
         docked.logical_w = 3072.0;
@@ -2125,11 +2099,11 @@ mod tests {
         docked.sel = KeyPos { row: 1, col: 1 };
         let mut glide = Glide::default();
         let cold_at = std::time::Instant::now();
-        let _ = draw(&docked, &mut fonts, &mut cache, &mut glide).expect("docked");
+        paint_frame(&mut g, &docked, &mut glide);
         let cold = cold_at.elapsed();
         docked.sel = KeyPos { row: 1, col: 2 };
         let warm_at = std::time::Instant::now();
-        let _ = draw(&docked, &mut fonts, &mut cache, &mut glide).expect("docked move");
+        paint_frame(&mut g, &docked, &mut glide);
         let warm = warm_at.elapsed();
         assert!(warm < std::time::Duration::from_millis(120), "docked highlight cold {cold:?} warm {warm:?}");
     }
