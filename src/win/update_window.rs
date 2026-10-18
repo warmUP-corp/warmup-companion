@@ -23,7 +23,7 @@ use windows::Foundation::Numerics::Matrix3x2;
 use windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE;
 
 use super::desktop_window::{self, DesktopApp, DesktopWindowThread};
-use super::mono_ui::*;
+use crate::mono_ui::*;
 use super::tray_menu::lucide;
 use crate::updater::{self, Phase, Snapshot};
 

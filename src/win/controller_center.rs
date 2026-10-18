@@ -26,7 +26,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::desktop_window::{self, DesktopApp, DesktopWindowThread};
-use super::mono_ui::*;
+use crate::mono_ui::*;
 use super::vk_renderer::{self, VkPalette};
 
 mod apps;

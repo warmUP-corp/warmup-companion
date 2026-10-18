@@ -17,7 +17,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
-use super::mono_ui::*;
+use crate::mono_ui::*;
 
 const CLASS: windows::core::PCWSTR = w!("WarmupTrayMenu");
 const TIMER_ID: usize = 7;

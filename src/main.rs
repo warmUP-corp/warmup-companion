@@ -28,6 +28,8 @@ mod vk_motion;
 mod crash;
 #[cfg(any(windows, target_os = "linux"))]
 mod install;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod mono_ui;
 #[cfg(all(target_os = "linux", feature = "service"))]
 mod linux_service;
 #[cfg(all(windows, feature = "service"))]

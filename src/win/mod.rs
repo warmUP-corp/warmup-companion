@@ -3,8 +3,6 @@ pub mod controller_center;
 #[cfg(feature = "gamepad")]
 pub(crate) mod installer_ui;
 #[cfg(feature = "gamepad")]
-mod mono_ui;
-#[cfg(feature = "gamepad")]
 pub(crate) mod tray_menu;
 #[cfg(feature = "gamepad")]
 pub(crate) mod update_window;

@@ -38,7 +38,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::desktop_window::{self, DesktopApp, DesktopWindowThread};
-use super::mono_ui::*;
+use crate::mono_ui::*;
 use super::tray_menu::lucide;
 
 const CLASS: PCWSTR = w!("WarmupInstallerWizard");
