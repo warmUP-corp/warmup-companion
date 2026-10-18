@@ -64,7 +64,8 @@ mod release_feed;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
 mod linux_update;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
+#[cfg_attr(not(windows), allow(dead_code))]
 mod debug_state;
 mod predict_ngram;
 mod vk_commit;

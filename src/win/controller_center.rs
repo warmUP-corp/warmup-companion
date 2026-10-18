@@ -1,46 +1,40 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use windows::core::{w, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
+#[cfg(windows)]
+use windows::Win32::Foundation::HWND;
+#[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_LEFT,
-    VK_RETURN,
-    VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
-};
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateIconFromResourceEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics,
-    GetWindowRect, KillTimer, MessageBoxW, SendMessageW, SetClassLongPtrW, SetForegroundWindow,
-    SetTimer, SetWindowPos, ShowWindow, GCLP_HICON, GCLP_HICONSM, HICON, HMENU, HTCAPTION,
-    HTCLIENT, ICON_BIG, ICON_SMALL, IDOK, LR_DEFAULTCOLOR, MB_DEFBUTTON2, MB_ICONWARNING,
-    MB_OKCANCEL, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, WM_CLOSE,
-    WM_CHAR, WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_MOUSEWHEEL, WM_SYSKEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_NCHITTEST, WM_SETICON, WM_SETTINGCHANGE, WM_TIMER, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_POPUP,
+    GetKeyState, VK_CONTROL, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT,
+    VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 
-use super::desktop_window::{self, DesktopApp, DesktopWindowThread};
 use crate::mono_ui::*;
+#[cfg(windows)]
 use super::vk_renderer::{self, VkPalette};
 
+#[cfg_attr(not(windows), path = "controller_center/apps.rs")]
 mod apps;
+#[cfg(not(windows))]
+#[path = "controller_center/linux.rs"]
+mod linux;
+#[cfg(windows)]
+mod win;
+#[cfg(not(windows))]
+use linux::*;
+#[cfg(windows)]
+use win::*;
+#[cfg(not(windows))]
+pub use linux::show;
+#[cfg(windows)]
+pub use win::show;
 
-const WINDOW_CLASS: PCWSTR = w!("WarmupControllerCenter");
-const TIMER_ID: usize = 31;
-const TIMER_MS: u32 = 33;
 
 const WIN_W: f32 = 744.0;
 const WIN_H: f32 = 720.0;
 const WIN_R: f32 = 24.0;
-const PAD_X: f32 = 72.0;
-const PAD_TOP: f32 = 48.0;
-const PAD_BOTTOM: f32 = 96.0;
-const SHADOW_DY: f32 = 24.0;
-const SHADOW_SIGMA: f32 = 30.0;
 
 const TITLE_H: f32 = 64.0;
 const TAB_X: f32 = 24.0;
@@ -65,6 +59,7 @@ const RED: u32 = 0x003A45FF;
 const REPEAT_DELAY: Duration = Duration::from_millis(400);
 const REPEAT_EVERY: Duration = Duration::from_millis(90);
 
+#[cfg(windows)]
 const TABS: [(&str, Icon); 6] = [
     ("General", Icon::Settings),
     ("Mouse", Icon::Mouse),
@@ -73,11 +68,19 @@ const TABS: [(&str, Icon); 6] = [
     ("Apps", Icon::AppWindow),
     ("Voice", Icon::Mic),
 ];
+#[cfg(not(windows))]
+const TABS: [(&str, Icon); 5] = [
+    ("General", Icon::Settings),
+    ("Mouse", Icon::Mouse),
+    ("Keyboard", Icon::Keyboard),
+    ("Controller", Icon::Gamepad),
+    ("Apps", Icon::AppWindow),
+];
 
 const PAD_BUTTONS: [&str; 10] = ["A", "B", "X", "Y", "LB", "RB", "LT", "RT", "L3", "R3"];
 
+#[cfg_attr(not(windows), allow(dead_code))]
 const APP_ICO: &[u8] = include_bytes!("../../assets/icon.ico");
-const HERO_PNG: &[u8] = include_bytes!("../../assets/controller-center/launcher-hero.png");
 const PROMO: Rect = rect(TAB_X, 404.0, TAB_W, 216.0);
 const PROMO_ART_H: f32 = 96.0;
 const PROMO_BUTTON: Rect = rect(TAB_X + 12.0, 404.0 + 216.0 - 44.0, TAB_W - 24.0, 32.0);
@@ -85,6 +88,7 @@ const PROMO_FILL: u32 = 0x002E2C2C;
 const PROMO_BUTTON_FILL: u32 = 0x003C3A3A;
 const PROMO_SUB: &str = "All your games in one library, built for the controller.";
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn ico_entry(bytes: &[u8], want: u32) -> Option<(usize, usize)> {
     let count = u16::from_le_bytes([*bytes.get(4)?, *bytes.get(5)?]) as usize;
     let mut best: Option<(u32, usize, usize)> = None;
@@ -108,46 +112,8 @@ fn ico_entry(bytes: &[u8], want: u32) -> Option<(usize, usize)> {
     best.map(|(_, off, len)| (off, len))
 }
 
-thread_local! {
-    static APP_ICONS: RefCell<HashMap<i32, HICON>> = RefCell::new(HashMap::new());
-}
 
-fn app_icon(px: i32) -> Option<HICON> {
-    if let Some(icon) = APP_ICONS.with(|m| m.borrow().get(&px).copied()) {
-        return Some(icon);
-    }
-    let (off, len) = ico_entry(APP_ICO, px as u32)?;
-    let icon = unsafe {
-        CreateIconFromResourceEx(
-            &APP_ICO[off..off + len],
-            true,
-            0x0003_0000,
-            px,
-            px,
-            LR_DEFAULTCOLOR,
-        )
-    }
-    .ok()?;
-    APP_ICONS.with(|m| m.borrow_mut().insert(px, icon));
-    Some(icon)
-}
 
-unsafe fn set_window_icons(hwnd: HWND, scale: f32) {
-    for (which, index, base) in [
-        (ICON_BIG, GCLP_HICON, 32.0),
-        (ICON_SMALL, GCLP_HICONSM, 16.0),
-    ] {
-        if let Some(icon) = app_icon((base * scale).round() as i32) {
-            SendMessageW(
-                hwnd,
-                WM_SETICON,
-                WPARAM(which as usize),
-                LPARAM(icon.0 as isize),
-            );
-            SetClassLongPtrW(hwnd, index, icon.0 as isize);
-        }
-    }
-}
 
 enum Kind {
     Check {
@@ -316,7 +282,6 @@ const VOICE_MODELS: &[(&str, &str, &str)] = &[
     ("Whisper Small", "small", "466 MB"),
     ("Whisper Medium", "medium", "1.5 GB"),
 ];
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VoiceDl {
@@ -364,7 +329,7 @@ fn voice_size(id: &str) -> &'static str {
 }
 
 fn speech_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(crate::install::DATA_DIR).join("speech")
+    crate::paths::data_dir().join("speech")
 }
 
 fn read_speech(name: &str) -> String {
@@ -456,80 +421,6 @@ fn activate_voice_model(id: &'static str) {
     }
 }
 
-fn run_voice_download(id: &'static str) -> bool {
-    use std::io::BufRead;
-    use std::os::windows::process::CommandExt;
-    let (script, args): (&str, &[&str]) = match id {
-        "parakeet-redux" => ("Get-WarmupParakeet.ps1", &["-Variant", "redux"]),
-        "parakeet" => ("Get-WarmupParakeet.ps1", &[]),
-        _ => ("Get-WarmupSpeech.ps1", &["-Model", id]),
-    };
-    let dirs = [
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf())),
-        std::env::var_os("ProgramW6432")
-            .or_else(|| std::env::var_os("ProgramFiles"))
-            .map(|p| std::path::PathBuf::from(p).join("WarmupCompanion")),
-    ];
-    let Some(script) = dirs
-        .iter()
-        .flatten()
-        .map(|d| d.join(script))
-        .find(|p| p.is_file())
-        .or_else(|| dirs[0].as_ref().map(|d| d.join(script)))
-    else {
-        return false;
-    };
-    if !script.is_file() {
-        crate::install::log_line(&format!(
-            "control center: voice download: {} missing",
-            script.display()
-        ));
-        return false;
-    }
-    let spawned = std::process::Command::new("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-WindowStyle",
-            "Hidden",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-        ])
-        .arg(&script)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn();
-    let mut child = match spawned {
-        Ok(c) => c,
-        Err(e) => {
-            crate::install::log_line(&format!("control center: voice download: {e}"));
-            return false;
-        }
-    };
-    if let Some(out) = child.stdout.take() {
-        for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
-            if let Some(pct) = line
-                .split_once(": ")
-                .and_then(|(_, rest)| rest.split_once('%'))
-                .and_then(|(p, _)| p.trim().parse::<u8>().ok())
-            {
-                set_voice_dl(Some(VoiceDl::Running(id, pct.min(100))));
-            }
-        }
-    }
-    let ok = child.wait().is_ok_and(|st| st.success());
-    if !ok {
-        crate::install::log_line(&format!("control center: voice download {id} failed"));
-    }
-    ok && voice_installed(id)
-}
 
 const VOICE_FALLBACK: [&str; 7] = [
     "parakeet-redux",
@@ -822,6 +713,7 @@ fn items() -> Vec<Item> {
     ]
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn voice_items() -> impl Iterator<Item = Item> {
     VOICE_MODELS
         .iter()
@@ -958,9 +850,6 @@ const CONFIRM_CANCEL: Rect = rect(328.0, 390.0, 110.0, 44.0);
 const CONFIRM_RESET: Rect = rect(448.0, 390.0, 110.0, 44.0);
 const TOAST_FOR: Duration = Duration::from_secs(3);
 
-fn local_stamp() -> windows::Win32::Foundation::SYSTEMTIME {
-    unsafe { windows::Win32::System::SystemInformation::GetLocalTime() }
-}
 
 fn export_file_name(y: u16, mo: u16, d: u16) -> String {
     format!("warmup-companion-settings-{y:04}{mo:02}{d:02}.ini")
@@ -1132,100 +1021,8 @@ fn staged_changes(ui: &Ui) -> bool {
         || apps::dirty(&ui.apps)
 }
 
-fn documents_dir() -> Option<String> {
-    known_folder(&windows::Win32::UI::Shell::FOLDERID_Documents)
-}
 
-fn known_folder(id: &windows::core::GUID) -> Option<String> {
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows::Win32::System::Com::CoTaskMemFree;
-    use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
-    use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT};
-    unsafe {
-        let mut token = HANDLE::default();
-        let have_token = WTSQueryUserToken(WTSGetActiveConsoleSessionId(), &mut token).is_ok();
-        let result = if have_token {
-            SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, token)
-        } else {
-            SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None)
-        };
-        if have_token {
-            let _ = CloseHandle(token);
-        }
-        let pwstr = result.ok()?;
-        let path = pwstr.to_string().ok();
-        CoTaskMemFree(Some(pwstr.0.cast()));
-        path
-    }
-}
 
-unsafe fn pick_file(
-    owner: HWND,
-    save: bool,
-    dirty: bool,
-) -> Result<Option<std::path::PathBuf>, String> {
-    use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER,
-        COINIT_APARTMENTTHREADED,
-    };
-    use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
-    use windows::Win32::UI::Shell::{
-        FileOpenDialog, FileSaveDialog, IFileDialog, IShellItem, SHCreateItemFromParsingName,
-        FOS_FILEMUSTEXIST, FOS_OVERWRITEPROMPT, SIGDN_FILESYSPATH,
-    };
-    let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-    let clsid = if save {
-        &FileSaveDialog
-    } else {
-        &FileOpenDialog
-    };
-    let dialog: IFileDialog = CoCreateInstance(clsid, None, CLSCTX_INPROC_SERVER)
-        .map_err(|e| format!("file dialog: {e}"))?;
-    let filter = [COMDLG_FILTERSPEC {
-        pszName: w!("Settings (*.ini)"),
-        pszSpec: w!("*.ini"),
-    }];
-    let _ = dialog.SetFileTypes(&filter);
-    let _ = dialog.SetDefaultExtension(w!("ini"));
-    let title = match (save, dirty) {
-        (true, true) => w!("Export settings (unsaved changes are not included)"),
-        (true, false) => w!("Export settings"),
-        _ => w!("Import settings"),
-    };
-    let _ = dialog.SetTitle(title);
-    if save {
-        let t = local_stamp();
-        let name = HSTRING::from(export_file_name(t.wYear, t.wMonth, t.wDay));
-        let _ = dialog.SetFileName(&name);
-    }
-    if let Ok(opts) = dialog.GetOptions() {
-        let extra = if save {
-            FOS_OVERWRITEPROMPT
-        } else {
-            FOS_FILEMUSTEXIST
-        };
-        let _ = dialog.SetOptions(opts | extra);
-    }
-    if let Some(dir) = documents_dir() {
-        if let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(dir), None)
-        {
-            let _ = dialog.SetFolder(&item);
-        }
-    }
-    OWNS_PAD.store(false, Ordering::SeqCst);
-    let shown = dialog.Show(owner);
-    OWNS_PAD.store(true, Ordering::SeqCst);
-    if shown.is_err() {
-        return Ok(None);
-    }
-    let item = dialog.GetResult().map_err(|e| format!("GetResult: {e}"))?;
-    let path = item
-        .GetDisplayName(SIGDN_FILESYSPATH)
-        .map_err(|e| format!("GetDisplayName: {e}"))?;
-    let out = path.to_string().ok().map(std::path::PathBuf::from);
-    CoTaskMemFree(Some(path.0.cast()));
-    Ok(out)
-}
 
 fn export_settings(ui: &mut Ui) {
     let dirty = staged_changes(ui);
@@ -1738,12 +1535,6 @@ fn transport_label(usb: Option<bool>) -> Option<&'static str> {
     usb.map(|wired| if wired { "USB" } else { "Bluetooth" })
 }
 
-fn surface_px(scale: f32) -> (i32, i32) {
-    (
-        ((WIN_W + 2.0 * PAD_X) * scale).ceil() as i32,
-        ((WIN_H + PAD_TOP + PAD_BOTTOM) * scale).ceil() as i32,
-    )
-}
 
 #[derive(Default)]
 struct PadNav {
@@ -1759,6 +1550,7 @@ struct Ui {
     words: String,
     theme: Theme,
     live: Live,
+    #[cfg_attr(not(windows), allow(dead_code))]
     gfx: Option<Gfx>,
     drag: Option<usize>,
     pad: PadNav,
@@ -1778,7 +1570,6 @@ thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
 }
 
-static THREAD: OnceLock<Mutex<Option<DesktopWindowThread>>> = OnceLock::new();
 static OWNS_PAD: AtomicBool = AtomicBool::new(false);
 static PAD_EDGES: Mutex<Vec<(&'static str, bool)>> = Mutex::new(Vec::new());
 const PAD_EDGE_CAP: usize = 64;
@@ -1789,15 +1580,18 @@ pub(crate) fn owns_pad() -> bool {
     OWNS_PAD.load(Ordering::SeqCst) || MENU_OWNS.load(Ordering::SeqCst)
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn set_menu_owns_pad(on: bool) {
     let _ = take_pad_edges();
     MENU_OWNS.store(on, Ordering::SeqCst);
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn take_menu_pad_edges() -> Vec<(&'static str, bool)> {
     take_pad_edges()
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn pad_status() -> (bool, String) {
     let live = Live::read();
     (live.connected, live.pill())
@@ -1829,154 +1623,12 @@ pub(crate) fn toggle() -> bool {
     }
 }
 
-fn hide() {
-    OWNS_PAD.store(false, Ordering::SeqCst);
-    if let Some(t) = THREAD
-        .get()
-        .and_then(|s| s.lock().ok())
-        .as_ref()
-        .and_then(|g| g.as_ref())
-    {
-        let _ = t.hide();
-    }
-}
 
-struct CenterApp;
 
-impl DesktopApp for CenterApp {
-    const THREAD_NAME: &'static str = "warmup-controller-center";
-    const CLASS_NAME: PCWSTR = WINDOW_CLASS;
-    const BG_COLOR: u32 = 0x001E1C1C;
-    const WNDPROC: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT = wndproc;
 
-    fn on_show(&mut self, _lparam: LPARAM) {
-        ui_show();
-    }
 
-    fn on_hide(&mut self) {
-        ui_hide();
-    }
-}
 
-pub fn show() {
-    let slot = THREAD.get_or_init(|| Mutex::new(None));
-    let Ok(mut guard) = slot.lock() else {
-        return;
-    };
-    apps::prewarm();
-    if guard.is_none() {
-        match desktop_window::spawn(CenterApp) {
-            Ok(t) => *guard = Some(t),
-            Err(e) => {
-                crate::install::log_line(&format!("control center: spawn failed: {e}"));
-                return;
-            }
-        }
-    }
-    if let Some(t) = guard.as_ref() {
-        let _ = take_pad_edges();
-        OWNS_PAD.store(true, Ordering::SeqCst);
-        if t.show(LPARAM(0)).is_err() {
-            OWNS_PAD.store(false, Ordering::SeqCst);
-        }
-    }
-}
 
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-fn ui_show() {
-    OWNS_PAD.store(true, Ordering::SeqCst);
-    if let Some(hwnd) = UI.with(|u| u.borrow().as_ref().map(|u| u.hwnd)) {
-        unsafe {
-            let _ = ShowWindow(hwnd, SW_SHOW);
-            let _ = SetForegroundWindow(hwnd);
-        }
-        return;
-    }
-    unsafe {
-        let Ok(instance) = GetModuleHandleW(None) else {
-            OWNS_PAD.store(false, Ordering::SeqCst);
-            return;
-        };
-        let Ok(hwnd) = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_APPWINDOW,
-            WINDOW_CLASS,
-            w!("Control Center"),
-            WS_POPUP,
-            0,
-            0,
-            1,
-            1,
-            None,
-            HMENU::default(),
-            windows::Win32::Foundation::HINSTANCE(instance.0),
-            None,
-        ) else {
-            crate::install::log_line("control center: CreateWindowExW failed");
-            OWNS_PAD.store(false, Ordering::SeqCst);
-            return;
-        };
-        let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
-        let (w, h) = surface_px(scale);
-        let card_w = (WIN_W * scale) as i32;
-        let card_h = (WIN_H * scale) as i32;
-        let x = (GetSystemMetrics(SM_CXSCREEN) - card_w) / 2 - (PAD_X * scale) as i32;
-        let y = (GetSystemMetrics(SM_CYSCREEN) - card_h) / 2 - (PAD_TOP * scale) as i32;
-        let _ = SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
-        set_window_icons(hwnd, scale);
-        let mut items = items();
-        items.extend(voice_items());
-        for it in &mut items {
-            it.value = stored_value(it);
-        }
-        let focus = focus_order(0, &items, false)[0];
-        let ui = Ui {
-            hwnd,
-            scale,
-            tab: 0,
-            focus,
-            items,
-            words: crate::config::vocabulary().words.join(", "),
-            theme: current_theme(),
-            live: Live::read(),
-            gfx: None,
-            drag: None,
-            pad: PadNav::default(),
-            led_open: false,
-            led_orig: crate::led_engine::led_snapshot(),
-            led_base: (0, 0, 0, 0),
-            led_previewed: (0, 0, 0, 0),
-            reset_hint: std::cell::Cell::new(rect(0.0, 0.0, 0.0, 0.0)),
-            confirm: None,
-            toast: None,
-            promo: promo_art(scale),
-            apps: apps::load(),
-            voice_dl: voice_dl(),
-        };
-        UI.with(|u| *u.borrow_mut() = Some(ui));
-        with_ui(|ui| {
-            ui.led_base = led_values(ui);
-            ui.led_previewed = ui.led_base;
-            paint(ui);
-        });
-        let _ = SetTimer(hwnd, TIMER_ID, TIMER_MS, None);
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = SetForegroundWindow(hwnd);
-    }
-}
-
-fn promo_art(scale: f32) -> Option<(i32, i32, Vec<u8>)> {
-    if crate::tray::launcher_installed() {
-        return None;
-    }
-    let (w, h) = (
-        (TAB_W * scale).round() as u32,
-        (PROMO_ART_H * scale).round() as u32,
-    );
-    cover_bgra(HERO_PNG, w, h, 12.0 * scale).map(|px| (w as i32, h as i32, px))
-}
 
 fn wrap_lines(g: &mut Gfx, text: &str, px: f32, max_w: f32) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
@@ -2002,10 +1654,38 @@ fn ui_hide() {
         if ui.led_previewed != ui.led_base {
             crate::led_engine::restore_led(ui.led_orig);
         }
-        unsafe {
-            let _ = KillTimer(ui.hwnd, TIMER_ID);
-            let _ = DestroyWindow(ui.hwnd);
-        }
+        close_window(&ui);
+    }
+}
+
+fn new_ui(hwnd: HWND, scale: f32) -> Ui {
+    let mut items = center_items();
+    for it in &mut items {
+        it.value = stored_value(it);
+    }
+    let focus = focus_order(0, &items, false)[0];
+    Ui {
+        hwnd,
+        scale,
+        tab: 0,
+        focus,
+        items,
+        words: crate::config::vocabulary().words.join(", "),
+        theme: current_theme(),
+        live: Live::read(),
+        gfx: None,
+        drag: None,
+        pad: PadNav::default(),
+        led_open: false,
+        led_orig: crate::led_engine::led_snapshot(),
+        led_base: (0, 0, 0, 0),
+        led_previewed: (0, 0, 0, 0),
+        reset_hint: std::cell::Cell::new(rect(0.0, 0.0, 0.0, 0.0)),
+        confirm: None,
+        toast: None,
+        promo: promo_art(scale),
+        apps: apps::load(),
+        voice_dl: voice_dl(),
     }
 }
 
@@ -2162,22 +1842,6 @@ fn apply(ui: &mut Ui) -> bool {
     !declined
 }
 
-unsafe fn confirm_signin_only(owner: HWND) -> bool {
-    let title = wide("Sign-in screen only");
-    let body = wide(
-        "After you next sign in or unlock, the companion sleeps on the desktop: no controller input, \
-         no tray icon and no Control Center.\r\n\r\n\
-         It only wakes on the lock and sign-in screen. To change this setting later, use \
-         warmUP > Settings > Controller > Companion (or Start menu > Warmup Companion).\r\n\r\n\
-         Turn it on?",
-    );
-    MessageBoxW(
-        owner,
-        PCWSTR(body.as_ptr()),
-        PCWSTR(title.as_ptr()),
-        MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2,
-    ) == IDOK
-}
 
 fn staged_vocabulary(coding: bool, words: &str) -> crate::config::Vocabulary {
     let cleaned: String = words
@@ -2297,7 +1961,7 @@ fn activate(ui: &mut Ui, target: Target) -> After {
             }
         }
         Target::Cancel => return After::Close,
-        Target::Promo => crate::updater::download_launcher(),
+        Target::Promo => get_launcher(),
         Target::AppsToggle
         | Target::App(_)
         | Target::AddApp
@@ -2328,17 +1992,7 @@ fn navigate(ui: &mut Ui, nav: Nav) {
     apps::keep_visible(ui);
 }
 
-fn finish(after: After) {
-    if let After::Close = after {
-        ui_hide();
-    }
-}
 
-fn design_point(ui: &Ui, lparam: LPARAM) -> (f32, f32) {
-    let x = (lparam.0 & 0xffff) as i16 as f32;
-    let y = ((lparam.0 >> 16) & 0xffff) as i16 as f32;
-    (x / ui.scale - PAD_X, y / ui.scale - PAD_TOP)
-}
 
 fn click(ui: &mut Ui, x: f32, y: f32) -> After {
     if ui.confirm.is_some() {
@@ -2391,9 +2045,7 @@ fn click(ui: &mut Ui, x: f32, y: f32) -> After {
             Kind::Slider { min, max, .. } => {
                 ui.items[i].value = slider_pos_at(r, min, max, x);
                 ui.drag = Some(i);
-                unsafe {
-                    SetCapture(ui.hwnd);
-                }
+                set_capture(ui.hwnd);
             }
             Kind::Choice { options, .. } if is_card_picker(&ui.items[i].kind) => {
                 let caption = ui.items[i].caption.is_some();
@@ -2575,43 +2227,7 @@ fn tick(ui: &mut Ui) -> (bool, After) {
     (dirty, After::Stay)
 }
 
-fn paint(ui: &mut Ui) {
-    sync_led_preview(ui);
-    let mut gfx = match ui.gfx.take() {
-        Some(g) => g,
-        None => match unsafe { Gfx::new() } {
-            Ok(g) => g,
-            Err(e) => {
-                crate::install::log_line(&format!("control center: gfx: {e}"));
-                return;
-            }
-        },
-    };
-    if let Err(e) = unsafe { render(ui, &mut gfx) } {
-        crate::install::log_line(&format!("control center: render: {e}"));
-        ui.gfx = None;
-        return;
-    }
-    ui.gfx = Some(gfx);
-}
 
-unsafe fn render(ui: &Ui, g: &mut Gfx) -> Result<(), String> {
-    let s = ui.scale;
-    g.begin(surface_px(s))?;
-    g.draw_shadow(
-        &[rect(
-            PAD_X * s,
-            (PAD_TOP + SHADOW_DY) * s,
-            WIN_W * s,
-            WIN_H * s,
-        )],
-        WIN_R * s,
-        SHADOW_SIGMA * s,
-    );
-    g.transform(s, PAD_X * s, PAD_TOP * s);
-    draw_window(ui, g);
-    g.present(ui.hwnd, None)
-}
 
 unsafe fn draw_window(ui: &Ui, g: &mut Gfx) {
     let t = ui.theme;
@@ -2764,9 +2380,7 @@ unsafe fn draw_promo(ui: &Ui, g: &mut Gfx, w: i32, h: i32, px: &[u8]) {
     let c = PROMO;
     g.fill(c, 12.0, PROMO_FILL, 1.0);
     let art = rect(c.x, c.y, c.w, PROMO_ART_H);
-    if let Ok(bmp) = g.bitmap(w, h, px) {
-        g.draw_bitmap(&bmp, art, 1.0, false);
-    }
+    draw_promo_art(g, w, h, px, art);
     g.gradient(
         rect(art.x, art.y + art.h * 0.4, art.w, art.h * 0.6 + 1.0),
         0.0,
@@ -2865,7 +2479,7 @@ unsafe fn draw_card(ui: &Ui, g: &mut Gfx, card: Rect, label: &str, sel: bool, ke
     }
     let art_x = card.x + 8.0;
     let art_y = card.y + 8.0;
-    let dark = super::vk_ui::is_dark_theme();
+    let dark = crate::vk_theme::is_dark_theme();
     let user = crate::config::keyboard_theme();
     let current = preview_palette(staged_style(ui), dark, user);
     match (key, i) {
@@ -2917,7 +2531,7 @@ fn preview_palette(
     dark: bool,
     user: crate::config::KeyboardTheme,
 ) -> VkPalette {
-    super::vk_ui::themed_palette(vk_renderer::style_palette(style, dark), style, user)
+    crate::vk_theme::themed_palette(vk_renderer::style_palette(style, dark), style, user)
 }
 
 fn staged_style(ui: &Ui) -> crate::config::VkStyle {
@@ -2966,7 +2580,7 @@ unsafe fn draw_mini(g: &mut Gfx, x: f32, y: f32, pal: &VkPalette, l: &MiniLayout
     }
 }
 
-unsafe fn draw_toggle(g: &Gfx, t: &Theme, r: Rect, on: bool) {
+unsafe fn draw_toggle(g: &mut Gfx, t: &Theme, r: Rect, on: bool) {
     g.fill(r, 14.0, if on { t.ring } else { t.toggle_off }, 1.0);
     let kx = if on { r.x + 21.0 } else { r.x + 3.0 };
     g.circle(kx + 11.0, r.y + 14.0, 11.0, 0x00FF_FFFF);
@@ -2976,7 +2590,7 @@ unsafe fn draw_row(ui: &Ui, g: &mut Gfx, target: Target, r: Rect) {
     let t = ui.theme;
     let s = ui.scale;
     let focused = ui.focus == target;
-    let tile = |g: &Gfx, fill: u32| {
+    let tile = |g: &mut Gfx, fill: u32| {
         g.fill(r, 12.0, if focused { t.hi } else { fill }, 1.0);
         if focused {
             g.ring(r, 12.0, 2.0, t.ring, 1.0);
@@ -3358,156 +2972,6 @@ fn hit_caption(x: f32, y: f32) -> bool {
     (0.0..WIN_W).contains(&x) && (0.0..TITLE_H).contains(&y) && !CLOSE.inset(-7.0).contains(x, y)
 }
 
-unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    match msg {
-        WM_NCHITTEST => {
-            let mut wr = RECT::default();
-            let _ = GetWindowRect(hwnd, &mut wr);
-            let sx = (lparam.0 & 0xffff) as i16 as i32 - wr.left;
-            let sy = ((lparam.0 >> 16) & 0xffff) as i16 as i32 - wr.top;
-            let mut caption = false;
-            with_ui(|ui| {
-                let (x, y) =
-                    design_point(ui, LPARAM(((sy as isize) << 16) | (sx as isize & 0xffff)));
-                caption = hit_caption(x, y);
-            });
-            LRESULT(if caption { HTCAPTION } else { HTCLIENT } as isize)
-        }
-        WM_LBUTTONDOWN => {
-            let mut after = After::Stay;
-            with_ui(|ui| {
-                let (x, y) = design_point(ui, lparam);
-                after = click(ui, x, y);
-                paint(ui);
-            });
-            finish(after);
-            LRESULT(0)
-        }
-        WM_MOUSEWHEEL => {
-            let delta = ((wparam.0 >> 16) & 0xffff) as u16 as i16 as i32;
-            with_ui(|ui| {
-                if apps::wheel(ui, delta) {
-                    paint(ui);
-                }
-            });
-            LRESULT(0)
-        }
-        WM_MOUSEMOVE => {
-            with_ui(|ui| {
-                if let Some(i) = ui.drag {
-                    let (x, _) = design_point(ui, lparam);
-                    if let Some((_, r)) = rows(ui.tab, &ui.items, ui.led_open)
-                        .into_iter()
-                        .find(|(t, _)| *t == Target::Item(i))
-                    {
-                        if let Kind::Slider { min, max, .. } = ui.items[i].kind {
-                            let v = slider_pos_at(r, min, max, x);
-                            if v != ui.items[i].value {
-                                ui.items[i].value = v;
-                                paint(ui);
-                            }
-                        }
-                    }
-                }
-            });
-            LRESULT(0)
-        }
-        WM_LBUTTONUP => {
-            with_ui(|ui| {
-                if ui.drag.take().is_some() {
-                    let _ = ReleaseCapture();
-                }
-            });
-            LRESULT(0)
-        }
-        WM_KEYDOWN => {
-            let mut after = After::Stay;
-            with_ui(|ui| {
-                after = key_down(ui, wparam.0 as u16);
-                paint(ui);
-            });
-            finish(after);
-            LRESULT(0)
-        }
-        WM_SYSKEYDOWN => {
-            let mut handled = false;
-            with_ui(|ui| {
-                if apps::records_keys(ui) {
-                    let _ = key_down(ui, wparam.0 as u16);
-                    paint(ui);
-                    handled = true;
-                }
-            });
-            if handled {
-                LRESULT(0)
-            } else {
-                DefWindowProcW(hwnd, msg, wparam, lparam)
-            }
-        }
-        WM_CHAR => {
-            with_ui(|ui| {
-                if apps::typing(ui) {
-                    if let Some(ch) = char::from_u32(wparam.0 as u32) {
-                        apps::char_input(ui, ch);
-                        paint(ui);
-                    }
-                }
-            });
-            LRESULT(0)
-        }
-        WM_TIMER if wparam.0 == TIMER_ID => {
-            let mut after = After::Stay;
-            with_ui(|ui| {
-                let (dirty, a) = tick(ui);
-                after = a;
-                if dirty {
-                    paint(ui);
-                }
-            });
-            finish(after);
-            LRESULT(0)
-        }
-        WM_SETTINGCHANGE => {
-            with_ui(|ui| {
-                ui.theme = current_theme();
-                paint(ui);
-            });
-            DefWindowProcW(hwnd, msg, wparam, lparam)
-        }
-        WM_DPICHANGED => {
-            let suggested = &*(lparam.0 as *const RECT);
-            with_ui(|ui| {
-                ui.scale = ((wparam.0 >> 16) & 0xffff).max(96) as f32 / 96.0;
-                set_window_icons(hwnd, ui.scale);
-                let (w, h) = surface_px(ui.scale);
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    suggested.left,
-                    suggested.top,
-                    w,
-                    h,
-                    SWP_NOZORDER | SWP_NOACTIVATE,
-                );
-                if let Some(g) = ui.gfx.as_mut() {
-                    g.icons.clear();
-                }
-                ui.promo = promo_art(ui.scale);
-                paint(ui);
-            });
-            LRESULT(0)
-        }
-        WM_CLOSE => {
-            ui_hide();
-            LRESULT(0)
-        }
-        WM_DESTROY => {
-            let _ = KillTimer(hwnd, TIMER_ID);
-            LRESULT(0)
-        }
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-    }
-}
 
 #[cfg(test)]
 mod tests {

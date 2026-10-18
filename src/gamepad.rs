@@ -740,9 +740,9 @@ impl GamepadPoll {
         }
 
         // Desktop `native_vk` request (open/close the companion keyboard via IPC).
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         let center_open = crate::win::controller_center::owns_pad();
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         let center_open = false;
         if let Some(open) = crate::pipe_server::take_native_vk_request() {
             if let Some(action) = native_vk_request_action(open, vk_open, center_open) {
@@ -780,11 +780,21 @@ impl GamepadPoll {
             };
             crate::debug_state::set_gamepad(self.backend.is_connected(), name, input);
         }
+        #[cfg(target_os = "linux")]
+        {
+            let name = self.backend.controller_label();
+            let input = if center_open {
+                self.backend.live_input_summary()
+            } else {
+                String::new()
+            };
+            crate::debug_state::set_gamepad(self.backend.is_connected(), name, input);
+        }
 
         for c in &changes {
             track_down(&mut self.pad_down, *c);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         let changes = {
             let chord_allowed = !game_owns_input
                 && (center_open || !crate::pipe_server::launcher_foreground_nav())
@@ -817,6 +827,7 @@ impl GamepadPoll {
                 crate::pipe_server::publish_battery(bat.percent, bat.charging, bat.wired);
                 crate::pipe_server::publish_usb(bat.usb);
                 crate::pipe_server::publish_pads(&self.backend.pads());
+                #[cfg(windows)]
                 crate::win::shortcut_sheet::set_shown(false);
                 return Ok(center_vk_actions(vk_open));
             }
@@ -1318,6 +1329,11 @@ impl GamepadPoll {
     #[cfg(windows)]
     fn service_signin_desktop() -> bool {
         crate::config::service_mode() && Self::input_desktop_is_winlogon()
+    }
+
+    #[cfg(not(windows))]
+    fn service_signin_desktop() -> bool {
+        false
     }
 
     fn handle_vk_open_button(&mut self, change: &ButtonChange) -> Option<VkLoopAction> {

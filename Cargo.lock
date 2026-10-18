@@ -4992,6 +4992,7 @@ dependencies = [
  "evdev",
  "fontdb 0.16.2",
  "ksni",
+ "libc",
  "nix 0.31.3",
  "notify-rust",
  "parakeet-rs",
