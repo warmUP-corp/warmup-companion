@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- On Linux, an Xbox controller on Bluetooth shows its battery level when the driver reports one (xpadneo or the kernel's HID battery).
+- On Linux, the bundled device rule also lets the companion read a DualSense or DualShock 4 battery and set its lightbar. The install guide explains when that rule is needed, how to update, and which features need Hyprland.
+- On Linux, `warmup-companion update` installs the latest release when it has a Linux build. The download is checked against its SHA-256 file before it replaces the installed program, and a running service restarts on the new version. A service you stopped stays stopped. The previous version is kept as `warmup-companion.old`. `--check` only looks, and `--dry-run` downloads and checks without replacing anything. While update checks are on, the companion shows a notification when a newer Linux build is out.
+- On Linux, a slow two-finger scroll on the touchpad also scrolls apps that only count whole wheel notches. Small movements add up across frames instead of being dropped.
+- On Linux, a button shortcut such as Ctrl+Z follows the active keyboard layout. On a German keyboard it undoes instead of sending Ctrl+Y. With several layouts set up, the shortcut follows the one that is active. The on-screen keyboard's Ctrl shortcuts do the same.
+- On Linux, turning voice typing off drops a recording that is still going and unloads the voice engine. Starting a game unloads an idle voice engine; a dictation already in progress finishes first.
+- On Linux, a controller that connects while a lightbar colour is already on gets that colour. A game that has the pad keeps its own lightbar colour.
+- On Linux, a swipe left or right on the touchpad moves to the previous or next workspace on Hyprland. Swipe up and swipe down send the overview and show-desktop shortcuts.
+- On Linux, a controller button can send the shortcut for the focused app. In a browser, B closes the tab, Y opens a tab, and the triggers move between tabs.
 - The on-screen keyboard is drawn on the GPU. The card stays on the graphics card, and moving the highlight uploads the selected key.
 - The voice cloud no longer waits for the graphics card to go idle. If a game is already using the GPU, that cloud frame is skipped so the game is not stalled.
 - The voice cloud on the mic key keeps moving while you dictate. It no longer waits for a D-pad move before the next frame is shown.

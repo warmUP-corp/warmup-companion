@@ -20,6 +20,7 @@ pub fn run() -> Result<(), String> {
     crate::install::log_line("warmup-companion service starting (SDL3 + uinput)");
     crate::linux_game_detect::start();
     crate::linux_tray::spawn();
+    crate::linux_update::spawn_auto_check();
     crate::linux_vk::show_prompt_once();
     let mut app = App::default();
     app.use_real_win32 = false;

@@ -12,6 +12,7 @@ struct Board {
 }
 
 static BOARD: OnceLock<Mutex<Option<Board>>> = OnceLock::new();
+static CHORD_LAYOUT: Mutex<Option<(String, Layout)>> = Mutex::new(None);
 
 fn board() -> &'static Mutex<Option<Board>> {
     BOARD.get_or_init(|| Mutex::new(None))
@@ -37,7 +38,10 @@ pub fn tap_vk(vk: u16) -> bool {
 }
 
 pub fn tap_ctrl(vk: u16) -> bool {
-    let Some(code) = evdev_from_vk(vk) else {
+    let layout_code = char::from_u32(vk as u32)
+        .filter(char::is_ascii_alphanumeric)
+        .and_then(chord_code);
+    let Some(code) = layout_code.or_else(|| evdev_from_vk(vk)) else {
         return false;
     };
     chord(KeyCode::KEY_LEFTCTRL, code)
@@ -68,6 +72,24 @@ pub fn replace_text(del: usize, ins: &str) -> std::io::Result<()> {
     }
     type_text(ins);
     Ok(())
+}
+
+pub fn chord_code(ch: char) -> Option<KeyCode> {
+    let (name, group) = chord_layout();
+    let mut slot = CHORD_LAYOUT.lock().ok()?;
+    if slot.as_ref().is_none_or(|(have, _)| *have != name) {
+        let layout = Layout::for_name(&name);
+        *slot = Some((name, layout));
+    }
+    let (_, layout) = slot.as_ref()?;
+    let ch = ch.to_ascii_lowercase();
+    layout
+        .lookup_group(ch, group)
+        .or_else(|| layout.lookup_group(ch, 0))
+}
+
+pub fn chord_codes() -> &'static [KeyCode] {
+    KEYS
 }
 
 fn type_char(ch: char, layout: &mut Layout) -> bool {
@@ -301,13 +323,17 @@ const KEYS: &[KeyCode] = &[
 ];
 
 struct Layout {
-    map: Vec<(u32, KeyCode, u32)>,
+    map: Vec<(u32, KeyCode, u32, u32)>,
 }
 
 impl Layout {
     fn load() -> Self {
+        Self::for_name(&active_layout())
+    }
+
+    fn for_name(name: &str) -> Self {
         let mut map = Vec::new();
-        if let Some(keymap) = load_keymap() {
+        if let Some(keymap) = load_keymap(name) {
             let min = keymap.min_keycode().raw();
             let max = keymap.max_keycode().raw();
             for raw in min..=max {
@@ -325,8 +351,11 @@ impl Layout {
                             let Some(code) = code_for_raw(evdev) else {
                                 continue;
                             };
-                            if !map.iter().any(|(have, _, _)| *have == ch) {
-                                map.push((ch, code, level));
+                            if !map
+                                .iter()
+                                .any(|(have, _, _, group)| *have == ch && *group == layout)
+                            {
+                                map.push((ch, code, level, layout));
                             }
                         }
                     }
@@ -340,19 +369,26 @@ impl Layout {
         let want = ch as u32;
         self.map
             .iter()
-            .find(|(have, _, _)| *have == want)
-            .map(|(_, code, level)| (*code, *level))
+            .find(|(have, _, _, _)| *have == want)
+            .map(|(_, code, level, _)| (*code, *level))
+    }
+
+    fn lookup_group(&self, ch: char, group: u32) -> Option<KeyCode> {
+        let want = ch as u32;
+        self.map
+            .iter()
+            .find(|(have, _, _, layout)| *have == want && *layout == group)
+            .map(|(_, code, _, _)| *code)
     }
 }
 
-fn load_keymap() -> Option<xkbcommon::xkb::Keymap> {
+fn load_keymap(layout: &str) -> Option<xkbcommon::xkb::Keymap> {
     let context = xkbcommon::xkb::Context::new(xkbcommon::xkb::CONTEXT_NO_FLAGS);
-    let layout = active_layout();
     xkbcommon::xkb::Keymap::new_from_names(
         &context,
         "evdev",
         "pc105",
-        &layout,
+        layout,
         "",
         None,
         xkbcommon::xkb::KEYMAP_COMPILE_NO_FLAGS,
@@ -384,7 +420,51 @@ fn active_layout() -> String {
     "us".to_string()
 }
 
+fn chord_layout() -> (String, u32) {
+    if let Ok(layout) = std::env::var("XKB_DEFAULT_LAYOUT") {
+        if !layout.is_empty() {
+            return (layout, 0);
+        }
+    }
+    if let Some(found) = hypr_keyboard() {
+        return found;
+    }
+    (active_layout(), 0)
+}
+
+fn hypr_keyboard() -> Option<(String, u32)> {
+    let value = hypr_request(b"j/devices")?;
+    let keyboards = value.get("keyboards")?.as_array()?;
+    let pick = keyboards
+        .iter()
+        .find(|kb| kb.get("name").and_then(|n| n.as_str()) == Some("warmup-companion-keyboard"))
+        .or_else(|| {
+            keyboards
+                .iter()
+                .find(|kb| kb.get("main").and_then(|m| m.as_bool()) == Some(true))
+        })?;
+    let layout = pick.get("layout")?.as_str()?.trim();
+    if layout.is_empty() {
+        return None;
+    }
+    let group = pick
+        .get("active_layout_index")
+        .and_then(|i| i.as_u64())
+        .unwrap_or(0) as u32;
+    Some((layout.to_string(), group))
+}
+
 fn hypr_layout() -> Option<String> {
+    let value = hypr_request(b"j/getoption input:kb_layout")?;
+    let layout = value.get("str")?.as_str()?.trim();
+    if layout.is_empty() {
+        None
+    } else {
+        Some(layout.split(',').next().unwrap_or(layout).to_string())
+    }
+}
+
+fn hypr_request(command: &[u8]) -> Option<serde_json::Value> {
     let sig = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")?;
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")?;
     let sock = std::path::PathBuf::from(runtime)
@@ -395,7 +475,7 @@ fn hypr_layout() -> Option<String> {
     stream
         .set_read_timeout(Some(Duration::from_millis(300)))
         .ok()?;
-    stream.write_all(b"j/getoption input:kb_layout").ok()?;
+    stream.write_all(command).ok()?;
     let mut buf = Vec::new();
     let mut tmp = [0u8; 2048];
     loop {
@@ -405,14 +485,7 @@ fn hypr_layout() -> Option<String> {
             Err(_) => break,
         }
     }
-    let text = String::from_utf8_lossy(&buf);
-    let value = serde_json::from_str::<serde_json::Value>(&text).ok()?;
-    let layout = value.get("str")?.as_str()?.trim();
-    if layout.is_empty() {
-        None
-    } else {
-        Some(layout.split(',').next().unwrap_or(layout).to_string())
-    }
+    serde_json::from_slice(&buf).ok()
 }
 
 fn code_for_raw(code: u16) -> Option<KeyCode> {

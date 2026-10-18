@@ -84,6 +84,10 @@ fn effective_userland_poll_mode() -> PollMode {
         let _ = std::thread::Builder::new()
             .name("voice-unload".into())
             .spawn(crate::win::speech_input::unload_engine);
+        #[cfg(all(target_os = "linux", feature = "speech"))]
+        let _ = std::thread::Builder::new()
+            .name("voice-unload".into())
+            .spawn(crate::linux_speech::unload_engine);
     } else if !any_game {
         VOICE_GAME_SEEN.store(false, Ordering::SeqCst);
     }
@@ -267,6 +271,10 @@ impl SdlBackend {
                     .active_controller_name()
                     .unwrap_or_else(|| "none".to_string()),
             );
+            #[cfg(target_os = "linux")]
+            if self.input.active_controller_name().is_some() {
+                crate::led_engine::reapply_led();
+            }
         }
         if mode != PollMode::Full {
             self.touchpad = TouchpadFrame::default();
@@ -492,6 +500,10 @@ fn sdl_thread_main(
             );
         }
         let pad_present = input.active_controller_name().is_some();
+        #[cfg(target_os = "linux")]
+        if connected_change && pad_present {
+            crate::led_engine::reapply_led();
+        }
         let changes = input.detect_button_changes();
         if !changes.is_empty() {
             if let Ok(mut q) = shared.changes.lock() {

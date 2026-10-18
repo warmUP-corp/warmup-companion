@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -15,8 +15,11 @@ const PORT: u16 = 17182;
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static STOP: AtomicBool = AtomicBool::new(false);
+static DISCARD: AtomicBool = AtomicBool::new(false);
 static PHASE: AtomicU8 = AtomicU8::new(0);
 static LEVEL: AtomicU32 = AtomicU32::new(0);
+static VOICE_OFF_APPLIED: AtomicBool = AtomicBool::new(false);
+static VOICE_OFF_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 pub fn running() -> bool {
     RUNNING.load(Ordering::SeqCst)
@@ -40,6 +43,72 @@ pub fn available() -> bool {
 
 pub fn request_stop() {
     STOP.store(true, Ordering::SeqCst);
+}
+
+pub fn unload_engine() {
+    if running() {
+        crate::install::log_line("game started during dictation; voice engine stays loaded");
+        return;
+    }
+    quit_server();
+    std::thread::sleep(Duration::from_millis(500));
+    if server_up() {
+        quit_server();
+    }
+}
+
+pub fn enforce_voice_enabled() {
+    if crate::config::voice_enabled() {
+        if VOICE_OFF_APPLIED.swap(false, Ordering::SeqCst) {
+            VOICE_OFF_GENERATION.fetch_add(1, Ordering::SeqCst);
+        }
+        return;
+    }
+    if VOICE_OFF_APPLIED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let generation = VOICE_OFF_GENERATION.load(Ordering::SeqCst);
+    crate::vk_nav::set_voice_input_active(false);
+    crate::install::log_line(
+        "voice transcription disabled; discarding any recording and unloading the engine",
+    );
+    DISCARD.store(true, Ordering::SeqCst);
+    request_stop();
+    if std::thread::Builder::new()
+        .name("voice-unload".into())
+        .spawn(move || {
+            if VOICE_OFF_GENERATION.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            quit_server();
+            std::thread::sleep(Duration::from_millis(500));
+            if VOICE_OFF_GENERATION.load(Ordering::SeqCst) != generation
+                || crate::config::voice_enabled()
+            {
+                return;
+            }
+            if server_up() {
+                quit_server();
+            }
+            if VOICE_OFF_GENERATION.load(Ordering::SeqCst) == generation
+                && !crate::config::voice_enabled()
+                && server_up()
+            {
+                VOICE_OFF_APPLIED.store(false, Ordering::SeqCst);
+            }
+        })
+        .is_err()
+    {
+        VOICE_OFF_APPLIED.store(false, Ordering::SeqCst);
+    }
+}
+
+fn quit_server() {
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr(), Duration::from_millis(200)) else {
+        return;
+    };
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
+    let _ = stream.write_all(&u32::MAX.to_le_bytes());
 }
 
 pub fn toggle() {
@@ -84,6 +153,7 @@ fn start() -> Result<(), String> {
         return Ok(());
     }
     STOP.store(false, Ordering::SeqCst);
+    DISCARD.store(false, Ordering::SeqCst);
     set_phase(1);
     std::thread::Builder::new()
         .name("warmup-dictation".into())
@@ -312,6 +382,10 @@ fn record_and_type() -> Result<(), String> {
     drop(stream);
     set_phase(2);
     set_level(0.0);
+    if DISCARD.load(Ordering::SeqCst) {
+        crate::install::log_line("speech: recording discarded");
+        return Ok(());
+    }
     let secs = all.len() as f32 / in_rate as f32;
     if all.is_empty() || secs < 0.3 {
         crate::install::log_line("speech: nothing recorded");
@@ -321,6 +395,10 @@ fn record_and_type() -> Result<(), String> {
         .join()
         .map_err(|_| "voice engine thread panicked".to_string())?
         .map_err(|error| format!("voice engine: {error}"))?;
+    if DISCARD.load(Ordering::SeqCst) {
+        crate::install::log_line("speech: recording discarded");
+        return Ok(());
+    }
     let samples = resample_16k(&all, in_rate);
     let heard = transcribe_via_server(&samples)?;
     let clean = clean_transcript(&heard);
@@ -371,6 +449,7 @@ fn onnx_runtime() -> Option<PathBuf> {
     }
     [
         "/usr/lib/libonnxruntime.so",
+        "/usr/lib64/libonnxruntime.so",
         "/usr/lib/voxtype/cuda-13/libonnxruntime.so",
     ]
     .into_iter()
@@ -498,6 +577,7 @@ mod engine {
         ));
         let mut model = parakeet_rs::ParakeetTDT::from_pretrained(&dir, None)
             .map_err(|error| format!("parakeet load: {error}"))?;
+        crate::install::log_line("parakeet: model loaded on CPU");
         let listener = TcpListener::bind(addr()).map_err(|error| format!("parakeet-server bind {PORT}: {error}"))?;
         crate::install::log_line(&format!("parakeet-server: ready on {}", addr()));
         for stream in listener.incoming() {
