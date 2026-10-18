@@ -110,7 +110,7 @@ evdev = "0.13"
 libc = "0.2"
 nix = { version = "0.31", features = ["socket", "fs", "user", "poll"] }
 xkbcommon = "0.8"
-wayland-protocols-misc = "0.3"
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
 smithay-client-toolkit = "0.19"
 tiny-skia = "0.11"
 cosmic-text = "0.14"
@@ -118,8 +118,7 @@ fontdb = { version = "0.16", default-features = false, features = ["std"] }
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 ksni = "0.2.2"
 notify-rust = "4"
-eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
 wgpu = "23"
 pollster = "0.4"
-wayland-client = "0.31"
+wayland-client = { version = "0.31", features = ["system", "dlopen"] }
 wayland-protocols-wlr = "0.3"

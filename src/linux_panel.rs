@@ -111,7 +111,6 @@ pub(crate) struct Spec {
 enum Cmd {
     Show,
     Hide,
-    Repaint,
     Quit,
 }
 
@@ -153,10 +152,6 @@ impl PanelThread {
 
     pub(crate) fn hide(&self) -> Result<(), String> {
         self.post(Cmd::Hide)
-    }
-
-    pub(crate) fn repaint(&self) -> Result<(), String> {
-        self.post(Cmd::Repaint)
     }
 }
 
@@ -201,7 +196,6 @@ fn run(
             match cmd {
                 Cmd::Show => host.show(&qh),
                 Cmd::Hide => host.hide(),
-                Cmd::Repaint => host.dirty = true,
                 Cmd::Quit => quit = true,
             }
         }

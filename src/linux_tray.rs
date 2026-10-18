@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use ksni::menu::{CheckmarkItem, MenuItem, StandardItem, SubMenu};
 use ksni::{Icon, ToolTip, Tray};
@@ -12,6 +13,7 @@ const BUILD_INFO: &str = concat!(
 );
 
 static STARTED: AtomicBool = AtomicBool::new(false);
+static HANDLE: Mutex<Option<ksni::Handle<CompanionTray>>> = Mutex::new(None);
 
 struct CompanionTray;
 
@@ -23,15 +25,25 @@ pub fn spawn() {
         .name("warmup-tray".into())
         .spawn(|| {
             crate::linux_notify::show_welcome_if_first_run();
-            if let Err(error) = ksni::TrayService::new(CompanionTray).run() {
+            let service = ksni::TrayService::new(CompanionTray);
+            if let Ok(mut handle) = HANDLE.lock() {
+                *handle = Some(service.handle());
+            }
+            if let Err(error) = service.run() {
                 crate::install::log_line(&format!("tray stopped: {error}"));
             }
         });
 }
 
+pub(crate) fn refresh() {
+    if let Some(handle) = HANDLE.lock().ok().and_then(|h| h.clone()) {
+        handle.update(|_| {});
+    }
+}
+
 impl Tray for CompanionTray {
     fn activate(&mut self, _x: i32, _y: i32) {
-        crate::linux_center::show();
+        crate::win::controller_center::show();
     }
 
     fn id(&self) -> String {
@@ -74,7 +86,7 @@ impl Tray for CompanionTray {
             check("Gamepad cursor", settings.cursor_enabled, |_| {
                 toggle_bool("cursor_enabled", crate::config::gamepad_settings().cursor_enabled);
             }),
-            action("Controller Center...", |_| crate::linux_center::show()),
+            action("Control Center…", |_| crate::win::controller_center::show()),
             action("Show controller tips", |_| {
                 let _ = crate::linux_notify::notify(
                     "Warmup Companion",
@@ -110,6 +122,11 @@ impl Tray for CompanionTray {
                                 crate::config::vk_style() == crate::config::VkStyle::Mono,
                                 |_| set_style("mono"),
                             ),
+                            check(
+                                "Modern",
+                                crate::config::vk_style() == crate::config::VkStyle::Modern,
+                                |_| set_style("modern"),
+                            ),
                         ],
                     ),
                 ],
@@ -139,6 +156,7 @@ impl Tray for CompanionTray {
                     ),
                 ],
             ),
+            submenu("Updates", update_items(settings.update_check)),
             submenu(
                 "Diagnostics",
                 vec![
@@ -159,6 +177,27 @@ impl Tray for CompanionTray {
         ];
         items
     }
+}
+
+fn update_items(auto: bool) -> Vec<MenuItem<CompanionTray>> {
+    let mut items = match crate::linux_update::available() {
+        Some((version, page)) => vec![
+            action(&format!("Install update v{version}…"), |_| {
+                crate::linux_update::start_update()
+            }),
+            action("What's new", move |_| {
+                let _ = std::process::Command::new("xdg-open").arg(&page).spawn();
+            }),
+        ],
+        None => vec![action("Check for updates", |_| {
+            crate::linux_update::check_now()
+        })],
+    };
+    items.push(MenuItem::Separator);
+    items.push(check("Check automatically", auto, |_| {
+        toggle_bool("update_check", crate::config::gamepad_settings().update_check);
+    }));
+    items
 }
 
 fn action(

@@ -490,9 +490,9 @@ pub fn dispatch_install_or_service(args: &[String]) {
     if args.iter().any(|a| a == "--controller-center") {
         #[cfg(feature = "gamepad")]
         {
-            if let Err(error) = crate::linux_center::show_blocking() {
-                eprintln!("{error}");
-                std::process::exit(1);
+            crate::win::controller_center::show();
+            while crate::win::controller_center::owns_pad() {
+                std::thread::sleep(std::time::Duration::from_millis(200));
             }
             std::process::exit(0);
         }

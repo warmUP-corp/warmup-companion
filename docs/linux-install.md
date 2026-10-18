@@ -101,9 +101,9 @@ L3 opens the on-screen keyboard on a layer above other windows. It does not take
 
 ## Tray and settings
 
-The running service adds a StatusNotifierItem. Right-click it, or left-click it, for the menu: pause input, Controller Center, keyboard layout settings, game detection, the log, diagnostics, and uninstall.
+The running service adds a StatusNotifierItem. Left-click it to open Control Center. Right-click it for the menu: pause input, Control Center, keyboard layout settings, game detection, updates, the log, diagnostics, and uninstall. Select + Start on the controller also opens and closes Control Center, and the controller drives it while it is open.
 
-`warmup-companion settings` reads and writes `$XDG_CONFIG_HOME/warmup-companion/settings.ini`. `warmup-companion --controller-center` opens the same window. `warmup-companion diagnostics` writes a tarball under `$XDG_STATE_HOME/warmup-companion/diagnostics/`.
+`warmup-companion settings` reads and writes `$XDG_CONFIG_HOME/warmup-companion/settings.ini`. `warmup-companion --controller-center` opens Control Center on its own, without the controller. `warmup-companion diagnostics` writes a tarball under `$XDG_STATE_HOME/warmup-companion/diagnostics/`.
 
 ## Hyprland-only features
 

@@ -42,16 +42,11 @@ mod service;
 mod service_worker;
 #[cfg(all(windows, feature = "gamepad"))]
 mod tray;
-#[cfg(feature = "gamepad")]
-mod center_rows;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
 mod linux_tray;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
 mod linux_notify;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
-mod linux_center;
-#[cfg(all(target_os = "linux", feature = "gamepad"))]
-#[allow(dead_code)]
 mod linux_panel;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
 mod linux_diag;
