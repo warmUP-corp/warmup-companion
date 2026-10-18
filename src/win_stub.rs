@@ -77,6 +77,10 @@ pub mod xbox_vk {
 #[path = "win/controller_center.rs"]
 pub mod controller_center;
 
+#[cfg(feature = "gamepad")]
+#[path = "win/tray_menu.rs"]
+pub(crate) mod tray_menu;
+
 pub mod speech_input {
     #[cfg_attr(not(feature = "gamepad"), allow(dead_code))]
     pub fn set_engine(_name: &str) {}

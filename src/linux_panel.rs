@@ -18,12 +18,17 @@ use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::xdg::window::{
     Window, WindowConfigure, WindowDecorations, WindowHandler,
 };
+use smithay_client_toolkit::shell::wlr_layer::{
+    Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
+    LayerSurfaceConfigure,
+};
 use smithay_client_toolkit::shell::xdg::{XdgShell, XdgSurface};
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
 use smithay_client_toolkit::shm::{Shm, ShmHandler};
 use smithay_client_toolkit::{
-    delegate_activation, delegate_compositor, delegate_keyboard, delegate_output, delegate_pointer,
+    delegate_activation, delegate_compositor, delegate_keyboard, delegate_layer, delegate_output,
+    delegate_pointer,
     delegate_registry, delegate_seat, delegate_shm, delegate_xdg_shell, delegate_xdg_window,
     registry_handlers,
 };
@@ -81,6 +86,13 @@ pub(crate) enum Flow {
 
 pub(crate) trait PanelApp: Send {
     fn size(&self) -> (u32, u32);
+    fn overlay(&self) -> bool {
+        false
+    }
+    fn resize(&mut self, _w: u32, _h: u32) {}
+    fn frame_rect(&self) -> Option<(i32, i32, u32, u32)> {
+        None
+    }
     fn open(&mut self, scale: f32);
     fn close(&mut self);
     fn rescale(&mut self, _scale: f32) {}
@@ -247,6 +259,27 @@ fn run(
     let _ = conn.flush();
 }
 
+enum Surface {
+    Window(Window),
+    Layer(LayerSurface),
+}
+
+impl Surface {
+    fn wl_surface(&self) -> &wl_surface::WlSurface {
+        match self {
+            Surface::Window(w) => w.wl_surface(),
+            Surface::Layer(l) => l.wl_surface(),
+        }
+    }
+
+    fn commit(&self) {
+        match self {
+            Surface::Window(w) => w.commit(),
+            Surface::Layer(l) => l.commit(),
+        }
+    }
+}
+
 struct Repeat {
     raw: u32,
     key: Key,
@@ -262,12 +295,15 @@ struct Host {
     output_state: OutputState,
     compositor: CompositorState,
     xdg: XdgShell,
+    layer_shell: Option<LayerShell>,
     shm: Shm,
     activation: Option<ActivationState>,
     viewporter: Option<wp_viewporter::WpViewporter>,
     fractional_mgr: Option<wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
     pool: Option<SlotPool>,
-    window: Option<Window>,
+    window: Option<Surface>,
+    layer_size: (u32, u32),
+    painted: Option<(i32, i32, u32, u32)>,
     viewport: Option<wp_viewport::WpViewport>,
     fractional: Option<wp_fractional_scale_v1::WpFractionalScaleV1>,
     buffer: Option<Buffer>,
@@ -309,12 +345,15 @@ impl Host {
             output_state: OutputState::new(globals, qh),
             compositor,
             xdg,
+            layer_shell: LayerShell::bind(globals, qh).ok(),
             shm,
             activation: ActivationState::bind(globals, qh).ok(),
             viewporter: globals.bind(qh, 1..=1, ()).ok(),
             fractional_mgr: globals.bind(qh, 1..=1, ()).ok(),
             pool: None,
             window: None,
+            layer_size: (0, 0),
+            painted: None,
             viewport: None,
             fractional: None,
             buffer: None,
@@ -343,15 +382,35 @@ impl Host {
             self.dirty = true;
             return;
         }
-        let (w, h) = self.app.size();
         let surface = self.compositor.create_surface(qh);
-        let window = self
-            .xdg
-            .create_window(surface, WindowDecorations::RequestClient, qh);
-        window.set_title(self.spec.title);
-        window.set_app_id(self.spec.app_id);
-        window.set_min_size(Some((w, h)));
-        window.set_max_size(Some((w, h)));
+        let window = if self.app.overlay() {
+            let Some(layer_shell) = &self.layer_shell else {
+                crate::install::log_line(&format!("{}: no layer shell", self.spec.thread));
+                self.app.close();
+                return;
+            };
+            let layer = layer_shell.create_layer_surface(
+                qh,
+                surface,
+                Layer::Overlay,
+                Some(self.spec.app_id),
+                None,
+            );
+            layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+            layer.set_exclusive_zone(-1);
+            layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+            Surface::Layer(layer)
+        } else {
+            let (w, h) = self.app.size();
+            let window = self
+                .xdg
+                .create_window(surface, WindowDecorations::RequestClient, qh);
+            window.set_title(self.spec.title);
+            window.set_app_id(self.spec.app_id);
+            window.set_min_size(Some((w, h)));
+            window.set_max_size(Some((w, h)));
+            Surface::Window(window)
+        };
         self.viewport = self
             .viewporter
             .as_ref()
@@ -392,6 +451,7 @@ impl Host {
             self.app.close();
         }
         self.buffer = None;
+        self.painted = None;
         if let Some(f) = self.fractional.take() {
             f.destroy();
         }
@@ -471,14 +531,22 @@ impl Host {
         let Some(window) = &self.window else {
             return;
         };
-        let (w, h) = self.app.size();
+        let (w, h) = match window {
+            Surface::Layer(_) => self.layer_size,
+            Surface::Window(_) => self.app.size(),
+        };
+        if w == 0 || h == 0 {
+            return;
+        }
         let s = self.scale;
         let (pw, ph) = (
             (w as f32 * s).ceil() as u32,
             (h as f32 * s).ceil() as u32,
         );
+        let full = (0, 0, pw, ph);
+        let rect = self.app.frame_rect().map_or(full, |r| clip(r, pw, ph));
         if self.gfx.is_none() {
-            match Gfx::new(pw, ph) {
+            match Gfx::new(rect.2, rect.3) {
                 Ok(g) => self.gfx = Some(g),
                 Err(e) => {
                     crate::install::log_line(&format!("{}: gfx: {e}", self.spec.thread));
@@ -489,7 +557,7 @@ impl Host {
         let Some(gfx) = self.gfx.as_mut() else {
             return;
         };
-        gfx.begin(pw, ph);
+        gfx.begin(rect.2, rect.3);
         self.app.paint(gfx, s);
         let stride = pw as i32 * 4;
         if self.pool.is_none() {
@@ -504,23 +572,35 @@ impl Host {
         let Some(pool) = self.pool.as_mut() else {
             return;
         };
-        let buffer = match self.buffer.take() {
-            Some(b) if b.height() == ph as i32 && b.stride() == stride && pool.canvas(&b).is_some() => b,
+        let (buffer, previous) = match self.buffer.take() {
+            Some(b) if b.height() == ph as i32 && b.stride() == stride && pool.canvas(&b).is_some() => {
+                (b, self.painted)
+            }
             _ => match pool.create_buffer(pw as i32, ph as i32, stride, wl_shm::Format::Argb8888) {
-                Ok((b, _)) => b,
+                Ok((b, _)) => (b, Some(full)),
                 Err(_) => return,
             },
         };
         let Some(canvas) = pool.canvas(&buffer) else {
             return;
         };
+        if let Some(old) = previous.filter(|old| *old != rect) {
+            for y in old.1..old.1 + old.3 as i32 {
+                let row = (y as usize * pw as usize + old.0 as usize) * 4;
+                canvas[row..row + old.2 as usize * 4].fill(0);
+            }
+        }
         let pixels = gfx.pixels();
-        let n = canvas.len().min(pixels.len());
-        for (dst, src) in canvas[..n]
-            .chunks_exact_mut(4)
-            .zip(pixels[..n].chunks_exact(4))
-        {
-            dst.copy_from_slice(&[src[2], src[1], src[0], src[3]]);
+        let (gw, gh) = (gfx.width() as usize, gfx.height() as usize);
+        for y in 0..(rect.3 as usize).min(gh) {
+            let src = &pixels[y * gw * 4..(y * gw + (rect.2 as usize).min(gw)) * 4];
+            let at = ((rect.1 as usize + y) * pw as usize + rect.0 as usize) * 4;
+            for (dst, px) in canvas[at..at + src.len()]
+                .chunks_exact_mut(4)
+                .zip(src.chunks_exact(4))
+            {
+                dst.copy_from_slice(&[px[2], px[1], px[0], px[3]]);
+            }
         }
         let surface = window.wl_surface();
         match &self.viewport {
@@ -530,8 +610,12 @@ impl Host {
             }
             None => surface.set_buffer_scale(s.round().max(1.0) as i32),
         }
-        window.set_window_geometry(0, 0, w, h);
-        surface.damage_buffer(0, 0, pw as i32, ph as i32);
+        if let Surface::Window(win) = window {
+            win.set_window_geometry(0, 0, w, h);
+        }
+        for r in [Some(rect), previous].into_iter().flatten() {
+            surface.damage_buffer(r.0, r.1, r.2 as i32, r.3 as i32);
+        }
         surface.frame(qh, surface.clone());
         if let Err(e) = buffer.attach_to(surface) {
             crate::install::log_line(&format!("{}: buffer: {e}", self.spec.thread));
@@ -539,6 +623,7 @@ impl Host {
         }
         window.commit();
         self.buffer = Some(buffer);
+        self.painted = Some(rect);
         self.frame_pending = true;
         self.dirty = false;
     }
@@ -573,6 +658,14 @@ impl Host {
         let flow = self.app.key(key);
         self.apply(flow);
     }
+}
+
+fn clip(r: (i32, i32, u32, u32), w: u32, h: u32) -> (i32, i32, u32, u32) {
+    let x0 = r.0.clamp(0, w as i32);
+    let y0 = r.1.clamp(0, h as i32);
+    let x1 = (r.0 + r.2 as i32).clamp(x0, w as i32);
+    let y1 = (r.1 + r.3 as i32).clamp(y0, h as i32);
+    (x0, y0, (x1 - x0) as u32, (y1 - y0) as u32)
 }
 
 fn vk_of(sym: Keysym, raw: u32) -> Option<u16> {
@@ -702,6 +795,38 @@ impl WindowHandler for Host {
         _: WindowConfigure,
         _: u32,
     ) {
+        self.configured = true;
+        self.dirty = true;
+        if !self.opened {
+            self.opened = true;
+            self.scale = self.effective_scale();
+            self.next_tick = Instant::now() + TICK;
+            self.app.open(self.scale);
+        }
+        if !self.frame_pending {
+            self.draw(qh);
+        }
+    }
+}
+
+impl LayerShellHandler for Host {
+    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {
+        self.hide();
+    }
+
+    fn configure(
+        &mut self,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+        _: &LayerSurface,
+        configure: LayerSurfaceConfigure,
+        _: u32,
+    ) {
+        let size = configure.new_size;
+        if size.0 > 0 && size.1 > 0 && size != self.layer_size {
+            self.layer_size = size;
+            self.app.resize(size.0, size.1);
+        }
         self.configured = true;
         self.dirty = true;
         if !self.opened {
@@ -898,7 +1023,7 @@ impl PointerHandler for Host {
                 PointerEventKind::Press { button, serial, .. } if button == BTN_LEFT => {
                     self.serial = Some(serial);
                     if self.app.caption(x, y) {
-                        if let (Some(w), Some(seat)) = (&self.window, &self.seat) {
+                        if let (Some(Surface::Window(w)), Some(seat)) = (&self.window, &self.seat) {
                             w.move_(seat, serial);
                         }
                         Flow::Idle
@@ -949,6 +1074,7 @@ delegate_keyboard!(Host);
 delegate_pointer!(Host);
 delegate_xdg_shell!(Host);
 delegate_xdg_window!(Host);
+delegate_layer!(Host);
 delegate_activation!(Host);
 delegate_registry!(Host);
 
