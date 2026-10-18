@@ -1,7 +1,7 @@
 #[cfg(windows)]
 mod win;
 #[cfg(windows)]
-pub(crate) use win::{Gfx, current_theme};
+pub(crate) use win::{Gfx, current_theme, user_locale_name};
 
 #[cfg(not(windows))]
 mod linux;

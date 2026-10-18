@@ -1,8 +1,10 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 
-use windows::core::{w, HSTRING, Interface};
+use windows::core::{HSTRING, Interface};
 use windows::Foundation::Numerics::Matrix3x2;
 use windows::Win32::Foundation::{BOOL, HWND, POINT, RECT, SIZE};
+use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
     D2D1_FILL_MODE_ALTERNATE, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_POINT_2F, D2D_RECT_F,
@@ -44,6 +46,18 @@ use super::{
     svg_bgra, svg_bgra_scaled, FONT_NORMAL, FONT_SEMI_BOLD,
 };
 
+pub(crate) fn user_locale_name() -> HSTRING {
+    let mut buf = [0u16; 85];
+    let len = unsafe { GetUserDefaultLocaleName(&mut buf) };
+    if len > 1 {
+        let end = (len - 1) as usize;
+        String::from_utf16_lossy(&buf[..end])
+    } else {
+        "en-US".to_string()
+    }
+    .into()
+}
+
 pub(crate) fn theme_from(pal: &VkPalette) -> Theme {
     Theme {
         bg: pal.bg,
@@ -82,16 +96,17 @@ pub(crate) struct Gfx {
     pub(crate) dwrite: IDWriteFactory,
     pub(crate) fonts: IDWriteFontCollection,
     pub(crate) family: HSTRING,
+    pub(crate) locale: HSTRING,
     pub(crate) rt: ID2D1RenderTarget,
     pub(crate) device: Option<ID2D1DeviceContext>,
     pub(crate) brush: ID2D1SolidColorBrush,
-    pub(crate) formats: HashMap<(u32, i32, String, u8, u8, bool), IDWriteTextFormat>,
-    pub(crate) icons: HashMap<(Icon, u32, u32), ID2D1Bitmap>,
-    pub(crate) svg_icons: HashMap<(String, u32, u32), ID2D1Bitmap>,
-    pub(crate) svg_scaled: HashMap<(String, u32, u32, u32), ID2D1Bitmap>,
-    pub(crate) art: HashMap<String, ID2D1Bitmap>,
-    pub(crate) images: HashMap<String, ID2D1Bitmap>,
-    pub(crate) shadow: Option<((i32, i32, Vec<Rect>), ID2D1Bitmap)>,
+    pub(crate) formats: RefCell<HashMap<(u32, i32, String, u8, u8, bool), IDWriteTextFormat>>,
+    pub(crate) icons: RefCell<HashMap<(Icon, u32, u32), ID2D1Bitmap>>,
+    pub(crate) svg_icons: RefCell<HashMap<(String, u32, u32), ID2D1Bitmap>>,
+    pub(crate) svg_scaled: RefCell<HashMap<(String, u32, u32, u32), ID2D1Bitmap>>,
+    pub(crate) art: RefCell<HashMap<String, ID2D1Bitmap>>,
+    pub(crate) images: RefCell<HashMap<String, ID2D1Bitmap>>,
+    pub(crate) shadow: RefCell<Option<((i32, i32, Vec<Rect>), ID2D1Bitmap)>>,
     pub(crate) dc_rt: Option<ID2D1DCRenderTarget>,
     pub(crate) dc: HDC,
     pub(crate) bmp: HBITMAP,
@@ -144,20 +159,22 @@ impl Gfx {
             .map_err(|e| format!("GetSystemFontCollection: {e}"))?;
         let fonts = fonts.ok_or("GetSystemFontCollection returned null")?;
         let family = vk_renderer::resolve_family(&fonts, vk_renderer::MONO_FAMILIES);
+        let locale = user_locale_name();
         Ok(Gfx {
             dwrite,
             fonts,
             family,
+            locale,
             rt,
             device: None,
             brush,
-            formats: HashMap::new(),
-            icons: HashMap::new(),
-            svg_icons: HashMap::new(),
-            svg_scaled: HashMap::new(),
-            art: HashMap::new(),
-            images: HashMap::new(),
-            shadow: None,
+            formats: RefCell::new(HashMap::new()),
+            icons: RefCell::new(HashMap::new()),
+            svg_icons: RefCell::new(HashMap::new()),
+            svg_scaled: RefCell::new(HashMap::new()),
+            art: RefCell::new(HashMap::new()),
+            images: RefCell::new(HashMap::new()),
+            shadow: RefCell::new(None),
             dc_rt: Some(dc_rt),
             dc: HDC::default(),
             bmp: HBITMAP::default(),
@@ -217,7 +234,7 @@ impl Gfx {
     }
 
     pub(crate) unsafe fn format_full(
-        &mut self,
+        &self,
         px: f32,
         weight: i32,
         family: &str,
@@ -233,7 +250,7 @@ impl Gfx {
             valign as u8,
             wrap,
         );
-        if let Some(f) = self.formats.get(&key) {
+        if let Some(f) = self.formats.borrow().get(&key) {
             return Some(f.clone());
         }
         let halign_d2d = match halign {
@@ -255,9 +272,9 @@ impl Gfx {
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
                 px,
-                w!("en-us"),
+                &self.locale,
             )
-            .ok()?;
+            .ok()?;;
         let _ = f.SetTextAlignment(halign_d2d);
         let _ = f.SetParagraphAlignment(valign_d2d);
         let _ = f.SetWordWrapping(if wrap {
@@ -265,11 +282,11 @@ impl Gfx {
         } else {
             DWRITE_WORD_WRAPPING_NO_WRAP
         });
-        self.formats.insert(key, f.clone());
+        self.formats.borrow_mut().insert(key, f.clone());
         Some(f)
     }
 
-    pub(crate) unsafe fn measure(&mut self, s: &str, px: f32, bold: bool) -> f32 {
+    pub(crate) unsafe fn measure(&self, s: &str, px: f32, bold: bool) -> f32 {
         let family = self.family.to_string();
         let weight = if bold { FONT_SEMI_BOLD } else { FONT_NORMAL };
         let family: &str = &family;
@@ -277,7 +294,7 @@ impl Gfx {
     }
 
     pub(crate) unsafe fn measure_full(
-        &mut self,
+        &self,
         s: &str,
         px: f32,
         weight: i32,
@@ -302,7 +319,7 @@ impl Gfx {
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn text(
-        &mut self,
+        &self,
         s: &str,
         r: Rect,
         px: f32,
@@ -422,10 +439,10 @@ impl Gfx {
         );
     }
 
-    pub(crate) unsafe fn icon(&mut self, icon: Icon, r: Rect, tint: u32, alpha: f32, scale: f32) {
+    pub(crate) unsafe fn icon(&self, icon: Icon, r: Rect, tint: u32, alpha: f32, scale: f32) {
         let px = (r.w.max(r.h) * scale).round().max(1.0) as u32;
         let key = (icon, px, tint);
-        if !self.icons.contains_key(&key) {
+        if !self.icons.borrow().contains_key(&key) {
             let pixels = match icon_svg(icon) {
                 Some(svg) => svg_bgra(svg, px, tint),
                 None => logo_bgra(px, tint),
@@ -436,9 +453,9 @@ impl Gfx {
             let Ok(bmp) = self.bitmap(px as i32, px as i32, &pixels) else {
                 return;
             };
-            self.icons.insert(key, bmp);
+            self.icons.borrow_mut().insert(key, bmp);
         }
-        if let Some(bmp) = self.icons.get(&key) {
+        if let Some(bmp) = self.icons.borrow().get(&key) {
             self.rt.DrawBitmap(
                 bmp,
                 Some(&r.d2d()),
@@ -471,15 +488,16 @@ impl Gfx {
             .map_err(|e| format!("CreateBitmap: {e}"))
     }
 
-    pub(crate) unsafe fn draw_shadow(&mut self, cards: &[Rect], radius: f32, sigma: f32) {
+    pub(crate) unsafe fn draw_shadow(&self, cards: &[Rect], radius: f32, sigma: f32) {
         let (w, h) = self.size;
         let key = (w, h, cards.to_vec());
-        if !matches!(&self.shadow, Some((k, _)) if *k == key) {
+        let stale = !matches!(self.shadow.borrow().as_ref(), Some((k, _)) if *k == key);
+        if stale {
             let alpha = shadow_alpha(w as usize, h as usize, cards, radius, sigma);
             let bgra: Vec<u8> = alpha.iter().flat_map(|a| [0, 0, 0, *a]).collect();
-            self.shadow = self.bitmap(w, h, &bgra).ok().map(|b| (key, b));
+            *self.shadow.borrow_mut() = self.bitmap(w, h, &bgra).ok().map(|b| (key, b));
         }
-        if let Some((_, bmp)) = &self.shadow {
+        if let Some((_, bmp)) = self.shadow.borrow().as_ref() {
             self.rt.DrawBitmap(
                 bmp,
                 Some(&rect(0.0, 0.0, w as f32, h as f32).d2d()),
@@ -655,7 +673,7 @@ impl Gfx {
 
 #[allow(dead_code)]
 impl Gfx {
-    pub(crate) unsafe fn format(&mut self, px: f32, bold: bool) -> Option<IDWriteTextFormat> {
+    pub(crate) unsafe fn format(&self, px: f32, bold: bool) -> Option<IDWriteTextFormat> {
         let family = self.family.to_string();
         let weight = if bold { FONT_SEMI_BOLD } else { FONT_NORMAL };
         self.format_full(px, weight, &family, Align::Center, VAlign::Center, false)
@@ -676,20 +694,22 @@ impl Gfx {
             .map_err(|e| format!("GetSystemFontCollection: {e}"))?;
         let fonts = fonts.ok_or("GetSystemFontCollection returned null")?;
         let family = vk_renderer::resolve_family(&fonts, vk_renderer::MONO_FAMILIES);
+        let locale = user_locale_name();
         Ok(Gfx {
             dwrite,
             fonts,
             family,
+            locale,
             rt,
             device: Some(device.clone()),
             brush,
-            formats: HashMap::new(),
-            icons: HashMap::new(),
-            svg_icons: HashMap::new(),
-            svg_scaled: HashMap::new(),
-            art: HashMap::new(),
-            images: HashMap::new(),
-            shadow: None,
+            formats: RefCell::new(HashMap::new()),
+            icons: RefCell::new(HashMap::new()),
+            svg_icons: RefCell::new(HashMap::new()),
+            svg_scaled: RefCell::new(HashMap::new()),
+            art: RefCell::new(HashMap::new()),
+            images: RefCell::new(HashMap::new()),
+            shadow: RefCell::new(None),
             dc_rt: None,
             dc: HDC::default(),
             bmp: HBITMAP::default(),
@@ -700,7 +720,7 @@ impl Gfx {
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn text_full(
-        &mut self,
+        &self,
         s: &str,
         r: Rect,
         px: f32,
@@ -763,22 +783,22 @@ impl Gfx {
     }
 
     pub(crate) unsafe fn svg_bitmap(
-        &mut self,
+        &self,
         svg: &str,
         px: u32,
         tint: u32,
     ) -> Option<ID2D1Bitmap> {
         let key = (svg.to_string(), px, tint);
-        if !self.svg_icons.contains_key(&key) {
+        if !self.svg_icons.borrow().contains_key(&key) {
             let bgra = svg_bgra(svg, px, tint)?;
             let bmp = self.bitmap(px as i32, px as i32, &bgra).ok()?;
-            self.svg_icons.insert(key.clone(), bmp);
+            self.svg_icons.borrow_mut().insert(key.clone(), bmp);
         }
-        self.svg_icons.get(&key).cloned()
+        self.svg_icons.borrow().get(&key).cloned()
     }
 
     pub(crate) unsafe fn draw_svg_scaled(
-        &mut self,
+        &self,
         svg: &str,
         px: u32,
         tint: u32,
@@ -787,7 +807,7 @@ impl Gfx {
         alpha: f32,
     ) {
         let key = (svg.to_string(), px, tint, source_px.to_bits());
-        if !self.svg_scaled.contains_key(&key) {
+        if !self.svg_scaled.borrow().contains_key(&key) {
             let scale = px as f32 / source_px.max(1.0);
             let Some(bgra) = svg_bgra_scaled(svg, px, tint, scale) else {
                 return;
@@ -795,32 +815,32 @@ impl Gfx {
             let Ok(bmp) = self.bitmap(px as i32, px as i32, &bgra) else {
                 return;
             };
-            self.svg_scaled.insert(key.clone(), bmp);
+            self.svg_scaled.borrow_mut().insert(key.clone(), bmp);
         }
-        let Some(bmp) = self.svg_scaled.get(&key).cloned() else {
+        let Some(bmp) = self.svg_scaled.borrow().get(&key).cloned() else {
             return;
         };
         self.draw_bitmap(&bmp, dst, alpha, false);
     }
 
     pub(crate) unsafe fn cover_bitmap(
-        &mut self,
+        &self,
         key: &str,
         png: &[u8],
         w: u32,
         h: u32,
         radius: f32,
     ) -> Option<ID2D1Bitmap> {
-        if !self.art.contains_key(key) {
+        if !self.art.borrow().contains_key(key) {
             let bgra = cover_bgra(png, w, h, radius)?;
             let bmp = self.bitmap(w as i32, h as i32, &bgra).ok()?;
-            self.art.insert(key.to_string(), bmp);
+            self.art.borrow_mut().insert(key.to_string(), bmp);
         }
-        self.art.get(key).cloned()
+        self.art.borrow().get(key).cloned()
     }
 
     pub(crate) unsafe fn draw_svg(
-        &mut self,
+        &self,
         svg: &str,
         px: u32,
         tint: u32,
@@ -835,7 +855,7 @@ impl Gfx {
     }
 
     pub(crate) unsafe fn draw_art(
-        &mut self,
+        &self,
         key: &str,
         png: &[u8],
         w: u32,
@@ -851,7 +871,7 @@ impl Gfx {
         self.draw_bitmap(&bmp, dst, alpha, cubic);
     }
 
-    pub(crate) unsafe fn set_image(&mut self, key: &str, w: u32, h: u32, rgba: &[u8]) {
+    pub(crate) unsafe fn set_image(&self, key: &str, w: u32, h: u32, rgba: &[u8]) {
         if rgba.len() != (w as usize) * (h as usize) * 4 {
             return;
         }
@@ -860,12 +880,12 @@ impl Gfx {
             .flat_map(|p| [p[2], p[1], p[0], p[3]])
             .collect();
         if let Ok(bmp) = self.bitmap(w as i32, h as i32, &bgra) {
-            self.images.insert(key.to_string(), bmp);
+            self.images.borrow_mut().insert(key.to_string(), bmp);
         }
     }
 
-    pub(crate) unsafe fn draw_image(&mut self, key: &str, dst: Rect, alpha: f32, cubic: bool) {
-        let Some(bmp) = self.images.get(key).cloned() else {
+    pub(crate) unsafe fn draw_image(&self, key: &str, dst: Rect, alpha: f32, cubic: bool) {
+        let Some(bmp) = self.images.borrow().get(key).cloned() else {
             return;
         };
         self.draw_bitmap(&bmp, dst, alpha, cubic);
