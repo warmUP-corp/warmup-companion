@@ -512,6 +512,10 @@ fn full_stamp(frame: &Frame, glide: &Glide) -> u64 {
         frame.sel.col.hash(&mut hasher);
         frame.pressed.map(|(pos, scale)| (pos.row, pos.col, scale.to_bits())).hash(&mut hasher);
         strip_live(glide, frame).then(Instant::now).hash(&mut hasher);
+        glide
+            .ring
+            .map(|(l, t, r, b)| [l.to_bits(), t.to_bits(), r.to_bits(), b.to_bits()])
+            .hash(&mut hasher);
     }
     hasher.finish()
 }

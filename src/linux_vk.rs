@@ -268,6 +268,10 @@ struct Shell {
     output_state: OutputState,
     shm: Shm,
     pool: SlotPool,
+    compositor: CompositorState,
+    layer_shell: LayerShell,
+    viewporter: Option<wp_viewporter::WpViewporter>,
+    scale_manager: Option<wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
     layer: LayerSurface,
     viewport: Option<wp_viewport::WpViewport>,
     fractional: Option<f64>,
@@ -288,6 +292,7 @@ struct Shell {
     gpu: Option<gpu::Presenter>,
     gpu_failed: bool,
     gpu_used: bool,
+    gpu_presented: bool,
     gpu_errors: u32,
     voice_gen: u64,
 }
@@ -304,30 +309,27 @@ impl Shell {
             "this compositor has no layer shell, so there is no on-screen keyboard".to_string()
         })?;
         let shm = Shm::bind(globals, qh).map_err(|error| error.to_string())?;
-        let surface = compositor.create_surface(qh);
-        let layer = layer_shell.create_layer_surface(
-            qh,
-            surface,
-            Layer::Overlay,
-            Some("warmup-companion-keyboard"),
-            None,
-        );
-        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-        let viewport = globals
-            .bind::<wp_viewporter::WpViewporter, _, _>(qh, 1..=1, ())
-            .ok()
-            .map(|porter| porter.get_viewport(layer.wl_surface(), qh, ()));
-        if let Ok(manager) = globals
+        let viewporter = globals.bind::<wp_viewporter::WpViewporter, _, _>(qh, 1..=1, ()).ok();
+        let scale_manager = globals
             .bind::<wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1, _, _>(qh, 1..=1, ())
-        {
-            let _ = manager.get_fractional_scale(layer.wl_surface(), qh, ());
-        }
+            .ok();
+        let (layer, viewport) = open_layer(
+            &compositor,
+            &layer_shell,
+            viewporter.as_ref(),
+            scale_manager.as_ref(),
+            qh,
+        );
         let pool = SlotPool::new(1920 * 400 * 4, &shm).map_err(|error| error.to_string())?;
         let mut shell = Self {
             registry_state: RegistryState::new(globals),
             output_state: OutputState::new(globals, qh),
             shm,
             pool,
+            compositor,
+            layer_shell,
+            viewporter,
+            scale_manager,
             layer,
             viewport,
             fractional: None,
@@ -348,6 +350,7 @@ impl Shell {
             gpu: None,
             gpu_failed: false,
             gpu_used: false,
+            gpu_presented: false,
             gpu_errors: 0,
             voice_gen: 0,
         };
@@ -401,6 +404,32 @@ impl Shell {
             .unwrap_or((1920, 1080));
         let scale = info.scale_factor.max(1) as f32;
         (pixels_w as f32 / scale, pixels_h as f32 / scale)
+    }
+
+    fn fresh_surface(&mut self, qh: &QueueHandle<Self>) {
+        let (layer, viewport) = open_layer(
+            &self.compositor,
+            &self.layer_shell,
+            self.viewporter.as_ref(),
+            self.scale_manager.as_ref(),
+            qh,
+        );
+        if let Some(old) = self.viewport.take() {
+            old.destroy();
+        }
+        let old = std::mem::replace(&mut self.layer, layer);
+        if let smithay_client_toolkit::shell::wlr_layer::SurfaceKind::Wlr(proxy) = old.kind() {
+            proxy.destroy();
+        }
+        drop(old);
+        self.viewport = viewport;
+        self.buffer = None;
+        self.configured = false;
+        self.frame_pending = false;
+        self.placed = None;
+        self.dirty = true;
+        self.apply_layout();
+        self.layer.commit();
     }
 
     fn look(&self) -> crate::vk_paint::VkLook {
@@ -473,11 +502,18 @@ impl Shell {
             match self.present_gpu(qh, &frame) {
                 Ok(()) => {
                     self.gpu_errors = 0;
+                    self.gpu_presented = true;
                     return;
                 }
                 Err(error) => {
                     crate::install::log_line(&format!("keyboard gpu: {error}"));
                     self.gpu = None;
+                    if self.gpu_used && !self.gpu_presented {
+                        crate::install::log_line("keyboard: drawing in software on a new surface");
+                        self.gpu_failed = true;
+                        self.fresh_surface(qh);
+                        return;
+                    }
                     if self.gpu_used {
                         self.gpu_errors += 1;
                         if self.gpu_errors >= 3 {
@@ -593,6 +629,29 @@ impl Drop for Shell {
     fn drop(&mut self) {
         self.gpu.take();
     }
+}
+
+fn open_layer(
+    compositor: &CompositorState,
+    layer_shell: &LayerShell,
+    viewporter: Option<&wp_viewporter::WpViewporter>,
+    scale_manager: Option<&wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
+    qh: &QueueHandle<Shell>,
+) -> (LayerSurface, Option<wp_viewport::WpViewport>) {
+    let surface = compositor.create_surface(qh);
+    let layer = layer_shell.create_layer_surface(
+        qh,
+        surface,
+        Layer::Overlay,
+        Some("warmup-companion-keyboard"),
+        None,
+    );
+    layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+    let viewport = viewporter.map(|porter| porter.get_viewport(layer.wl_surface(), qh, ()));
+    if let Some(manager) = scale_manager {
+        let _ = manager.get_fractional_scale(layer.wl_surface(), qh, ());
+    }
+    (layer, viewport)
 }
 
 fn desired_size(output_w: f32, output_h: f32, look: crate::vk_paint::VkLook) -> (u32, u32) {
@@ -749,9 +808,12 @@ impl CompositorHandler for Shell {
     ) {
     }
 
-    fn frame(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
+    fn frame(&mut self, _: &Connection, qh: &QueueHandle<Self>, surface: &wl_surface::WlSurface, _: u32) {
+        if surface != self.layer.wl_surface() {
+            return;
+        }
         self.frame_pending = false;
-        if self.dirty {
+        if self.dirty && self.configured {
             self.draw(qh);
         }
     }
