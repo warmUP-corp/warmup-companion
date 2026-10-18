@@ -2660,10 +2660,9 @@ impl VkRenderer {
         Ok(f)
     }
 
-    unsafe fn measure_px(&self, style: VkStyle, text: &str, px: f32) -> f32 {
-        self.text_format(style, px)
-            .map(|f| self.measure_text(text, &f))
-            .unwrap_or(0.0)
+    unsafe fn measure_px(&mut self, style: VkStyle, text: &str, px: f32) -> f32 {
+        let g = &mut self.gfx;
+        crate::vk_paint::paint_measure_px(g, style, text, px)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2677,20 +2676,21 @@ impl VkRenderer {
         color: u32,
         alpha: f32,
     ) -> Result<f32, String> {
-        let format = self.text_format(style, px)?;
-        let w = self.measure_text(text, &format);
-        let brush = solid_brush(&self.d2d_context, colorref_alpha(color, alpha))?;
-        self.d2d_context.DrawText(
-            &wide(text),
-            &format,
-            &D2D_RECT_F {
-                left,
-                right: left + w,
-                ..band
+        let g = &mut self.gfx;
+        let w = crate::vk_paint::paint_text_px(
+            g,
+            style,
+            text,
+            px,
+            left,
+            crate::mono_ui::Rect {
+                x: band.left,
+                y: band.top,
+                w: band.right - band.left,
+                h: band.bottom - band.top,
             },
-            &brush,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-            DWRITE_MEASURING_MODE_NATURAL,
+            color,
+            alpha,
         );
         Ok(w)
     }

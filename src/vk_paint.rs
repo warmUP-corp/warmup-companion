@@ -818,3 +818,40 @@ pub unsafe fn paint_display_border(
     }
     Ok(())
 }
+
+pub unsafe fn paint_measure_px(g: &mut Gfx, style: VkStyle, text: &str, px: f32) -> f32 {
+    let spec = style_spec(style);
+    g.measure_full(text, px, 400, spec.families)
+}
+
+pub unsafe fn paint_text_px(
+    g: &mut Gfx,
+    style: VkStyle,
+    text: &str,
+    px: f32,
+    left: f32,
+    band: Rect,
+    color: u32,
+    alpha: f32,
+) -> f32 {
+    let spec = style_spec(style);
+    let w = g.measure_full(text, px, 400, spec.families);
+    g.text_full(
+        text,
+        Rect {
+            x: left,
+            y: band.y,
+            w,
+            h: band.h,
+        },
+        px,
+        400,
+        spec.families,
+        color,
+        alpha,
+        crate::mono_ui::Align::Center,
+        crate::mono_ui::VAlign::Center,
+        false,
+    );
+    w
+}
