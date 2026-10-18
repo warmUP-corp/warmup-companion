@@ -654,6 +654,35 @@ pub fn text_px(design: f32, u: f32) -> f32 {
     (design * u).max(LEGEND_MIN_TEXT_PX)
 }
 
+pub unsafe fn paint_svg_icon(
+    g: &mut Gfx,
+    svg: &str,
+    raster_px: u32,
+    tint: u32,
+    dst: Rect,
+    alpha: f32,
+    source_px: f32,
+) {
+    g.draw_svg_scaled(svg, raster_px, tint, source_px, dst, alpha);
+}
+
+pub fn fit_rect(dst: Rect, src_w: f32, src_h: f32) -> Rect {
+    if src_w <= 0.0 || src_h <= 0.0 {
+        return dst;
+    }
+    let (fit_w, fit_h) = if dst.w / dst.h > src_w / src_h {
+        (dst.h * src_w / src_h, dst.h)
+    } else {
+        (dst.w, dst.w * src_h / src_w)
+    };
+    Rect {
+        x: (dst.x + dst.x + dst.w - fit_w) * 0.5,
+        y: (dst.y + dst.y + dst.h - fit_h) * 0.5,
+        w: fit_w,
+        h: fit_h,
+    }
+}
+
 pub unsafe fn paint_voice_orb(
     g: &mut Gfx,
     accent: u32,

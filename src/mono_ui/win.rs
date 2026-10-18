@@ -41,7 +41,7 @@ use crate::win::vk_renderer::{self, VkPalette};
 
 use super::{
     Align, DIM_ALPHA, Icon, Rect, Theme, VAlign, cover_bgra, icon_svg, logo_bgra, rect, shadow_alpha,
-    svg_bgra, FONT_NORMAL, FONT_SEMI_BOLD,
+    svg_bgra, svg_bgra_scaled, FONT_NORMAL, FONT_SEMI_BOLD,
 };
 
 pub(crate) fn theme_from(pal: &VkPalette) -> Theme {
@@ -88,6 +88,7 @@ pub(crate) struct Gfx {
     pub(crate) formats: HashMap<(u32, i32, String, u8, u8, bool), IDWriteTextFormat>,
     pub(crate) icons: HashMap<(Icon, u32, u32), ID2D1Bitmap>,
     pub(crate) svg_icons: HashMap<(String, u32, u32), ID2D1Bitmap>,
+    pub(crate) svg_scaled: HashMap<(String, u32, u32, u32), ID2D1Bitmap>,
     pub(crate) art: HashMap<String, ID2D1Bitmap>,
     pub(crate) images: HashMap<String, ID2D1Bitmap>,
     pub(crate) shadow: Option<((i32, i32, Vec<Rect>), ID2D1Bitmap)>,
@@ -153,6 +154,7 @@ impl Gfx {
             formats: HashMap::new(),
             icons: HashMap::new(),
             svg_icons: HashMap::new(),
+            svg_scaled: HashMap::new(),
             art: HashMap::new(),
             images: HashMap::new(),
             shadow: None,
@@ -684,6 +686,7 @@ impl Gfx {
             formats: HashMap::new(),
             icons: HashMap::new(),
             svg_icons: HashMap::new(),
+            svg_scaled: HashMap::new(),
             art: HashMap::new(),
             images: HashMap::new(),
             shadow: None,
@@ -772,6 +775,32 @@ impl Gfx {
             self.svg_icons.insert(key.clone(), bmp);
         }
         self.svg_icons.get(&key).cloned()
+    }
+
+    pub(crate) unsafe fn draw_svg_scaled(
+        &mut self,
+        svg: &str,
+        px: u32,
+        tint: u32,
+        source_px: f32,
+        dst: Rect,
+        alpha: f32,
+    ) {
+        let key = (svg.to_string(), px, tint, source_px.to_bits());
+        if !self.svg_scaled.contains_key(&key) {
+            let scale = px as f32 / source_px.max(1.0);
+            let Some(bgra) = svg_bgra_scaled(svg, px, tint, scale) else {
+                return;
+            };
+            let Ok(bmp) = self.bitmap(px as i32, px as i32, &bgra) else {
+                return;
+            };
+            self.svg_scaled.insert(key.clone(), bmp);
+        }
+        let Some(bmp) = self.svg_scaled.get(&key).cloned() else {
+            return;
+        };
+        self.draw_bitmap(&bmp, dst, alpha, false);
     }
 
     pub(crate) unsafe fn cover_bitmap(

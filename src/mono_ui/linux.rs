@@ -9,6 +9,7 @@ use tiny_skia::{
 
 use super::{
     Align, Icon, Rect, VAlign, cover_bgra, icon_svg, logo_bgra, shadow_alpha, svg_bgra,
+    svg_bgra_scaled,
 };
 
 pub(crate) struct Gfx {
@@ -19,6 +20,7 @@ pub(crate) struct Gfx {
     masks: Vec<Mask>,
     icons: HashMap<(Icon, u32, u32), Pixmap>,
     svg_icons: HashMap<(String, u32, u32), Pixmap>,
+    svg_scaled: HashMap<(String, u32, u32, u32), Pixmap>,
     art: HashMap<String, Pixmap>,
     images: HashMap<String, Pixmap>,
 }
@@ -143,6 +145,7 @@ impl Gfx {
             masks: Vec::new(),
             icons: HashMap::new(),
             svg_icons: HashMap::new(),
+            svg_scaled: HashMap::new(),
             art: HashMap::new(),
             images: HashMap::new(),
         })
@@ -601,6 +604,35 @@ impl Gfx {
             return;
         };
         self.draw_cached_pixmap(&card, dst, alpha, cubic);
+    }
+
+    pub(crate) unsafe fn draw_svg_scaled(
+        &mut self,
+        svg: &str,
+        px: u32,
+        tint: u32,
+        source_px: f32,
+        dst: Rect,
+        alpha: f32,
+    ) {
+        let key = (svg.to_string(), px, tint, source_px.to_bits());
+        if !self.svg_scaled.contains_key(&key) {
+            let scale = px as f32 / source_px.max(1.0);
+            let Some(bytes) = svg_bgra_scaled(svg, px, tint, scale) else {
+                return;
+            };
+            let Some(size) = tiny_skia::IntSize::from_wh(px, px) else {
+                return;
+            };
+            let Some(owned) = Pixmap::from_vec(bgra_to_rgba(bytes), size) else {
+                return;
+            };
+            self.svg_scaled.insert(key.clone(), owned);
+        }
+        let Some(card) = self.svg_scaled.get(&key).cloned() else {
+            return;
+        };
+        self.draw_cached_pixmap(&card, dst, alpha, false);
     }
 
     pub(crate) unsafe fn draw_art(
