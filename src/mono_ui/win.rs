@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 
-use windows::core::{w, HSTRING};
+use windows::core::{w, HSTRING, Interface};
 use windows::Foundation::Numerics::Matrix3x2;
 use windows::Win32::Foundation::{BOOL, HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT,
-    D2D_POINT_2F, D2D_RECT_F, D2D_SIZE_U,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
+    D2D1_FILL_MODE_ALTERNATE, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_POINT_2F, D2D_RECT_F,
+    D2D_SIZE_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap, ID2D1DCRenderTarget, ID2D1DeviceContext, ID2D1Factory,
@@ -13,8 +14,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT,
     D2D1_ARC_SIZE_SMALL, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES,
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_FIGURE_BEGIN_FILLED,
-    D2D1_FIGURE_END_CLOSED, D2D1_FILL_MODE_ALTERNATE, D2D1_GAMMA_2_2,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_GAMMA_2_2,
     D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, D2D1_INTERPOLATION_MODE_LINEAR,
     D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
     D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_RENDER_TARGET_PROPERTIES,
@@ -25,7 +25,8 @@ use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
+    DWRITE_PARAGRAPH_ALIGNMENT_FAR, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_CENTER,
+    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
     DWRITE_TEXT_METRICS, DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -39,8 +40,8 @@ use std::mem::ManuallyDrop;
 use crate::win::vk_renderer::{self, VkPalette};
 
 use super::{
-    Align, DIM_ALPHA, Icon, Rect, Theme, VAlign, icon_svg, logo_bgra, rect, shadow_alpha, svg_bgra,
-    FONT_NORMAL, FONT_SEMI_BOLD,
+    Align, DIM_ALPHA, Icon, Rect, Theme, VAlign, cover_bgra, icon_svg, logo_bgra, rect, shadow_alpha,
+    svg_bgra, FONT_NORMAL, FONT_SEMI_BOLD,
 };
 
 pub(crate) fn theme_from(pal: &VkPalette) -> Theme {
@@ -554,8 +555,11 @@ impl Gfx {
     }
 
     pub(crate) unsafe fn begin(&mut self, size: (i32, i32)) -> Result<(), String> {
-        let dc_rt = self.dc_rt.as_ref().ok_or("begin needs a DC target")?;
+        if self.dc_rt.is_none() {
+            return Err("begin needs a DC target".into());
+        }
         self.ensure_surface(size)?;
+        let dc_rt = self.dc_rt.as_ref().ok_or("begin needs a DC target")?;
         let bounds = RECT {
             left: 0,
             top: 0,
@@ -673,18 +677,28 @@ impl Gfx {
     }
 
     pub(crate) unsafe fn draw_bitmap(&self, bmp: &ID2D1Bitmap, dst: Rect, alpha: f32, cubic: bool) {
-        self.rt.DrawBitmap(
-            bmp,
-            Some(&dst.d2d()),
-            alpha,
-            if cubic {
-                D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC
-            } else {
-                D2D1_INTERPOLATION_MODE_LINEAR
-            },
-            None,
-            None,
-        );
+        if let Some(ctx) = self.device.as_ref() {
+            ctx.DrawBitmap(
+                bmp,
+                Some(&dst.d2d()),
+                alpha,
+                if cubic {
+                    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC
+                } else {
+                    D2D1_INTERPOLATION_MODE_LINEAR
+                },
+                None,
+                None,
+            );
+        } else {
+            self.rt.DrawBitmap(
+                bmp,
+                Some(&dst.d2d()),
+                alpha,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                None,
+            );
+        }
     }
 
     pub(crate) unsafe fn push_clip(&self, r: Rect, antialiased: bool) {

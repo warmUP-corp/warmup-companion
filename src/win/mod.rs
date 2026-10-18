@@ -22,7 +22,7 @@ pub mod surface;
 pub mod toast;
 pub mod vk_layouts;
 mod vk_log;
-mod vk_renderer;
+pub(crate) mod vk_renderer;
 pub mod vk_ui;
 pub mod xbox_vk;
 
