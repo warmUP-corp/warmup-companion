@@ -389,8 +389,12 @@ fn run_update_command(args: &[String]) -> i32 {
             );
             if restarted {
                 println!("Restarted warmup-companion.service.");
-            } else {
+            } else if options.restart == Restart::Skip {
                 println!("The service was not restarted.");
+            } else {
+                println!(
+                    "The service is not running. The update takes effect the next time it starts."
+                );
             }
             println!("{}", crate::linux_update::rollback_hint(&options.dir));
             0

@@ -225,7 +225,7 @@ pub(crate) fn rollback_hint(dir: &Path) -> String {
         return "No previous version was kept.".into();
     }
     format!(
-        "To go back to the previous version run: mv {} {} && systemctl --user restart {UNIT_NAME}",
+        "To go back to the previous version run: mv {} {} && systemctl --user try-restart {UNIT_NAME}",
         old.display(),
         dir.join(BIN_NAME).display()
     )
@@ -259,15 +259,23 @@ fn restart(mode: Restart) -> Result<bool, String> {
     if mode == Restart::Skip || !crate::paths::systemd_user_unit_file().is_file() {
         return Ok(false);
     }
+    let running = crate::install::systemctl(&["--user", "is-active", UNIT_NAME])
+        .is_ok_and(|state| state.trim() == "active");
+    if !running {
+        return Ok(false);
+    }
     if mode == Restart::Queue {
-        crate::install::systemctl_ok(&["--user", "--no-block", "restart", UNIT_NAME])?;
+        crate::install::systemctl_ok(&["--user", "--no-block", "try-restart", UNIT_NAME])?;
         return Ok(true);
     }
-    crate::install::systemctl_ok(&["--user", "restart", UNIT_NAME])?;
+    crate::install::systemctl_ok(&["--user", "try-restart", UNIT_NAME])?;
     std::thread::sleep(SETTLE);
     let state = crate::install::systemctl(&["--user", "is-active", UNIT_NAME])?;
     if state.trim() != "active" {
-        return Err(format!("the new version is {} after the restart", state.trim()));
+        return Err(format!(
+            "the new version is {} after the restart",
+            state.trim()
+        ));
     }
     Ok(true)
 }

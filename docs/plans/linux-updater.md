@@ -4,7 +4,7 @@ The Windows updater in `src/updater.rs` stays Windows-only. The Linux updater is
 
 ## What is built
 
-- `warmup-companion update` checks the latest release, downloads the Linux build, verifies its checksum, renames it over the installed binary, and runs `systemctl --user restart warmup-companion.service`.
+- `warmup-companion update` checks the latest release, downloads the Linux build, verifies its checksum, renames it over the installed binary, and runs `systemctl --user try-restart warmup-companion.service` while the service is running.
 - `warmup-companion update --check` only reports what the latest release has.
 - `warmup-companion update --dry-run` downloads and verifies, then deletes the download. Nothing is replaced and nothing restarts.
 - `warmup-companion update --dir <path>` installs into another folder and never restarts the service. Use it to test.
@@ -71,17 +71,17 @@ So the service does not have to stop first:
 2. Verify the checksum there and make it executable. A mismatch deletes the download.
 3. Keep the current binary as `warmup-companion.old` (a hard link, or a copy if linking fails). An older `.old` is replaced. If this fails, the update stops before anything is swapped.
 4. Rename `warmup-companion.new` onto `warmup-companion`.
-5. `systemctl --user restart warmup-companion.service`. `Restart=on-failure` does not restart a clean exit, so the explicit restart is what picks up the new binary.
+5. `systemctl --user try-restart warmup-companion.service`, only while the service is active. `Restart=on-failure` does not restart a clean exit, so the explicit restart is what picks up the new binary. `try-restart` never starts a service the user stopped; the update then takes effect the next time it starts, and the CLI says so.
 
 From the CLI the restart waits for systemd. From inside the service it is queued with `--no-block`: the restart stops the service's own cgroup, and a queued job finishes even after the caller is gone. No separate helper process is needed.
 
 If the download, the checksum, or the rename fails, the old binary stays in place and the running service is not touched. If the restart fails after the rename, the new binary is already installed and the service keeps running the old one until it next starts. From the CLI, the updater also waits three seconds after the restart and fails if the service is not `active`, which catches a new build that crashes on start. Every failure after the rename, and every successful CLI update, prints how to roll back:
 
 ```sh
-mv ~/.local/share/warmup-companion/bin/warmup-companion.old ~/.local/share/warmup-companion/bin/warmup-companion && systemctl --user restart warmup-companion.service
+mv ~/.local/share/warmup-companion/bin/warmup-companion.old ~/.local/share/warmup-companion/bin/warmup-companion && systemctl --user try-restart warmup-companion.service
 ```
 
-The restart is skipped when the user unit file does not exist, and always with `--dir`. The unit file does not need a rewrite when the path stays the same, so the updater never runs `daemon-reload` or `enable`.
+The restart is skipped when the service is not running, when the user unit file does not exist, and always with `--dir`. The unit file does not need a rewrite when the path stays the same, so the updater never runs `daemon-reload` or `enable`.
 
 ## How the user hears about it
 
