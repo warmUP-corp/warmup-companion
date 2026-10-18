@@ -275,6 +275,7 @@ struct Host {
     keyboard: Option<wl_keyboard::WlKeyboard>,
     pointer: Option<ThemedPointer>,
     seat: Option<wl_seat::WlSeat>,
+    serial: Option<u32>,
     preferred: Option<f64>,
     int_scale: i32,
     scale: f32,
@@ -321,6 +322,7 @@ impl Host {
             keyboard: None,
             pointer: None,
             seat: None,
+            serial: None,
             preferred: None,
             int_scale: 1,
             scale: 1.0,
@@ -372,7 +374,7 @@ impl Host {
             activation.request_token(
                 qh,
                 RequestData {
-                    seat_and_serial: None,
+                    seat_and_serial: self.seat.clone().zip(self.serial),
                     surface: Some(surface),
                     app_id: Some(self.spec.app_id.to_string()),
                 },
@@ -502,9 +504,14 @@ impl Host {
         let Some(pool) = self.pool.as_mut() else {
             return;
         };
-        let Ok((buffer, canvas)) =
-            pool.create_buffer(pw as i32, ph as i32, stride, wl_shm::Format::Argb8888)
-        else {
+        let buffer = match self.buffer.take() {
+            Some(b) if b.height() == ph as i32 && b.stride() == stride && pool.canvas(&b).is_some() => b,
+            _ => match pool.create_buffer(pw as i32, ph as i32, stride, wl_shm::Format::Argb8888) {
+                Ok((b, _)) => b,
+                Err(_) => return,
+            },
+        };
+        let Some(canvas) = pool.canvas(&buffer) else {
             return;
         };
         let pixels = gfx.pixels();
@@ -782,10 +789,11 @@ impl KeyboardHandler for Host {
         _: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
         _: &wl_surface::WlSurface,
-        _: u32,
+        serial: u32,
         _: &[u32],
         _: &[Keysym],
     ) {
+        self.serial = Some(serial);
     }
 
     fn leave(
@@ -805,9 +813,10 @@ impl KeyboardHandler for Host {
         _: &Connection,
         _: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
-        _: u32,
+        serial: u32,
         event: KeyEvent,
     ) {
+        self.serial = Some(serial);
         self.key_event(&event, true);
     }
 
@@ -877,7 +886,8 @@ impl PointerHandler for Host {
             let (x, y) = (event.position.0 as f32, event.position.1 as f32);
             self.pointer_at = (x, y);
             let flow = match event.kind {
-                PointerEventKind::Enter { .. } => {
+                PointerEventKind::Enter { serial } => {
+                    self.serial = Some(serial);
                     if let Some(p) = &self.pointer {
                         let _ = p.set_cursor(conn, CursorIcon::Default);
                     }
@@ -886,6 +896,7 @@ impl PointerHandler for Host {
                 PointerEventKind::Leave { .. } => Flow::Idle,
                 PointerEventKind::Motion { .. } => self.app.motion(x, y),
                 PointerEventKind::Press { button, serial, .. } if button == BTN_LEFT => {
+                    self.serial = Some(serial);
                     if self.app.caption(x, y) {
                         if let (Some(w), Some(seat)) = (&self.window, &self.seat) {
                             w.move_(seat, serial);
