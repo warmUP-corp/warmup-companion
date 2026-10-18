@@ -1,13 +1,6 @@
 use crate::config::VkStyle;
 use crate::mono_ui::{Gfx, Rect};
 
-pub fn colorref_hex(c: u32) -> String {
-    let r = c & 0xff;
-    let g = (c >> 8) & 0xff;
-    let b = (c >> 16) & 0xff;
-    format!("#{r:02X}{g:02X}{b:02X}")
-}
-
 pub fn colorref_mix(fg: u32, bg: u32, amount: f32) -> u32 {
     let amount = amount.clamp(0.0, 1.0);
     let blend = |shift: u32| {
@@ -656,7 +649,7 @@ pub fn text_px(design: f32, u: f32) -> f32 {
 
 pub unsafe fn paint_svg_icon(
     g: &mut Gfx,
-    svg: &str,
+    svg: &'static str,
     raster_px: u32,
     tint: u32,
     dst: Rect,
@@ -683,8 +676,32 @@ pub fn fit_rect(dst: Rect, src_w: f32, src_h: f32) -> Rect {
     }
 }
 
+pub unsafe fn paint_blur_strokes(
+    g: &Gfx,
+    r: Rect,
+    radius: f32,
+    dy: f32,
+    blur: f32,
+    alpha: f32,
+) {
+    for (spread, a) in blur_shadow_layers(blur, alpha) {
+        let rad = (radius + spread).max(0.0);
+        g.fill(
+            Rect {
+                x: r.x - spread,
+                y: r.y - spread + dy,
+                w: r.w + spread * 2.0,
+                h: r.h + spread * 2.0,
+            },
+            rad,
+            0x000000,
+            a,
+        );
+    }
+}
+
 pub unsafe fn paint_voice_orb(
-    g: &mut Gfx,
+    g: &Gfx,
     accent: u32,
     level: f32,
     transcribing: bool,
@@ -745,7 +762,7 @@ pub unsafe fn paint_voice_orb(
 }
 
 pub unsafe fn paint_outer_shadow(
-    g: &mut Gfx,
+    g: &Gfx,
     shape: Rect,
     radius: f32,
     dy: f32,
@@ -772,7 +789,7 @@ pub unsafe fn paint_outer_shadow(
 }
 
 pub unsafe fn paint_display_border(
-    g: &mut Gfx,
+    g: &Gfx,
     cw: f32,
     ch: f32,
     accent: u32,
@@ -793,4 +810,41 @@ pub unsafe fn paint_display_border(
         g.fill_edge_band(cw, ch, depth * scale, radius, accent, layer_alpha * alpha)?;
     }
     Ok(())
+}
+
+pub unsafe fn paint_measure_px(g: &Gfx, style: VkStyle, text: &str, px: f32) -> f32 {
+    let spec = style_spec(style);
+    g.measure_full(text, px, 400, spec.families)
+}
+
+pub unsafe fn paint_text_px(
+    g: &Gfx,
+    style: VkStyle,
+    text: &str,
+    px: f32,
+    left: f32,
+    band: Rect,
+    color: u32,
+    alpha: f32,
+) -> f32 {
+    let spec = style_spec(style);
+    let w = g.measure_full(text, px, 400, spec.families);
+    g.text_full(
+        text,
+        Rect {
+            x: left,
+            y: band.y,
+            w,
+            h: band.h,
+        },
+        px,
+        400,
+        spec.families,
+        color,
+        alpha,
+        crate::mono_ui::Align::Center,
+        crate::mono_ui::VAlign::Center,
+        false,
+    );
+    w
 }

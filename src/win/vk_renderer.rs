@@ -7,7 +7,6 @@ use std::time::Instant;
 use windows::core::{w, Interface};
 use windows::Foundation::Numerics::Matrix3x2;
 use windows::Win32::Foundation::{BOOL, HWND, RECT};
-use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
     D2D1_FILL_MODE_ALTERNATE, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_POINT_2F, D2D_RECT_F,
@@ -59,7 +58,7 @@ use super::controller_tips::TipToken;
 use super::nimbus_orb::{drive_scale, mood_drive, NimbusMood, NimbusOrb, ORB_FRAME_FILL};
 use super::shortcut_sheet::{self, Line};
 use crate::config::VkStyle;
-use crate::mono_ui::Gfx;
+use crate::mono_ui::{Gfx, user_locale_name};
 use crate::vk_nav::{KeyAction, KeyCell, KeyPos, KeyRow};
 pub use crate::vk_paint::{
     FLOATING_PANEL_INSET,
@@ -156,34 +155,6 @@ fn translate(dx: f32, dy: f32) -> Matrix3x2 {
     }
 }
 
-
-unsafe fn draw_blur_shadow(
-    ctx: &ID2D1DeviceContext,
-    rect: D2D_RECT_F,
-    radius: f32,
-    dy: f32,
-    blur: f32,
-    alpha: f32,
-) -> Result<(), String> {
-    for (spread, a) in blur_shadow_layers(blur, alpha) {
-        let brush = solid_brush(ctx, colorref_alpha(0x000000, a))?;
-        let r = (radius + spread).max(0.0);
-        ctx.FillRoundedRectangle(
-            &D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F {
-                    left: rect.left - spread,
-                    top: rect.top - spread + dy,
-                    right: rect.right + spread,
-                    bottom: rect.bottom + spread + dy,
-                },
-                radiusX: r,
-                radiusY: r,
-            },
-            &brush,
-        );
-    }
-    Ok(())
-}
 
 fn rounded(rect: D2D_RECT_F, radius: f32) -> D2D1_ROUNDED_RECT {
     D2D1_ROUNDED_RECT {
@@ -1767,28 +1738,19 @@ impl VkRenderer {
             .controller_art_cache
             .get(&key)
             .ok_or_else(|| format!("missing controller art cache {art:?}"))?;
-        let source_aspect = *width as f32 / *height as f32;
-        let fit_w = rect.right - rect.left;
-        let fit_h = rect.bottom - rect.top;
-        let (draw_w, draw_h) = if fit_w / fit_h > source_aspect {
-            (fit_h * source_aspect, fit_h)
-        } else {
-            (fit_w, fit_w / source_aspect)
-        };
-        let dest = D2D_RECT_F {
-            left: (rect.left + rect.right - draw_w) * 0.5,
-            top: (rect.top + rect.bottom - draw_h) * 0.5,
-            right: (rect.left + rect.right + draw_w) * 0.5,
-            bottom: (rect.top + rect.bottom + draw_h) * 0.5,
-        };
-        self.d2d_context.DrawBitmap(
-            bitmap,
-            Some(&dest),
-            opacity.clamp(0.0, 1.0),
-            D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
-            None,
-            None,
+        let (bitmap, width, height) = (bitmap.clone(), *width, *height);
+        let g = &mut self.gfx;
+        let dest = crate::vk_paint::fit_rect(
+            crate::mono_ui::Rect {
+                x: rect.left,
+                y: rect.top,
+                w: rect.right - rect.left,
+                h: rect.bottom - rect.top,
+            },
+            width as f32,
+            height as f32,
         );
+        g.draw_bitmap(&bitmap, dest, opacity.clamp(0.0, 1.0), true);
         Ok(())
     }
 
@@ -2050,14 +2012,20 @@ impl VkRenderer {
             let action_key = is_action_key(&key.action);
             if selected {
                 if let Some((dy, blur, alpha)) = spec.sel_shadow {
-                    draw_blur_shadow(
-                        &self.d2d_context,
-                        key_rect,
+                    let g = &mut self.gfx;
+                    crate::vk_paint::paint_blur_strokes(
+                        g,
+                        crate::mono_ui::Rect {
+                            x: key_rect.left,
+                            y: key_rect.top,
+                            w: key_rect.right - key_rect.left,
+                            h: key_rect.bottom - key_rect.top,
+                        },
                         radius,
                         dy * unit,
                         blur * unit,
                         alpha,
-                    )?;
+                    );
                 }
             } else if spec.key_shadow_dy > 0.0 {
                 let dy = (spec.key_shadow_dy * unit).max(1.0);
@@ -2692,9 +2660,7 @@ impl VkRenderer {
     }
 
     unsafe fn measure_px(&self, style: VkStyle, text: &str, px: f32) -> f32 {
-        self.text_format(style, px)
-            .map(|f| self.measure_text(text, &f))
-            .unwrap_or(0.0)
+        crate::vk_paint::paint_measure_px(&self.gfx, style, text, px)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2708,20 +2674,21 @@ impl VkRenderer {
         color: u32,
         alpha: f32,
     ) -> Result<f32, String> {
-        let format = self.text_format(style, px)?;
-        let w = self.measure_text(text, &format);
-        let brush = solid_brush(&self.d2d_context, colorref_alpha(color, alpha))?;
-        self.d2d_context.DrawText(
-            &wide(text),
-            &format,
-            &D2D_RECT_F {
-                left,
-                right: left + w,
-                ..band
+        let g = &mut self.gfx;
+        let w = crate::vk_paint::paint_text_px(
+            g,
+            style,
+            text,
+            px,
+            left,
+            crate::mono_ui::Rect {
+                x: band.left,
+                y: band.top,
+                w: band.right - band.left,
+                h: band.bottom - band.top,
             },
-            &brush,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-            DWRITE_MEASURING_MODE_NATURAL,
+            color,
+            alpha,
         );
         Ok(w)
     }
@@ -3067,14 +3034,20 @@ impl VkRenderer {
             let r = (chip.bottom - chip.top) * 0.5;
             if selected {
                 if let Some((dy, blur, a)) = spec.sel_shadow {
-                    draw_blur_shadow(
-                        &self.d2d_context,
-                        chip,
+                    let g = &mut self.gfx;
+                    crate::vk_paint::paint_blur_strokes(
+                        g,
+                        crate::mono_ui::Rect {
+                            x: chip.left,
+                            y: chip.top,
+                            w: chip.right - chip.left,
+                            h: chip.bottom - chip.top,
+                        },
                         r,
                         dy * geom.unit,
                         blur * geom.unit,
                         a * alpha,
-                    )?;
+                    );
                 }
             }
             self.d2d_context
@@ -4614,18 +4587,6 @@ unsafe fn create_dwrite() -> Result<IDWriteFactory, String> {
 }
 
 /// `CreateTextFormat` rejects a null locale on some builds; use the user default.
-fn user_locale_name() -> windows::core::HSTRING {
-    let mut buf = [0u16; 85];
-    let len = unsafe { GetUserDefaultLocaleName(&mut buf) };
-    if len > 1 {
-        let end = (len - 1) as usize;
-        String::from_utf16_lossy(&buf[..end])
-    } else {
-        "en-US".to_string()
-    }
-    .into()
-}
-
 fn key_metrics(
     scale_w: f32,
     client_h: f32,

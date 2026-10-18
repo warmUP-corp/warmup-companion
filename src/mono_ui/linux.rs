@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use cosmic_text::{Align as TextAlign, Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache, Weight, Wrap};
@@ -13,14 +14,14 @@ use super::{
 };
 
 pub(crate) struct Gfx {
-    pixmap: Pixmap,
-    fonts: FontSystem,
-    swash: SwashCache,
+    pixmap: RefCell<Pixmap>,
+    fonts: RefCell<FontSystem>,
+    swash: RefCell<SwashCache>,
     transform: Transform,
-    masks: Vec<Mask>,
+    masks: RefCell<Vec<Mask>>,
     icons: HashMap<(Icon, u32, u32), Pixmap>,
-    svg_icons: HashMap<(String, u32, u32), Pixmap>,
-    svg_scaled: HashMap<(String, u32, u32, u32), Pixmap>,
+    svg_icons: HashMap<(usize, usize, u32, u32), Pixmap>,
+    svg_scaled: HashMap<(usize, usize, u32, u32, u32), Pixmap>,
     art: HashMap<String, Pixmap>,
     images: HashMap<String, Pixmap>,
 }
@@ -138,11 +139,11 @@ impl Gfx {
         let pixmap =
             Pixmap::new(w.max(1), h.max(1)).ok_or("mono_ui pixmap alloc failed")?;
         Ok(Gfx {
-            pixmap,
-            fonts: load_fonts(),
-            swash: SwashCache::new(),
+            pixmap: RefCell::new(pixmap),
+            fonts: RefCell::new(load_fonts()),
+            swash: RefCell::new(SwashCache::new()),
             transform: Transform::identity(),
-            masks: Vec::new(),
+            masks: RefCell::new(Vec::new()),
             icons: HashMap::new(),
             svg_icons: HashMap::new(),
             svg_scaled: HashMap::new(),
@@ -152,26 +153,26 @@ impl Gfx {
     }
 
     pub(crate) fn begin(&mut self, w: u32, h: u32) {
-        if self.pixmap.width() != w.max(1) || self.pixmap.height() != h.max(1) {
+        if self.pixmap.borrow().width() != w.max(1) || self.pixmap.borrow().height() != h.max(1) {
             if let Some(pixmap) = Pixmap::new(w.max(1), h.max(1)) {
-                self.pixmap = pixmap;
+                *self.pixmap.borrow_mut() = pixmap;
             }
         }
-        self.pixmap.fill(Color::from_rgba8(0, 0, 0, 0));
-        self.masks.clear();
+        self.pixmap.borrow_mut().fill(Color::from_rgba8(0, 0, 0, 0));
+        self.masks.borrow_mut().clear();
         self.transform = Transform::identity();
     }
 
-    pub(crate) fn pixels(&self) -> &[u8] {
-        self.pixmap.data()
+    pub(crate) fn pixels(&self) -> std::cell::Ref<'_, [u8]> {
+        std::cell::Ref::map(self.pixmap.borrow(), |p| p.data())
     }
 
     pub(crate) fn width(&self) -> u32 {
-        self.pixmap.width()
+        self.pixmap.borrow().width()
     }
 
     pub(crate) fn height(&self) -> u32 {
-        self.pixmap.height()
+        self.pixmap.borrow().height()
     }
 
     pub(crate) unsafe fn transform(&mut self, scale: f32, dx: f32, dy: f32) {
@@ -188,9 +189,12 @@ impl Gfx {
         )
     }
 
-    fn push_mask_path(&mut self, path: &Path, rule: FillRule, antialiased: bool) {
-        let (w, h) = (self.pixmap.width(), self.pixmap.height());
-        let mut mask = match self.masks.last() {
+    fn push_mask_path(&self, path: &Path, rule: FillRule, antialiased: bool) {
+        let (w, h) = {
+            let pixmap = self.pixmap.borrow();
+            (pixmap.width(), pixmap.height())
+        };
+        let mut mask = match self.masks.borrow().last() {
             Some(top) => top.clone(),
             None => {
                 let mut full = Mask::new(w, h).unwrap_or_else(|| Mask::new(1, 1).unwrap());
@@ -208,11 +212,11 @@ impl Gfx {
             }
         };
         mask.intersect_path(path, rule, antialiased, self.transform);
-        self.masks.push(mask);
+        self.masks.borrow_mut().push(mask);
     }
 
     fn draw_text_runs(
-        &mut self,
+        &self,
         value: &str,
         r: Rect,
         px: f32,
@@ -238,11 +242,12 @@ impl Gfx {
             return;
         }
         let metrics = Metrics::new(px * s, px * s);
-        let mut buffer = Buffer::new(&mut self.fonts, metrics);
-        buffer.set_size(&mut self.fonts, Some(w), Some(h));
-        buffer.set_wrap(&mut self.fonts, if wrap { Wrap::Word } else { Wrap::None });
+        let mut fonts = self.fonts.borrow_mut();
+        let mut buffer = Buffer::new(&mut fonts, metrics);
+        buffer.set_size(&mut fonts, Some(w), Some(h));
+        buffer.set_wrap(&mut fonts, if wrap { Wrap::Word } else { Wrap::None });
         let attrs = Attrs::new().family(family).weight(weight);
-        buffer.set_text(&mut self.fonts, value, &attrs, Shaping::Advanced);
+        buffer.set_text(&mut fonts, value, &attrs, Shaping::Advanced);
         let cosmic_align = match halign {
             Align::Left => TextAlign::Left,
             Align::Center => TextAlign::Center,
@@ -251,7 +256,7 @@ impl Gfx {
         for line in &mut buffer.lines {
             line.set_align(Some(cosmic_align));
         }
-        buffer.shape_until_scroll(&mut self.fonts, false);
+        buffer.shape_until_scroll(&mut fonts, false);
         let mut block_top = 0.0;
         let mut block_bottom = px * s;
         let mut seen = false;
@@ -272,10 +277,9 @@ impl Gfx {
         let (cr, cg, cb, ca) = split_color(c, alpha);
         let paint = cosmic_text::Color::rgba(cr, cg, cb, ca);
         let clip = (x as i32, y as i32, right as i32, bottom as i32);
-        let fonts = &mut self.fonts;
-        let cache = &mut self.swash;
-        let pixmap = &mut self.pixmap;
-        buffer.draw(fonts, cache, paint, |gx, gy, gw, gh, pixel| {
+        let mut cache = self.swash.borrow_mut();
+        let mut pixmap = self.pixmap.borrow_mut();
+        buffer.draw(&mut *fonts, &mut *cache, paint, |gx, gy, gw, gh, pixel| {
             let px0 = x as i32 + gx;
             let py0 = y as i32 + dy + gy;
             if px0 + gw as i32 <= clip.0
@@ -285,12 +289,12 @@ impl Gfx {
             {
                 return;
             }
-            blend_straight(pixmap, px0, py0, pixel);
+            blend_straight(&mut pixmap, px0, py0, pixel);
         });
     }
 
     fn shape_width(
-        &mut self,
+        &self,
         value: &str,
         px: f32,
         weight: Weight,
@@ -300,12 +304,13 @@ impl Gfx {
             return 0.0;
         }
         let metrics = Metrics::new(px, px);
-        let mut buffer = Buffer::new(&mut self.fonts, metrics);
-        buffer.set_size(&mut self.fonts, None, None);
-        buffer.set_wrap(&mut self.fonts, Wrap::None);
+        let mut fonts = self.fonts.borrow_mut();
+        let mut buffer = Buffer::new(&mut fonts, metrics);
+        buffer.set_size(&mut fonts, None, None);
+        buffer.set_wrap(&mut fonts, Wrap::None);
         let attrs = Attrs::new().family(family).weight(weight);
-        buffer.set_text(&mut self.fonts, value, &attrs, Shaping::Advanced);
-        buffer.shape_until_scroll(&mut self.fonts, false);
+        buffer.set_text(&mut fonts, value, &attrs, Shaping::Advanced);
+        buffer.shape_until_scroll(&mut fonts, false);
         buffer
             .layout_runs()
             .map(|run| run.line_w)
@@ -336,13 +341,13 @@ impl Gfx {
             FilterQuality::Bilinear
         };
         let k = dw / w;
-        self.pixmap.draw_pixmap(
+        self.pixmap.borrow_mut().draw_pixmap(
             0,
             0,
             key_pixmap.as_ref(),
             &paint,
             Transform::from_row(k, 0.0, 0.0, dh / h, x, y),
-            self.masks.last(),
+            self.masks.borrow().last(),
         );
     }
 
@@ -359,13 +364,13 @@ impl Gfx {
         self.icons.get(&(icon, px, tint)).cloned()
     }
 
-    fn cached_svg(&mut self, svg: &str, px: u32, tint: u32) -> Option<Pixmap> {
-        let key = (svg.to_string(), px, tint);
+    fn cached_svg(&mut self, svg: &'static str, px: u32, tint: u32) -> Option<Pixmap> {
+        let key = (svg.as_ptr() as usize, svg.len(), px, tint);
         if !self.svg_icons.contains_key(&key) {
             let bytes = svg_bgra(svg, px, tint)?;
             let size = tiny_skia::IntSize::from_wh(px, px)?;
             let owned = Pixmap::from_vec(bgra_to_rgba(bytes), size)?;
-            self.svg_icons.insert(key.clone(), owned);
+            self.svg_icons.insert(key, owned);
         }
         self.svg_icons.get(&key).cloned()
     }
@@ -380,24 +385,24 @@ impl Gfx {
         self.art.get(key).cloned()
     }
 
-    pub(crate) unsafe fn measure(&mut self, s: &str, px: f32, bold: bool) -> f32 {
+    pub(crate) unsafe fn measure(&self, s: &str, px: f32, bold: bool) -> f32 {
         let weight = weight_for(if bold { 600 } else { 400 });
         self.measure_full(s, px, weight.0 as i32, &["Inter", "Selawik"])
     }
 
     pub(crate) unsafe fn measure_full(
-        &mut self,
+        &self,
         s: &str,
         px: f32,
         weight: i32,
         families: &[&str],
     ) -> f32 {
-        let family = resolve_family(self.fonts.db(), families);
+        let family = resolve_family(&self.fonts.borrow().db(), families);
         self.shape_width(s, px, weight_for(weight), family)
     }
 
     pub(crate) unsafe fn text(
-        &mut self,
+        &self,
         s: &str,
         r: Rect,
         px: f32,
@@ -411,7 +416,7 @@ impl Gfx {
     }
 
     pub(crate) unsafe fn text_full(
-        &mut self,
+        &self,
         s: &str,
         r: Rect,
         px: f32,
@@ -423,17 +428,17 @@ impl Gfx {
         valign: VAlign,
         wrap: bool,
     ) {
-        let family = resolve_family(self.fonts.db(), families);
+        let family = resolve_family(&self.fonts.borrow().db(), families);
         self.draw_text_runs(s, r, px, weight_for(weight), family, c, alpha, halign, valign, wrap);
     }
 
-    pub(crate) unsafe fn fill(&mut self, r: Rect, radius: f32, c: u32, alpha: f32) {
+    pub(crate) unsafe fn fill(&self, r: Rect, radius: f32, c: u32, alpha: f32) {
         let Some(path) = rounded_path(r.x, r.y, r.w, r.h, radius) else {
             return;
         };
         let paint = solid_paint(c, alpha);
-        self.pixmap
-            .fill_path(&path, &paint, FillRule::Winding, self.transform, self.masks.last());
+        self.pixmap.borrow_mut()
+            .fill_path(&path, &paint, FillRule::Winding, self.transform, self.masks.borrow().last());
     }
 
     pub(crate) unsafe fn fill_rect(&mut self, r: Rect, c: u32, alpha: f32) {
@@ -441,8 +446,8 @@ impl Gfx {
             return;
         };
         let paint = solid_paint(c, alpha);
-        self.pixmap
-            .fill_rect(rect, &paint, self.transform, self.masks.last());
+        self.pixmap.borrow_mut()
+            .fill_rect(rect, &paint, self.transform, self.masks.borrow().last());
     }
 
     pub(crate) unsafe fn gradient(
@@ -480,8 +485,8 @@ impl Gfx {
             anti_alias: true,
             ..Default::default()
         };
-        self.pixmap
-            .fill_path(&path, &paint, FillRule::Winding, self.transform, self.masks.last());
+        self.pixmap.borrow_mut()
+            .fill_path(&path, &paint, FillRule::Winding, self.transform, self.masks.borrow().last());
     }
 
     pub(crate) unsafe fn ring(&mut self, r: Rect, radius: f32, width: f32, c: u32, alpha: f32) {
@@ -500,8 +505,8 @@ impl Gfx {
             width,
             ..Default::default()
         };
-        self.pixmap
-            .stroke_path(&path, &paint, &stroke, self.transform, self.masks.last());
+        self.pixmap.borrow_mut()
+            .stroke_path(&path, &paint, &stroke, self.transform, self.masks.borrow().last());
     }
 
     pub(crate) unsafe fn circle(&mut self, cx: f32, cy: f32, radius: f32, c: u32) {
@@ -509,8 +514,8 @@ impl Gfx {
             return;
         };
         let paint = solid_paint(c, 1.0);
-        self.pixmap
-            .fill_path(&path, &paint, FillRule::Winding, self.transform, self.masks.last());
+        self.pixmap.borrow_mut()
+            .fill_path(&path, &paint, FillRule::Winding, self.transform, self.masks.borrow().last());
     }
 
     pub(crate) unsafe fn ellipse(
@@ -534,12 +539,12 @@ impl Gfx {
             width,
             ..Default::default()
         };
-        self.pixmap
-            .stroke_path(&path, &paint, &stroke, self.transform, self.masks.last());
+        self.pixmap.borrow_mut()
+            .stroke_path(&path, &paint, &stroke, self.transform, self.masks.borrow().last());
     }
 
     pub(crate) unsafe fn fill_ellipse(
-        &mut self,
+        &self,
         cx: f32,
         cy: f32,
         rx: f32,
@@ -554,8 +559,8 @@ impl Gfx {
             return;
         };
         let paint = solid_paint(c, alpha);
-        self.pixmap
-            .fill_path(&path, &paint, FillRule::Winding, self.transform, self.masks.last());
+        self.pixmap.borrow_mut()
+            .fill_path(&path, &paint, FillRule::Winding, self.transform, self.masks.borrow().last());
     }
 
     pub(crate) unsafe fn line(
@@ -579,8 +584,8 @@ impl Gfx {
             width,
             ..Default::default()
         };
-        self.pixmap
-            .stroke_path(&path, &paint, &stroke, self.transform, self.masks.last());
+        self.pixmap.borrow_mut()
+            .stroke_path(&path, &paint, &stroke, self.transform, self.masks.borrow().last());
     }
 
     pub(crate) unsafe fn icon(&mut self, icon: Icon, r: Rect, tint: u32, alpha: f32, scale: f32) {
@@ -593,7 +598,7 @@ impl Gfx {
 
     pub(crate) unsafe fn draw_svg(
         &mut self,
-        svg: &str,
+        svg: &'static str,
         px: u32,
         tint: u32,
         dst: Rect,
@@ -608,14 +613,14 @@ impl Gfx {
 
     pub(crate) unsafe fn draw_svg_scaled(
         &mut self,
-        svg: &str,
+        svg: &'static str,
         px: u32,
         tint: u32,
         source_px: f32,
         dst: Rect,
         alpha: f32,
     ) {
-        let key = (svg.to_string(), px, tint, source_px.to_bits());
+        let key = (svg.as_ptr() as usize, svg.len(), px, tint, source_px.to_bits());
         if !self.svg_scaled.contains_key(&key) {
             let scale = px as f32 / source_px.max(1.0);
             let Some(bytes) = svg_bgra_scaled(svg, px, tint, scale) else {
@@ -627,7 +632,7 @@ impl Gfx {
             let Some(owned) = Pixmap::from_vec(bgra_to_rgba(bytes), size) else {
                 return;
             };
-            self.svg_scaled.insert(key.clone(), owned);
+            self.svg_scaled.insert(key, owned);
         }
         let Some(card) = self.svg_scaled.get(&key).cloned() else {
             return;
@@ -672,7 +677,8 @@ impl Gfx {
     }
 
     pub(crate) unsafe fn draw_shadow(&mut self, cards: &[Rect], radius: f32, sigma: f32) {
-        let (w, h) = (self.pixmap.width() as usize, self.pixmap.height() as usize);
+        let pixmap = self.pixmap.borrow();
+        let (w, h) = (pixmap.width() as usize, pixmap.height() as usize);
         let s = self.transform.sx;
         let mapped: Vec<Rect> = cards
             .iter()
@@ -696,13 +702,13 @@ impl Gfx {
         };
         let mut paint = PixmapPaint::default();
         paint.quality = FilterQuality::Bilinear;
-        self.pixmap.draw_pixmap(
+        self.pixmap.borrow_mut().draw_pixmap(
             0,
             0,
             card.as_ref(),
             &paint,
             Transform::identity(),
-            self.masks.last(),
+            self.masks.borrow().last(),
         );
     }
 
@@ -715,11 +721,11 @@ impl Gfx {
     }
 
     pub(crate) unsafe fn pop_clip(&mut self) {
-        self.masks.pop();
+        self.masks.borrow_mut().pop();
     }
 
     pub(crate) unsafe fn push_shadow_layer(
-        &mut self,
+        &self,
         shape: Rect,
         radius: f32,
         dy: f32,
@@ -747,8 +753,8 @@ impl Gfx {
         Ok(())
     }
 
-    pub(crate) unsafe fn pop_layer(&mut self) {
-        self.masks.pop();
+    pub(crate) unsafe fn pop_layer(&self) {
+        self.masks.borrow_mut().pop();
     }
 
     pub(crate) unsafe fn radial_fill(
@@ -791,12 +797,12 @@ impl Gfx {
             anti_alias: true,
             ..Default::default()
         };
-        self.pixmap
-            .fill_path(&path, &paint, FillRule::Winding, self.transform, self.masks.last());
+        self.pixmap.borrow_mut()
+            .fill_path(&path, &paint, FillRule::Winding, self.transform, self.masks.borrow().last());
     }
 
     pub(crate) unsafe fn fill_edge_band(
-        &mut self,
+        &self,
         cw: f32,
         ch: f32,
         depth: f32,
@@ -818,13 +824,16 @@ impl Gfx {
             return Err("edge band path".into());
         };
         let paint = solid_paint(c, alpha);
-        self.pixmap
-            .fill_path(&path, &paint, FillRule::EvenOdd, self.transform, self.masks.last());
+        self.pixmap.borrow_mut()
+            .fill_path(&path, &paint, FillRule::EvenOdd, self.transform, self.masks.borrow().last());
         Ok(())
     }
 
     pub(crate) unsafe fn clear(&mut self, c: u32, alpha: f32) {
-        let (w, h) = (self.pixmap.width() as f32, self.pixmap.height() as f32);
+        let (w, h) = {
+            let pixmap = self.pixmap.borrow();
+            (pixmap.width() as f32, pixmap.height() as f32)
+        };
         self.fill_rect(Rect { x: 0.0, y: 0.0, w, h }, c, alpha);
     }
 }
