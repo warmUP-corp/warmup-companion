@@ -1,7 +1,8 @@
 use std::time::Instant;
 
-use cosmic_text::{Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache, Weight, Wrap};
-use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
+use cosmic_text::Weight;
+use crate::mono_ui::Align;
+use tiny_skia::Pixmap;
 
 use crate::config::{KeyboardTheme, VkStyle};
 use crate::mono_ui::Gfx;
@@ -222,41 +223,38 @@ pub fn paint_frame(g: &mut Gfx, frame: &Frame, glide: &mut Glide) {
     let _ = sheet_metrics_are_the_windows_ones();
     let (width, height) = frame_px(frame);
     g.begin(width, height);
-    let (pixmap, fonts, cache) = g.canvas();
     if frame.sheet {
         glide.base = None;
         glide.animating = false;
-        draw_sheet_frame(pixmap, frame, fonts, cache);
+        draw_sheet_frame(g, frame);
         return;
     }
     let now = Instant::now();
     if strip_blocking(glide, frame, now) {
         glide.base = None;
-        render_keyboard(pixmap, frame, fonts, cache, glide, true);
+        render_keyboard(g, frame, glide, true);
         return;
     }
     let stamp = keyboard_stamp(frame);
     let cached = glide
         .base
         .as_ref()
-        .filter(|(s, base)| *s == stamp && base.data().len() == pixmap.data().len());
+        .filter(|(s, base)| *s == stamp && base.data().len() == g.pixels().len());
     if let Some((_, base)) = cached {
-        pixmap.data_mut().copy_from_slice(base.data());
-        paint_live(pixmap, frame, fonts, cache, glide, true);
+        g.canvas().0.data_mut().copy_from_slice(base.data());
+        paint_live(g, frame, glide, true);
         return;
     }
-    render_keyboard(pixmap, frame, fonts, cache, glide, false);
-    if let Some(copy) = clone_pixmap(pixmap) {
+    render_keyboard(g, frame, glide, false);
+    if let Some(copy) = clone_pixmap(g.canvas().0) {
         glide.base = Some((stamp, copy));
     }
-    paint_live(pixmap, frame, fonts, cache, glide, false);
+    paint_live(g, frame, glide, false);
 }
 
 fn render_keyboard(
-    pixmap: &mut Pixmap,
+    g: &mut Gfx,
     frame: &Frame,
-    fonts: &mut FontSystem,
-    cache: &mut SwashCache,
     glide: &mut Glide,
     highlight: bool,
 ) {
@@ -292,9 +290,9 @@ fn render_keyboard(
         let y = FLOATING_PANEL_INSET * scale;
         let w = (frame.logical_w - 2.0 * FLOATING_PANEL_INSET) * scale;
         let h = (frame.logical_h - 2.0 * FLOATING_PANEL_INSET) * scale;
-        round_rect(pixmap, x, y, w, h, panel_r * scale, pal.bg, 255);
+        round_rect(g, x, y, w, h, panel_r * scale, pal.bg, 255);
         stroke_rect(
-            pixmap,
+            g,
             x + 0.5 * scale,
             y + 0.5 * scale,
             (w - scale).max(1.0),
@@ -306,7 +304,7 @@ fn render_keyboard(
         );
         Some((x, y, w, h, panel_r * scale))
     } else {
-        fill(pixmap, pal.bg, 255);
+        fill(g, pal.bg, 255);
         None
     };
     for rect in &rects {
@@ -316,10 +314,10 @@ fn render_keyboard(
         } else {
             1.0
         };
-        paint_key(pixmap, fonts, cache, frame, &spec, &pal, rect, unit, key_h, scale, radius, selected, press, true);
+        paint_key(g, frame, &spec, &pal, rect, unit, key_h, scale, radius, selected, press, true);
     }
     if highlight {
-        stroke_ring(pixmap, glide, &spec, &pal, unit, scale, radius);
+        stroke_ring(g, glide, &spec, &pal, unit, scale, radius);
     }
     let (strip_alpha, strip_dy) = if frame.strip.is_some() {
         if glide.strip_at.is_none() {
@@ -335,13 +333,13 @@ fn render_keyboard(
         (1.0, 0.0)
     };
     if let Some(strip) = &frame.strip {
-        draw_strip(pixmap, fonts, cache, &spec, &pal, strip, &rects, unit, scale, frame.ps5, strip_dy, strip_alpha);
+        draw_strip(g, &spec, &pal, strip, &rects, unit, scale, frame.ps5, strip_dy, strip_alpha);
     }
     if !look.tv_layout() {
-        draw_legend(pixmap, fonts, cache, spec, &pal, &rects, frame.logical_w, frame.logical_h, lu, scale, frame.ps5);
+        draw_legend(g, spec, &pal, &rects, frame.logical_w, frame.logical_h, lu, scale, frame.ps5);
     }
     if let Some((x, y, w, h, radius)) = panel {
-        clip_round(pixmap, x, y, w, h, radius);
+        clip_round(g, x, y, w, h, radius);
     }
     let strip_moving = glide
         .strip_at
@@ -385,26 +383,24 @@ fn fit_legend(widths: &[f32], sep: f32, avail: f32) -> Vec<usize> {
     kept
 }
 
-fn leg_part_width(part: &Leg, u: f32, fonts: &mut FontSystem, family: &[&str]) -> f32 {
+fn leg_part_width(part: &Leg, u: f32, g: &mut Gfx, family: &[&str]) -> f32 {
     match *part {
         Leg::Btn("SELECT") => BAR_SHARE * u,
         Leg::Btn(_) => BAR_GLYPH * u,
-        Leg::Word(word) => measure_label(fonts, family, word, text_px(BAR_PREFIX_PX, u)),
-        Leg::Plus => measure_label(fonts, family, "+", text_px(BAR_CONNECTOR_PX, u)),
-        Leg::Slash => measure_label(fonts, family, "/", text_px(BAR_CONNECTOR_PX, u)),
+        Leg::Word(word) => measure_label(g, family, word, text_px(BAR_PREFIX_PX, u)),
+        Leg::Plus => measure_label(g, family, "+", text_px(BAR_CONNECTOR_PX, u)),
+        Leg::Slash => measure_label(g, family, "/", text_px(BAR_CONNECTOR_PX, u)),
     }
 }
 
-fn legend_item_width(parts: &[Leg], label: &str, u: f32, fonts: &mut FontSystem, family: &[&str]) -> f32 {
+fn legend_item_width(parts: &[Leg], label: &str, u: f32, g: &mut Gfx, family: &[&str]) -> f32 {
     let gaps = BAR_GAP * u * parts.len().saturating_sub(1) as f32;
-    let body: f32 = parts.iter().map(|part| leg_part_width(part, u, fonts, family)).sum();
-    body + gaps + BAR_LABEL_GAP * u + measure_label(fonts, family, label, text_px(BAR_LABEL_PX, u))
+    let body: f32 = parts.iter().map(|part| leg_part_width(part, u, g, family)).sum();
+    body + gaps + BAR_LABEL_GAP * u + measure_label(g, family, label, text_px(BAR_LABEL_PX, u))
 }
 
 fn draw_legend(
-    pixmap: &mut Pixmap,
-    fonts: &mut FontSystem,
-    cache: &mut SwashCache,
+    g: &mut Gfx,
     _spec: &Spec,
     pal: &Pal,
     _rects: &[KeyRect],
@@ -418,11 +414,11 @@ fn draw_legend(
     let left = pad_x;
     let right = (frame_w - pad_x).max(left);
     let family = _spec.families;
-    let dot_w = measure_label(fonts, family, LEGEND_SEP, text_px(BAR_SEP_PX, u));
+    let dot_w = measure_label(g, family, LEGEND_SEP, text_px(BAR_SEP_PX, u));
     let sep_w = BAR_GAP * u + dot_w + BAR_GAP * u;
     let widths: Vec<f32> = LEGEND_ROWS
         .iter()
-        .map(|(parts, label)| legend_item_width(parts, label, u, fonts, family))
+        .map(|(parts, label)| legend_item_width(parts, label, u, g, family))
         .collect();
     let kept = fit_legend(&widths, sep_w, (right - left).max(1.0));
     let total = kept.iter().map(|&i| widths[i]).sum::<f32>() + sep_w * kept.len().saturating_sub(1) as f32;
@@ -435,11 +431,9 @@ fn draw_legend(
     for (n, &index) in kept.iter().enumerate() {
         if n > 0 {
             let sep_left = x - sep_w + BAR_GAP * u;
-            let sep_w_text = measure_label(fonts, family, LEGEND_SEP, text_px(BAR_SEP_PX, u));
+            let sep_w_text = measure_label(g, family, LEGEND_SEP, text_px(BAR_SEP_PX, u));
             text_aligned(
-                pixmap,
-                fonts,
-                cache,
+                g,
                 LEGEND_SEP,
                 (sep_left, top, sep_left + sep_w_text, bottom),
                 text_px(BAR_SEP_PX, u) * scale,
@@ -457,11 +451,11 @@ fn draw_legend(
             if i > 0 {
                 cursor += BAR_GAP * u;
             }
-            let w = leg_part_width(part, u, fonts, family);
+            let w = leg_part_width(part, u, g, family);
             match *part {
                 Leg::Btn(hint) => {
                     if let Some(svg) = hint_svg(ps5, hint) {
-                        blit_svg(pixmap, svg, cursor, top, cursor + w, bottom, w, scale, None, 255);
+                        blit_svg(g, svg, cursor, top, cursor + w, bottom, w, scale, None, 255);
                     }
                 }
                 Leg::Word(_) | Leg::Plus | Leg::Slash => {
@@ -472,9 +466,7 @@ fn draw_legend(
                         Leg::Btn(_) => "",
                     };
                     text_aligned(
-                        pixmap,
-                        fonts,
-                        cache,
+                        g,
                         shown,
                         (cursor, top, cursor + w, bottom),
                         (if matches!(*part, Leg::Word(_)) { text_px(BAR_PREFIX_PX, u) } else { text_px(BAR_CONNECTOR_PX, u) }) * scale,
@@ -489,12 +481,10 @@ fn draw_legend(
             }
             cursor += w;
         }
-        let label_w = measure_label(fonts, family, label, label_px);
+        let label_w = measure_label(g, family, label, label_px);
         let label_x = cursor + BAR_LABEL_GAP * u;
         text_aligned(
-            pixmap,
-            fonts,
-            cache,
+            g,
             label,
             (label_x, top, label_x + label_w, bottom),
             label_px * scale,
@@ -580,9 +570,7 @@ fn clone_pixmap(src: &Pixmap) -> Option<Pixmap> {
 }
 
 fn paint_key(
-    pixmap: &mut Pixmap,
-    fonts: &mut FontSystem,
-    cache: &mut SwashCache,
+    g: &mut Gfx,
     frame: &Frame,
     spec: &Spec,
     pal: &Pal,
@@ -613,43 +601,43 @@ fn paint_key(
     if shadow {
         if selected {
             if let Some((dy, blur, alpha)) = spec.sel_shadow {
-                blur_shadow(pixmap, left * scale, top * scale, (right - left) * scale, (bottom - top) * scale, radius * scale, dy * unit * scale, blur * unit * scale, alpha);
+                blur_shadow(g, left * scale, top * scale, (right - left) * scale, (bottom - top) * scale, radius * scale, dy * unit * scale, blur * unit * scale, alpha);
             }
         } else if spec.key_shadow_dy > 0.0 {
             let dy = (spec.key_shadow_dy * unit).max(1.0);
-            round_rect(pixmap, left * scale, (top + dy) * scale, (right - left) * scale, (bottom - top) * scale, radius * scale, Rgb { r: 0, g: 0, b: 0 }, (spec.key_shadow_alpha * 255.0) as u8);
+            round_rect(g, left * scale, (top + dy) * scale, (right - left) * scale, (bottom - top) * scale, radius * scale, Rgb { r: 0, g: 0, b: 0 }, (spec.key_shadow_alpha * 255.0) as u8);
         }
     }
-    round_rect(pixmap, left * scale, top * scale, (right - left) * scale, (bottom - top) * scale, radius * scale, fill_c, 255);
+    round_rect(g, left * scale, top * scale, (right - left) * scale, (bottom - top) * scale, radius * scale, fill_c, 255);
     let locked = (matches!(key.action, KeyAction::Shift) && frame.caps) || (matches!(key.action, KeyAction::Symbols) && frame.symbol_locked);
     if locked {
         let pill_w = ((right - left) * 0.28).min(24.0 * unit);
         let pill_h = (3.0 * unit).max(2.0);
         let cx = (left + right) * 0.5;
         let yb = bottom - 5.0 * unit;
-        round_rect(pixmap, (cx - pill_w * 0.5) * scale, (yb - pill_h) * scale, pill_w * scale, pill_h * scale, pill_h * 0.5 * scale, if selected { pal.sel_text } else { pal.accent }, 255);
+        round_rect(g, (cx - pill_w * 0.5) * scale, (yb - pill_h) * scale, pill_w * scale, pill_h * scale, pill_h * 0.5 * scale, if selected { pal.sel_text } else { pal.accent }, 255);
     }
     let is_space = matches!(key.action, KeyAction::Vk(vk) if vk == VK_SPACE);
     let dim = if selected { pal.sel_text } else { pal.text_dim };
     let dim_a = (spec.number_alpha * 255.0) as u8;
     if let Some(sub) = key.sublabel.as_deref().filter(|_| !is_space) {
         let band = band_at(left, top, right, spec.number_cy * unit, key_h);
-        text(pixmap, fonts, cache, sub, band, spec.number_px * unit * scale, Weight::NORMAL, dim, dim_a, scale, spec.families);
+        text(g, sub, band, spec.number_px * unit * scale, Weight::NORMAL, dim, dim_a, scale, spec.families);
     }
     if matches!(key.action, KeyAction::VoiceInput) {
-        blit_svg(pixmap, MIC, left, top, right, bottom, spec.icon_px * unit, scale, Some(label_c), 255);
+        blit_svg(g, MIC, left, top, right, bottom, spec.icon_px * unit, scale, Some(label_c), 255);
     } else if is_space {
         if let Some(word) = spec.space_label {
-            text(pixmap, fonts, cache, word, (left, top, right, bottom), spec.space_label_px * unit * scale, Weight::NORMAL, label_c, 255, scale, spec.families);
+            text(g, word, (left, top, right, bottom), spec.space_label_px * unit * scale, Weight::NORMAL, label_c, 255, scale, spec.families);
         } else if let Some(sub) = key.sublabel.as_deref() {
             let cap = band_at(left, top, right, spec.caption_cy * unit, key_h);
-            text(pixmap, fonts, cache, sub, cap, spec.number_px * unit * scale, Weight::NORMAL, dim, dim_a, scale, spec.families);
+            text(g, sub, cap, spec.number_px * unit * scale, Weight::NORMAL, dim, dim_a, scale, spec.families);
             let icon = band_at(left, top, right, spec.space_icon_cy * unit, key_h);
-            blit_svg(pixmap, SPACE, icon.0, icon.1, icon.2, icon.3, spec.space_icon_px * unit, scale, Some(label_c), 255);
+            blit_svg(g, SPACE, icon.0, icon.1, icon.2, icon.3, spec.space_icon_px * unit, scale, Some(label_c), 255);
         }
     } else if let Some((svg, large)) = key_icon(&key.action, frame.caps) {
         let px = if large { spec.icon_large_px } else { spec.icon_px } * unit;
-        blit_svg(pixmap, svg, left, top, right, bottom, px, scale, Some(label_c), 255);
+        blit_svg(g, svg, left, top, right, bottom, px, scale, Some(label_c), 255);
     } else {
         let mut glyph = key.label.clone();
         if spec.trim_symbols_label && matches!(key.action, KeyAction::Symbols) {
@@ -663,7 +651,7 @@ fn paint_key(
             } else {
                 (left, top, right, bottom)
             };
-            text(pixmap, fonts, cache, &glyph, band, px * unit * scale, weight, label_c, 255, scale, spec.families);
+            text(g, &glyph, band, px * unit * scale, weight, label_c, 255, scale, spec.families);
         }
     }
     if let Some(hint) = key_hint(&key.action) {
@@ -672,20 +660,20 @@ fn paint_key(
         let bx = left + inset;
         let by = top + inset;
         if let Some(svg) = hint_svg(frame.ps5, hint) {
-            blit_svg(pixmap, svg, bx, by, bx + badge, by + badge, badge, scale, None, 255);
+            blit_svg(g, svg, bx, by, bx + badge, by + badge, badge, scale, None, 255);
         }
     }
 }
 
-fn stroke_ring(pixmap: &mut Pixmap, glide: &Glide, spec: &Spec, pal: &Pal, unit: f32, scale: f32, radius: f32) {
+fn stroke_ring(g: &mut Gfx, glide: &Glide, spec: &Spec, pal: &Pal, unit: f32, scale: f32, radius: f32) {
     let Some((l, t, r, b)) = glide.ring else { return };
     let ring_w = (spec.sel_ring_w * unit).max(1.0);
-    stroke_rect(pixmap, (l + ring_w * 0.5) * scale, (t + ring_w * 0.5) * scale, (r - l - ring_w) * scale, (b - t - ring_w) * scale, (radius - ring_w * 0.5).max(0.0) * scale, pal.sel_ring, 255, ring_w * scale);
+    stroke_rect(g, (l + ring_w * 0.5) * scale, (t + ring_w * 0.5) * scale, (r - l - ring_w) * scale, (b - t - ring_w) * scale, (radius - ring_w * 0.5).max(0.0) * scale, pal.sel_ring, 255, ring_w * scale);
 }
 
-fn erase_key(pixmap: &mut Pixmap, rect: &KeyRect, spec: &Spec, pal: &Pal, unit: f32, scale: f32) {
+fn erase_key(g: &mut Gfx, rect: &KeyRect, spec: &Spec, pal: &Pal, unit: f32, scale: f32) {
     let dy = (spec.key_shadow_dy * unit).max(0.0);
-    round_rect(pixmap, rect.left * scale, rect.top * scale, (rect.right - rect.left) * scale, (rect.bottom - rect.top + dy) * scale, 0.0, pal.bg, 255);
+    round_rect(g, rect.left * scale, rect.top * scale, (rect.right - rect.left) * scale, (rect.bottom - rect.top + dy) * scale, 0.0, pal.bg, 255);
 }
 
 fn scene(frame: &Frame) -> (&'static Spec, Pal, Vec<KeyRect>, f32, f32, f32, f32) {
@@ -721,37 +709,37 @@ fn advance_glide(glide: &mut Glide, frame: &Frame, target: Option<(f32, f32, f32
     glide.animating = strip_moving || pressing;
 }
 
-fn paint_live(pixmap: &mut Pixmap, frame: &Frame, fonts: &mut FontSystem, cache: &mut SwashCache, glide: &mut Glide, step: bool) {
+fn paint_live(g: &mut Gfx, frame: &Frame, glide: &mut Glide, step: bool) {
     let (spec, pal, rects, unit, scale, radius, key_h) = scene(frame);
     let target = rects.iter().find(|r| r.pos == frame.sel).map(|r| (r.left, r.top, r.right, r.bottom));
     if step {
         advance_glide(glide, frame, target, Instant::now());
     }
     if let Some(sel_index) = rects.iter().position(|r| r.pos == frame.sel) {
-        erase_key(pixmap, &rects[sel_index], &spec, &pal, unit, scale);
+        erase_key(g, &rects[sel_index], &spec, &pal, unit, scale);
         let press = frame.pressed.filter(|(p, _)| *p == rects[sel_index].pos).map(|(_, s)| s).unwrap_or(1.0);
-        paint_key(pixmap, fonts, cache, frame, &spec, &pal, &rects[sel_index], unit, key_h, scale, radius, true, press, true);
+        paint_key(g, frame, &spec, &pal, &rects[sel_index], unit, key_h, scale, radius, true, press, true);
         if let Some((pos, press)) = frame.pressed {
             if pos != rects[sel_index].pos {
                 if let Some(other) = rects.iter().find(|rect| rect.pos == pos) {
-                    erase_key(pixmap, other, &spec, &pal, unit, scale);
-                    paint_key(pixmap, fonts, cache, frame, &spec, &pal, other, unit, key_h, scale, radius, false, press, true);
+                    erase_key(g, other, &spec, &pal, unit, scale);
+                    paint_key(g, frame, &spec, &pal, other, unit, key_h, scale, radius, false, press, true);
                 }
             }
         }
     }
-    stroke_ring(pixmap, glide, &spec, &pal, unit, scale, radius);
+    stroke_ring(g, glide, &spec, &pal, unit, scale, radius);
     if frame.floating {
         let panel_r = spec.panel_radius * unit * scale;
         let x = FLOATING_PANEL_INSET * scale;
         let y = FLOATING_PANEL_INSET * scale;
         let w = (frame.logical_w - 2.0 * FLOATING_PANEL_INSET) * scale;
         let h = (frame.logical_h - 2.0 * FLOATING_PANEL_INSET) * scale;
-        clip_round(pixmap, x, y, w, h, panel_r);
+        clip_round(g, x, y, w, h, panel_r);
     }
 }
 
-fn draw_sheet_frame(pixmap: &mut Pixmap, frame: &Frame, fonts: &mut FontSystem, cache: &mut SwashCache) {
+fn draw_sheet_frame(g: &mut Gfx, frame: &Frame) {
     let (spec, pal, _, unit, scale, _, _) = scene(frame);
     let panel = if frame.floating {
         let panel_r = spec.panel_radius * unit;
@@ -759,9 +747,9 @@ fn draw_sheet_frame(pixmap: &mut Pixmap, frame: &Frame, fonts: &mut FontSystem, 
         let y = FLOATING_PANEL_INSET * scale;
         let w = (frame.logical_w - 2.0 * FLOATING_PANEL_INSET) * scale;
         let h = (frame.logical_h - 2.0 * FLOATING_PANEL_INSET) * scale;
-        round_rect(pixmap, x, y, w, h, panel_r * scale, rgb(0x1F1F1F), 255);
+        round_rect(g, x, y, w, h, panel_r * scale, rgb(0x1F1F1F), 255);
         stroke_rect(
-            pixmap,
+            g,
             x + 0.5 * scale,
             y + 0.5 * scale,
             (w - scale).max(1.0),
@@ -773,12 +761,12 @@ fn draw_sheet_frame(pixmap: &mut Pixmap, frame: &Frame, fonts: &mut FontSystem, 
         );
         Some((x, y, w, h, panel_r * scale))
     } else {
-        fill(pixmap, rgb(0x1F1F1F), 255);
+        fill(g, rgb(0x1F1F1F), 255);
         None
     };
-    paint_sheet(pixmap, fonts, cache, frame.logical_w, frame.logical_h, scale, frame.ps5);
+    paint_sheet(g, frame.logical_w, frame.logical_h, scale, frame.ps5);
     if let Some((x, y, w, h, radius)) = panel {
-        clip_round(pixmap, x, y, w, h, radius);
+        clip_round(g, x, y, w, h, radius);
     }
 }
 
@@ -794,21 +782,21 @@ struct SheetCol {
     width: f32,
 }
 
-fn sheet_part_width(part: &Leg, fonts: &mut FontSystem) -> f32 {
+fn sheet_part_width(part: &Leg, g: &mut Gfx) -> f32 {
     match *part {
         Leg::Btn("SELECT") => SHEET_SHARE,
         Leg::Btn(_) => SHEET_GLYPH,
-        Leg::Word(word) => measure_label(fonts, &["Noto Sans"], word, SHEET_TOKEN_PX),
-        Leg::Plus => measure_label(fonts, &["Noto Sans"], "+", SHEET_TOKEN_PX),
-        Leg::Slash => measure_label(fonts, &["Noto Sans"], "/", SHEET_TOKEN_PX),
+        Leg::Word(word) => measure_label(g, &["Noto Sans"], word, SHEET_TOKEN_PX),
+        Leg::Plus => measure_label(g, &["Noto Sans"], "+", SHEET_TOKEN_PX),
+        Leg::Slash => measure_label(g, &["Noto Sans"], "/", SHEET_TOKEN_PX),
     }
 }
 
-fn sheet_combo_width(parts: &[Leg], fonts: &mut FontSystem) -> f32 {
-    parts.iter().map(|part| sheet_part_width(part, fonts)).sum::<f32>() + SHEET_TOKEN_GAP * parts.len().saturating_sub(1) as f32
+fn sheet_combo_width(parts: &[Leg], g: &mut Gfx) -> f32 {
+    parts.iter().map(|part| sheet_part_width(part, g)).sum::<f32>() + SHEET_TOKEN_GAP * parts.len().saturating_sub(1) as f32
 }
 
-fn sheet_columns(fonts: &mut FontSystem) -> [SheetCol; 3] {
+fn sheet_columns(g: &mut Gfx) -> [SheetCol; 3] {
     const L3: &[Leg] = &[Leg::Btn("L3")];
     const R3: &[Leg] = &[Leg::Btn("R3")];
     const TAP: &[Leg] = &[Leg::Word("Tap"), Leg::Btn("SELECT")];
@@ -860,10 +848,10 @@ fn sheet_columns(fonts: &mut FontSystem) -> [SheetCol; 3] {
         for line in &lines {
             match line {
                 SheetLine::Row(parts, text) => {
-                    combo = combo.max(sheet_combo_width(parts, fonts));
-                    label = label.max(measure_label(fonts, &["Noto Sans"], text, SHEET_ACTION_PX));
+                    combo = combo.max(sheet_combo_width(parts, g));
+                    label = label.max(measure_label(g, &["Noto Sans"], text, SHEET_ACTION_PX));
                 }
-                SheetLine::Title(text) => header = header.max(measure_label(fonts, &["Noto Sans"], text, SHEET_HEADER_PX)),
+                SheetLine::Title(text) => header = header.max(measure_label(g, &["Noto Sans"], text, SHEET_HEADER_PX)),
                 SheetLine::Blank => {}
             }
         }
@@ -890,8 +878,8 @@ fn leg_word(part: &Leg) -> &'static str {
     }
 }
 
-fn paint_sheet(pixmap: &mut Pixmap, fonts: &mut FontSystem, cache: &mut SwashCache, frame_w: f32, frame_h: f32, scale: f32, ps5: bool) {
-    let cols = sheet_columns(fonts);
+fn paint_sheet(g: &mut Gfx, frame_w: f32, frame_h: f32, scale: f32, ps5: bool) {
+    let cols = sheet_columns(g);
     let total = sheet_total(&cols);
     let rows = cols.iter().map(|col| col.lines.len()).max().unwrap_or(1);
     let design_h = SHEET_PAD_TOP + rows as f32 * SHEET_ROW_H + SHEET_PAD_BOTTOM;
@@ -910,7 +898,7 @@ fn paint_sheet(pixmap: &mut Pixmap, fonts: &mut FontSystem, cache: &mut SwashCac
             let y = top + index as f32 * row_h;
             match line {
                 SheetLine::Title(title) => {
-                    text_aligned(pixmap, fonts, cache, title, (x, y, x + col_w, y + row_h), SHEET_HEADER_PX * u * scale, Weight::NORMAL, white, muted, scale, Align::Left, &["Noto Sans"]);
+                    text_aligned(g, title, (x, y, x + col_w, y + row_h), SHEET_HEADER_PX * u * scale, Weight::NORMAL, white, muted, scale, Align::Left, &["Noto Sans"]);
                 }
                 SheetLine::Row(parts, label) => {
                     let mut cursor = x;
@@ -918,26 +906,26 @@ fn paint_sheet(pixmap: &mut Pixmap, fonts: &mut FontSystem, cache: &mut SwashCac
                         if part_index > 0 {
                             cursor += SHEET_TOKEN_GAP * u;
                         }
-                        let w = sheet_part_width(part, fonts) * u;
+                        let w = sheet_part_width(part, g) * u;
                         match *part {
                             Leg::Btn(hint) => {
                                 if let Some(svg) = hint_svg(ps5, hint) {
-                                    blit_svg(pixmap, svg, cursor, y, cursor + w, y + row_h, w, scale, None, 255);
+                                    blit_svg(g, svg, cursor, y, cursor + w, y + row_h, w, scale, None, 255);
                                 }
                             }
                             Leg::Word(_) | Leg::Plus | Leg::Slash => {
-                                text_aligned(pixmap, fonts, cache, leg_word(part), (cursor, y, cursor + w, y + row_h), SHEET_TOKEN_PX * u * scale, Weight::NORMAL, white, muted, scale, Align::Left, &["Noto Sans"]);
+                                text_aligned(g, leg_word(part), (cursor, y, cursor + w, y + row_h), SHEET_TOKEN_PX * u * scale, Weight::NORMAL, white, muted, scale, Align::Left, &["Noto Sans"]);
                             }
                         }
                         cursor += w;
                     }
                     let label_x = x + col.combo * u + SHEET_ACTION_GAP * u;
-                    text_aligned(pixmap, fonts, cache, label, (label_x, y, x + col_w, y + row_h), SHEET_ACTION_PX * u * scale, Weight::NORMAL, white, 255, scale, Align::Left, &["Noto Sans"]);
+                    text_aligned(g, label, (label_x, y, x + col_w, y + row_h), SHEET_ACTION_PX * u * scale, Weight::NORMAL, white, 255, scale, Align::Left, &["Noto Sans"]);
                 }
                 SheetLine::Blank => {}
             }
             if sheet_hairline(&col.lines, index) {
-                round_rect(pixmap, x * scale, (y + row_h - u) * scale, col_w * scale, u * scale, 0.0, white, line_a);
+                round_rect(g, x * scale, (y + row_h - u) * scale, col_w * scale, u * scale, 0.0, white, line_a);
             }
         }
         x += col_w;
@@ -946,23 +934,21 @@ fn paint_sheet(pixmap: &mut Pixmap, fonts: &mut FontSystem, cache: &mut SwashCac
         }
         x += SHEET_COL_GAP * u;
         if ci + 2 == count {
-            round_rect(pixmap, x * scale, top * scale, u * scale, block_h * scale, 0.0, white, line_a);
+            round_rect(g, x * scale, top * scale, u * scale, block_h * scale, 0.0, white, line_a);
             x += u + SHEET_COL_GAP * u;
         }
     }
 }
 
 #[cfg(test)]
-fn sheet_layout(fonts: &mut FontSystem) -> (f32, [f32; 3]) {
-    let cols = sheet_columns(fonts);
+fn sheet_layout(g: &mut Gfx) -> (f32, [f32; 3]) {
+    let cols = sheet_columns(g);
     (sheet_total(&cols), [cols[0].combo, cols[1].combo, cols[2].combo])
 }
 
 
 fn draw_strip(
-    pixmap: &mut Pixmap,
-    fonts: &mut FontSystem,
-    cache: &mut SwashCache,
+    g: &mut Gfx,
     spec: &Spec,
     pal: &Pal,
     strip: &StripState,
@@ -993,7 +979,7 @@ fn draw_strip(
             let x0 = inner_l + i as f32 * col_w;
             let x1 = x0 + col_w;
             if i > 0 {
-                round_rect(pixmap, (x0 - 0.5) * scale, (cy - sep_h * 0.5) * scale, scale.max(1.0), sep_h * scale, 0.0, pal.border, fade_u8(spec.separator_alpha));
+                round_rect(g, (x0 - 0.5) * scale, (cy - sep_h * 0.5) * scale, scale.max(1.0), sep_h * scale, 0.0, pal.border, fade_u8(spec.separator_alpha));
             }
             if word.is_empty() {
                 continue;
@@ -1001,7 +987,7 @@ fn draw_strip(
             let selected = i == strip.highlight_slot;
             let alpha = fade_u8(if selected { 1.0 } else { spec.chip_text_alpha });
             let color = if selected { pal.text } else { pal.text_dim };
-            text(pixmap, fonts, cache, word, (x0, top, x1, bottom), spec.chip_px * unit * scale, if selected { weight(spec.chip_sel_weight) } else { Weight::NORMAL }, color, alpha, scale, spec.families);
+            text(g, word, (x0, top, x1, bottom), spec.chip_px * unit * scale, if selected { weight(spec.chip_sel_weight) } else { Weight::NORMAL }, color, alpha, scale, spec.families);
         }
         return;
     }
@@ -1015,17 +1001,17 @@ fn draw_strip(
     let inner_b = chips.3 - spec.chips_pad * unit;
     let chip_r = ((inner_b - inner_t) * 0.5).max(0.0);
     let chips_r = concentric_radius(chip_r, spec.chips_pad * unit);
-    round_rect(pixmap, chips.0 * scale, chips.1 * scale, (chips.2 - chips.0) * scale, (chips.3 - chips.1) * scale, chips_r * scale, pal.key_action, fade_u8(1.0));
-    stroke_rect(pixmap, (chips.0 + 0.5) * scale, (chips.1 + 0.5) * scale, (chips.2 - chips.0 - 1.0) * scale, (chips.3 - chips.1 - 1.0) * scale, (chips_r - 0.5).max(0.0) * scale, pal.border, fade_u8(1.0), scale.max(1.0));
+    round_rect(g, chips.0 * scale, chips.1 * scale, (chips.2 - chips.0) * scale, (chips.3 - chips.1) * scale, chips_r * scale, pal.key_action, fade_u8(1.0));
+    stroke_rect(g, (chips.0 + 0.5) * scale, (chips.1 + 0.5) * scale, (chips.2 - chips.0 - 1.0) * scale, (chips.3 - chips.1 - 1.0) * scale, (chips_r - 0.5).max(0.0) * scale, pal.border, fade_u8(1.0), scale.max(1.0));
     for (rect, hint) in [(prev, "LB"), (next, "RB")] {
         let rad = button_h * 0.5;
-        round_rect(pixmap, rect.0 * scale, rect.1 * scale, (rect.2 - rect.0) * scale, (rect.3 - rect.1) * scale, rad * scale, pal.key_action, fade_u8(1.0));
-        stroke_rect(pixmap, (rect.0 + 0.5) * scale, (rect.1 + 0.5) * scale, (rect.2 - rect.0 - 1.0) * scale, (rect.3 - rect.1 - 1.0) * scale, (rad - 0.5).max(0.0) * scale, pal.border, fade_u8(1.0), scale.max(1.0));
+        round_rect(g, rect.0 * scale, rect.1 * scale, (rect.2 - rect.0) * scale, (rect.3 - rect.1) * scale, rad * scale, pal.key_action, fade_u8(1.0));
+        stroke_rect(g, (rect.0 + 0.5) * scale, (rect.1 + 0.5) * scale, (rect.2 - rect.0 - 1.0) * scale, (rect.3 - rect.1 - 1.0) * scale, (rad - 0.5).max(0.0) * scale, pal.border, fade_u8(1.0), scale.max(1.0));
         if let Some(svg) = hint_svg(ps5, hint) {
             let px = 30.0 * unit;
             let cx = (rect.0 + rect.2) * 0.5;
             let half = px * 0.5;
-            blit_svg(pixmap, svg, cx - half, cy - half, cx + half, cy + half, px, scale, None, fade_u8(1.0));
+            blit_svg(g, svg, cx - half, cy - half, cx + half, cy + half, px, scale, None, fade_u8(1.0));
         }
     }
     let inner_l = chips.0 + spec.chips_pad * unit;
@@ -1039,12 +1025,12 @@ fn draw_strip(
         let word = &strip.visible[slot];
         let selected = slot == strip.highlight_slot;
         if selected {
-            round_rect(pixmap, x0 * scale, inner_t * scale, chip_w * scale, (inner_b - inner_t) * scale, chip_r * scale, pal.chip_sel, fade_u8(1.0));
+            round_rect(g, x0 * scale, inner_t * scale, chip_w * scale, (inner_b - inner_t) * scale, chip_r * scale, pal.chip_sel, fade_u8(1.0));
         }
         let alpha = fade_u8(if selected { 1.0 } else { spec.chip_text_alpha });
         let weight = if selected { weight(spec.chip_sel_weight) } else { Weight::NORMAL };
         let label = (x0 + chip_r * 0.5, inner_t, x0 + chip_w - chip_r * 0.5, inner_b);
-        text(pixmap, fonts, cache, word, label, spec.chip_px * unit * scale, weight, pal.text, alpha, scale, spec.families);
+        text(g, word, label, spec.chip_px * unit * scale, weight, pal.text, alpha, scale, spec.families);
     }
 }
 
@@ -1247,69 +1233,35 @@ const CHEV_R: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" heigh
 const CHEV_U: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>"#;
 const CHEV_D: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>"#;
 
-fn fill(pixmap: &mut Pixmap, color: Rgb, alpha: u8) {
-    if let Some(rect) = Rect::from_xywh(0.0, 0.0, pixmap.width() as f32, pixmap.height() as f32) {
-        let mut paint = Paint::default();
-        paint.set_color_rgba8(color.r, color.g, color.b, alpha);
-        pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-    }
+fn cref(color: Rgb) -> u32 {
+    color.r as u32 | (color.g as u32) << 8 | (color.b as u32) << 16
 }
 
-fn round_rect(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Rgb, alpha: u8) {
-    let Some(path) = rounded(x, y, w, h, radius) else { return };
-    let mut paint = Paint::default();
-    paint.set_color_rgba8(color.r, color.g, color.b, alpha);
-    pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+fn device(x: f32, y: f32, w: f32, h: f32) -> crate::mono_ui::Rect {
+    crate::mono_ui::rect(x, y, w, h)
 }
 
-fn stroke_rect(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Rgb, alpha: u8, width: f32) {
-    let Some(path) = rounded(x, y, w, h, radius) else { return };
-    let mut paint = Paint::default();
-    paint.set_color_rgba8(color.r, color.g, color.b, alpha);
-    let stroke = Stroke { width: width.max(1.0), ..Stroke::default() };
-    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+fn fill(g: &mut Gfx, color: Rgb, alpha: u8) {
+    unsafe { g.clear(cref(color), alpha as f32 / 255.0) };
 }
 
-fn rounded(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Option<tiny_skia::Path> {
-    if w < 1.0 || h < 1.0 {
-        return None;
-    }
-    let radius = radius.min(w * 0.5).min(h * 0.5).max(0.0);
-    let k = radius * 0.55228475;
-    let mut path = PathBuilder::new();
-    path.move_to(x + radius, y);
-    path.line_to(x + w - radius, y);
-    path.cubic_to(x + w - radius + k, y, x + w, y + radius - k, x + w, y + radius);
-    path.line_to(x + w, y + h - radius);
-    path.cubic_to(x + w, y + h - radius + k, x + w - radius + k, y + h, x + w - radius, y + h);
-    path.line_to(x + radius, y + h);
-    path.cubic_to(x + radius - k, y + h, x, y + h - radius + k, x, y + h - radius);
-    path.line_to(x, y + radius);
-    path.cubic_to(x, y + radius - k, x + radius - k, y, x + radius, y);
-    path.close();
-    path.finish()
+fn round_rect(g: &mut Gfx, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Rgb, alpha: u8) {
+    unsafe { g.fill(device(x, y, w, h), radius, cref(color), alpha as f32 / 255.0) };
 }
 
-fn blur_shadow(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, radius: f32, dy: f32, blur: f32, alpha: f32) {
-    let steps = 6.0;
-    let per = 1.0 - (1.0 - alpha.clamp(0.0, 1.0)).powf(1.0 / steps);
-    for i in 0..6 {
-        let t = i as f32 / (steps - 1.0);
-        let spread = blur * (-0.25 + 0.75 * t);
-        round_rect(
-            pixmap,
-            x - spread,
-            y - spread + dy,
-            w + spread * 2.0,
-            h + spread * 2.0,
-            (radius + spread).max(0.0),
-            Rgb { r: 0, g: 0, b: 0 },
-            (per * 255.0) as u8,
-        );
-    }
+fn stroke_rect(g: &mut Gfx, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Rgb, alpha: u8, width: f32) {
+    let width = width.max(1.0);
+    let half = width * 0.5;
+    let outer = device(x - half, y - half, w + width, h + width);
+    unsafe { g.ring(outer, radius + half, width, cref(color), alpha as f32 / 255.0) };
 }
 
-fn clip_round(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, radius: f32) {
+fn blur_shadow(g: &mut Gfx, x: f32, y: f32, w: f32, h: f32, radius: f32, dy: f32, blur: f32, alpha: f32) {
+    unsafe { crate::vk_paint::paint_blur_strokes(g, device(x, y, w, h), radius, dy, blur, alpha) };
+}
+
+fn clip_round(g: &mut Gfx, x: f32, y: f32, w: f32, h: f32, radius: f32) {
+    let pixmap = g.canvas().0;
     let width = pixmap.width() as i32;
     let height = pixmap.height() as i32;
     let data = pixmap.data_mut();
@@ -1354,9 +1306,7 @@ fn clear_span(data: &mut [u8], width: i32, py: i32, from: i32, to: i32) {
 }
 
 fn text(
-    pixmap: &mut Pixmap,
-    fonts: &mut FontSystem,
-    cache: &mut SwashCache,
+    g: &mut Gfx,
     value: &str,
     band: (f32, f32, f32, f32),
     px: f32,
@@ -1366,40 +1316,15 @@ fn text(
     scale: f32,
     family: &[&str],
 ) {
-    text_aligned(pixmap, fonts, cache, value, band, px, weight, color, alpha, scale, Align::Center, family);
+    text_aligned(g, value, band, px, weight, color, alpha, scale, Align::Center, family);
 }
 
-fn pick_family<'a>(fonts: &FontSystem, names: &[&'a str]) -> Family<'a> {
-    names
-        .iter()
-        .find(|name| {
-            fonts
-                .db()
-                .faces()
-                .any(|face| face.families.iter().any(|(have, _)| have == *name))
-        })
-        .map(|name| Family::Name(name))
-        .unwrap_or(Family::SansSerif)
-}
-
-fn measure_label(fonts: &mut FontSystem, family: &[&str], value: &str, px: f32) -> f32 {
-    if value.is_empty() || px < 1.0 {
-        return 0.0;
-    }
-    let metrics = Metrics::new(px, px);
-    let mut buffer = Buffer::new(fonts, metrics);
-    buffer.set_size(fonts, None, None);
-    buffer.set_wrap(fonts, Wrap::None);
-    let attrs = Attrs::new().family(pick_family(fonts, family)).weight(Weight::NORMAL);
-    buffer.set_text(fonts, value, &attrs, Shaping::Advanced);
-    buffer.shape_until_scroll(fonts, false);
-    buffer.layout_runs().map(|run| run.line_w).fold(0.0, f32::max)
+fn measure_label(g: &mut Gfx, family: &[&str], value: &str, px: f32) -> f32 {
+    unsafe { g.measure_full(value, px, 400, family) }
 }
 
 fn text_aligned(
-    pixmap: &mut Pixmap,
-    fonts: &mut FontSystem,
-    cache: &mut SwashCache,
+    g: &mut Gfx,
     value: &str,
     band: (f32, f32, f32, f32),
     px: f32,
@@ -1413,166 +1338,52 @@ fn text_aligned(
     if value.is_empty() || px < 4.0 {
         return;
     }
-    let (x, y, r, b) = (band.0 * scale, band.1 * scale, band.2 * scale, band.3 * scale);
-    let w = r - x;
-    let h = b - y;
-    if w < 2.0 || h < 2.0 {
-        return;
-    }
-    let metrics = Metrics::new(px, px);
-    let mut buffer = Buffer::new(fonts, metrics);
-    buffer.set_size(fonts, Some(w), Some(h));
-    buffer.set_wrap(fonts, Wrap::None);
-    let attrs = Attrs::new().family(pick_family(fonts, family)).weight(weight);
-    buffer.set_text(fonts, value, &attrs, Shaping::Advanced);
-    for line in &mut buffer.lines {
-        line.set_align(Some(align));
-    }
-    buffer.shape_until_scroll(fonts, false);
-    let mut block_top = 0.0;
-    let mut block_bottom = px * 1.2;
-    let mut seen = false;
-    for run in buffer.layout_runs() {
-        if !seen {
-            block_top = run.line_top;
-            seen = true;
-        }
-        block_bottom = run.line_top + run.line_height;
-    }
-    let block = (block_bottom - block_top).max(1.0);
-    let dy = ((h - block) * 0.5 - block_top).round() as i32;
-    let paint = Color::rgba(color.r, color.g, color.b, alpha);
-    let clip = (x as i32, y as i32, r as i32, b as i32);
-    buffer.draw(fonts, cache, paint, |gx, gy, gw, gh, pixel| {
-        let px0 = x as i32 + gx;
-        let py0 = y as i32 + dy + gy;
-        if px0 + gw as i32 <= clip.0 || py0 + gh as i32 <= clip.1 || px0 >= clip.2 || py0 >= clip.3 {
-            return;
-        }
-        blend_straight(pixmap, px0, py0, pixel);
-    });
+    let r = device(band.0 * scale, band.1 * scale, (band.2 - band.0) * scale, (band.3 - band.1) * scale);
+    unsafe {
+        g.text_full(
+            value,
+            r,
+            px,
+            weight.0 as i32,
+            family,
+            cref(color),
+            alpha as f32 / 255.0,
+            align,
+            crate::mono_ui::VAlign::Center,
+            false,
+        )
+    };
 }
 
-fn blend_straight(pixmap: &mut Pixmap, x: i32, y: i32, pixel: Color) {
-    if pixel.a() == 0 {
-        return;
-    }
-    let src_a = pixel.a() as f32 / 255.0;
-    blend_premul(
-        pixmap,
-        x,
-        y,
-        (pixel.r() as f32 * src_a).round() as u8,
-        (pixel.g() as f32 * src_a).round() as u8,
-        (pixel.b() as f32 * src_a).round() as u8,
-        pixel.a(),
-    );
-}
-
-fn blend_premul(pixmap: &mut Pixmap, x: i32, y: i32, pr: u8, pg: u8, pb: u8, pa: u8) {
-    if x < 0 || y < 0 || pa == 0 {
-        return;
-    }
-    let (pw, ph) = (pixmap.width() as i32, pixmap.height() as i32);
-    if x >= pw || y >= ph {
-        return;
-    }
-    let width = pixmap.width();
-    let data = pixmap.data_mut();
-    let index = ((y as u32 * width) + x as u32) as usize * 4;
-    let src_a = pa as f32 / 255.0;
-    let inv = 1.0 - src_a;
-    data[index] = (pr as f32 + data[index] as f32 * inv).round().clamp(0.0, 255.0) as u8;
-    data[index + 1] = (pg as f32 + data[index + 1] as f32 * inv).round().clamp(0.0, 255.0) as u8;
-    data[index + 2] = (pb as f32 + data[index + 2] as f32 * inv).round().clamp(0.0, 255.0) as u8;
-    data[index + 3] = (pa as f32 + data[index + 3] as f32 * inv).round().clamp(0.0, 255.0) as u8;
-}
-
-fn blit_svg(pixmap: &mut Pixmap, svg: &str, x0: f32, y0: f32, x1: f32, y1: f32, size: f32, scale: f32, tint: Option<Rgb>, alpha: u8) {
+fn blit_svg(g: &mut Gfx, svg: &str, x0: f32, y0: f32, x1: f32, y1: f32, size: f32, scale: f32, tint: Option<Rgb>, alpha: u8) {
     if alpha == 0 {
         return;
     }
-    let px = (size * scale).round().max(8.0) as u32;
-    let Some(bytes) = cached_svg(svg, px, tint) else { return };
-    let cx = (x0 + x1) * 0.5 * scale;
-    let cy = (y0 + y1) * 0.5 * scale;
-    let dest_x = (cx - px as f32 * 0.5).round() as i32;
-    let dest_y = (cy - px as f32 * 0.5).round() as i32;
-    let fade = alpha as f32 / 255.0;
-    for row in 0..px {
-        for col in 0..px {
-            let index = ((row * px + col) * 4) as usize;
-            blend_premul(
-                pixmap,
-                dest_x + col as i32,
-                dest_y + row as i32,
-                (bytes[index] as f32 * fade).round() as u8,
-                (bytes[index + 1] as f32 * fade).round() as u8,
-                (bytes[index + 2] as f32 * fade).round() as u8,
-                (bytes[index + 3] as f32 * fade).round() as u8,
-            );
-        }
-    }
-}
-
-fn cached_svg(svg: &str, px: u32, tint: Option<Rgb>) -> Option<std::sync::Arc<Vec<u8>>> {
-    use std::sync::{Mutex, OnceLock};
-    type Key = (usize, usize, u32, u32);
-    static CACHE: OnceLock<Mutex<std::collections::HashMap<Key, std::sync::Arc<Vec<u8>>>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-    let tint_key = tint.map(|c| (c.r as u32) << 16 | (c.g as u32) << 8 | c.b as u32).unwrap_or(0);
-    let key = (svg.as_ptr() as usize, svg.len(), px, tint_key);
-    if let Ok(guard) = cache.lock() {
-        if let Some(hit) = guard.get(&key) {
-            return Some(hit.clone());
-        }
-    }
-    let factor = if tint.is_none() { 3u32 } else { 1u32 };
-    let colored = if let Some(c) = tint {
-        svg.replace("currentColor", &format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b))
+    let tip = tint.is_none();
+    let draw_px = size.round().clamp(12.0, 192.0);
+    let raster_px = if tip {
+        (draw_px * scale * 3.0).round().clamp(54.0, (draw_px * scale * 3.0).max(192.0))
     } else {
-        svg.to_string()
-    };
-    let tree = resvg::usvg::Tree::from_data(colored.as_bytes(), &resvg::usvg::Options::default()).ok()?;
-    let raster = px.saturating_mul(factor);
-    let mut icon = resvg::tiny_skia::Pixmap::new(raster, raster)?;
-    let tw = tree.size().width().max(1.0);
-    let th = tree.size().height().max(1.0);
-    let s = raster as f32 / tw.max(th);
-    let dx = (raster as f32 - tw * s) * 0.5;
-    let dy = (raster as f32 - th * s) * 0.5;
-    resvg::render(
-        &tree,
-        resvg::tiny_skia::Transform::from_row(s, 0.0, 0.0, s, dx, dy),
-        &mut icon.as_mut(),
+        (draw_px * scale).round().max(1.0)
+    } as u32;
+    let source_px = if tip { 32.0 } else { 24.0 };
+    let dst = crate::mono_ui::rect(
+        ((x0 + x1) * 0.5 - draw_px * 0.5) * scale,
+        ((y0 + y1) * 0.5 - draw_px * 0.5) * scale,
+        draw_px * scale,
+        draw_px * scale,
     );
-    let src = icon.data();
-    let area = (factor * factor) as f32;
-    let mut bytes = vec![0u8; (px * px * 4) as usize];
-    for row in 0..px {
-        for col in 0..px {
-            let mut acc = [0.0f32; 4];
-            for sy in 0..factor {
-                for sx in 0..factor {
-                    let index = (((row * factor + sy) * raster + col * factor + sx) * 4) as usize;
-                    acc[0] += src[index] as f32;
-                    acc[1] += src[index + 1] as f32;
-                    acc[2] += src[index + 2] as f32;
-                    acc[3] += src[index + 3] as f32;
-                }
-            }
-            let out = ((row * px + col) * 4) as usize;
-            bytes[out] = (acc[0] / area).round() as u8;
-            bytes[out + 1] = (acc[1] / area).round() as u8;
-            bytes[out + 2] = (acc[2] / area).round() as u8;
-            bytes[out + 3] = (acc[3] / area).round() as u8;
-        }
-    }
-    let bytes = std::sync::Arc::new(bytes);
-    if let Ok(mut guard) = cache.lock() {
-        guard.insert(key, bytes.clone());
-    }
-    Some(bytes)
+    unsafe {
+        crate::vk_paint::paint_svg_icon(
+            g,
+            svg,
+            raster_px,
+            tint.map(cref).unwrap_or(0),
+            dst,
+            alpha as f32 / 255.0,
+            source_px,
+        )
+    };
 }
 
 pub struct KeyPatch {
@@ -1592,8 +1403,7 @@ pub struct KeyPatch {
 pub fn paint_base(g: &mut Gfx, frame: &Frame, glide: &mut Glide) {
     let (width, height) = frame_px(frame);
     g.begin(width, height);
-    let (pixmap, fonts, cache) = g.canvas();
-    render_keyboard(pixmap, frame, fonts, cache, glide, false);
+    render_keyboard(g, frame, glide, false);
 }
 
 pub fn voice_spot(frame: &Frame) -> Option<(f32, f32, f32)> {
@@ -1625,11 +1435,8 @@ pub fn paint_selected_key(g: &mut Gfx, frame: &Frame, press: f32) -> Option<KeyP
     let width = (local.right * scale).ceil().max(1.0) as u32;
     let height = (local.bottom * scale).ceil().max(1.0) as u32;
     g.begin(width, height);
-    let (pixmap, fonts, cache) = g.canvas();
     paint_key(
-        pixmap,
-        fonts,
-        cache,
+        g,
         frame,
         &spec,
         &pal,
@@ -1657,7 +1464,7 @@ pub fn paint_selected_key(g: &mut Gfx, frame: &Frame, press: f32) -> Option<KeyP
     })
 }
 
-pub fn paint_voice_key(pixmap: &mut Pixmap, frame: &Frame, orb: &[u8], orb_px: u32) {
+pub fn paint_voice_key(g: &mut Gfx, frame: &Frame, orb: &[u8], orb_px: u32) {
     let (_spec, pal, rects, _unit, scale, _radius, _key_h) = scene(frame);
     let Some(rect) = rects.iter().find(|rect| {
         frame
@@ -1672,7 +1479,7 @@ pub fn paint_voice_key(pixmap: &mut Pixmap, frame: &Frame, orb: &[u8], orb_px: u
     let cx = (rect.left + rect.right) * 0.5;
     let cy = (rect.top + rect.bottom) * 0.5;
     blit_premul(
-        pixmap,
+        g.canvas().0,
         orb,
         orb_px,
         (cx - side * 0.5) * scale,
@@ -1680,7 +1487,7 @@ pub fn paint_voice_key(pixmap: &mut Pixmap, frame: &Frame, orb: &[u8], orb_px: u
         side * scale,
     );
     stroke_rect(
-        pixmap,
+        g,
         rect.left * scale,
         rect.top * scale,
         (rect.right - rect.left) * scale,
@@ -1838,9 +1645,8 @@ pub fn paint_prompt(g: &mut Gfx, text_value: &str, scale: f32) {
     let logical_w = 520.0;
     let logical_h = 72.0;
     g.begin((logical_w * scale) as u32, (logical_h * scale) as u32);
-    let (pixmap, fonts, cache) = g.canvas();
-    fill(pixmap, rgb(0x15161C), 235);
-    text(pixmap, fonts, cache, text_value, (16.0, 16.0, logical_w - 16.0, logical_h - 16.0), 22.0 * scale, Weight::MEDIUM, rgb(0xFFFFFF), 255, 1.0, &["Noto Sans"]);
+    fill(g, rgb(0x15161C), 235);
+    text(g, text_value, (16.0, 16.0, logical_w - 16.0, logical_h - 16.0), 22.0 * scale, Weight::MEDIUM, rgb(0xFFFFFF), 255, 1.0, &["Noto Sans"]);
 }
 
 #[cfg(test)]
@@ -1933,7 +1739,7 @@ mod tests {
         let (w, h) = super::sheet_size(3072.0, 1728.0);
         assert_eq!((w, h), (1600, 546));
         let mut g = Gfx::new(1, 1).expect("gfx");
-        let (total, combos) = super::sheet_layout(g.canvas().1);
+        let (total, combos) = super::sheet_layout(&mut g);
         for (got, want) in combos.iter().zip([86.0, 183.0, 140.0]) {
             assert!((got - want).abs() <= 16.0, "combos {combos:?} total {total}");
         }

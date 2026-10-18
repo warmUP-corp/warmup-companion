@@ -532,7 +532,7 @@ impl Shell {
         #[cfg(feature = "speech")]
         if crate::linux_speech::visual_active() {
             if let Some((px, bytes)) = crate::linux_nimbus::latest_frame() {
-                draw::paint_voice_key(self.gfx.canvas().0, &frame, &bytes, px);
+                draw::paint_voice_key(&mut self.gfx, &frame, &bytes, px);
             }
         }
         let pixels = draw::to_argb(self.gfx.pixels());
