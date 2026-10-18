@@ -177,28 +177,28 @@ fn match_process_to_game(
 
     let path_lower = image_path.map(|path| path.replace('/', "\\").to_ascii_lowercase());
 
-    let mut install_matches: Vec<&str> = Vec::new();
     if let Some(path) = path_lower.as_deref() {
-        for game in games {
-            if game
-                .install_dir_prefixes
-                .iter()
-                .any(|prefix| path.starts_with(prefix))
-            {
-                install_matches.push(game.game_id.as_str());
+        let mut install_matches: Vec<(usize, &str)> = games
+            .iter()
+            .filter_map(|game| {
+                game.install_dir_prefixes
+                    .iter()
+                    .filter(|prefix| path.starts_with(prefix.as_str()))
+                    .map(String::len)
+                    .max()
+                    .map(|len| (len, game.game_id.as_str()))
+            })
+            .collect();
+        if let Some(longest) = install_matches.iter().map(|(len, _)| *len).max() {
+            install_matches.retain(|(len, _)| *len == longest);
+            install_matches.sort_unstable();
+            install_matches.dedup();
+            if install_matches.len() == 1 {
+                return Some(install_matches[0].1.to_string());
             }
-        }
-        install_matches.sort_unstable();
-        install_matches.dedup();
-        if install_matches.len() == 1 {
-            return Some(install_matches[0].to_string());
-        }
-        if install_matches.len() > 1 {
             crate::install::log_line(&format!(
-                "playtime tracker: install-dir collision for {path} -> using {}",
-                install_matches[0]
+                "playtime tracker: install-dir collision for {path}, not counted by folder"
             ));
-            return Some(install_matches[0].to_string());
         }
     }
 
@@ -214,10 +214,8 @@ fn match_process_to_game(
     }
     if stem_matches.len() > 1 {
         crate::install::log_line(&format!(
-            "playtime tracker: exe-stem collision for {stem} -> using {}",
-            stem_matches[0]
+            "playtime tracker: exe-stem collision for {stem}, not counted"
         ));
-        return Some(stem_matches[0].to_string());
     }
     None
 }
