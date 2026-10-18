@@ -75,14 +75,17 @@ pub fn replace_text(del: usize, ins: &str) -> std::io::Result<()> {
 }
 
 pub fn chord_code(ch: char) -> Option<KeyCode> {
-    let name = active_layout();
+    let (name, group) = chord_layout();
     let mut slot = CHORD_LAYOUT.lock().ok()?;
     if slot.as_ref().is_none_or(|(have, _)| *have != name) {
         let layout = Layout::for_name(&name);
         *slot = Some((name, layout));
     }
     let (_, layout) = slot.as_ref()?;
-    layout.lookup(ch.to_ascii_lowercase()).map(|(code, _)| code)
+    let ch = ch.to_ascii_lowercase();
+    layout
+        .lookup_group(ch, group)
+        .or_else(|| layout.lookup_group(ch, 0))
 }
 
 pub fn chord_codes() -> &'static [KeyCode] {
@@ -320,7 +323,7 @@ const KEYS: &[KeyCode] = &[
 ];
 
 struct Layout {
-    map: Vec<(u32, KeyCode, u32)>,
+    map: Vec<(u32, KeyCode, u32, u32)>,
 }
 
 impl Layout {
@@ -348,8 +351,11 @@ impl Layout {
                             let Some(code) = code_for_raw(evdev) else {
                                 continue;
                             };
-                            if !map.iter().any(|(have, _, _)| *have == ch) {
-                                map.push((ch, code, level));
+                            if !map
+                                .iter()
+                                .any(|(have, _, _, group)| *have == ch && *group == layout)
+                            {
+                                map.push((ch, code, level, layout));
                             }
                         }
                     }
@@ -363,8 +369,16 @@ impl Layout {
         let want = ch as u32;
         self.map
             .iter()
-            .find(|(have, _, _)| *have == want)
-            .map(|(_, code, level)| (*code, *level))
+            .find(|(have, _, _, _)| *have == want)
+            .map(|(_, code, level, _)| (*code, *level))
+    }
+
+    fn lookup_group(&self, ch: char, group: u32) -> Option<KeyCode> {
+        let want = ch as u32;
+        self.map
+            .iter()
+            .find(|(have, _, _, layout)| *have == want && *layout == group)
+            .map(|(_, code, _, _)| *code)
     }
 }
 
@@ -406,7 +420,51 @@ fn active_layout() -> String {
     "us".to_string()
 }
 
+fn chord_layout() -> (String, u32) {
+    if let Ok(layout) = std::env::var("XKB_DEFAULT_LAYOUT") {
+        if !layout.is_empty() {
+            return (layout, 0);
+        }
+    }
+    if let Some(found) = hypr_keyboard() {
+        return found;
+    }
+    (active_layout(), 0)
+}
+
+fn hypr_keyboard() -> Option<(String, u32)> {
+    let value = hypr_request(b"j/devices")?;
+    let keyboards = value.get("keyboards")?.as_array()?;
+    let pick = keyboards
+        .iter()
+        .find(|kb| kb.get("name").and_then(|n| n.as_str()) == Some("warmup-companion-keyboard"))
+        .or_else(|| {
+            keyboards
+                .iter()
+                .find(|kb| kb.get("main").and_then(|m| m.as_bool()) == Some(true))
+        })?;
+    let layout = pick.get("layout")?.as_str()?.trim();
+    if layout.is_empty() {
+        return None;
+    }
+    let group = pick
+        .get("active_layout_index")
+        .and_then(|i| i.as_u64())
+        .unwrap_or(0) as u32;
+    Some((layout.to_string(), group))
+}
+
 fn hypr_layout() -> Option<String> {
+    let value = hypr_request(b"j/getoption input:kb_layout")?;
+    let layout = value.get("str")?.as_str()?.trim();
+    if layout.is_empty() {
+        None
+    } else {
+        Some(layout.split(',').next().unwrap_or(layout).to_string())
+    }
+}
+
+fn hypr_request(command: &[u8]) -> Option<serde_json::Value> {
     let sig = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")?;
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")?;
     let sock = std::path::PathBuf::from(runtime)
@@ -417,7 +475,7 @@ fn hypr_layout() -> Option<String> {
     stream
         .set_read_timeout(Some(Duration::from_millis(300)))
         .ok()?;
-    stream.write_all(b"j/getoption input:kb_layout").ok()?;
+    stream.write_all(command).ok()?;
     let mut buf = Vec::new();
     let mut tmp = [0u8; 2048];
     loop {
@@ -427,14 +485,7 @@ fn hypr_layout() -> Option<String> {
             Err(_) => break,
         }
     }
-    let text = String::from_utf8_lossy(&buf);
-    let value = serde_json::from_str::<serde_json::Value>(&text).ok()?;
-    let layout = value.get("str")?.as_str()?.trim();
-    if layout.is_empty() {
-        None
-    } else {
-        Some(layout.split(',').next().unwrap_or(layout).to_string())
-    }
+    serde_json::from_slice(&buf).ok()
 }
 
 fn code_for_raw(code: u16) -> Option<KeyCode> {
