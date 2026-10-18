@@ -442,7 +442,7 @@ impl Shell {
 
     fn look(&self) -> crate::vk_paint::VkLook {
         if let Some(info) = self.output.as_ref().and_then(|output| self.output_state.info(output)) {
-            OUTPUT_IS_TV.store(is_tv(info.physical_size), Ordering::SeqCst);
+            OUTPUT_IS_TV.store(crate::vk_look::is_tv(info.physical_size.0, info.physical_size.1), Ordering::SeqCst);
         }
         look()
     }
@@ -656,15 +656,6 @@ fn desired_size(output_w: f32, output_h: f32, look: crate::vk_paint::VkLook) -> 
     let rows = crate::vk_nav::rows_snapshot();
     let docked = matches!(vk_layout_mode(), VkLayoutMode::Docked);
     draw::card_size(output_w, output_h, docked, &rows, look)
-}
-
-fn is_tv((width_mm, height_mm): (i32, i32)) -> bool {
-    if width_mm <= 0 || height_mm <= 0 {
-        return false;
-    }
-    let (w, h) = (width_mm as f32, height_mm as f32);
-    let diagonal = (w * w + h * h).sqrt() / 25.4;
-    diagonal >= 40.0 && w / h <= 2.0
 }
 
 fn ps5_pad() -> bool {

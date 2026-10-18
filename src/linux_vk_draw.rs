@@ -6,7 +6,7 @@ use tiny_skia::Pixmap;
 
 use crate::config::{KeyboardTheme, VkStyle};
 use crate::mono_ui::Gfx;
-use crate::vk_paint::{VkLook, VkPalette};
+use crate::vk_paint::VkLook;
 use crate::vk_geom::{self, KeyRect};
 use crate::vk_key::{VK_BACK, VK_DOWN, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP};
 use crate::vk_motion::{self, concentric_radius};
@@ -1035,7 +1035,7 @@ fn draw_strip(
 }
 
 fn palette(look: VkLook, theme: &KeyboardTheme) -> Pal {
-    let v = themed_palette(crate::vk_paint::style_palette(look.style, true), look.style, theme);
+    let v = crate::vk_look::themed_palette(crate::vk_paint::style_palette(look.style, true), look.style, *theme);
     Pal {
         bg: from_colorref(v.bg),
         key: from_colorref(v.key),
@@ -1053,80 +1053,7 @@ fn palette(look: VkLook, theme: &KeyboardTheme) -> Pal {
 }
 
 pub fn accent(look: VkLook, theme: &KeyboardTheme) -> u32 {
-    themed_palette(crate::vk_paint::style_palette(look.style, true), look.style, theme).accent
-}
-
-fn themed_palette(mut pal: VkPalette, style: VkStyle, theme: &KeyboardTheme) -> VkPalette {
-    use crate::vk_paint::mix_color;
-    if style == VkStyle::Modern {
-        if let Some(v) = theme.bg {
-            pal.bg = v;
-        }
-        if let Some(v) = theme.text {
-            pal.text = v;
-            pal.enter_text = v;
-            pal.text_dim = mix_color(v, pal.bg, 0.8);
-        }
-        if let Some(v) = theme.sel_text {
-            pal.sel_text = v;
-        }
-        if let Some(v) = theme.accent {
-            pal.accent = v;
-            pal.sel_ring = v;
-            pal.chip_sel = v;
-        }
-        if let Some(v) = theme.key {
-            pal.key = v;
-            pal.key_action = mix_color(pal.text, v, 0.08);
-        }
-        if theme.key.is_some() || theme.accent.is_some() {
-            if let Some(tint) = theme.accent.or(pal.mod_tint.map(|(_, bar)| bar)) {
-                pal.key_enter = mix_color(tint, pal.key, 0.14);
-                pal.mod_tint = Some((mix_color(tint, pal.key, 0.2), tint));
-            }
-        }
-        if let Some(v) = theme.border {
-            pal.border = v;
-            pal.panel_stroke = v;
-            pal.panel_stroke_alpha = 1.0;
-        }
-        return pal;
-    }
-    if style == VkStyle::Mono {
-        if let Some(v) = theme.accent {
-            pal.accent = mix_color(v, pal.key, 0.7);
-            pal.sel_ring = v;
-        }
-        if let Some(v) = theme.sel_text {
-            pal.sel_text = v;
-        }
-        return pal;
-    }
-    if let Some(v) = theme.bg {
-        pal.bg = v;
-    }
-    if let Some(v) = theme.key {
-        pal.key = v;
-        pal.key_action = mix_color(0x000000, v, 0.26);
-        pal.chip_sel = mix_color(0xFFFFFF, v, 0.10);
-    }
-    if let Some(v) = theme.accent {
-        pal.accent = v;
-        pal.sel_ring = mix_color(0xFFFFFF, v, 0.5);
-    }
-    if let Some(v) = theme.text {
-        pal.text = v;
-        pal.text_dim = v;
-    }
-    if let Some(v) = theme.sel_text {
-        pal.sel_text = v;
-    }
-    if let Some(v) = theme.border {
-        pal.border = v;
-        pal.panel_stroke = v;
-        pal.panel_stroke_alpha = 1.0;
-    }
-    pal
+    crate::vk_look::themed_palette(crate::vk_paint::style_palette(look.style, true), look.style, *theme).accent
 }
 
 fn rgb(v: u32) -> Rgb {

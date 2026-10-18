@@ -66,6 +66,8 @@ mod vk_commit;
 #[cfg(windows)]
 mod image_paste;
 mod vk_geom;
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+mod vk_look;
 mod vk_key;
 #[cfg(all(windows, feature = "vk-panels"))]
 mod clipboard_history;
