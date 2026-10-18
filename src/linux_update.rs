@@ -156,9 +156,10 @@ pub(crate) fn spawn_auto_check() {
                 match check() {
                     Ok(Check::Available(release)) if release.version != notified => {
                         log(&format!("v{} available", release.version));
+                        let bin = crate::paths::install_dir().join(BIN_NAME);
                         notify(
                             &format!("warmUP companion v{} is available", release.version),
-                            "Run warmup-companion update to install it.",
+                            &format!("Run {} update to install it.", bin.display()),
                         );
                         notified = release.version;
                     }
