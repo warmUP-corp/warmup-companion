@@ -1767,28 +1767,19 @@ impl VkRenderer {
             .controller_art_cache
             .get(&key)
             .ok_or_else(|| format!("missing controller art cache {art:?}"))?;
-        let source_aspect = *width as f32 / *height as f32;
-        let fit_w = rect.right - rect.left;
-        let fit_h = rect.bottom - rect.top;
-        let (draw_w, draw_h) = if fit_w / fit_h > source_aspect {
-            (fit_h * source_aspect, fit_h)
-        } else {
-            (fit_w, fit_w / source_aspect)
-        };
-        let dest = D2D_RECT_F {
-            left: (rect.left + rect.right - draw_w) * 0.5,
-            top: (rect.top + rect.bottom - draw_h) * 0.5,
-            right: (rect.left + rect.right + draw_w) * 0.5,
-            bottom: (rect.top + rect.bottom + draw_h) * 0.5,
-        };
-        self.d2d_context.DrawBitmap(
-            bitmap,
-            Some(&dest),
-            opacity.clamp(0.0, 1.0),
-            D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
-            None,
-            None,
+        let (bitmap, width, height) = (bitmap.clone(), *width, *height);
+        let g = &mut self.gfx;
+        let dest = crate::vk_paint::fit_rect(
+            crate::mono_ui::Rect {
+                x: rect.left,
+                y: rect.top,
+                w: rect.right - rect.left,
+                h: rect.bottom - rect.top,
+            },
+            width as f32,
+            height as f32,
         );
+        g.draw_bitmap(&bitmap, dest, opacity.clamp(0.0, 1.0), true);
         Ok(())
     }
 
