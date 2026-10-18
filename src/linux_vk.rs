@@ -534,7 +534,7 @@ impl Shell {
                 draw::paint_voice_key(&mut self.gfx, &frame, &bytes, px);
             }
         }
-        let pixels = draw::to_argb(self.gfx.pixels());
+        let pixels = draw::to_argb(&self.gfx.pixels());
         let buffer_w = self.gfx.width() as i32;
         let buffer_h = self.gfx.height() as i32;
         let stride = buffer_w * 4;
@@ -753,7 +753,7 @@ impl Prompt {
 
     fn draw(&mut self, qh: &QueueHandle<Self>) {
         draw::paint_prompt(&mut self.gfx, "Press L3 to open the keyboard", 1.0);
-        let pixels = draw::to_argb(self.gfx.pixels());
+        let pixels = draw::to_argb(&self.gfx.pixels());
         let buffer_w = self.gfx.width() as i32;
         let buffer_h = self.gfx.height() as i32;
         let Ok((buffer, canvas)) = self.pool.create_buffer(

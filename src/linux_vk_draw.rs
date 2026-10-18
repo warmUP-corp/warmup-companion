@@ -1282,7 +1282,7 @@ fn text_aligned(
     };
 }
 
-fn blit_svg(g: &mut Gfx, svg: &str, x0: f32, y0: f32, x1: f32, y1: f32, size: f32, scale: f32, tint: Option<Rgb>, alpha: u8) {
+fn blit_svg(g: &mut Gfx, svg: &'static str, x0: f32, y0: f32, x1: f32, y1: f32, size: f32, scale: f32, tint: Option<Rgb>, alpha: u8) {
     if alpha == 0 {
         return;
     }

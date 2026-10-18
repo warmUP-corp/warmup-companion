@@ -275,7 +275,7 @@ impl Presenter {
             let strip_live = strip_live(glide, frame);
             if strip_live || self.base.is_none() || self.stamp != stamp {
                 draw::paint_base(g, frame, glide);
-                self.base = Some(upload(&self.device, &self.queue, "keyboard-base", g.pixels(), g.width(), g.height()));
+                self.base = Some(upload(&self.device, &self.queue, "keyboard-base", &g.pixels(), g.width(), g.height()));
                 self.keys.clear();
                 self.stamp = if strip_live { !stamp } else { stamp };
                 raster = true;
@@ -283,7 +283,7 @@ impl Presenter {
             if !self.keys.contains_key(&key_id) {
                 match draw::paint_selected_key(g, frame, 1.0) {
                     Some(patch) => {
-                        let image = upload(&self.device, &self.queue, "keyboard-key", g.pixels(), g.width(), g.height());
+                        let image = upload(&self.device, &self.queue, "keyboard-key", &g.pixels(), g.width(), g.height());
                         self.keys.insert(
                             key_id,
                             KeyGpu {
@@ -314,7 +314,7 @@ impl Presenter {
             let stamp = full_stamp(frame, glide);
             if self.mode != mode || self.base.is_none() || self.stamp != stamp {
                 draw::paint_frame(g, frame, glide);
-                self.base = Some(upload(&self.device, &self.queue, "keyboard-frame", g.pixels(), g.width(), g.height()));
+                self.base = Some(upload(&self.device, &self.queue, "keyboard-frame", &g.pixels(), g.width(), g.height()));
                 self.keys.clear();
                 raster = true;
             }

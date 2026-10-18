@@ -192,7 +192,7 @@ impl Pill {
         if !crate::linux_vk::paint_voice_screen(&mut self.gfx, width, height, phase, 0.0, false, None, 0, accent) {
             return;
         }
-        let pixels = crate::linux_vk::draw_argb(self.gfx.pixels());
+        let pixels = crate::linux_vk::draw_argb(&self.gfx.pixels());
         let size = (self.gfx.width(), self.gfx.height());
         if !self.upload(&pixels, size, qh, true) {
             return;

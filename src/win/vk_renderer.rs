@@ -7,7 +7,6 @@ use std::time::Instant;
 use windows::core::{w, Interface};
 use windows::Foundation::Numerics::Matrix3x2;
 use windows::Win32::Foundation::{BOOL, HWND, RECT};
-use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
     D2D1_FILL_MODE_ALTERNATE, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_POINT_2F, D2D_RECT_F,
@@ -59,7 +58,7 @@ use super::controller_tips::TipToken;
 use super::nimbus_orb::{drive_scale, mood_drive, NimbusMood, NimbusOrb, ORB_FRAME_FILL};
 use super::shortcut_sheet::{self, Line};
 use crate::config::VkStyle;
-use crate::mono_ui::Gfx;
+use crate::mono_ui::{Gfx, user_locale_name};
 use crate::vk_nav::{KeyAction, KeyCell, KeyPos, KeyRow};
 pub use crate::vk_paint::{
     FLOATING_PANEL_INSET,
@@ -2661,9 +2660,7 @@ impl VkRenderer {
     }
 
     unsafe fn measure_px(&self, style: VkStyle, text: &str, px: f32) -> f32 {
-        self.text_format(style, px)
-            .map(|f| self.measure_text(text, &f))
-            .unwrap_or(0.0)
+        crate::vk_paint::paint_measure_px(&self.gfx, style, text, px)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2677,20 +2674,21 @@ impl VkRenderer {
         color: u32,
         alpha: f32,
     ) -> Result<f32, String> {
-        let format = self.text_format(style, px)?;
-        let w = self.measure_text(text, &format);
-        let brush = solid_brush(&self.d2d_context, colorref_alpha(color, alpha))?;
-        self.d2d_context.DrawText(
-            &wide(text),
-            &format,
-            &D2D_RECT_F {
-                left,
-                right: left + w,
-                ..band
+        let g = &mut self.gfx;
+        let w = crate::vk_paint::paint_text_px(
+            g,
+            style,
+            text,
+            px,
+            left,
+            crate::mono_ui::Rect {
+                x: band.left,
+                y: band.top,
+                w: band.right - band.left,
+                h: band.bottom - band.top,
             },
-            &brush,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-            DWRITE_MEASURING_MODE_NATURAL,
+            color,
+            alpha,
         );
         Ok(w)
     }
@@ -4589,18 +4587,6 @@ unsafe fn create_dwrite() -> Result<IDWriteFactory, String> {
 }
 
 /// `CreateTextFormat` rejects a null locale on some builds; use the user default.
-fn user_locale_name() -> windows::core::HSTRING {
-    let mut buf = [0u16; 85];
-    let len = unsafe { GetUserDefaultLocaleName(&mut buf) };
-    if len > 1 {
-        let end = (len - 1) as usize;
-        String::from_utf16_lossy(&buf[..end])
-    } else {
-        "en-US".to_string()
-    }
-    .into()
-}
-
 fn key_metrics(
     scale_w: f32,
     client_h: f32,
