@@ -157,34 +157,6 @@ fn translate(dx: f32, dy: f32) -> Matrix3x2 {
 }
 
 
-unsafe fn draw_blur_shadow(
-    ctx: &ID2D1DeviceContext,
-    rect: D2D_RECT_F,
-    radius: f32,
-    dy: f32,
-    blur: f32,
-    alpha: f32,
-) -> Result<(), String> {
-    for (spread, a) in blur_shadow_layers(blur, alpha) {
-        let brush = solid_brush(ctx, colorref_alpha(0x000000, a))?;
-        let r = (radius + spread).max(0.0);
-        ctx.FillRoundedRectangle(
-            &D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F {
-                    left: rect.left - spread,
-                    top: rect.top - spread + dy,
-                    right: rect.right + spread,
-                    bottom: rect.bottom + spread + dy,
-                },
-                radiusX: r,
-                radiusY: r,
-            },
-            &brush,
-        );
-    }
-    Ok(())
-}
-
 fn rounded(rect: D2D_RECT_F, radius: f32) -> D2D1_ROUNDED_RECT {
     D2D1_ROUNDED_RECT {
         rect,
@@ -2041,14 +2013,20 @@ impl VkRenderer {
             let action_key = is_action_key(&key.action);
             if selected {
                 if let Some((dy, blur, alpha)) = spec.sel_shadow {
-                    draw_blur_shadow(
-                        &self.d2d_context,
-                        key_rect,
+                    let g = &mut self.gfx;
+                    crate::vk_paint::paint_blur_strokes(
+                        g,
+                        crate::mono_ui::Rect {
+                            x: key_rect.left,
+                            y: key_rect.top,
+                            w: key_rect.right - key_rect.left,
+                            h: key_rect.bottom - key_rect.top,
+                        },
                         radius,
                         dy * unit,
                         blur * unit,
                         alpha,
-                    )?;
+                    );
                 }
             } else if spec.key_shadow_dy > 0.0 {
                 let dy = (spec.key_shadow_dy * unit).max(1.0);
@@ -3058,14 +3036,20 @@ impl VkRenderer {
             let r = (chip.bottom - chip.top) * 0.5;
             if selected {
                 if let Some((dy, blur, a)) = spec.sel_shadow {
-                    draw_blur_shadow(
-                        &self.d2d_context,
-                        chip,
+                    let g = &mut self.gfx;
+                    crate::vk_paint::paint_blur_strokes(
+                        g,
+                        crate::mono_ui::Rect {
+                            x: chip.left,
+                            y: chip.top,
+                            w: chip.right - chip.left,
+                            h: chip.bottom - chip.top,
+                        },
                         r,
                         dy * geom.unit,
                         blur * geom.unit,
                         a * alpha,
-                    )?;
+                    );
                 }
             }
             self.d2d_context

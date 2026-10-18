@@ -683,6 +683,30 @@ pub fn fit_rect(dst: Rect, src_w: f32, src_h: f32) -> Rect {
     }
 }
 
+pub unsafe fn paint_blur_strokes(
+    g: &mut Gfx,
+    r: Rect,
+    radius: f32,
+    dy: f32,
+    blur: f32,
+    alpha: f32,
+) {
+    for (spread, a) in blur_shadow_layers(blur, alpha) {
+        let rad = (radius + spread).max(0.0);
+        g.fill(
+            Rect {
+                x: r.x - spread,
+                y: r.y - spread + dy,
+                w: r.w + spread * 2.0,
+                h: r.h + spread * 2.0,
+            },
+            rad,
+            0x000000,
+            a,
+        );
+    }
+}
+
 pub unsafe fn paint_voice_orb(
     g: &mut Gfx,
     accent: u32,
