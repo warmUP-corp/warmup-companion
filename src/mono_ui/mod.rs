@@ -241,6 +241,33 @@ pub(crate) fn svg_bgra(svg: &str, px: u32, tint: u32) -> Option<Vec<u8>> {
     )
 }
 
+pub(crate) fn svg_bgra_scaled(svg: &str, px: u32, tint: u32, scale: f32) -> Option<Vec<u8>> {
+    let svg = svg.replace(
+        "currentColor",
+        &format!(
+            "#{:02X}{:02X}{:02X}",
+            tint & 0xff,
+            (tint >> 8) & 0xff,
+            (tint >> 16) & 0xff
+        ),
+    );
+    let tree =
+        resvg::usvg::Tree::from_data(svg.as_bytes(), &resvg::usvg::Options::default()).ok()?;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(px, px)?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    Some(
+        pixmap
+            .data()
+            .chunks_exact(4)
+            .flat_map(|p| [p[2], p[1], p[0], p[3]])
+            .collect(),
+    )
+}
+
 pub(crate) fn logo_bgra(px: u32, tint: u32) -> Option<Vec<u8>> {
     let mut reader = png::Decoder::new(std::io::Cursor::new(LOGO_PNG))
         .read_info()

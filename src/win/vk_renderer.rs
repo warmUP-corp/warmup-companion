@@ -70,7 +70,6 @@ pub use crate::vk_paint::{
     VkLook,
     VkPalette,
     blur_shadow_layers,
-    colorref_hex,
     colorref_mix,
     floating_pad,
     lerp,
@@ -286,7 +285,7 @@ pub struct VkRenderer {
     dip_scale: f32,
     swapchain: IDXGISwapChain1,
     d2d_context: ID2D1DeviceContext,
-    gfx: Option<Gfx>,
+    gfx: Gfx,
     /// Owns the swapchain buffer. Must be dropped before `ResizeBuffers`, or the
     /// resize fails and every later draw is left with no target (the last pill
     /// frame stays on screen).
@@ -300,7 +299,6 @@ pub struct VkRenderer {
     /// Fixed large font for the connect/keyboard prompt pills (10-foot UI).
     prompt_format: IDWriteTextFormat,
     prompt_fonts: Option<PromptFonts>,
-    icon_cache: HashMap<IconCacheKey, ID2D1Bitmap1>,
     controller_art_cache: HashMap<ControllerArtCacheKey, (ID2D1Bitmap1, u32, u32)>,
     prompt_started: Instant,
     /// Gliding focus-ring rect (client px) + the previous draw time, so the ring
@@ -676,13 +674,6 @@ enum VkIcon {
     XboxRb,
     XboxLt,
     XboxRt,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct IconCacheKey {
-    icon: VkIcon,
-    px: u32,
-    color: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1475,9 +1466,9 @@ impl VkRenderer {
             height,
             dip_scale: 1.0,
             swapchain,
-            d2d_context,
+            d2d_context: d2d_context.clone(),
             d2d_target: Some(d2d_target),
-            gfx: None,
+            gfx: Gfx::wrap(&d2d_context)?,
             dwrite,
             text_format,
             glyph_format,
@@ -1485,7 +1476,6 @@ impl VkRenderer {
             style_fonts: None,
             prompt_format,
             prompt_fonts: None,
-            icon_cache: HashMap::new(),
             controller_art_cache: HashMap::new(),
             prompt_started: Instant::now(),
             anim_sel: None,
@@ -1522,11 +1512,9 @@ impl VkRenderer {
         };
     }
 
-    unsafe fn gfx(&mut self) -> Result<&mut Gfx, String> {
-        if self.gfx.is_none() {
-            self.gfx = Some(Gfx::wrap(&self.d2d_context)?);
-        }
-        self.gfx.as_mut().ok_or("keyboard graphics unavailable".into())
+    unsafe fn set_transform(&mut self, m: &Matrix3x2) {
+        self.d2d_context.SetTransform(m);
+        self.gfx.transform(m.M11, m.M31, m.M32);
     }
 
     unsafe fn dip_canvas(&self) -> (f32, f32) {
@@ -1663,73 +1651,22 @@ impl VkRenderer {
                 .clamp(54.0, (draw_px * 3.0).max(192.0)),
             _ => (draw_px * self.dip_scale).round(),
         } as u32;
-        let key = IconCacheKey {
-            icon,
-            px: raster_px,
-            color,
-        };
-        if !self.icon_cache.contains_key(&key) {
-            let svg = icon.svg().replace("currentColor", &colorref_hex(color));
-            let opt = resvg::usvg::Options::default();
-            let tree = resvg::usvg::Tree::from_data(svg.as_bytes(), &opt)
-                .map_err(|e| format!("parse svg icon {icon:?}: {e}"))?;
-            let mut pixmap = resvg::tiny_skia::Pixmap::new(raster_px, raster_px)
-                .ok_or_else(|| format!("alloc svg icon pixmap {raster_px}x{raster_px}"))?;
-            let source_px = if icon.is_controller_tip() { 32.0 } else { 24.0 };
-            let scale = raster_px as f32 / source_px;
-            resvg::render(
-                &tree,
-                resvg::tiny_skia::Transform::from_scale(scale, scale),
-                &mut pixmap.as_mut(),
-            );
-
-            let mut bgra = pixmap.data().to_vec();
-            for px in bgra.chunks_exact_mut(4) {
-                px.swap(0, 2);
-            }
-            let props = D2D1_BITMAP_PROPERTIES1 {
-                pixelFormat: D2D1_PIXEL_FORMAT {
-                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-                },
-                dpiX: 96.0,
-                dpiY: 96.0,
-                bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
-                colorContext: ManuallyDrop::new(None),
-            };
-            let bitmap = self
-                .d2d_context
-                .CreateBitmap(
-                    D2D_SIZE_U {
-                        width: raster_px,
-                        height: raster_px,
-                    },
-                    Some(bgra.as_ptr() as *const core::ffi::c_void),
-                    raster_px * 4,
-                    &props,
-                )
-                .map_err(|e| format!("CreateBitmap svg icon {icon:?}: {e}"))?;
-            self.icon_cache.insert(key, bitmap);
-        }
-
-        let bitmap = self
-            .icon_cache
-            .get(&key)
-            .ok_or_else(|| format!("missing svg icon cache {icon:?}"))?;
+        let source_px = if icon.is_controller_tip() { 32.0 } else { 24.0 };
         let size = draw_px;
-        let dest = D2D_RECT_F {
-            left: (rect.left + rect.right - size) * 0.5,
-            top: (rect.top + rect.bottom - size) * 0.5,
-            right: (rect.left + rect.right + size) * 0.5,
-            bottom: (rect.top + rect.bottom + size) * 0.5,
-        };
-        self.d2d_context.DrawBitmap(
-            bitmap,
-            Some(&dest),
+        let g = &mut self.gfx;
+        crate::vk_paint::paint_svg_icon(
+            g,
+            icon.svg(),
+            raster_px,
+            color,
+            crate::mono_ui::Rect {
+                x: (rect.left + rect.right - size) * 0.5,
+                y: (rect.top + rect.bottom - size) * 0.5,
+                w: size,
+                h: size,
+            },
             opacity.clamp(0.0, 1.0),
-            D2D1_INTERPOLATION_MODE_LINEAR,
-            None,
-            None,
+            source_px,
         );
         Ok(())
     }
@@ -1830,28 +1767,19 @@ impl VkRenderer {
             .controller_art_cache
             .get(&key)
             .ok_or_else(|| format!("missing controller art cache {art:?}"))?;
-        let source_aspect = *width as f32 / *height as f32;
-        let fit_w = rect.right - rect.left;
-        let fit_h = rect.bottom - rect.top;
-        let (draw_w, draw_h) = if fit_w / fit_h > source_aspect {
-            (fit_h * source_aspect, fit_h)
-        } else {
-            (fit_w, fit_w / source_aspect)
-        };
-        let dest = D2D_RECT_F {
-            left: (rect.left + rect.right - draw_w) * 0.5,
-            top: (rect.top + rect.bottom - draw_h) * 0.5,
-            right: (rect.left + rect.right + draw_w) * 0.5,
-            bottom: (rect.top + rect.bottom + draw_h) * 0.5,
-        };
-        self.d2d_context.DrawBitmap(
-            bitmap,
-            Some(&dest),
-            opacity.clamp(0.0, 1.0),
-            D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
-            None,
-            None,
+        let (bitmap, width, height) = (bitmap.clone(), *width, *height);
+        let g = &mut self.gfx;
+        let dest = crate::vk_paint::fit_rect(
+            crate::mono_ui::Rect {
+                x: rect.left,
+                y: rect.top,
+                w: rect.right - rect.left,
+                h: rect.bottom - rect.top,
+            },
+            width as f32,
+            height as f32,
         );
+        g.draw_bitmap(&bitmap, dest, opacity.clamp(0.0, 1.0), true);
         Ok(())
     }
 
@@ -1881,7 +1809,7 @@ impl VkRenderer {
         alpha_scale: f32,
     ) -> Result<(), String> {
         let t = self.prompt_started.elapsed().as_secs_f32();
-        let g = self.gfx()?;
+        let g = &mut self.gfx;
         crate::vk_paint::paint_voice_orb(
             g, accent, level, transcribing, cx, cy, unit, alpha_scale, t,
         );
@@ -1976,7 +1904,7 @@ impl VkRenderer {
         self.d2d_context.BeginDraw();
         // Per-key press transforms below are scoped; start every frame clean in
         // case a previous frame bailed mid-key.
-        self.d2d_context.SetTransform(&IDENTITY);
+        self.set_transform(&IDENTITY);
 
         // Suggestion strip entrance clock: arm on hidden->shown, drop on hide.
         match (candidates.is_some(), self.strip_shown_at) {
@@ -2102,11 +2030,11 @@ impl VkRenderer {
                 .filter(|(p, _)| p.row == kr.pos.row && p.col == kr.pos.col)
                 .map(|(_, s)| s);
             if let Some(s) = press {
-                self.d2d_context.SetTransform(&scale_about(
-                    s,
-                    (kr.left + kr.right) * 0.5,
-                    (kr.top + kr.bottom) * 0.5,
-                ));
+                self.set_transform(&scale_about(
+                s,
+                (kr.left + kr.right) * 0.5,
+                (kr.top + kr.bottom) * 0.5,
+            ));
             }
             let key_rect = kr.rect();
             let rect = rounded(key_rect, radius);
@@ -2359,7 +2287,7 @@ impl VkRenderer {
                 }
             }
             if press.is_some() {
-                self.d2d_context.SetTransform(&IDENTITY);
+                self.set_transform(&IDENTITY);
             }
         }
 
@@ -2376,16 +2304,16 @@ impl VkRenderer {
                 .filter(|(p, _)| p.row == sel.row && p.col == sel.col)
                 .map(|(_, s)| s);
             if let Some(s) = ring_press {
-                self.d2d_context.SetTransform(&scale_about(
-                    s,
-                    (ring.left + ring.right) * 0.5,
-                    (ring.top + ring.bottom) * 0.5,
-                ));
+                self.set_transform(&scale_about(
+                s,
+                (ring.left + ring.right) * 0.5,
+                (ring.top + ring.bottom) * 0.5,
+            ));
             }
             self.d2d_context
                 .DrawRoundedRectangle(&rr, &sel_ring_brush, ring_w, None);
             if ring_press.is_some() {
-                self.d2d_context.SetTransform(&IDENTITY);
+                self.set_transform(&IDENTITY);
             }
         }
 
@@ -2413,7 +2341,7 @@ impl VkRenderer {
         // Suggestion pill last, so it floats on top of the keys (and the ring).
         if let Some(strip) = candidates.filter(|_| !panel_open) {
             let geom = StripGeom::above(&rects, spec, unit);
-            self.d2d_context.SetTransform(&translate(0.0, strip_dy));
+            self.set_transform(&translate(0.0, strip_dy));
             let result = self.draw_strip(
                 spec,
                 pal,
@@ -2423,7 +2351,7 @@ impl VkRenderer {
                 strip_alpha.clamp(0.0, 1.0),
                 controller_icons,
             );
-            self.d2d_context.SetTransform(&IDENTITY);
+            self.set_transform(&IDENTITY);
             result?;
         }
 
@@ -3456,7 +3384,7 @@ impl VkRenderer {
         let breathe = ((t * std::f32::consts::TAU * 0.33).sin() * 0.5 + 0.5) * 0.015;
         let scale = 1.0 - (0.015 - breathe) * prompt_alpha;
         let pill_cy = ch - PROMPT_PILL_H * 0.5;
-        self.d2d_context.SetTransform(&Matrix3x2 {
+        self.set_transform(&Matrix3x2 {
             M11: scale,
             M12: 0.0,
             M21: 0.0,
@@ -3659,7 +3587,7 @@ impl VkRenderer {
             }
         }
 
-        self.d2d_context.SetTransform(&identity);
+        self.set_transform(&identity);
         self.d2d_context
             .EndDraw(None, None)
             .map_err(|e| format!("EndDraw: {e}"))?;
@@ -3799,8 +3727,8 @@ impl VkRenderer {
         let pill_cy = bottom - pill_h * 0.5;
         let alpha = p.alpha.clamp(0.0, 1.0);
 
-        self.d2d_context
-            .SetTransform(&scale_about(p.scale, cw * 0.5, pill_cy));
+        self
+            .set_transform(&scale_about(p.scale, cw * 0.5, pill_cy));
         self.d2d_context.BeginDraw();
         self.d2d_context.Clear(Some(&D2D1_COLOR_F {
             r: 0.0,
@@ -3916,7 +3844,7 @@ impl VkRenderer {
             let _ = self.text_format.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
         }
 
-        self.d2d_context.SetTransform(&IDENTITY);
+        self.set_transform(&IDENTITY);
         self.d2d_context
             .EndDraw(None, None)
             .map_err(|e| format!("EndDraw: {e}"))?;
@@ -3986,7 +3914,7 @@ impl VkRenderer {
         (dy, blur, alpha): (f32, f32, f32),
     ) -> Result<(), String> {
         let r = shape.rect;
-        let g = self.gfx()?;
+        let g = &mut self.gfx;
         crate::vk_paint::paint_outer_shadow(
             g,
             crate::mono_ui::Rect {
@@ -4083,8 +4011,8 @@ impl VkRenderer {
         );
         let stroke = colorref_alpha(white, lerp(stroke_alpha, spec.card_stroke_alpha, card_t));
 
-        self.d2d_context
-            .SetTransform(&scale_about(scale, cw * 0.5, pill_cy));
+        self
+            .set_transform(&scale_about(scale, cw * 0.5, pill_cy));
         self.d2d_context.BeginDraw();
         self.d2d_context.Clear(Some(&D2D1_COLOR_F {
             r: 0.0,
@@ -4246,7 +4174,7 @@ impl VkRenderer {
             );
         }
 
-        self.d2d_context.SetTransform(&IDENTITY);
+        self.set_transform(&IDENTITY);
         self.d2d_context
             .EndDraw(None, None)
             .map_err(|e| format!("EndDraw: {e}"))?;
@@ -4320,7 +4248,7 @@ impl VkRenderer {
     /// small radius.
     unsafe fn draw_display_border(&mut self, accent: u32, alpha: f32) -> Result<(), String> {
         let (cw, ch) = self.dip_canvas();
-        let g = self.gfx()?;
+        let g = &mut self.gfx;
         crate::vk_paint::paint_display_border(g, cw, ch, accent, alpha)
     }
 
@@ -4366,7 +4294,7 @@ impl VkRenderer {
                 b: 0.0,
                 a: 0.0,
             }));
-            self.d2d_context.SetTransform(&IDENTITY);
+            self.set_transform(&IDENTITY);
             let border_alpha = if matches!(phase, VoicePhase::Transcribing) {
                 let t = self.prompt_started.elapsed().as_secs_f32();
                 let pulse = 0.5 + 0.5 * (t * 2.4).sin();
@@ -4738,7 +4666,7 @@ impl VkRenderer {
         let family = ControllerIconFamily::Ps5;
         let (w, h) = (self.width as f32, self.height as f32);
         self.d2d_context.BeginDraw();
-        self.d2d_context.SetTransform(&IDENTITY);
+        self.set_transform(&IDENTITY);
         self.d2d_context.Clear(Some(&colorref(pal.bg)));
         let drawn = if sheet {
             let panel = D2D_RECT_F {
