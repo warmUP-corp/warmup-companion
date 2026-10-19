@@ -82,7 +82,6 @@ struct Pal {
     bg: Rgb,
     accent: Rgb,
     sel_ring: Rgb,
-    text: Rgb,
     panel_stroke: Rgb,
     panel_stroke_alpha: f32,
 }
@@ -318,7 +317,7 @@ fn render_keyboard(
         paint_strip(g, frame, strip, &rects, unit, scale, strip_dy, strip_alpha);
     }
     if !look.tv_layout() {
-        draw_legend(g, spec, &pal, &rects, frame.logical_w, frame.logical_h, lu, scale, frame.ps5);
+        paint_legend(g, frame, &rects, lu, scale);
     }
     if let Some((x, y, w, h, radius)) = panel {
         clip_round(g, x, y, w, h, radius);
@@ -338,147 +337,28 @@ enum Leg {
     Slash,
 }
 
-const LEGEND_ROWS: &[(&[Leg], &str)] = &[
-    (&[Leg::Btn("A")], "Type"),
-    (&[Leg::Btn("B")], "Delete"),
-    (&[Leg::Btn("LB"), Leg::Slash, Leg::Btn("RB")], "Move caret"),
-    (&[Leg::Btn("RT")], "Shift"),
-    (&[Leg::Btn("R3")], "Dictate"),
-    (&[Leg::Btn("SELECT"), Leg::Plus, Leg::Btn("Y")], "Paste"),
-    (&[Leg::Word("Tap"), Leg::Btn("SELECT")], "Suggestions"),
-    (&[Leg::Btn("L3")], "Close keyboard"),
-    (&[Leg::Word("Hold"), Leg::Btn("SELECT")], "All shortcuts"),
-];
 
-fn text_px(design: f32, u: f32) -> f32 {
-    (design * u).max(LEGEND_MIN_TEXT_PX)
-}
 
-fn fit_legend(widths: &[f32], sep: f32, avail: f32) -> Vec<usize> {
-    let mut kept: Vec<usize> = (0..widths.len()).collect();
-    let total = |kept: &[usize]| {
-        kept.iter().map(|&i| widths[i]).sum::<f32>() + sep * kept.len().saturating_sub(1) as f32
+
+
+
+fn paint_legend(g: &mut Gfx, frame: &Frame, rects: &[KeyRect], lu: f32, scale: f32) {
+    let look = frame.look();
+    let pal = vk_palette(frame);
+    let pad_x = crate::vk_paint::floating_pad(ui_scale(), look).0;
+    let (left, right) = crate::vk_paint::legend_span(rects, frame.logical_w, pad_x);
+    let lp = crate::vk_paint::LegendPaint {
+        pal: &pal,
+        style: look.style,
+        family: icon_family(frame),
+        u: lu * scale,
+        top: (frame.logical_h - crate::vk_paint::BAR_H * lu) * scale,
+        left: left * scale,
+        right: right * scale,
+        alpha: 1.0,
+        dip_scale: 1.0,
     };
-    while kept.len() > 1 && total(&kept) > avail {
-        kept.remove((kept.len() - 1) / 2);
-    }
-    kept
-}
-
-fn leg_part_width(part: &Leg, u: f32, g: &mut Gfx, family: &[&str]) -> f32 {
-    match *part {
-        Leg::Btn("SELECT") => BAR_SHARE * u,
-        Leg::Btn(_) => BAR_GLYPH * u,
-        Leg::Word(word) => measure_label(g, family, word, text_px(BAR_PREFIX_PX, u)),
-        Leg::Plus => measure_label(g, family, "+", text_px(BAR_CONNECTOR_PX, u)),
-        Leg::Slash => measure_label(g, family, "/", text_px(BAR_CONNECTOR_PX, u)),
-    }
-}
-
-fn legend_item_width(parts: &[Leg], label: &str, u: f32, g: &mut Gfx, family: &[&str]) -> f32 {
-    let gaps = BAR_GAP * u * parts.len().saturating_sub(1) as f32;
-    let body: f32 = parts.iter().map(|part| leg_part_width(part, u, g, family)).sum();
-    body + gaps + BAR_LABEL_GAP * u + measure_label(g, family, label, text_px(BAR_LABEL_PX, u))
-}
-
-fn draw_legend(
-    g: &mut Gfx,
-    _spec: &Spec,
-    pal: &Pal,
-    _rects: &[KeyRect],
-    frame_w: f32,
-    frame_h: f32,
-    u: f32,
-    scale: f32,
-    ps5: bool,
-) {
-    let pad_x = 16.0 * u;
-    let left = pad_x;
-    let right = (frame_w - pad_x).max(left);
-    let family = _spec.families;
-    let dot_w = measure_label(g, family, LEGEND_SEP, text_px(BAR_SEP_PX, u));
-    let sep_w = BAR_GAP * u + dot_w + BAR_GAP * u;
-    let widths: Vec<f32> = LEGEND_ROWS
-        .iter()
-        .map(|(parts, label)| legend_item_width(parts, label, u, g, family))
-        .collect();
-    let kept = fit_legend(&widths, sep_w, (right - left).max(1.0));
-    let total = kept.iter().map(|&i| widths[i]).sum::<f32>() + sep_w * kept.len().saturating_sub(1) as f32;
-    let mut x = (left + right - total) * 0.5;
-    let top = frame_h - BAR_H * u;
-    let bottom = frame_h;
-    let secondary = (ALPHA_SECONDARY * 255.0) as u8;
-    let sep_alpha = (ALPHA_SEP * 255.0) as u8;
-    let label_px = text_px(BAR_LABEL_PX, u);
-    for (n, &index) in kept.iter().enumerate() {
-        if n > 0 {
-            let sep_left = x - sep_w + BAR_GAP * u;
-            let sep_w_text = measure_label(g, family, LEGEND_SEP, text_px(BAR_SEP_PX, u));
-            text_aligned(
-                g,
-                LEGEND_SEP,
-                (sep_left, top, sep_left + sep_w_text, bottom),
-                text_px(BAR_SEP_PX, u) * scale,
-                Weight::NORMAL,
-                pal.text,
-                sep_alpha,
-                scale,
-                Align::Left,
-                family,
-            );
-        }
-        let (parts, label) = LEGEND_ROWS[index];
-        let mut cursor = x;
-        for (i, part) in parts.iter().enumerate() {
-            if i > 0 {
-                cursor += BAR_GAP * u;
-            }
-            let w = leg_part_width(part, u, g, family);
-            match *part {
-                Leg::Btn(hint) => {
-                    if let Some(svg) = hint_svg(ps5, hint) {
-                        blit_svg(g, svg, cursor, top, cursor + w, bottom, w, scale, None, 255);
-                    }
-                }
-                Leg::Word(_) | Leg::Plus | Leg::Slash => {
-                    let shown = match *part {
-                        Leg::Word(word) => word,
-                        Leg::Plus => "+",
-                        Leg::Slash => "/",
-                        Leg::Btn(_) => "",
-                    };
-                    text_aligned(
-                        g,
-                        shown,
-                        (cursor, top, cursor + w, bottom),
-                        (if matches!(*part, Leg::Word(_)) { text_px(BAR_PREFIX_PX, u) } else { text_px(BAR_CONNECTOR_PX, u) }) * scale,
-                        Weight::NORMAL,
-                        pal.text,
-                        secondary,
-                        scale,
-                        Align::Left,
-                        family,
-                    );
-                }
-            }
-            cursor += w;
-        }
-        let label_w = measure_label(g, family, label, label_px);
-        let label_x = cursor + BAR_LABEL_GAP * u;
-        text_aligned(
-            g,
-            label,
-            (label_x, top, label_x + label_w, bottom),
-            label_px * scale,
-            Weight::NORMAL,
-            pal.text,
-            255,
-            scale,
-            Align::Left,
-            family,
-        );
-        x += widths[index] + sep_w;
-    }
+    unsafe { crate::vk_paint::paint_legend(g, &crate::win::shortcut_sheet::shown_legend(), &lp) };
 }
 
 fn strip_blocking(glide: &Glide, frame: &Frame, now: Instant) -> bool {
@@ -948,7 +828,6 @@ fn palette(look: VkLook, dark: bool, theme: &KeyboardTheme) -> Pal {
         bg: from_colorref(v.bg),
         accent: from_colorref(v.accent),
         sel_ring: from_colorref(v.sel_ring),
-        text: from_colorref(v.text),
         panel_stroke: from_colorref(v.panel_stroke),
         panel_stroke_alpha: v.panel_stroke_alpha,
     }
