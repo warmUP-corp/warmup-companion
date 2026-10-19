@@ -80,6 +80,8 @@ pub struct Frame {
     pub style: VkStyle,
     pub tv: bool,
     pub dark: bool,
+    pub pal: crate::vk_paint::VkPalette,
+    pub voice_available: bool,
     pub theme: KeyboardTheme,
     pub strip: Option<StripState>,
     pub pressed: Option<(KeyPos, f32)>,
@@ -224,7 +226,7 @@ fn render_keyboard(
     let scale = frame.scale.max(1.0);
     let look = frame.look();
     let spec = spec_for(look);
-    let pal = palette(look, frame.dark, &frame.theme);
+    let pal = palette(frame);
     let lu = crate::vk_paint::ref_unit(ui_scale(), look);
     let top_inset = crate::vk_paint::strip_band_height(ui_scale(), look);
     let legend_h = legend_band_height(ui_scale(), look);
@@ -269,13 +271,14 @@ fn render_keyboard(
         fill(g, pal.bg, 255);
         None
     };
+    let ks = key_style(frame, unit, key_h, scale);
     for rect in &rects {
         let selected = highlight && rect.pos == frame.sel;
         let press = if highlight { press_of(frame, rect.pos) } else { None };
-        paint_key(g, frame, rect, unit, key_h, scale, selected, press);
+        paint_key(g, frame, &ks, rect, scale, selected, press);
     }
     if highlight {
-        stroke_ring(g, glide, frame, unit, key_h, scale);
+        stroke_ring(g, glide, frame, &ks, scale);
     }
     let (strip_alpha, strip_dy) = if frame.strip.is_some() {
         if glide.strip_at.is_none() {
@@ -316,11 +319,10 @@ fn render_keyboard(
 
 fn paint_legend(g: &mut Gfx, frame: &Frame, rects: &[KeyRect], lu: f32, scale: f32) {
     let look = frame.look();
-    let pal = vk_palette(frame);
-    let pad_x = crate::vk_paint::floating_pad(ui_scale(), look).0;
+        let pad_x = crate::vk_paint::floating_pad(ui_scale(), look).0;
     let (left, right) = crate::vk_paint::legend_span(rects, frame.logical_w, pad_x);
     let lp = crate::vk_paint::LegendPaint {
-        pal: &pal,
+        pal: &frame.pal,
         style: look.style,
         family: icon_family(frame),
         u: lu * scale,
@@ -361,6 +363,7 @@ pub(crate) fn keyboard_stamp(frame: &Frame) -> u64 {
     frame.floating.hash(&mut hasher);
     frame.dark.hash(&mut hasher);
     frame.sheet_hint.hash(&mut hasher);
+    frame.voice_available.hash(&mut hasher);
     frame.theme.bg.hash(&mut hasher);
     frame.theme.key.hash(&mut hasher);
     frame.theme.accent.hash(&mut hasher);
@@ -409,17 +412,12 @@ fn press_of(frame: &Frame, pos: KeyPos) -> Option<f32> {
     frame.pressed.filter(|(p, _)| *p == pos).map(|(_, s)| s)
 }
 
-fn vk_palette(frame: &Frame) -> crate::vk_paint::VkPalette {
-    let look = frame.look();
-    crate::vk_theme::themed_palette(crate::vk_paint::style_palette(look.style, frame.dark), look.style, frame.theme)
-}
-
-fn key_style<'a>(frame: &Frame, pal: &'a crate::vk_paint::VkPalette, unit: f32, key_h: f32, scale: f32) -> crate::vk_paint::KeyStyle<'a> {
+fn key_style(frame: &Frame, unit: f32, key_h: f32, scale: f32) -> crate::vk_paint::KeyStyle<'_> {
     let look = frame.look();
     let label_px = spec_for(look).label_px * unit * scale;
     crate::vk_paint::KeyStyle {
         look,
-        pal,
+        pal: &frame.pal,
         unit: unit * scale,
         key_h: key_h * scale,
         dip_scale: 1.0,
@@ -449,16 +447,13 @@ fn device_edges(left: f32, top: f32, right: f32, bottom: f32, scale: f32) -> cra
 fn paint_key(
     g: &mut Gfx,
     frame: &Frame,
+    ks: &crate::vk_paint::KeyStyle,
     rect: &KeyRect,
-    unit: f32,
-    key_h: f32,
     scale: f32,
     selected: bool,
     press: Option<f32>,
 ) {
     let Some(key) = frame.rows.get(rect.pos.row).and_then(|row| row.keys.get(rect.pos.col)) else { return };
-    let pal = vk_palette(frame);
-    let ks = key_style(frame, &pal, unit, key_h, scale);
     let st = crate::vk_paint::KeyState {
         selected,
         press_scale: press,
@@ -466,20 +461,18 @@ fn paint_key(
         caps: frame.caps,
         symbols: frame.symbol,
         symbols_locked: frame.symbol_locked,
-        voice_available: crate::config::gamepad_settings().voice_enabled,
+        voice_available: frame.voice_available,
         tonal_row: rect.pos.row == 0 && frame.rows.len() == 5,
         glyph: crate::vk_paint::key_glyph(key),
         hint: crate::vk_paint::key_hint(key),
     };
     let edges = device_edges(rect.left, rect.top, rect.right, rect.bottom, scale);
-    unsafe { crate::vk_paint::paint_key(g, key, edges, &ks, &st, None) };
+    unsafe { crate::vk_paint::paint_key(g, key, edges, ks, &st, None) };
 }
 
-fn stroke_ring(g: &mut Gfx, glide: &Glide, frame: &Frame, unit: f32, key_h: f32, scale: f32) {
+fn stroke_ring(g: &mut Gfx, glide: &Glide, frame: &Frame, ks: &crate::vk_paint::KeyStyle, scale: f32) {
     let Some((l, t, r, b)) = glide.ring else { return };
-    let pal = vk_palette(frame);
-    let ks = key_style(frame, &pal, unit, key_h, scale);
-    unsafe { crate::vk_paint::paint_focus_ring(g, device_edges(l, t, r, b, scale), &ks, press_of(frame, frame.sel)) };
+    unsafe { crate::vk_paint::paint_focus_ring(g, device_edges(l, t, r, b, scale), ks, press_of(frame, frame.sel)) };
 }
 
 fn erase_key(g: &mut Gfx, rect: &KeyRect, spec: &Spec, pal: &Pal, unit: f32, scale: f32) {
@@ -491,7 +484,7 @@ fn scene(frame: &Frame) -> (&'static Spec, Pal, Vec<KeyRect>, f32, f32, f32, f32
     let scale = frame.scale.max(1.0);
     let look = frame.look();
     let spec = spec_for(look);
-    let pal = palette(look, frame.dark, &frame.theme);
+    let pal = palette(frame);
     let top_inset = crate::vk_paint::strip_band_height(ui_scale(), look);
     let legend_h = legend_band_height(ui_scale(), look);
     let rects = vk_geom::key_rects(
@@ -526,20 +519,21 @@ fn paint_live(g: &mut Gfx, frame: &Frame, glide: &mut Glide, step: bool) {
     if step {
         advance_glide(glide, frame, target, Instant::now());
     }
+    let ks = key_style(frame, unit, key_h, scale);
     if let Some(sel_index) = rects.iter().position(|r| r.pos == frame.sel) {
         erase_key(g, &rects[sel_index], &spec, &pal, unit, scale);
         let press = press_of(frame, rects[sel_index].pos);
-        paint_key(g, frame, &rects[sel_index], unit, key_h, scale, true, press);
+        paint_key(g, frame, &ks, &rects[sel_index], scale, true, press);
         if let Some((pos, press)) = frame.pressed {
             if pos != rects[sel_index].pos {
                 if let Some(other) = rects.iter().find(|rect| rect.pos == pos) {
                     erase_key(g, other, &spec, &pal, unit, scale);
-                    paint_key(g, frame, other, unit, key_h, scale, false, Some(press));
+                    paint_key(g, frame, &ks, other, scale, false, Some(press));
                 }
             }
         }
     }
-    stroke_ring(g, glide, frame, unit, key_h, scale);
+    stroke_ring(g, glide, frame, &ks, scale);
     if frame.floating {
         let panel_r = spec.panel_radius * unit * scale;
         let x = FLOATING_PANEL_INSET * scale;
@@ -562,8 +556,7 @@ fn sheet_paint<'a>(frame: &Frame, pal: &'a crate::vk_paint::VkPalette) -> crate:
 fn draw_sheet_frame(g: &mut Gfx, frame: &Frame) {
     let (spec, _, _, unit, scale, _, _) = scene(frame);
     let look = frame.look();
-    let pal = vk_palette(frame);
-    let sp = sheet_paint(frame, &pal);
+        let sp = sheet_paint(frame, &frame.pal);
     let (w, h) = (frame.logical_w * scale, frame.logical_h * scale);
     let inset = FLOATING_PANEL_INSET * scale;
     let inset_panel = crate::vk_paint::Edges {
@@ -601,8 +594,7 @@ fn paint_sheet_hint(g: &mut Gfx, frame: &Frame, rects: &[KeyRect], scale: f32) {
     let right = rects.iter().map(|r| r.right).fold(f32::NEG_INFINITY, f32::max);
     let top = rects.iter().map(|r| r.top).fold(f32::INFINITY, f32::min);
     let u = crate::vk_paint::ref_unit(ui_scale(), frame.look());
-    let pal = vk_palette(frame);
-    let sp = sheet_paint(frame, &pal);
+        let sp = sheet_paint(frame, &frame.pal);
     unsafe {
         crate::vk_paint::paint_sheet_hint(
             g,
@@ -638,8 +630,7 @@ fn paint_strip(
 ) {
     let look = frame.look();
     let spec = spec_for(look);
-    let pal = vk_palette(frame);
-    let above = crate::vk_paint::StripGeom::above(rects, spec, unit);
+        let above = crate::vk_paint::StripGeom::above(rects, spec, unit);
     let geom = crate::vk_paint::StripGeom {
         left: above.left * scale,
         top: above.top * scale,
@@ -649,7 +640,7 @@ fn paint_strip(
     };
     let sp = crate::vk_paint::StripPaint {
         spec,
-        pal: &pal,
+        pal: &frame.pal,
         alpha: alpha.clamp(0.0, 1.0),
         icons: icon_family(frame),
         select_retired: spec.strip == crate::vk_paint::StripLook::Chips
@@ -663,8 +654,8 @@ fn paint_strip(
     }
 }
 
-fn palette(look: VkLook, dark: bool, theme: &KeyboardTheme) -> Pal {
-    let v = crate::vk_theme::themed_palette(crate::vk_paint::style_palette(look.style, dark), look.style, *theme);
+fn palette(frame: &Frame) -> Pal {
+    let v = &frame.pal;
     Pal {
         bg: from_colorref(v.bg),
         accent: from_colorref(v.accent),
@@ -674,8 +665,8 @@ fn palette(look: VkLook, dark: bool, theme: &KeyboardTheme) -> Pal {
     }
 }
 
-pub fn accent(look: VkLook, dark: bool, theme: &KeyboardTheme) -> u32 {
-    crate::vk_theme::themed_palette(crate::vk_paint::style_palette(look.style, dark), look.style, *theme).accent
+pub fn themed_palette(look: VkLook, dark: bool, theme: &KeyboardTheme) -> crate::vk_paint::VkPalette {
+    crate::vk_theme::themed_palette(crate::vk_paint::style_palette(look.style, dark), look.style, *theme)
 }
 
 fn rgb(v: u32) -> Rgb {
@@ -860,7 +851,8 @@ pub fn paint_selected_key(g: &mut Gfx, frame: &Frame, press: f32) -> Option<KeyP
     let width = (local.right * scale).ceil().max(1.0) as u32;
     let height = (local.bottom * scale).ceil().max(1.0) as u32;
     g.begin(width, height);
-    paint_key(g, frame, &local, unit, key_h, scale, true, (press < 0.999).then_some(press));
+    let ks = key_style(frame, unit, key_h, scale);
+    paint_key(g, frame, &ks, &local, scale, true, (press < 0.999).then_some(press));
     Some(KeyPatch {
         width,
         height,
@@ -1101,6 +1093,8 @@ mod tests {
             style: VkStyle::Normal,
             tv: false,
             dark: true,
+            pal: crate::vk_paint::style_palette(VkStyle::Normal, true),
+            voice_available: true,
             theme: KeyboardTheme::default(),
             strip: None,
             pressed: None,
@@ -1161,6 +1155,8 @@ mod tests {
             style: VkStyle::Normal,
             tv: false,
             dark: true,
+            pal: crate::vk_paint::style_palette(VkStyle::Normal, true),
+            voice_available: true,
             theme: KeyboardTheme::default(),
             strip: None,
             pressed: None,

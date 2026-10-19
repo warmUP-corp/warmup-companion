@@ -71,7 +71,7 @@ pub fn paint_voice_orb(
 #[cfg(feature = "speech")]
 pub fn voice_accent() -> u32 {
     let look = crate::vk_paint::VkLook { style: vk_style(), tv: false };
-    draw::accent(look, crate::vk_theme::is_dark_theme(), &crate::config::keyboard_theme())
+    draw::themed_palette(look, crate::vk_theme::is_dark_theme(), &crate::config::keyboard_theme()).accent
 }
 
 #[cfg(feature = "speech")]
@@ -500,6 +500,8 @@ impl Shell {
         });
         let (shift, caps, symbol, symbol_locked) = crate::vk_nav::modifier_state();
         let floating = !matches!(vk_layout_mode(), VkLayoutMode::Docked);
+        let dark = crate::vk_theme::is_dark_theme();
+        let theme = crate::config::keyboard_theme();
         let frame = draw::Frame {
             logical_w: self.logical_w as f32,
             logical_h: self.logical_h as f32,
@@ -509,8 +511,10 @@ impl Shell {
             sel: crate::vk_nav::selection(),
             style: look.style,
             tv: look.tv,
-            dark: crate::vk_theme::is_dark_theme(),
-            theme: crate::config::keyboard_theme(),
+            dark,
+            pal: draw::themed_palette(look, dark, &theme),
+            voice_available: crate::config::gamepad_settings().voice_enabled && speech_ready(),
+            theme,
             strip,
             pressed,
             ps5: self.ps5,
@@ -681,6 +685,17 @@ fn desired_size(output_w: f32, output_h: f32, look: crate::vk_paint::VkLook) -> 
     let rows = crate::vk_nav::rows_snapshot();
     let docked = matches!(vk_layout_mode(), VkLayoutMode::Docked);
     draw::card_size(output_w, output_h, docked, &rows, look)
+}
+
+fn speech_ready() -> bool {
+    #[cfg(feature = "speech")]
+    {
+        crate::linux_speech::available()
+    }
+    #[cfg(not(feature = "speech"))]
+    {
+        false
+    }
 }
 
 fn ps5_pad() -> bool {
