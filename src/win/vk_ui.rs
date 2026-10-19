@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::vk_nav::{self, KeyAction, KeyCell};
+use crate::vk_nav::{self, KeyCell};
 
 use windows::core::w;
 use windows::Win32::Foundation::{CloseHandle, HMODULE, HWND, LPARAM, LRESULT, WPARAM};
@@ -106,36 +106,7 @@ pub(crate) fn is_dark_theme() -> bool {
     }
 }
 
-/// Glyph + font face for a key. Special keys use equivalent Unicode symbols,
-/// which Segoe UI Symbol covers reliably.
-/// Returns `(text, is_symbol_font)`.
-fn key_glyph(key: &KeyCell) -> (String, bool) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE;
-    match &key.action {
-        KeyAction::Shift => (key.label.clone(), false),
-        KeyAction::VoiceInput => (String::new(), false),
-        KeyAction::Vk(vk) if *vk == VK_SPACE => (String::new(), false),
-        _ => (key.label.clone(), false),
-    }
-}
-
-fn key_hint(key: &KeyCell) -> Option<&'static str> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_RETURN, VK_SPACE};
-    match &key.action {
-        // Badges mirror the web VK's controller hints
-        // (`getIntegratedBadge` / `gamepad::handle_vk_open_button`). Select engages
-        // the suggestion strip, not Tab, so the Tab key carries no badge.
-        KeyAction::Vk(vk) if *vk == VK_BACK => Some("B"),
-        KeyAction::Vk(vk) if *vk == VK_RETURN => Some("START"),
-        KeyAction::Vk(vk) if *vk == VK_SPACE => Some("Y"),
-        KeyAction::Shift => Some("RT"),
-        KeyAction::Symbols => Some("LT"),
-        KeyAction::PredictPrev => Some("LB"),
-        KeyAction::PredictNext => Some("RB"),
-        KeyAction::VoiceInput => Some("R3"),
-        _ => None,
-    }
-}
+use crate::vk_paint::{key_glyph, key_hint};
 
 #[derive(Clone, Copy, Debug)]
 pub enum VkAttach {

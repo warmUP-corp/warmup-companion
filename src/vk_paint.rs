@@ -1,5 +1,6 @@
 use crate::config::VkStyle;
-use crate::mono_ui::{Gfx, Rect};
+use crate::mono_ui::{Align, Gfx, Rect, VAlign};
+use crate::vk_nav::{KeyAction, KeyCell};
 
 pub fn colorref_mix(fg: u32, bg: u32, amount: f32) -> u32 {
     let amount = amount.clamp(0.0, 1.0);
@@ -847,4 +848,700 @@ pub unsafe fn paint_text_px(
         false,
     );
     w
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum VkIcon {
+    Backspace,
+    Enter,
+    Mic,
+    MicOff,
+    Space,
+    Shift,
+    ShiftFilled,
+    Caps,
+    CapsFilled,
+    ChevronLeft,
+    ChevronRight,
+    ChevronUp,
+    ChevronDown,
+    Gamepad,
+    Check,
+    L3Ps5,
+    L3Xbox,
+    R3Ps5,
+    R3Xbox,
+    SelectPs5,
+    SelectXbox,
+    StartPs5,
+    StartXbox,
+    Ps5Cross,
+    Ps5Circle,
+    Ps5Square,
+    Ps5Triangle,
+    Ps5L1,
+    Ps5R1,
+    Ps5L2,
+    Ps5R2,
+    XboxA,
+    XboxB,
+    XboxX,
+    XboxY,
+    XboxLb,
+    XboxRb,
+    XboxLt,
+    XboxRt,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ControllerIconFamily {
+    Ps5,
+    Xbox,
+}
+
+#[cfg_attr(not(feature = "gamepad"), allow(dead_code))]
+pub(crate) fn is_playstation_label(label: &str) -> bool {
+    ControllerIconFamily::from_label(label) == ControllerIconFamily::Ps5
+}
+
+impl ControllerIconFamily {
+    pub(crate) fn from_label(label: &str) -> Self {
+        let l = label.to_ascii_lowercase();
+        if l.contains("dualsense")
+            || l.contains("dualshock")
+            || l.contains("playstation")
+            || l.contains("ps5")
+            || l.contains("ps4")
+            || l.contains("hid slot")
+            || l.contains("sony")
+            || l == "wireless controller"
+        {
+            Self::Ps5
+        } else {
+            Self::Xbox
+        }
+    }
+
+    pub(crate) fn l3_icon(self) -> VkIcon {
+        match self {
+            Self::Ps5 => VkIcon::L3Ps5,
+            Self::Xbox => VkIcon::L3Xbox,
+        }
+    }
+
+    pub(crate) fn hint_icon(self, hint: &str) -> Option<VkIcon> {
+        match (self, hint) {
+            (Self::Ps5, "A") => Some(VkIcon::Ps5Cross),
+            (Self::Ps5, "B") => Some(VkIcon::Ps5Circle),
+            (Self::Ps5, "X") => Some(VkIcon::Ps5Square),
+            (Self::Ps5, "Y") => Some(VkIcon::Ps5Triangle),
+            (Self::Ps5, "LB") => Some(VkIcon::Ps5L1),
+            (Self::Ps5, "RB") => Some(VkIcon::Ps5R1),
+            (Self::Ps5, "LT") => Some(VkIcon::Ps5L2),
+            (Self::Ps5, "RT") => Some(VkIcon::Ps5R2),
+            (Self::Ps5, "L3") => Some(VkIcon::L3Ps5),
+            (Self::Ps5, "R3") => Some(VkIcon::R3Ps5),
+            (Self::Ps5, "SELECT") => Some(VkIcon::SelectPs5),
+            (Self::Ps5, "START") => Some(VkIcon::StartPs5),
+            (Self::Xbox, "A") => Some(VkIcon::XboxA),
+            (Self::Xbox, "B") => Some(VkIcon::XboxB),
+            (Self::Xbox, "X") => Some(VkIcon::XboxX),
+            (Self::Xbox, "Y") => Some(VkIcon::XboxY),
+            (Self::Xbox, "LB") => Some(VkIcon::XboxLb),
+            (Self::Xbox, "RB") => Some(VkIcon::XboxRb),
+            (Self::Xbox, "LT") => Some(VkIcon::XboxLt),
+            (Self::Xbox, "RT") => Some(VkIcon::XboxRt),
+            (Self::Xbox, "L3") => Some(VkIcon::L3Xbox),
+            (Self::Xbox, "R3") => Some(VkIcon::R3Xbox),
+            (Self::Xbox, "SELECT") => Some(VkIcon::SelectXbox),
+            (Self::Xbox, "START") => Some(VkIcon::StartXbox),
+            _ => None,
+        }
+    }
+}
+
+impl VkIcon {
+    pub(crate) fn svg(self) -> &'static str {
+        match self {
+            VkIcon::Backspace => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 5a2 2 0 0 0-1.344.519l-6.328 5.74a1 1 0 0 0 0 1.481l6.328 5.741A2 2 0 0 0 10 19h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z"/><path d="m12 9 6 6"/><path d="m18 9-6 6"/></svg>"#
+            }
+            VkIcon::Enter => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 4v7a4 4 0 0 1-4 4H4"/><path d="m9 10-5 5 5 5"/></svg>"#
+            }
+            VkIcon::Mic => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></svg>"#
+            }
+            VkIcon::MicOff => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M16.95 16.95A7 7 0 0 1 5 12v-2"/><path d="M18.89 13.23A7 7 0 0 0 19 12v-2"/><path d="m2 2 20 20"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/></svg>"#
+            }
+            VkIcon::Space => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 17v1c0 .5-.5 1-1 1H3c-.5 0-1-.5-1-1v-1"/></svg>"#
+            }
+            VkIcon::Shift => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 16a1 1 0 0 0 1-1v-2a1 1 0 0 1 1-1h3.293a.707.707 0 0 0 .5-1.207l-6.939-6.939a1.207 1.207 0 0 0-1.708 0l-6.94 6.94a.707.707 0 0 0 .5 1.206H8a1 1 0 0 1 1 1v2a1 1 0 0 0 1 1z"/><path d="M9 20h6"/></svg>"#
+            }
+            VkIcon::ShiftFilled => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 16a1 1 0 0 0 1-1v-2a1 1 0 0 1 1-1h3.293a.707.707 0 0 0 .5-1.207l-6.939-6.939a1.207 1.207 0 0 0-1.708 0l-6.94 6.94a.707.707 0 0 0 .5 1.206H8a1 1 0 0 1 1 1v2a1 1 0 0 0 1 1z"/><path d="M9 20h6" fill="none"/></svg>"#
+            }
+            VkIcon::Caps => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1v-6a1 1 0 0 1 1-1h3.293a.707.707 0 0 0 .5-1.207l-7.086-7.086a1 1 0 0 0-1.414 0l-7.086 7.086a.707.707 0 0 0 .5 1.207H8a1 1 0 0 1 1 1z"/></svg>"#
+            }
+            VkIcon::CapsFilled => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1v-6a1 1 0 0 1 1-1h3.293a.707.707 0 0 0 .5-1.207l-7.086-7.086a1 1 0 0 0-1.414 0l-7.086 7.086a.707.707 0 0 0 .5 1.207H8a1 1 0 0 1 1 1z"/></svg>"#
+            }
+            VkIcon::ChevronLeft => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>"#
+            }
+            VkIcon::ChevronRight => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>"#
+            }
+            VkIcon::ChevronUp => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>"#
+            }
+            VkIcon::ChevronDown => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>"#
+            }
+            VkIcon::Gamepad => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><line x1="6" x2="10" y1="12" y2="12"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="15" x2="15.01" y1="13" y2="13"/><line x1="18" x2="18.01" y1="11" y2="11"/><rect width="20" height="12" x="2" y="6" rx="4"/><path d="M6 18v1a2 2 0 0 0 4 0v-1"/><path d="M14 18v1a2 2 0 0 0 4 0v-1"/></svg>"#
+            }
+            VkIcon::Check => {
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>"#
+            }
+            VkIcon::L3Ps5 => include_str!("../controller-icons/p5_l3_click.svg"),
+            VkIcon::L3Xbox => include_str!("../controller-icons/x_l3_click.svg"),
+            VkIcon::R3Ps5 => include_str!("../controller-icons/p5_r3_click.svg"),
+            VkIcon::R3Xbox => include_str!("../controller-icons/x_r3_click.svg"),
+            VkIcon::SelectPs5 => include_str!("../controller-icons/p5_share.svg"),
+            VkIcon::SelectXbox => include_str!("../controller-icons/x_menu_view.svg"),
+            VkIcon::StartPs5 => include_str!("../controller-icons/p5_options.svg"),
+            VkIcon::StartXbox => include_str!("../controller-icons/x_menu_menu.svg"),
+            VkIcon::Ps5Cross => include_str!("../controller-icons/p5_face_cross_colored.svg"),
+            VkIcon::Ps5Circle => include_str!("../controller-icons/p5_face_circle_colored.svg"),
+            VkIcon::Ps5Square => include_str!("../controller-icons/p5_face_square_colored.svg"),
+            VkIcon::Ps5Triangle => {
+                include_str!("../controller-icons/p5_face_triangle_colored.svg")
+            }
+            VkIcon::Ps5L1 => include_str!("../controller-icons/p5_shoulder_l1.svg"),
+            VkIcon::Ps5R1 => include_str!("../controller-icons/p5_shoulder_r1.svg"),
+            VkIcon::Ps5L2 => include_str!("../controller-icons/p5_trigger_l2.svg"),
+            VkIcon::Ps5R2 => include_str!("../controller-icons/p5_trigger_r2.svg"),
+            VkIcon::XboxA => include_str!("../controller-icons/x_face_a_colored.svg"),
+            VkIcon::XboxB => include_str!("../controller-icons/x_face_b_colored.svg"),
+            VkIcon::XboxX => include_str!("../controller-icons/x_face_x_colored.svg"),
+            VkIcon::XboxY => include_str!("../controller-icons/x_face_y_colored.svg"),
+            VkIcon::XboxLb => include_str!("../controller-icons/x_shoulder_lb.svg"),
+            VkIcon::XboxRb => include_str!("../controller-icons/x_shoulder_rb.svg"),
+            VkIcon::XboxLt => include_str!("../controller-icons/x_trigger_lt.svg"),
+            VkIcon::XboxRt => include_str!("../controller-icons/x_trigger_rt.svg"),
+        }
+    }
+
+    pub(crate) fn is_controller_tip(self) -> bool {
+        matches!(
+            self,
+            VkIcon::L3Ps5
+                | VkIcon::L3Xbox
+                | VkIcon::R3Ps5
+                | VkIcon::R3Xbox
+                | VkIcon::SelectPs5
+                | VkIcon::SelectXbox
+                | VkIcon::StartPs5
+                | VkIcon::StartXbox
+                | VkIcon::Ps5Cross
+                | VkIcon::Ps5Circle
+                | VkIcon::Ps5Square
+                | VkIcon::Ps5Triangle
+                | VkIcon::Ps5L1
+                | VkIcon::Ps5R1
+                | VkIcon::Ps5L2
+                | VkIcon::Ps5R2
+                | VkIcon::XboxA
+                | VkIcon::XboxB
+                | VkIcon::XboxX
+                | VkIcon::XboxY
+                | VkIcon::XboxLb
+                | VkIcon::XboxRb
+                | VkIcon::XboxLt
+                | VkIcon::XboxRt
+        )
+    }
+}
+
+pub(crate) fn key_icon(action: &KeyAction, shift: bool) -> Option<(VkIcon, bool)> {
+    use crate::vk_key::*;
+    match action {
+        KeyAction::Vk(vk) if *vk == VK_BACK => Some((VkIcon::Backspace, true)),
+        KeyAction::Vk(vk) if *vk == VK_RETURN => Some((VkIcon::Enter, true)),
+        KeyAction::Vk(vk) if *vk == VK_LEFT => Some((VkIcon::ChevronLeft, false)),
+        KeyAction::Vk(vk) if *vk == VK_RIGHT => Some((VkIcon::ChevronRight, false)),
+        KeyAction::Vk(vk) if *vk == VK_UP => Some((VkIcon::ChevronUp, false)),
+        KeyAction::Vk(vk) if *vk == VK_DOWN => Some((VkIcon::ChevronDown, false)),
+        KeyAction::PredictPrev => Some((VkIcon::ChevronLeft, false)),
+        KeyAction::PredictNext => Some((VkIcon::ChevronRight, false)),
+        KeyAction::Shift => Some((shift_icon(shift), false)),
+        _ => None,
+    }
+}
+
+pub(crate) fn shift_icon(shift: bool) -> VkIcon {
+    if shift {
+        VkIcon::CapsFilled
+    } else {
+        VkIcon::Caps
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn caps_icon(caps: bool) -> VkIcon {
+    if caps {
+        VkIcon::ShiftFilled
+    } else {
+        VkIcon::Shift
+    }
+}
+
+pub(crate) fn is_action_key(action: &KeyAction) -> bool {
+    use crate::vk_key::*;
+    matches!(action, KeyAction::Vk(vk) if *vk == VK_BACK || *vk == VK_RETURN)
+}
+
+pub(crate) fn is_function_key(action: &KeyAction) -> bool {
+    use crate::vk_key::*;
+    matches!(
+        action,
+        KeyAction::Shift
+            | KeyAction::Symbols
+            | KeyAction::PredictPrev
+            | KeyAction::PredictNext
+            | KeyAction::VoiceInput
+    ) || matches!(action, KeyAction::Vk(vk) if *vk == VK_BACK || *vk == VK_SPACE)
+}
+
+pub(crate) fn is_enter_key(action: &KeyAction) -> bool {
+    use crate::vk_key::*;
+    matches!(action, KeyAction::Vk(vk) if *vk == VK_RETURN)
+}
+
+pub(crate) fn styled_glyph(spec: &StyleSpec, action: &KeyAction, glyph: String) -> String {
+    match action {
+        KeyAction::Symbols if spec.trim_symbols_label => glyph.trim_start_matches('?').to_string(),
+        _ => glyph,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Edges {
+    pub(crate) left: f32,
+    pub(crate) top: f32,
+    pub(crate) right: f32,
+    pub(crate) bottom: f32,
+}
+
+impl Edges {
+    pub(crate) fn rect(self) -> Rect {
+        Rect {
+            x: self.left,
+            y: self.top,
+            w: self.right - self.left,
+            h: self.bottom - self.top,
+        }
+    }
+
+    pub(crate) fn deflate(self, d: f32) -> Edges {
+        Edges {
+            left: self.left + d,
+            top: self.top + d,
+            right: self.right - d,
+            bottom: self.bottom - d,
+        }
+    }
+
+    pub(crate) fn band_at(self, cy: f32, h: f32) -> Edges {
+        Edges {
+            left: self.left,
+            top: cy - h * 0.5,
+            right: self.right,
+            bottom: cy + h * 0.5,
+        }
+    }
+
+    pub(crate) fn corner_band(self, spec: &StyleSpec, unit: f32) -> Edges {
+        let inset = spec.hint_inset * unit;
+        let h = spec.number_px * 1.5 * unit;
+        let w = spec.number_px * 2.0 * unit;
+        Edges {
+            left: self.right - inset - w,
+            top: self.top + inset * 0.5,
+            right: self.right - inset * 0.5,
+            bottom: self.top + inset * 0.5 + h,
+        }
+    }
+}
+
+pub(crate) fn key_glyph(key: &KeyCell) -> (String, bool) {
+    match &key.action {
+        KeyAction::Shift => (key.label.clone(), false),
+        KeyAction::VoiceInput => (String::new(), false),
+        KeyAction::Vk(vk) if *vk == crate::vk_key::VK_SPACE => (String::new(), false),
+        _ => (key.label.clone(), false),
+    }
+}
+
+pub(crate) fn key_hint(key: &KeyCell) -> Option<&'static str> {
+    use crate::vk_key::{VK_BACK, VK_RETURN, VK_SPACE};
+    match &key.action {
+        KeyAction::Vk(vk) if *vk == VK_BACK => Some("B"),
+        KeyAction::Vk(vk) if *vk == VK_RETURN => Some("START"),
+        KeyAction::Vk(vk) if *vk == VK_SPACE => Some("Y"),
+        KeyAction::Shift => Some("RT"),
+        KeyAction::Symbols => Some("LT"),
+        KeyAction::PredictPrev => Some("LB"),
+        KeyAction::PredictNext => Some("RB"),
+        KeyAction::VoiceInput => Some("R3"),
+        _ => None,
+    }
+}
+
+pub(crate) fn icon_draw_px(icon: VkIcon, h: f32) -> f32 {
+    match icon {
+        icon if icon.is_controller_tip() => (h * 0.98).round().clamp(24.0, h.max(64.0)),
+        _ => (h * 0.5).round().clamp(16.0, 96.0),
+    }
+}
+
+pub(crate) unsafe fn paint_icon(
+    g: &mut Gfx,
+    icon: VkIcon,
+    rect: Edges,
+    color: u32,
+    opacity: f32,
+    draw_px: f32,
+    dip_scale: f32,
+) {
+    let draw_px = draw_px.round().clamp(12.0, 192.0);
+    let raster_px = match icon {
+        icon if icon.is_controller_tip() => (draw_px * 3.0)
+            .round()
+            .clamp(54.0, (draw_px * 3.0).max(192.0)),
+        _ => (draw_px * dip_scale).round(),
+    } as u32;
+    let source_px = if icon.is_controller_tip() { 32.0 } else { 24.0 };
+    let size = draw_px;
+    paint_svg_icon(
+        g,
+        icon.svg(),
+        raster_px,
+        color,
+        Rect {
+            x: (rect.left + rect.right - size) * 0.5,
+            y: (rect.top + rect.bottom - size) * 0.5,
+            w: size,
+            h: size,
+        },
+        opacity.clamp(0.0, 1.0),
+        source_px,
+    );
+}
+
+pub(crate) struct KeyStyle<'a> {
+    pub(crate) look: VkLook,
+    pub(crate) pal: &'a VkPalette,
+    pub(crate) unit: f32,
+    pub(crate) key_h: f32,
+    pub(crate) dip_scale: f32,
+    pub(crate) glyph_px: f32,
+    pub(crate) hint_px: f32,
+    pub(crate) icons: ControllerIconFamily,
+}
+
+impl KeyStyle<'_> {
+    pub(crate) fn radius(&self) -> f32 {
+        style_spec(self.look).key_radius * self.unit
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct KeyState<'a> {
+    pub(crate) selected: bool,
+    pub(crate) press_scale: Option<f32>,
+    pub(crate) shift: bool,
+    pub(crate) caps: bool,
+    pub(crate) symbols: bool,
+    pub(crate) symbols_locked: bool,
+    pub(crate) voice_available: bool,
+    pub(crate) tonal_row: bool,
+    pub(crate) glyph: (String, bool),
+    pub(crate) hint: Option<&'a str>,
+}
+
+unsafe fn press_about(g: &mut Gfx, s: f32, cx: f32, cy: f32) {
+    g.transform(s, cx * (1.0 - s), cy * (1.0 - s));
+}
+
+pub(crate) unsafe fn paint_key(
+    g: &mut Gfx,
+    key: &KeyCell,
+    key_rect: Edges,
+    ks: &KeyStyle,
+    st: &KeyState,
+    voice: Option<&mut dyn FnMut(&mut Gfx, Edges, f32)>,
+) {
+    let spec = style_spec(ks.look);
+    let pal = ks.pal;
+    let unit = ks.unit;
+    let key_h = ks.key_h;
+    let radius = ks.radius();
+    let selected = st.selected;
+    let press = st.press_scale;
+    if let Some(s) = press {
+        press_about(
+            g,
+            s,
+            (key_rect.left + key_rect.right) * 0.5,
+            (key_rect.top + key_rect.bottom) * 0.5,
+        );
+    }
+    let action_key = is_action_key(&key.action);
+    if selected {
+        if let Some((dy, blur, alpha)) = spec.sel_shadow {
+            paint_blur_strokes(g, key_rect.rect(), radius, dy * unit, blur * unit, alpha);
+        }
+    } else if spec.key_shadow_dy > 0.0 {
+        let dy = (spec.key_shadow_dy * unit).max(1.0);
+        g.fill(
+            Rect {
+                x: key_rect.left,
+                y: key_rect.top + dy,
+                w: key_rect.right - key_rect.left,
+                h: key_rect.bottom - key_rect.top,
+            },
+            radius,
+            0x000000,
+            spec.key_shadow_alpha,
+        );
+    }
+    let modifier_active = !selected
+        && ((matches!(key.action, KeyAction::Shift) && st.shift)
+            || (matches!(key.action, KeyAction::Symbols) && st.symbols));
+    let modern = ks.look.style == VkStyle::Modern;
+    let fill_color = if selected {
+        pal.accent
+    } else if modifier_active || (press.is_some() && pal.mod_tint.is_some()) {
+        pal.mod_tint
+            .map(|(fill, _)| fill)
+            .unwrap_or_else(|| colorref_mix(pal.accent, pal.key, 0.35))
+    } else if modern && is_enter_key(&key.action) {
+        pal.key_enter
+    } else if action_key
+        || (spec.tonal_function_keys && (is_function_key(&key.action) || st.tonal_row))
+    {
+        pal.key_action
+    } else {
+        pal.key
+    };
+    let dim_color = if selected { pal.sel_text } else { pal.text_dim };
+    let label_color = if selected {
+        pal.sel_text
+    } else if modern && is_enter_key(&key.action) && !modifier_active {
+        pal.enter_text
+    } else {
+        pal.text
+    };
+    g.fill(key_rect.rect(), radius, fill_color, 1.0);
+
+    let locked = (matches!(key.action, KeyAction::Shift) && st.caps)
+        || (matches!(key.action, KeyAction::Symbols) && st.symbols_locked);
+    if locked {
+        let pill_w = ((key_rect.right - key_rect.left) * 0.28).min(24.0 * unit);
+        let pill_h = (3.0 * unit).max(2.0);
+        let cx = (key_rect.left + key_rect.right) * 0.5;
+        let bottom = key_rect.bottom - 5.0 * unit;
+        let pill_color = match (selected, pal.mod_tint) {
+            (true, _) => pal.sel_text,
+            (false, Some((_, bar))) => bar,
+            (false, None) => pal.accent,
+        };
+        g.fill(
+            Rect {
+                x: cx - pill_w * 0.5,
+                y: bottom - pill_h,
+                w: pill_w,
+                h: pill_h,
+            },
+            pill_h * 0.5,
+            pill_color,
+            1.0,
+        );
+    }
+
+    let is_space = matches!(key.action, KeyAction::Vk(vk) if vk == crate::vk_key::VK_SPACE);
+    if let Some(sub) = key.sublabel.as_deref().filter(|_| !is_space) {
+        let band = if spec.corner_sublabel {
+            key_rect.corner_band(spec, unit)
+        } else {
+            key_rect.band_at(key_rect.top + spec.number_cy * unit, key_h)
+        };
+        g.text_full(
+            sub,
+            band.rect(),
+            spec.number_px * unit,
+            400,
+            spec.families,
+            dim_color,
+            spec.number_alpha,
+            Align::Center,
+            VAlign::Center,
+            false,
+        );
+    }
+
+    let icon_px = spec.icon_px * unit;
+    if matches!(key.action, KeyAction::VoiceInput) {
+        if !st.voice_available {
+            let disabled_color = colorref_mix(label_color, fill_color, 0.42);
+            paint_icon(g, VkIcon::MicOff, key_rect, disabled_color, 1.0, icon_px, ks.dip_scale);
+        } else if let Some(voice) = voice {
+            voice(g, key_rect, radius);
+        } else {
+            paint_icon(g, VkIcon::Mic, key_rect, label_color, 1.0, icon_px, ks.dip_scale);
+        }
+    } else if is_space {
+        let space_px = spec.space_icon_px * unit;
+        if let Some(text) = spec.space_label {
+            g.text_full(
+                text,
+                key_rect.rect(),
+                spec.space_label_px * unit,
+                400,
+                spec.families,
+                label_color,
+                1.0,
+                Align::Center,
+                VAlign::Center,
+                false,
+            );
+        } else if let Some(sub) = key.sublabel.as_deref() {
+            let band = key_rect.band_at(key_rect.top + spec.caption_cy * unit, key_h);
+            g.text_full(
+                sub,
+                band.rect(),
+                spec.number_px * unit,
+                400,
+                spec.families,
+                dim_color,
+                spec.number_alpha,
+                Align::Center,
+                VAlign::Center,
+                false,
+            );
+            let icon_rect = key_rect.band_at(key_rect.top + spec.space_icon_cy * unit, key_h);
+            paint_icon(g, VkIcon::Space, icon_rect, label_color, 1.0, space_px, ks.dip_scale);
+        } else {
+            paint_icon(g, VkIcon::Space, key_rect, label_color, 1.0, space_px, ks.dip_scale);
+        }
+    } else if let Some((icon, large)) = key_icon(&key.action, st.shift) {
+        let px = if large {
+            spec.icon_large_px * unit
+        } else {
+            icon_px
+        };
+        paint_icon(g, icon, key_rect, label_color, 1.0, px, ks.dip_scale);
+    } else {
+        let (glyph, symbol_font) = st.glyph.clone();
+        let glyph = styled_glyph(spec, &key.action, glyph);
+        if !glyph.is_empty() {
+            let corner = spec.corner_sublabel && key.sublabel.is_some() && !symbol_font;
+            let (weight, families, halign, valign, wrap) = if corner {
+                (spec.label_weight, spec.families, Align::Left, VAlign::Bottom, false)
+            } else if symbol_font {
+                (
+                    400,
+                    &["Segoe UI Symbol"] as &[&str],
+                    Align::Center,
+                    VAlign::Center,
+                    true,
+                )
+            } else if glyph.chars().count() > 1 {
+                (spec.word_weight, spec.families, Align::Center, VAlign::Center, false)
+            } else {
+                (spec.label_weight, spec.families, Align::Center, VAlign::Center, false)
+            };
+            let px = if symbol_font {
+                ks.glyph_px
+            } else if glyph.chars().count() > 1 {
+                spec.word_px * unit
+            } else {
+                spec.label_px * unit
+            };
+            let label_rect = if corner {
+                key_rect.deflate(spec.hint_inset * 1.5 * unit)
+            } else if key.sublabel.is_some() {
+                key_rect.band_at(key_rect.top + spec.label_cy * unit, key_h)
+            } else {
+                key_rect
+            };
+            g.text_full(
+                &glyph,
+                label_rect.rect(),
+                px,
+                weight,
+                families,
+                label_color,
+                1.0,
+                halign,
+                valign,
+                wrap,
+            );
+        }
+    }
+
+    if let Some(hint) = st.hint {
+        let badge_size = spec.hint_badge * unit;
+        let inset = spec.hint_inset * unit;
+        let badge = Edges {
+            left: key_rect.left + inset,
+            top: key_rect.top + inset,
+            right: key_rect.left + inset + badge_size,
+            bottom: key_rect.top + inset + badge_size,
+        };
+        if let Some(icon) = ks.icons.hint_icon(hint) {
+            let px = icon_draw_px(icon, badge.bottom - badge.top);
+            paint_icon(g, icon, badge, pal.text, 1.0, px, ks.dip_scale);
+        } else {
+            let badge_color = if selected { pal.sel_text } else { pal.accent };
+            g.text_full(
+                hint,
+                badge.rect(),
+                ks.hint_px,
+                600,
+                &["Segoe UI"],
+                badge_color,
+                1.0,
+                Align::Center,
+                VAlign::Top,
+                true,
+            );
+        }
+    }
+    if press.is_some() {
+        g.transform(1.0, 0.0, 0.0);
+    }
+}
+
+pub(crate) unsafe fn paint_focus_ring(
+    g: &mut Gfx,
+    ring: Edges,
+    ks: &KeyStyle,
+    press_scale: Option<f32>,
+) {
+    let spec = style_spec(ks.look);
+    let ring_w = (spec.sel_ring_w * ks.unit).max(1.0);
+    if let Some(s) = press_scale {
+        press_about(g, s, (ring.left + ring.right) * 0.5, (ring.top + ring.bottom) * 0.5);
+    }
+    g.ring(ring.rect(), ks.radius(), ring_w, ks.pal.sel_ring, 1.0);
+    if press_scale.is_some() {
+        g.transform(1.0, 0.0, 0.0);
+    }
 }

@@ -43,19 +43,7 @@ pub(super) unsafe fn GetKeyState(vk: i32) -> i16 {
 }
 
 pub(super) mod vk_renderer {
-    pub(crate) use crate::vk_paint::{style_palette, VkPalette};
-
-    pub(crate) fn is_playstation_label(label: &str) -> bool {
-        let l = label.to_ascii_lowercase();
-        l.contains("dualsense")
-            || l.contains("dualshock")
-            || l.contains("playstation")
-            || l.contains("ps5")
-            || l.contains("ps4")
-            || l.contains("hid slot")
-            || l.contains("sony")
-            || l == "wireless controller"
-    }
+    pub(crate) use crate::vk_paint::{is_playstation_label, style_palette, VkPalette};
 }
 
 static THREAD: OnceLock<Mutex<Option<PanelThread>>> = OnceLock::new();
