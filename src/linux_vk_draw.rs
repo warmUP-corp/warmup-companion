@@ -8,7 +8,7 @@ use crate::config::{KeyboardTheme, VkStyle};
 use crate::mono_ui::Gfx;
 use crate::vk_paint::VkLook;
 use crate::vk_geom::{self, KeyRect};
-use crate::vk_motion::{self, concentric_radius};
+use crate::vk_motion;
 use crate::vk_nav::{KeyAction, KeyPos, KeyRow};
 use crate::vk_predict::StripState;
 
@@ -16,7 +16,6 @@ pub const REF_MON_W: f32 = 1920.0;
 const REF_KEY_W: f32 = 92.0;
 
 const FLOATING_PANEL_INSET: f32 = 1.0;
-pub const STRIP_BAND_H: f32 = 67.0;
 const BAR_H: f32 = 80.0;
 const BAR_GLYPH: f32 = 38.0;
 const BAR_SHARE: f32 = 44.0;
@@ -70,13 +69,7 @@ fn spec_for(look: VkLook) -> &'static Spec {
     crate::vk_paint::style_spec(look)
 }
 
-fn weight(value: i32) -> Weight {
-    Weight(value.clamp(1, 1000) as u16)
-}
 
-fn is_columns(spec: &Spec) -> bool {
-    spec.strip == crate::vk_paint::StripLook::Columns
-}
 
 #[derive(Clone, Copy)]
 struct Rgb {
@@ -87,16 +80,11 @@ struct Rgb {
 
 struct Pal {
     bg: Rgb,
-    key_action: Rgb,
     accent: Rgb,
     sel_ring: Rgb,
     text: Rgb,
-    text_dim: Rgb,
-    sel_text: Rgb,
-    border: Rgb,
     panel_stroke: Rgb,
     panel_stroke_alpha: f32,
-    chip_sel: Rgb,
 }
 
 pub struct Frame {
@@ -327,7 +315,7 @@ fn render_keyboard(
         (1.0, 0.0)
     };
     if let Some(strip) = &frame.strip {
-        draw_strip(g, &spec, &pal, strip, &rects, unit, scale, frame.ps5, strip_dy, strip_alpha);
+        paint_strip(g, frame, strip, &rects, unit, scale, strip_dy, strip_alpha);
     }
     if !look.tv_layout() {
         draw_legend(g, spec, &pal, &rects, frame.logical_w, frame.logical_h, lu, scale, frame.ps5);
@@ -917,93 +905,40 @@ fn sheet_layout(g: &mut Gfx) -> (f32, [f32; 3]) {
 }
 
 
-fn draw_strip(
+fn paint_strip(
     g: &mut Gfx,
-    spec: &Spec,
-    pal: &Pal,
+    frame: &Frame,
     strip: &StripState,
     rects: &[KeyRect],
     unit: f32,
     scale: f32,
-    ps5: bool,
     dy: f32,
-    fade: f32,
+    alpha: f32,
 ) {
-    if rects.is_empty() || strip.visible.iter().all(|w| w.is_empty()) || fade <= 0.0 {
-        return;
-    }
-    let fade_u8 = |a: f32| (a.clamp(0.0, 1.0) * fade * 255.0) as u8;
-    let left = rects.iter().map(|r| r.left).fold(f32::INFINITY, f32::min);
-    let right = rects.iter().map(|r| r.right).fold(f32::NEG_INFINITY, f32::max);
-    let grid_top = rects.iter().map(|r| r.top).fold(f32::INFINITY, f32::min);
-    let bottom = grid_top - spec.gap * unit + dy;
-    let top = (bottom - spec.strip_bar_h * unit).max(0.0);
-    let cy = (top + bottom) * 0.5;
-    if is_columns(spec) {
-        let inner_l = left;
-        let inner_r = right;
-        let n = strip.visible.len().max(1) as f32;
-        let col_w = (inner_r - inner_l) / n;
-        let sep_h = spec.separator_h * unit;
-        for (i, word) in strip.visible.iter().enumerate() {
-            let x0 = inner_l + i as f32 * col_w;
-            let x1 = x0 + col_w;
-            if i > 0 {
-                round_rect(g, (x0 - 0.5) * scale, (cy - sep_h * 0.5) * scale, scale.max(1.0), sep_h * scale, 0.0, pal.border, fade_u8(spec.separator_alpha));
-            }
-            if word.is_empty() {
-                continue;
-            }
-            let selected = i == strip.highlight_slot;
-            let alpha = fade_u8(if selected { 1.0 } else { spec.chip_text_alpha });
-            let color = if selected { pal.text } else { pal.text_dim };
-            text(g, word, (x0, top, x1, bottom), spec.chip_px * unit * scale, if selected { weight(spec.chip_sel_weight) } else { Weight::NORMAL }, color, alpha, scale, spec.families);
-        }
-        return;
-    }
-    let chip_look = spec.strip == crate::vk_paint::StripLook::Chips;
-    let button_w = spec.strip_button_w * unit;
-    let button_h = spec.strip_button_h * unit;
-    let gap = spec.strip_button_gap * unit;
-    let prev = (left, cy - button_h * 0.5, left + button_w, cy + button_h * 0.5);
-    let next = (right - button_w, cy - button_h * 0.5, right, cy + button_h * 0.5);
-    let chips = (prev.2 + gap, cy - spec.chips_h * unit * 0.5, next.0 - gap, cy + spec.chips_h * unit * 0.5);
-    let inner_t = chips.1 + spec.chips_pad * unit;
-    let inner_b = chips.3 - spec.chips_pad * unit;
-    let chip_r = ((inner_b - inner_t) * 0.5).max(0.0);
-    let chips_r = concentric_radius(chip_r, spec.chips_pad * unit);
-    round_rect(g, chips.0 * scale, chips.1 * scale, (chips.2 - chips.0) * scale, (chips.3 - chips.1) * scale, chips_r * scale, pal.key_action, fade_u8(1.0));
-    stroke_rect(g, (chips.0 + 0.5) * scale, (chips.1 + 0.5) * scale, (chips.2 - chips.0 - 1.0) * scale, (chips.3 - chips.1 - 1.0) * scale, (chips_r - 0.5).max(0.0) * scale, pal.border, fade_u8(1.0), scale.max(1.0));
-    for (rect, hint) in [(prev, "LB"), (next, "RB")] {
-        let rad = button_h * 0.5;
-        round_rect(g, rect.0 * scale, rect.1 * scale, (rect.2 - rect.0) * scale, (rect.3 - rect.1) * scale, rad * scale, pal.key_action, fade_u8(1.0));
-        stroke_rect(g, (rect.0 + 0.5) * scale, (rect.1 + 0.5) * scale, (rect.2 - rect.0 - 1.0) * scale, (rect.3 - rect.1 - 1.0) * scale, (rad - 0.5).max(0.0) * scale, pal.border, fade_u8(1.0), scale.max(1.0));
-        if let Some(svg) = hint_svg(ps5, hint) {
-            let px = 30.0 * unit;
-            let cx = (rect.0 + rect.2) * 0.5;
-            let half = px * 0.5;
-            blit_svg(g, svg, cx - half, cy - half, cx + half, cy + half, px, scale, None, fade_u8(1.0));
-        }
-    }
-    let inner_l = chips.0 + spec.chips_pad * unit;
-    let inner_r = chips.2 - spec.chips_pad * unit;
-    let filled: Vec<usize> = strip.visible.iter().enumerate().filter(|(_, w)| !w.is_empty()).map(|(i, _)| i).collect();
-    let n = filled.len().max(1) as f32;
-    let chip_gap = spec.chips_gap * unit;
-    let chip_w = ((inner_r - inner_l) - chip_gap * (n - 1.0)) / n;
-    for (k, slot) in filled.into_iter().enumerate() {
-        let x0 = inner_l + k as f32 * (chip_w + chip_gap);
-        let word = &strip.visible[slot];
-        let selected = slot == strip.highlight_slot;
-        if selected {
-            let sel_fill = if chip_look { pal.accent } else { pal.chip_sel };
-            round_rect(g, x0 * scale, inner_t * scale, chip_w * scale, (inner_b - inner_t) * scale, chip_r * scale, sel_fill, fade_u8(1.0));
-        }
-        let alpha = fade_u8(if selected { 1.0 } else { spec.chip_text_alpha });
-        let weight = if selected { weight(spec.chip_sel_weight) } else { Weight::NORMAL };
-        let label = (x0 + chip_r * 0.5, inner_t, x0 + chip_w - chip_r * 0.5, inner_b);
-        let color = if selected && chip_look { pal.sel_text } else { pal.text };
-        text(g, word, label, spec.chip_px * unit * scale, weight, color, alpha, scale, spec.families);
+    let look = frame.look();
+    let spec = spec_for(look);
+    let pal = vk_palette(frame);
+    let above = crate::vk_paint::StripGeom::above(rects, spec, unit);
+    let geom = crate::vk_paint::StripGeom {
+        left: above.left * scale,
+        top: above.top * scale,
+        right: above.right * scale,
+        bottom: above.bottom * scale,
+        unit: above.unit * scale,
+    };
+    let sp = crate::vk_paint::StripPaint {
+        spec,
+        pal: &pal,
+        alpha: alpha.clamp(0.0, 1.0),
+        icons: icon_family(frame),
+        select_retired: spec.strip == crate::vk_paint::StripLook::Chips
+            && crate::win::shortcut_sheet::hint_retired(),
+        dip_scale: 1.0,
+    };
+    unsafe {
+        g.transform(1.0, 0.0, dy * scale);
+        crate::vk_paint::paint_strip(g, &sp, strip, &geom);
+        g.transform(1.0, 0.0, 0.0);
     }
 }
 
@@ -1011,16 +946,11 @@ fn palette(look: VkLook, dark: bool, theme: &KeyboardTheme) -> Pal {
     let v = crate::vk_theme::themed_palette(crate::vk_paint::style_palette(look.style, dark), look.style, *theme);
     Pal {
         bg: from_colorref(v.bg),
-        key_action: from_colorref(v.key_action),
         accent: from_colorref(v.accent),
         sel_ring: from_colorref(v.sel_ring),
         text: from_colorref(v.text),
-        text_dim: from_colorref(v.text_dim),
-        sel_text: from_colorref(v.sel_text),
-        border: from_colorref(v.border),
         panel_stroke: from_colorref(v.panel_stroke),
         panel_stroke_alpha: v.panel_stroke_alpha,
-        chip_sel: from_colorref(v.chip_sel),
     }
 }
 

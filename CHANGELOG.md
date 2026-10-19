@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, the suggestion bar above the keys is drawn by the same code as on Windows: pills for Normal, columns for Mono and separate chips for Modern, with the Share or LB/RB hint beside them.
 - On Linux, the keyboard keys and the focus ring are drawn by the same code as on Windows. Modern shows its corner symbols and tinted Shift and Enter keys, a held Shift is tinted the Windows way, and the mic key shows as off when voice typing is turned off.
 - On Linux, the on-screen keyboard follows the light or dark desktop setting, like the Linux panels and like Windows. It stays dark unless the desktop asks for light, and switches while open.
 - On Linux, the highlighted suggestion in the Modern keyboard uses the accent colour with its own text colour, so it stays readable.

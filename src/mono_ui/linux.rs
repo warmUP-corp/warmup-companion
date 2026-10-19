@@ -475,8 +475,14 @@ impl Gfx {
             return;
         };
         let paint = solid_paint(c, alpha);
-        self.pixmap.borrow_mut()
-            .fill_rect(rect, &paint, self.transform, self.masks.borrow().last());
+        let path = PathBuilder::from_rect(rect);
+        self.pixmap.borrow_mut().fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            self.transform,
+            self.masks.borrow().last(),
+        );
     }
 
     pub(crate) unsafe fn gradient(
