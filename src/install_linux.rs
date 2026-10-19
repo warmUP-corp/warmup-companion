@@ -120,9 +120,7 @@ fn install_inner() -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("create install dir: {error}"))?;
     }
-    copy_binary(&src, &dest)?;
-    fs::set_permissions(&dest, fs::Permissions::from_mode(0o755))
-        .map_err(|error| format!("chmod install binary: {error}"))?;
+    let replaced = copy_binary(&src, &dest)?;
 
     let unit_path = crate::paths::systemd_user_unit_file();
     if let Some(parent) = unit_path.parent() {
@@ -131,8 +129,13 @@ fn install_inner() -> Result<(), String> {
     let unit = unit_text(&dest);
     fs::write(&unit_path, unit).map_err(|error| format!("write unit: {error}"))?;
 
+    let was_active = systemctl(&["--user", "is-active", UNIT_NAME])
+        .is_ok_and(|state| state.trim() == "active");
     systemctl_ok(&["--user", "daemon-reload"])?;
     systemctl_ok(&["--user", "enable", "--now", UNIT_NAME])?;
+    if replaced && was_active {
+        systemctl_ok(&["--user", "try-restart", UNIT_NAME])?;
+    }
 
     println!("Installed warmUP companion for this user.");
     println!("Binary: {}", dest.display());
@@ -164,18 +167,29 @@ fn installed_bin() -> PathBuf {
     crate::paths::install_dir().join(BIN_NAME)
 }
 
-fn copy_binary(src: &Path, dest: &Path) -> Result<(), String> {
+fn copy_binary(src: &Path, dest: &Path) -> Result<bool, String> {
     if same_file(src, dest) {
-        return Ok(());
+        fs::set_permissions(dest, fs::Permissions::from_mode(0o755))
+            .map_err(|error| format!("chmod install binary: {error}"))?;
+        return Ok(false);
     }
-    fs::copy(src, dest).map_err(|error| {
-        format!(
-            "copy {} to {}: {error}",
-            src.display(),
-            dest.display()
-        )
-    })?;
-    Ok(())
+    let staged = dest.with_file_name(format!("{BIN_NAME}.new"));
+    let _ = fs::remove_file(&staged);
+    let result = fs::copy(src, &staged)
+        .map_err(|error| format!("copy {} to {}: {error}", src.display(), staged.display()))
+        .and_then(|_| {
+            fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))
+                .map_err(|error| format!("chmod install binary: {error}"))
+        })
+        .and_then(|_| {
+            fs::rename(&staged, dest)
+                .map_err(|error| format!("replace {}: {error}", dest.display()))
+        });
+    if let Err(error) = result {
+        let _ = fs::remove_file(&staged);
+        return Err(error);
+    }
+    Ok(true)
 }
 
 fn same_file(left: &Path, right: &Path) -> bool {
