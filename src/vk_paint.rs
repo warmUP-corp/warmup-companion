@@ -1545,3 +1545,405 @@ pub(crate) unsafe fn paint_focus_ring(
         g.transform(1.0, 0.0, 0.0);
     }
 }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct StripGeom {
+    pub(crate) left: f32,
+    pub(crate) top: f32,
+    pub(crate) right: f32,
+    pub(crate) bottom: f32,
+    pub(crate) unit: f32,
+}
+
+impl StripGeom {
+    pub(crate) fn above(rects: &[crate::vk_geom::KeyRect], spec: &StyleSpec, unit: f32) -> Self {
+        if rects.is_empty() {
+            return Self::default();
+        }
+        let left = rects.iter().map(|r| r.left).fold(f32::INFINITY, f32::min);
+        let right = rects
+            .iter()
+            .map(|r| r.right)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let grid_top = rects.iter().map(|r| r.top).fold(f32::INFINITY, f32::min);
+        let bottom = grid_top - spec.gap * unit;
+        let top = (bottom - spec.strip_bar_h * unit).max(0.0);
+        Self {
+            left,
+            top,
+            right,
+            bottom,
+            unit,
+        }
+    }
+
+    pub(crate) fn cy(&self) -> f32 {
+        (self.top + self.bottom) * 0.5
+    }
+
+    pub(crate) fn pill_frame(&self, spec: &StyleSpec) -> PillFrame {
+        let u = self.unit;
+        let cy = self.cy();
+        let button_w = spec.strip_button_w * u;
+        let button_h = spec.strip_button_h * u;
+        let button_gap = spec.strip_button_gap * u;
+        let button = |left: f32| Edges {
+            left,
+            top: cy - button_h * 0.5,
+            right: left + button_w,
+            bottom: cy + button_h * 0.5,
+        };
+        let prev = button(self.left);
+        let next = button(self.right - button_w);
+        let chips_h = spec.chips_h * u;
+        let chips = Edges {
+            left: prev.right + button_gap,
+            top: cy - chips_h * 0.5,
+            right: next.left - button_gap,
+            bottom: cy + chips_h * 0.5,
+        };
+        let inner = chips.deflate(spec.chips_pad * u);
+        PillFrame {
+            prev,
+            next,
+            chips,
+            inner,
+            chip_r: ((inner.bottom - inner.top) * 0.5).max(0.0),
+        }
+    }
+
+    pub(crate) fn pill_slot_rects(&self, spec: &StyleSpec, visible: &[String]) -> Vec<(usize, Edges)> {
+        let frame = self.pill_frame(spec);
+        if frame.chips.right - frame.chips.left < 1.0 {
+            return Vec::new();
+        }
+        let inner = frame.inner;
+        let chip_gap = spec.chips_gap * self.unit;
+        let filled: Vec<usize> = visible
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| !w.is_empty())
+            .map(|(i, _)| i)
+            .collect();
+        let n = filled.len() as f32;
+        let chip_w = ((inner.right - inner.left) - chip_gap * (n - 1.0)) / n;
+        filled
+            .into_iter()
+            .enumerate()
+            .map(|(k, slot)| {
+                let left = inner.left + k as f32 * (chip_w + chip_gap);
+                (
+                    slot,
+                    Edges {
+                        left,
+                        top: inner.top,
+                        right: left + chip_w,
+                        bottom: inner.bottom,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn column_hints(&self, spec: &StyleSpec, engaged: bool) -> Vec<(&'static str, Edges)> {
+        let lane = spec.strip_button_w * self.unit;
+        let side = spec.strip_hint_px * self.unit;
+        let cy = self.cy();
+        let left = Edges::square(self.left + lane * 0.5, cy, side);
+        let right = Edges::square(self.right - lane * 0.5, cy, side);
+        if engaged {
+            vec![("LB", left), ("RB", right)]
+        } else {
+            vec![("SELECT", left)]
+        }
+    }
+
+    pub(crate) fn column_rects(&self, spec: &StyleSpec, slots: usize) -> Vec<Edges> {
+        let lane = spec.strip_button_w * self.unit;
+        let left = self.left + lane;
+        let right = (self.right - lane).max(left);
+        let slots = slots.max(1);
+        let col_w = (right - left) / slots as f32;
+        (0..slots)
+            .map(|i| Edges {
+                left: left + i as f32 * col_w,
+                top: self.top,
+                right: left + (i + 1) as f32 * col_w,
+                bottom: self.bottom,
+            })
+            .collect()
+    }
+
+    pub(crate) fn chip_rects(&self, spec: &StyleSpec, slots: usize) -> Vec<Edges> {
+        let half_gap = spec.chips_gap * self.unit * 0.5;
+        let chip_h = (spec.chips_h * self.unit).min(self.bottom - self.top);
+        let cy = self.cy();
+        self.column_rects(spec, slots)
+            .into_iter()
+            .map(|lane| Edges {
+                left: lane.left + half_gap,
+                top: cy - chip_h * 0.5,
+                right: (lane.right - half_gap).max(lane.left + half_gap),
+                bottom: cy + chip_h * 0.5,
+            })
+            .collect()
+    }
+
+    pub(crate) fn slot_rects(&self, spec: &StyleSpec, visible: &[String]) -> Vec<(usize, Edges)> {
+        match spec.strip {
+            StripLook::Pills => self.pill_slot_rects(spec, visible),
+            StripLook::Chips => self
+                .chip_rects(spec, visible.len())
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| visible.get(*i).is_some_and(|w| !w.is_empty()))
+                .collect(),
+            StripLook::Columns => self
+                .column_rects(spec, visible.len())
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| visible.get(*i).is_some_and(|w| !w.is_empty()))
+                .collect(),
+        }
+    }
+}
+
+pub(crate) struct PillFrame {
+    pub(crate) prev: Edges,
+    pub(crate) next: Edges,
+    pub(crate) chips: Edges,
+    pub(crate) inner: Edges,
+    pub(crate) chip_r: f32,
+}
+
+impl crate::vk_geom::KeyRect {
+    pub(crate) fn edges(&self) -> Edges {
+        Edges {
+            left: self.left,
+            top: self.top,
+            right: self.right,
+            bottom: self.bottom,
+        }
+    }
+}
+
+impl Edges {
+    pub(crate) fn square(cx: f32, cy: f32, side: f32) -> Edges {
+        let h = side * 0.5;
+        Edges {
+            left: cx - h,
+            top: cy - h,
+            right: cx + h,
+            bottom: cy + h,
+        }
+    }
+}
+
+pub(crate) struct StripPaint<'a> {
+    pub(crate) spec: &'a StyleSpec,
+    pub(crate) pal: &'a VkPalette,
+    pub(crate) alpha: f32,
+    pub(crate) icons: ControllerIconFamily,
+    pub(crate) select_retired: bool,
+    pub(crate) dip_scale: f32,
+}
+
+unsafe fn strip_word(
+    g: &mut Gfx,
+    sp: &StripPaint,
+    geom: &StripGeom,
+    word: &str,
+    rect: Edges,
+    selected: bool,
+    color: u32,
+    alpha: f32,
+) {
+    let spec = sp.spec;
+    g.text_clip(
+        word,
+        rect.rect(),
+        (spec.chip_px * geom.unit).max(1.0),
+        if selected { spec.chip_sel_weight } else { 400 },
+        spec.families,
+        color,
+        alpha,
+        Align::Center,
+        VAlign::Center,
+        false,
+    );
+}
+
+pub(crate) unsafe fn paint_strip(
+    g: &mut Gfx,
+    sp: &StripPaint,
+    strip: &crate::vk_predict::StripState,
+    geom: &StripGeom,
+) {
+    if sp.alpha <= 0.0
+        || geom.bottom - geom.top < 1.0
+        || strip.visible.iter().all(|w| w.is_empty())
+    {
+        return;
+    }
+    match sp.spec.strip {
+        StripLook::Pills => paint_strip_pills(g, sp, strip, geom),
+        StripLook::Columns => paint_strip_columns(g, sp, strip, geom),
+        StripLook::Chips => paint_strip_chips(g, sp, strip, geom),
+    }
+}
+
+unsafe fn paint_strip_chips(
+    g: &mut Gfx,
+    sp: &StripPaint,
+    strip: &crate::vk_predict::StripState,
+    geom: &StripGeom,
+) {
+    let (spec, pal, alpha) = (sp.spec, sp.pal, sp.alpha);
+    for (hint, rect) in geom
+        .column_hints(spec, strip.engaged)
+        .into_iter()
+        .filter(|(h, _)| !(sp.select_retired && *h == "SELECT"))
+    {
+        if let Some(icon) = sp.icons.hint_icon(hint) {
+            paint_icon(g, icon, rect, pal.text, alpha, rect.bottom - rect.top, sp.dip_scale);
+        }
+    }
+    if !strip.engaged {
+        let lane = spec.strip_button_w * geom.unit;
+        let side = spec.strip_hint_px * geom.unit;
+        let arrow = Edges::square(geom.right - lane * 0.5, geom.cy(), side);
+        paint_icon(g, VkIcon::ChevronRight, arrow, pal.text, alpha, side, sp.dip_scale);
+    }
+    let pad = spec.chips_gap * geom.unit;
+    for (i, chip) in geom.slot_rects(spec, &strip.visible) {
+        let selected = strip.engaged && i == strip.highlight_slot;
+        let r = (chip.bottom - chip.top) * 0.5;
+        if selected {
+            if let Some((dy, blur, a)) = spec.sel_shadow {
+                paint_blur_strokes(g, chip.rect(), r, dy * geom.unit, blur * geom.unit, a * alpha);
+            }
+        }
+        g.fill(chip.rect(), r, if selected { pal.accent } else { pal.key }, alpha);
+        let (color, a) = if selected {
+            (pal.sel_text, alpha)
+        } else {
+            (pal.text, spec.chip_text_alpha * alpha)
+        };
+        let label = Edges {
+            left: chip.left + pad,
+            right: chip.right - pad,
+            ..chip
+        };
+        strip_word(g, sp, geom, &strip.visible[i], label, selected, color, a);
+    }
+}
+
+unsafe fn paint_strip_pills(
+    g: &mut Gfx,
+    sp: &StripPaint,
+    strip: &crate::vk_predict::StripState,
+    geom: &StripGeom,
+) {
+    let (spec, pal, alpha) = (sp.spec, sp.pal, sp.alpha);
+    let u = geom.unit;
+    let cy = geom.cy();
+    let button_h = spec.strip_button_h * u;
+    let hint_px = spec.strip_hint_px * u;
+    let frame = geom.pill_frame(spec);
+    let mut buttons = vec![(frame.prev, if strip.engaged { "LB" } else { "SELECT" })];
+    if strip.engaged {
+        buttons.push((frame.next, "RB"));
+    }
+    for (rect, hint) in buttons {
+        g.fill(rect.rect(), button_h * 0.5, pal.key_action, alpha);
+        g.ring(rect.rect(), button_h * 0.5, 1.0, pal.border, alpha);
+        if let Some(icon) = sp.icons.hint_icon(hint) {
+            let cx = (rect.left + rect.right) * 0.5;
+            let square = Edges::square(cx, cy, hint_px);
+            let px = icon_draw_px(icon, square.bottom - square.top);
+            paint_icon(g, icon, square, pal.text, alpha, px, sp.dip_scale);
+        }
+    }
+    let chips = frame.chips;
+    if chips.right - chips.left < 1.0 {
+        return;
+    }
+    let chip_r = frame.chip_r;
+    let chips_r = crate::vk_motion::concentric_radius(chip_r, spec.chips_pad * u);
+    g.fill(chips.rect(), chips_r, pal.key_action, alpha);
+    g.ring(chips.rect(), chips_r, 1.0, pal.border, alpha);
+    for (slot_index, slot) in geom.pill_slot_rects(spec, &strip.visible) {
+        let word = &strip.visible[slot_index];
+        let selected = strip.engaged && slot_index == strip.highlight_slot;
+        if selected {
+            g.fill(slot.rect(), chip_r, pal.chip_sel, alpha);
+        }
+        let label = Edges {
+            left: slot.left + chip_r * 0.5,
+            right: slot.right - chip_r * 0.5,
+            ..slot
+        };
+        let a = if selected {
+            alpha
+        } else {
+            spec.chip_text_alpha * alpha
+        };
+        strip_word(g, sp, geom, word, label, selected, pal.text, a);
+    }
+}
+
+unsafe fn paint_strip_columns(
+    g: &mut Gfx,
+    sp: &StripPaint,
+    strip: &crate::vk_predict::StripState,
+    geom: &StripGeom,
+) {
+    let (spec, pal, alpha) = (sp.spec, sp.pal, sp.alpha);
+    let u = geom.unit;
+    let cy = geom.cy();
+    let sep_h = spec.separator_h * u;
+    for (hint, rect) in geom.column_hints(spec, strip.engaged) {
+        if let Some(icon) = sp.icons.hint_icon(hint) {
+            paint_icon(g, icon, rect, pal.text_dim, alpha, rect.bottom - rect.top, sp.dip_scale);
+        }
+    }
+    let columns = geom.column_rects(spec, strip.visible.len());
+    let sel_h = (sep_h * 1.6).min(geom.bottom - geom.top);
+    for (i, (word, col)) in strip.visible.iter().zip(columns).enumerate() {
+        if i > 0 {
+            let x = col.left.round();
+            let sep = Edges {
+                left: x - 0.5,
+                top: cy - sep_h * 0.5,
+                right: x + 0.5,
+                bottom: cy + sep_h * 0.5,
+            };
+            g.fill_rect(sep.rect(), pal.border, spec.separator_alpha * alpha);
+        }
+        if word.is_empty() {
+            continue;
+        }
+        let selected = strip.engaged && i == strip.highlight_slot;
+        let pad = 8.0 * u;
+        if selected {
+            let pill = Edges {
+                left: col.left + pad * 0.5,
+                top: cy - sel_h * 0.5,
+                right: col.right - pad * 0.5,
+                bottom: cy + sel_h * 0.5,
+            };
+            g.fill(pill.rect(), sel_h * 0.5, pal.chip_sel, alpha);
+        }
+        let (color, a) = if selected {
+            (pal.text, alpha)
+        } else {
+            (pal.text_dim, spec.chip_text_alpha * alpha)
+        };
+        let label = Edges {
+            left: col.left + pad,
+            right: col.right - pad,
+            ..col
+        };
+        strip_word(g, sp, geom, word, label, selected, color, a);
+    }
+}

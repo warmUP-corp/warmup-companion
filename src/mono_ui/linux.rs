@@ -443,6 +443,24 @@ impl Gfx {
         self.draw_text_runs(s, r, px, weight_for(weight), family, c, alpha, halign, valign, wrap);
     }
 
+    pub(crate) unsafe fn text_clip(
+        &mut self,
+        s: &str,
+        r: Rect,
+        px: f32,
+        weight: i32,
+        families: &[&str],
+        c: u32,
+        alpha: f32,
+        halign: Align,
+        valign: VAlign,
+        wrap: bool,
+    ) {
+        self.push_clip(r, false);
+        self.text_full(s, r, px, weight, families, c, alpha, halign, valign, wrap);
+        self.pop_clip();
+    }
+
     pub(crate) unsafe fn fill(&self, r: Rect, radius: f32, c: u32, alpha: f32) {
         let Some(path) = rounded_path(r.x, r.y, r.w, r.h, radius) else {
             return;

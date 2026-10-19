@@ -15,7 +15,7 @@ use windows::Win32::Graphics::Direct2D::{
     ID2D1Geometry, ID2D1Layer, ID2D1RenderTarget, ID2D1Resource, ID2D1SolidColorBrush,
     D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT,
     D2D1_ARC_SIZE_SMALL, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES,
-    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
+    D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_GAMMA_2_2,
     D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, D2D1_INTERPOLATION_MODE_LINEAR,
     D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
@@ -730,6 +730,35 @@ impl Gfx {
             &r.d2d(),
             &self.brush,
             D2D1_DRAW_TEXT_OPTIONS_NONE,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
+    }
+
+    pub(crate) unsafe fn text_clip(
+        &self,
+        s: &str,
+        r: Rect,
+        px: f32,
+        weight: i32,
+        families: &[&str],
+        c: u32,
+        alpha: f32,
+        halign: Align,
+        valign: VAlign,
+        wrap: bool,
+    ) {
+        let family = self.resolve(families).to_string();
+        let Some(f) = self.format_full(px, weight, &family, halign, valign, wrap) else {
+            return;
+        };
+        self.brush.SetColor(&color(c, alpha));
+        let text: Vec<u16> = s.encode_utf16().collect();
+        self.rt.DrawText(
+            &text,
+            &f,
+            &r.d2d(),
+            &self.brush,
+            D2D1_DRAW_TEXT_OPTIONS_CLIP,
             DWRITE_MEASURING_MODE_NATURAL,
         );
     }
