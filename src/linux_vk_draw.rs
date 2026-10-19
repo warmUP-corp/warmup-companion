@@ -25,26 +25,10 @@ const BAR_LABEL_PX: f32 = 19.0;
 const BAR_CONNECTOR_PX: f32 = 17.0;
 const BAR_PREFIX_PX: f32 = 20.0;
 const BAR_SEP_PX: f32 = 18.0;
-const SHEET_W: f32 = 1600.0;
-const SHEET_H: f32 = 546.0;
-const SHEET_PAD_TOP: f32 = 24.0;
-const SHEET_PAD_BOTTOM: f32 = 32.0;
-const SHEET_COL_GAP: f32 = 72.0;
-const SHEET_ROW_H: f32 = 70.0;
-const SHEET_HEADER_PX: f32 = 18.0;
-const SHEET_ACTION_PX: f32 = 19.0;
-const SHEET_TOKEN_PX: f32 = 17.0;
-const SHEET_GLYPH: f32 = 28.0;
-const SHEET_SHARE: f32 = 32.0;
-const SHEET_TOKEN_GAP: f32 = 8.0;
-const SHEET_ACTION_GAP: f32 = 24.0;
-const SHEET_TRAIL: f32 = 24.0;
 const LEGEND_MIN_TEXT_PX: f32 = 11.0;
 const LEGEND_SEP: &str = "\u{00B7}";
 const ALPHA_SECONDARY: f32 = 0xA6 as f32 / 255.0;
 const ALPHA_SEP: f32 = 0x66 as f32 / 255.0;
-const ALPHA_LINE: f32 = 0x14 as f32 / 255.0;
-const VK_KB_REF_H: f32 = 384.0;
 
 #[allow(dead_code)]
 fn sheet_metrics_are_the_windows_ones() -> f32 {
@@ -106,6 +90,7 @@ pub struct Frame {
     pub symbol_locked: bool,
     pub floating: bool,
     pub sheet: bool,
+    pub sheet_hint: bool,
 }
 
 pub struct Glide {
@@ -181,14 +166,6 @@ pub fn card_size(output_w: f32, output_h: f32, docked: bool, rows: &[KeyRow], lo
     }
 }
 
-#[cfg(test)]
-fn sheet_size(output_w: f32, output_h: f32) -> (u32, u32) {
-    let fit = (output_w / SHEET_W).min(output_h / SHEET_H).min(1.0).max(0.35);
-    (
-        (SHEET_W * fit).round().max(320.0) as u32,
-        (SHEET_H * fit).round().max(160.0) as u32,
-    )
-}
 
 fn legend_band_height(scale: f32, look: VkLook) -> f32 {
     if look.tv_layout() {
@@ -318,6 +295,8 @@ fn render_keyboard(
     }
     if !look.tv_layout() {
         paint_legend(g, frame, &rects, lu, scale);
+    } else if frame.sheet_hint && !frame.strip.as_ref().is_some_and(|s| s.visible.iter().any(|w| !w.is_empty())) {
+        paint_sheet_hint(g, frame, &rects, scale);
     }
     if let Some((x, y, w, h, radius)) = panel {
         clip_round(g, x, y, w, h, radius);
@@ -329,13 +308,6 @@ fn render_keyboard(
     glide.animating = strip_moving || pressing;
 }
 
-#[derive(Clone, Copy)]
-enum Leg {
-    Btn(&'static str),
-    Word(&'static str),
-    Plus,
-    Slash,
-}
 
 
 
@@ -388,6 +360,7 @@ pub(crate) fn keyboard_stamp(frame: &Frame) -> u64 {
     frame.symbol_locked.hash(&mut hasher);
     frame.floating.hash(&mut hasher);
     frame.dark.hash(&mut hasher);
+    frame.sheet_hint.hash(&mut hasher);
     frame.theme.bg.hash(&mut hasher);
     frame.theme.key.hash(&mut hasher);
     frame.theme.accent.hash(&mut hasher);
@@ -577,212 +550,80 @@ fn paint_live(g: &mut Gfx, frame: &Frame, glide: &mut Glide, step: bool) {
     }
 }
 
+fn sheet_paint<'a>(frame: &Frame, pal: &'a crate::vk_paint::VkPalette) -> crate::vk_paint::SheetPaint<'a> {
+    crate::vk_paint::SheetPaint {
+        pal,
+        style: frame.style,
+        family: icon_family(frame),
+        dip_scale: 1.0,
+    }
+}
+
 fn draw_sheet_frame(g: &mut Gfx, frame: &Frame) {
-    let (spec, pal, _, unit, scale, _, _) = scene(frame);
-    let panel = if frame.floating {
-        let panel_r = spec.panel_radius * unit;
-        let x = FLOATING_PANEL_INSET * scale;
-        let y = FLOATING_PANEL_INSET * scale;
-        let w = (frame.logical_w - 2.0 * FLOATING_PANEL_INSET) * scale;
-        let h = (frame.logical_h - 2.0 * FLOATING_PANEL_INSET) * scale;
-        round_rect(g, x, y, w, h, panel_r * scale, rgb(0x1F1F1F), 255);
-        stroke_rect(
-            g,
-            x + 0.5 * scale,
-            y + 0.5 * scale,
-            (w - scale).max(1.0),
-            (h - scale).max(1.0),
-            (panel_r - 0.5).max(0.0) * scale,
-            pal.panel_stroke,
-            (pal.panel_stroke_alpha * 255.0) as u8,
-            scale.max(1.0),
-        );
-        Some((x, y, w, h, panel_r * scale))
-    } else {
-        fill(g, rgb(0x1F1F1F), 255);
-        None
+    let (spec, _, _, unit, scale, _, _) = scene(frame);
+    let look = frame.look();
+    let pal = vk_palette(frame);
+    let sp = sheet_paint(frame, &pal);
+    let (w, h) = (frame.logical_w * scale, frame.logical_h * scale);
+    let inset = FLOATING_PANEL_INSET * scale;
+    let inset_panel = crate::vk_paint::Edges {
+        left: inset,
+        top: inset,
+        right: w - inset,
+        bottom: h - inset,
     };
-    paint_sheet(g, frame.logical_w, frame.logical_h, scale, frame.ps5);
-    if let Some((x, y, w, h, radius)) = panel {
-        clip_round(g, x, y, w, h, radius);
-    }
-}
-
-enum SheetLine {
-    Title(&'static str),
-    Blank,
-    Row(&'static [Leg], &'static str),
-}
-
-struct SheetCol {
-    lines: Vec<SheetLine>,
-    combo: f32,
-    width: f32,
-}
-
-fn sheet_part_width(part: &Leg, g: &mut Gfx) -> f32 {
-    match *part {
-        Leg::Btn("SELECT") => SHEET_SHARE,
-        Leg::Btn(_) => SHEET_GLYPH,
-        Leg::Word(word) => measure_label(g, &["Noto Sans"], word, SHEET_TOKEN_PX),
-        Leg::Plus => measure_label(g, &["Noto Sans"], "+", SHEET_TOKEN_PX),
-        Leg::Slash => measure_label(g, &["Noto Sans"], "/", SHEET_TOKEN_PX),
-    }
-}
-
-fn sheet_combo_width(parts: &[Leg], g: &mut Gfx) -> f32 {
-    parts.iter().map(|part| sheet_part_width(part, g)).sum::<f32>() + SHEET_TOKEN_GAP * parts.len().saturating_sub(1) as f32
-}
-
-fn sheet_columns(g: &mut Gfx) -> [SheetCol; 3] {
-    const L3: &[Leg] = &[Leg::Btn("L3")];
-    const R3: &[Leg] = &[Leg::Btn("R3")];
-    const TAP: &[Leg] = &[Leg::Word("Tap"), Leg::Btn("SELECT")];
-    const COPY: &[Leg] = &[Leg::Btn("SELECT"), Leg::Plus, Leg::Btn("X")];
-    const PASTE: &[Leg] = &[Leg::Btn("SELECT"), Leg::Plus, Leg::Btn("Y")];
-    const CLEAR: &[Leg] = &[Leg::Btn("SELECT"), Leg::Plus, Leg::Btn("B")];
-    const CARET: &[Leg] = &[Leg::Btn("LB"), Leg::Slash, Leg::Btn("RB")];
-    const JUMP: &[Leg] = &[Leg::Word("Hold"), Leg::Btn("SELECT"), Leg::Plus, Leg::Btn("LB"), Leg::Slash, Leg::Btn("RB")];
-    const SHIFT_K: &[Leg] = &[Leg::Btn("RT")];
-    const SYMBOLS: &[Leg] = &[Leg::Btn("LT")];
-    const LAYOUT: &[Leg] = &[Leg::Btn("X")];
-    const SHOT: &[Leg] = &[Leg::Btn("LB"), Leg::Plus, Leg::Btn("RB"), Leg::Plus, Leg::Btn("RT")];
-    const WINDOW: &[Leg] = &[Leg::Btn("LB"), Leg::Plus, Leg::Btn("RB"), Leg::Plus, Leg::Btn("LT")];
-    const OPEN: &[Leg] = &[Leg::Btn("SELECT"), Leg::Plus, Leg::Btn("LB"), Leg::Plus, Leg::Btn("X")];
-    const GAME_SHOT: &[Leg] = &[Leg::Word("Hold"), Leg::Btn("SELECT"), Leg::Plus, Leg::Btn("LB")];
-    const RECORD: &[Leg] = &[Leg::Word("Hold"), Leg::Btn("SELECT"), Leg::Plus, Leg::Btn("RB")];
-    let raw = [
-        vec![
-            SheetLine::Title("Keyboard"),
-            SheetLine::Row(L3, "Close keyboard"),
-            SheetLine::Row(R3, "Dictate"),
-            SheetLine::Row(TAP, "Suggestions"),
-            SheetLine::Row(COPY, "Copy"),
-            SheetLine::Row(PASTE, "Paste"),
-            SheetLine::Row(CLEAR, "Clear field"),
-        ],
-        vec![
-            SheetLine::Blank,
-            SheetLine::Row(CARET, "Move caret"),
-            SheetLine::Row(JUMP, "Jump a word"),
-            SheetLine::Row(SHIFT_K, "Shift"),
-            SheetLine::Row(SYMBOLS, "Symbols"),
-            SheetLine::Row(LAYOUT, "Switch layout"),
-        ],
-        vec![
-            SheetLine::Title("Keyboard closed"),
-            SheetLine::Row(SHOT, "Screenshot"),
-            SheetLine::Row(WINDOW, "Window screenshot"),
-            SheetLine::Row(OPEN, "Open warmUP"),
-            SheetLine::Title("In games"),
-            SheetLine::Row(GAME_SHOT, "Screenshot"),
-            SheetLine::Row(RECORD, "Record (warmUP)"),
-        ],
-    ];
-    raw.map(|lines| {
-        let mut combo = 0.0f32;
-        let mut label = 0.0f32;
-        let mut header = 0.0f32;
-        for line in &lines {
-            match line {
-                SheetLine::Row(parts, text) => {
-                    combo = combo.max(sheet_combo_width(parts, g));
-                    label = label.max(measure_label(g, &["Noto Sans"], text, SHEET_ACTION_PX));
+    let radius = frame.floating.then_some(spec.panel_radius * unit * scale);
+    unsafe {
+        if look.tv_layout() {
+            let u = crate::vk_paint::ref_unit(ui_scale(), look) * crate::vk_paint::MS_SCALE * scale;
+            crate::vk_paint::paint_modern_sheet(g, &sp, u, inset_panel, radius, 1.0);
+        } else {
+            let panel = if frame.floating {
+                inset_panel
+            } else {
+                crate::vk_paint::Edges {
+                    left: 0.0,
+                    top: 0.0,
+                    right: w,
+                    bottom: h,
                 }
-                SheetLine::Title(text) => header = header.max(measure_label(g, &["Noto Sans"], text, SHEET_HEADER_PX)),
-                SheetLine::Blank => {}
-            }
-        }
-        let width = (combo + SHEET_ACTION_GAP + label + SHEET_TRAIL).max(header);
-        SheetCol { lines, combo, width }
-    })
-}
-
-fn sheet_total(cols: &[SheetCol]) -> f32 {
-    let n = cols.len();
-    cols.iter().map(|col| col.width).sum::<f32>() + SHEET_COL_GAP * n as f32 + if n >= 2 { 1.0 } else { 0.0 }
-}
-
-fn sheet_hairline(lines: &[SheetLine], index: usize) -> bool {
-    matches!(lines.get(index), Some(SheetLine::Row(_, _))) && matches!(lines.get(index + 1), Some(SheetLine::Row(_, _)))
-}
-
-fn leg_word(part: &Leg) -> &'static str {
-    match *part {
-        Leg::Word(word) => word,
-        Leg::Plus => "+",
-        Leg::Slash => "/",
-        Leg::Btn(_) => "",
-    }
-}
-
-fn paint_sheet(g: &mut Gfx, frame_w: f32, frame_h: f32, scale: f32, ps5: bool) {
-    let cols = sheet_columns(g);
-    let total = sheet_total(&cols);
-    let rows = cols.iter().map(|col| col.lines.len()).max().unwrap_or(1);
-    let design_h = SHEET_PAD_TOP + rows as f32 * SHEET_ROW_H + SHEET_PAD_BOTTOM;
-    let u = (frame_w / SHEET_W).min(frame_h / design_h).clamp(0.35, 1.0);
-    let row_h = SHEET_ROW_H * u;
-    let top = SHEET_PAD_TOP * u;
-    let block_h = rows as f32 * row_h;
-    let mut x = (frame_w - total * u) * 0.5;
-    let count = cols.len();
-    let muted = (ALPHA_SECONDARY * 255.0) as u8;
-    let line_a = (ALPHA_LINE * 255.0) as u8;
-    let white = rgb(0xFFFFFF);
-    for (ci, col) in cols.iter().enumerate() {
-        let col_w = col.width * u;
-        for (index, line) in col.lines.iter().enumerate() {
-            let y = top + index as f32 * row_h;
-            match line {
-                SheetLine::Title(title) => {
-                    text_aligned(g, title, (x, y, x + col_w, y + row_h), SHEET_HEADER_PX * u * scale, Weight::NORMAL, white, muted, scale, Align::Left, &["Noto Sans"]);
-                }
-                SheetLine::Row(parts, label) => {
-                    let mut cursor = x;
-                    for (part_index, part) in parts.iter().enumerate() {
-                        if part_index > 0 {
-                            cursor += SHEET_TOKEN_GAP * u;
-                        }
-                        let w = sheet_part_width(part, g) * u;
-                        match *part {
-                            Leg::Btn(hint) => {
-                                if let Some(svg) = hint_svg(ps5, hint) {
-                                    blit_svg(g, svg, cursor, y, cursor + w, y + row_h, w, scale, None, 255);
-                                }
-                            }
-                            Leg::Word(_) | Leg::Plus | Leg::Slash => {
-                                text_aligned(g, leg_word(part), (cursor, y, cursor + w, y + row_h), SHEET_TOKEN_PX * u * scale, Weight::NORMAL, white, muted, scale, Align::Left, &["Noto Sans"]);
-                            }
-                        }
-                        cursor += w;
-                    }
-                    let label_x = x + col.combo * u + SHEET_ACTION_GAP * u;
-                    text_aligned(g, label, (label_x, y, x + col_w, y + row_h), SHEET_ACTION_PX * u * scale, Weight::NORMAL, white, 255, scale, Align::Left, &["Noto Sans"]);
-                }
-                SheetLine::Blank => {}
-            }
-            if sheet_hairline(&col.lines, index) {
-                round_rect(g, x * scale, (y + row_h - u) * scale, col_w * scale, u * scale, 0.0, white, line_a);
-            }
-        }
-        x += col_w;
-        if ci + 1 == count {
-            break;
-        }
-        x += SHEET_COL_GAP * u;
-        if ci + 2 == count {
-            round_rect(g, x * scale, top * scale, u * scale, block_h * scale, 0.0, white, line_a);
-            x += u + SHEET_COL_GAP * u;
+            };
+            crate::vk_paint::paint_shortcut_sheet(g, &sp, unit * scale, panel, radius, 1.0);
         }
     }
 }
 
-#[cfg(test)]
-fn sheet_layout(g: &mut Gfx) -> (f32, [f32; 3]) {
-    let cols = sheet_columns(g);
-    (sheet_total(&cols), [cols[0].combo, cols[1].combo, cols[2].combo])
+fn paint_sheet_hint(g: &mut Gfx, frame: &Frame, rects: &[KeyRect], scale: f32) {
+    if rects.is_empty() {
+        return;
+    }
+    let left = rects.iter().map(|r| r.left).fold(f32::INFINITY, f32::min);
+    let right = rects.iter().map(|r| r.right).fold(f32::NEG_INFINITY, f32::max);
+    let top = rects.iter().map(|r| r.top).fold(f32::INFINITY, f32::min);
+    let u = crate::vk_paint::ref_unit(ui_scale(), frame.look());
+    let pal = vk_palette(frame);
+    let sp = sheet_paint(frame, &pal);
+    unsafe {
+        crate::vk_paint::paint_sheet_hint(
+            g,
+            &sp,
+            u * scale,
+            (left + right) * 0.5 * scale,
+            top * scale,
+            frame.logical_w * scale,
+        )
+    };
 }
+
+
+
+
+
+
+
+
+
+
 
 
 fn paint_strip(
@@ -851,35 +692,6 @@ fn from_colorref(color: u32) -> Rgb {
 
 
 
-fn hint_svg(ps5: bool, hint: &str) -> Option<&'static str> {
-    Some(match (ps5, hint) {
-        (true, "A") => include_str!("../controller-icons/p5_face_cross_colored.svg"),
-        (true, "B") => include_str!("../controller-icons/p5_face_circle_colored.svg"),
-        (true, "X") => include_str!("../controller-icons/p5_face_square_colored.svg"),
-        (true, "Y") => include_str!("../controller-icons/p5_face_triangle_colored.svg"),
-        (true, "L3") => include_str!("../controller-icons/p5_l3_click.svg"),
-        (true, "SELECT") => include_str!("../controller-icons/p5_share.svg"),
-        (true, "LB") => include_str!("../controller-icons/p5_shoulder_l1.svg"),
-        (true, "RB") => include_str!("../controller-icons/p5_shoulder_r1.svg"),
-        (true, "LT") => include_str!("../controller-icons/p5_trigger_l2.svg"),
-        (true, "RT") => include_str!("../controller-icons/p5_trigger_r2.svg"),
-        (true, "R3") => include_str!("../controller-icons/p5_r3_click.svg"),
-        (true, "START") => include_str!("../controller-icons/p5_options.svg"),
-        (false, "A") => include_str!("../controller-icons/x_face_a_colored.svg"),
-        (false, "B") => include_str!("../controller-icons/x_face_b_colored.svg"),
-        (false, "X") => include_str!("../controller-icons/x_face_x_colored.svg"),
-        (false, "Y") => include_str!("../controller-icons/x_face_y_colored.svg"),
-        (false, "L3") => include_str!("../controller-icons/x_l3_click.svg"),
-        (false, "SELECT") => include_str!("../controller-icons/x_menu_view.svg"),
-        (false, "LB") => include_str!("../controller-icons/x_shoulder_lb.svg"),
-        (false, "RB") => include_str!("../controller-icons/x_shoulder_rb.svg"),
-        (false, "LT") => include_str!("../controller-icons/x_trigger_lt.svg"),
-        (false, "RT") => include_str!("../controller-icons/x_trigger_rt.svg"),
-        (false, "R3") => include_str!("../controller-icons/x_r3_click.svg"),
-        (false, "START") => include_str!("../controller-icons/x_menu_menu.svg"),
-        _ => return None,
-    })
-}
 
 
 fn cref(color: Rgb) -> u32 {
@@ -965,9 +777,6 @@ fn text(
     text_aligned(g, value, band, px, weight, color, alpha, scale, Align::Center, family);
 }
 
-fn measure_label(g: &mut Gfx, family: &[&str], value: &str, px: f32) -> f32 {
-    unsafe { g.measure_full(value, px, 400, family) }
-}
 
 fn text_aligned(
     g: &mut Gfx,
@@ -1001,36 +810,6 @@ fn text_aligned(
     };
 }
 
-fn blit_svg(g: &mut Gfx, svg: &'static str, x0: f32, y0: f32, x1: f32, y1: f32, size: f32, scale: f32, tint: Option<Rgb>, alpha: u8) {
-    if alpha == 0 {
-        return;
-    }
-    let tip = tint.is_none();
-    let draw_px = size.round().clamp(12.0, 192.0);
-    let raster_px = if tip {
-        (draw_px * scale * 3.0).round().clamp(54.0, (draw_px * scale * 3.0).max(192.0))
-    } else {
-        (draw_px * scale).round().max(1.0)
-    } as u32;
-    let source_px = if tip { 32.0 } else { 24.0 };
-    let dst = crate::mono_ui::rect(
-        ((x0 + x1) * 0.5 - draw_px * 0.5) * scale,
-        ((y0 + y1) * 0.5 - draw_px * 0.5) * scale,
-        draw_px * scale,
-        draw_px * scale,
-    );
-    unsafe {
-        crate::vk_paint::paint_svg_icon(
-            g,
-            svg,
-            raster_px,
-            tint.map(cref).unwrap_or(0),
-            dst,
-            alpha as f32 / 255.0,
-            source_px,
-        )
-    };
-}
 
 pub struct KeyPatch {
     pub width: u32,
@@ -1332,6 +1111,7 @@ mod tests {
             symbol_locked: false,
             floating: true,
             sheet: false,
+            sheet_hint: false,
         };
         let mut glide = Glide::default();
         let started = std::time::Instant::now();
@@ -1365,19 +1145,12 @@ mod tests {
         paint_frame(&mut g, &sheet, &mut Glide::default());
         assert_eq!((g.width(), g.height()), (1600, 546));
         let inset = (12 * 1600 + 80) * 4;
-        assert_eq!(&g.pixels()[inset..inset + 4], &[0x1F, 0x1F, 0x1F, 0xFF]);
+        assert_eq!(&g.pixels()[inset..inset + 4], &[0x15, 0x16, 0x1C, 0xFF]);
     }
 
     #[test]
     fn shortcut_overlay_matches_the_pen_frame() {
-        let (w, h) = super::sheet_size(3072.0, 1728.0);
-        assert_eq!((w, h), (1600, 546));
         let mut g = Gfx::new(1, 1).expect("gfx");
-        let (total, combos) = super::sheet_layout(&mut g);
-        for (got, want) in combos.iter().zip([86.0, 183.0, 140.0]) {
-            assert!((got - want).abs() <= 16.0, "combos {combos:?} total {total}");
-        }
-        assert!(total < 1600.0 - 96.0, "content {total} leaves the pen's side inset");
         let frame = Frame {
             logical_w: 1600.0,
             logical_h: 546.0,
@@ -1398,6 +1171,7 @@ mod tests {
             symbol_locked: false,
             floating: true,
             sheet: true,
+            sheet_hint: false,
         };
         paint_frame(&mut g, &frame, &mut Glide::default());
         assert!(g.pixels().chunks_exact(4).any(|px| px[0] != 0x1F || px[1] != 0x1F || px[2] != 0x1F));

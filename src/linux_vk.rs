@@ -38,6 +38,7 @@ mod gpu;
 static KEYBOARD_OPEN: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_GONE: AtomicBool = AtomicBool::new(false);
 static OUTPUT_IS_TV: AtomicBool = AtomicBool::new(false);
+const SHEET_HINT_FOR: Duration = Duration::from_secs(3);
 
 pub fn look() -> crate::vk_paint::VkLook {
     let tv = match crate::config::vk_display() {
@@ -223,6 +224,11 @@ fn keyboard_loop(wake: UnixStream) -> Result<(), String> {
                 shell.dirty = true;
             }
         }
+        let hint = shell.sheet_hint(shell.look());
+        if shell.configured && shell.hint_shown != hint {
+            shell.hint_shown = hint;
+            shell.dirty = true;
+        }
         if shell.configured && shell.dark != crate::vk_theme::is_dark_theme() {
             shell.dark = !shell.dark;
             shell.dirty = true;
@@ -308,6 +314,8 @@ struct Shell {
     gpu_presented: bool,
     gpu_errors: u32,
     dark: bool,
+    opened_at: std::time::Instant,
+    hint_shown: bool,
     voice_gen: u64,
 }
 
@@ -366,6 +374,8 @@ impl Shell {
             gpu_presented: false,
             gpu_errors: 0,
             dark: crate::vk_theme::is_dark_theme(),
+            opened_at: std::time::Instant::now(),
+            hint_shown: false,
             voice_gen: 0,
         };
         shell.apply_layout();
@@ -446,6 +456,13 @@ impl Shell {
         self.layer.commit();
     }
 
+    fn sheet_hint(&self, look: crate::vk_paint::VkLook) -> bool {
+        look.tv_layout()
+            && self.opened_at.elapsed() < SHEET_HINT_FOR
+            && crate::config::gamepad_settings().vk_side_tips
+            && !crate::win::shortcut_sheet::hint_retired()
+    }
+
     fn look(&self) -> crate::vk_paint::VkLook {
         if let Some(info) = self.output.as_ref().and_then(|output| self.output_state.info(output)) {
             OUTPUT_IS_TV.store(crate::vk_theme::is_tv(info.physical_size.0, info.physical_size.1), Ordering::SeqCst);
@@ -503,6 +520,7 @@ impl Shell {
             symbol_locked,
             floating,
             sheet: crate::vk_sheet::shown(),
+            sheet_hint: self.sheet_hint(look),
         };
         if self.logical_w == 0 || self.logical_h == 0 {
             return;
