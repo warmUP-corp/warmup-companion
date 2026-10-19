@@ -81,6 +81,36 @@ pub mod controller_center;
 #[path = "win/tray_menu.rs"]
 pub(crate) mod tray_menu;
 
+#[allow(dead_code)]
+#[path = "win/controller_tips.rs"]
+pub mod controller_tips;
+
+#[allow(dead_code)]
+#[path = "win/shortcut_sheet.rs"]
+pub mod shortcut_sheet;
+
+#[allow(dead_code)]
+pub mod vk_ui {
+    pub fn request_repaint() {
+        #[cfg(feature = "gamepad")]
+        crate::linux_vk::request_repaint();
+    }
+
+    pub(crate) fn vk_look() -> crate::vk_paint::VkLook {
+        #[cfg(feature = "gamepad")]
+        {
+            crate::linux_vk::look()
+        }
+        #[cfg(not(feature = "gamepad"))]
+        {
+            crate::vk_paint::VkLook {
+                style: crate::config::VkStyle::Normal,
+                tv: false,
+            }
+        }
+    }
+}
+
 pub mod speech_input {
     #[cfg_attr(not(feature = "gamepad"), allow(dead_code))]
     pub fn set_engine(_name: &str) {}

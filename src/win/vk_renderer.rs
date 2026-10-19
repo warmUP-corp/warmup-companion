@@ -68,6 +68,14 @@ pub(crate) use crate::vk_paint::{
     icon_draw_px, is_playstation_label, paint_focus_ring, paint_icon, paint_key,
     paint_strip, ControllerIconFamily, Edges, KeyState, KeyStyle, StripGeom, StripPaint, VkIcon,
 };
+#[cfg(test)]
+use crate::vk_paint::{bar_layout, legend_layout, BarLayout, BAR_LABEL_PX, BAR_SEP_PX};
+pub(crate) use crate::vk_paint::{
+    combo_parts, combo_width, legend_span, paint_combo, paint_legend, ComboPart, ComboStyle, LegendPaint, Measure, ALPHA_SECONDARY, BAR_H, LEGEND_SEP,
+    SHEET_ACTION_GAP, SHEET_ACTION_PX, SHEET_COL_GAP, SHEET_HEADER_PX, SHEET_PAD_BOTTOM,
+    SHEET_PAD_TOP, SHEET_PAD_X, SHEET_ROW_H, SHEET_TRAIL,
+};
+pub use crate::vk_paint::legend_band_height;
 pub use crate::vk_geom::KeyRect;
 pub use crate::vk_paint::{
     FLOATING_PANEL_INSET,
@@ -264,109 +272,15 @@ const SEL_GLIDE_TAU: f32 = 0.045;
 
 pub const STRIP_BAND_H: f32 = 67.0;
 
-const BAR_H: f32 = 80.0;
-const BAR_GLYPH: f32 = 38.0;
-const BAR_SHARE: f32 = 44.0;
-const BAR_GAP: f32 = 6.0;
-const BAR_LABEL_GAP: f32 = 6.0;
-const BAR_LABEL_PX: f32 = 19.0;
-const BAR_CONNECTOR_PX: f32 = 17.0;
-const BAR_PREFIX_PX: f32 = 20.0;
-const BAR_SEP_PX: f32 = 18.0;
-const SHEET_PAD_TOP: f32 = 16.0;
-const SHEET_PAD_X: f32 = 24.0;
-const SHEET_PAD_BOTTOM: f32 = 16.0;
-const SHEET_COL_GAP: f32 = 40.0;
-const SHEET_ROW_H: f32 = 70.0;
-const SHEET_HEADER_PX: f32 = 18.0;
-const SHEET_ACTION_PX: f32 = 19.0;
-const SHEET_TOKEN_PX: f32 = 17.0;
-const SHEET_GLYPH: f32 = 28.0;
-const SHEET_SHARE: f32 = 32.0;
-const SHEET_TOKEN_GAP: f32 = 8.0;
-const SHEET_ACTION_GAP: f32 = 24.0;
-const SHEET_TRAIL: f32 = 24.0;
-const LEGEND_SEP: &str = "\u{00B7}";
-const ALPHA_SECONDARY: f32 = 0xA6 as f32 / 255.0;
-const ALPHA_SEP: f32 = 0x66 as f32 / 255.0;
 const ALPHA_LINE: f32 = 0x14 as f32 / 255.0;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct ComboStyle {
-    glyph: f32,
-    share: f32,
-    gap: f32,
-    prefix_px: f32,
-    connector_px: f32,
-}
 
-impl ComboStyle {
-    fn bar(u: f32) -> Self {
-        Self {
-            glyph: BAR_GLYPH * u,
-            share: BAR_SHARE * u,
-            gap: BAR_GAP * u,
-            prefix_px: text_px(BAR_PREFIX_PX, u),
-            connector_px: text_px(BAR_CONNECTOR_PX, u),
-        }
-    }
 
-    fn sheet(u: f32) -> Self {
-        Self {
-            glyph: SHEET_GLYPH * u,
-            share: SHEET_SHARE * u,
-            gap: SHEET_TOKEN_GAP * u,
-            prefix_px: text_px(SHEET_TOKEN_PX, u),
-            connector_px: text_px(SHEET_TOKEN_PX, u),
-        }
-    }
-}
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum ComboPart {
-    Icon(VkIcon, bool),
-    Prefix(&'static str),
-    Connector(&'static str),
-}
 
-fn combo_parts(tokens: &[TipToken], family: ControllerIconFamily) -> Vec<ComboPart> {
-    tokens
-        .iter()
-        .filter_map(|&t| match t {
-            TipToken::Button(b) => family
-                .hint_icon(b)
-                .map(|i| ComboPart::Icon(i, b == "SELECT")),
-            TipToken::Text(t) if t == "/" => Some(ComboPart::Connector(t)),
-            TipToken::Text(t) => Some(ComboPart::Prefix(t)),
-            TipToken::Plus => Some(ComboPart::Connector("+")),
-            TipToken::Dot => Some(ComboPart::Connector(LEGEND_SEP)),
-        })
-        .collect()
-}
 
-type Measure<'a> = &'a dyn Fn(&str, f32) -> f32;
 
-fn part_width(part: &ComboPart, cs: &ComboStyle, measure: Measure) -> f32 {
-    match *part {
-        ComboPart::Icon(_, true) => cs.share,
-        ComboPart::Icon(_, false) => cs.glyph,
-        ComboPart::Prefix(t) => measure(t, cs.prefix_px),
-        ComboPart::Connector(t) => measure(t, cs.connector_px),
-    }
-}
 
-fn combo_width(parts: &[ComboPart], cs: &ComboStyle, measure: Measure) -> f32 {
-    parts
-        .iter()
-        .map(|p| part_width(p, cs, measure))
-        .sum::<f32>()
-        + cs.gap * parts.len().saturating_sub(1) as f32
-}
-
-pub fn legend_band_height(scale: f32, look: impl Into<VkLook>) -> f32 {
-    let look = look.into();
-    ((BAR_H - style_spec(look).pad_y) * ref_unit(scale, look)).max(0.0)
-}
 
 const SIDE_PAD: f32 = 24.0;
 const SIDE_LABEL_PX: f32 = 38.0;
@@ -420,53 +334,10 @@ fn tip_item(token: TipToken, family: ControllerIconFamily) -> Option<TipItem> {
     }
 }
 
-fn bar_item_width(
-    row: &shortcut_sheet::SheetRow,
-    family: ControllerIconFamily,
-    u: f32,
-    measure: Measure,
-) -> f32 {
-    combo_width(&combo_parts(row.keys, family), &ComboStyle::bar(u), measure)
-        + BAR_LABEL_GAP * u
-        + measure(row.label, text_px(BAR_LABEL_PX, u))
-}
 
-fn bar_sep_width(u: f32, measure: Measure) -> f32 {
-    2.0 * BAR_GAP * u + measure(LEGEND_SEP, text_px(BAR_SEP_PX, u))
-}
 
-#[derive(Clone, Debug, PartialEq)]
-struct BarLayout {
-    items: Vec<(usize, f32, f32)>,
-    sep_w: f32,
-}
 
-fn bar_layout(widths: &[f32], sep_w: f32, left: f32, right: f32) -> BarLayout {
-    let kept = shortcut_sheet::fit_legend(widths, sep_w, right - left);
-    let total =
-        kept.iter().map(|&i| widths[i]).sum::<f32>() + sep_w * kept.len().saturating_sub(1) as f32;
-    let mut x = (left + right - total) * 0.5;
-    let items = kept
-        .into_iter()
-        .map(|i| {
-            let at = x;
-            x += widths[i] + sep_w;
-            (i, at, widths[i])
-        })
-        .collect();
-    BarLayout { items, sep_w }
-}
 
-fn legend_span(rects: &[KeyRect], client_w: f32, pad_x: f32) -> (f32, f32) {
-    let (l, r) = rects.iter().fold((pad_x, client_w - pad_x), |(l, r), kr| {
-        (l.min(kr.left), r.max(kr.right))
-    });
-    if l > r {
-        (0.0, client_w)
-    } else {
-        (l.max(0.0), r.min(client_w))
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct SheetMetrics {
@@ -1966,43 +1837,16 @@ impl VkRenderer {
         text: u32,
         alpha: f32,
     ) -> Result<f32, String> {
-        let mut x = left;
-        for part in parts {
-            let w = match *part {
-                ComboPart::Icon(icon, share) => {
-                    let w = if share { cs.share } else { cs.glyph };
-                    let slot = D2D_RECT_F {
-                        left: x,
-                        right: x + w,
-                        ..band
-                    };
-                    self.draw_svg_icon_sized(icon, slot, text, alpha, w)?;
-                    w
-                }
-                ComboPart::Prefix(t) => self.draw_text_px(
-                    style,
-                    t,
-                    cs.prefix_px,
-                    x,
-                    band,
-                    text,
-                    ALPHA_SECONDARY * alpha,
-                )?,
-                ComboPart::Connector(t) => self.draw_text_px(
-                    style,
-                    t,
-                    cs.connector_px,
-                    x,
-                    band,
-                    text,
-                    ALPHA_SECONDARY * alpha,
-                )?,
-            };
-            x += w + cs.gap;
-        }
-        Ok((x - cs.gap - left).max(0.0))
+        let band = Edges {
+            left: band.left,
+            top: band.top,
+            right: band.right,
+            bottom: band.bottom,
+        };
+        Ok(paint_combo(&mut self.gfx, style, parts, cs, left, band, text, alpha, self.dip_scale))
     }
 
+    #[cfg(test)]
     unsafe fn bar_layout_for(
         &self,
         style: VkStyle,
@@ -2011,7 +1855,8 @@ impl VkRenderer {
         left: f32,
         right: f32,
     ) -> BarLayout {
-        self.layout_for_rows(
+        legend_layout(
+            &self.gfx,
             &shortcut_sheet::shown_legend(),
             style,
             family,
@@ -2019,23 +1864,6 @@ impl VkRenderer {
             left,
             right,
         )
-    }
-
-    unsafe fn layout_for_rows(
-        &self,
-        rows: &[shortcut_sheet::SheetRow],
-        style: VkStyle,
-        family: ControllerIconFamily,
-        u: f32,
-        left: f32,
-        right: f32,
-    ) -> BarLayout {
-        let measure = |t: &str, px: f32| self.measure_px(style, t, px);
-        let widths: Vec<f32> = rows
-            .iter()
-            .map(|row| bar_item_width(row, family, u, &measure))
-            .collect();
-        bar_layout(&widths, bar_sep_width(u, &measure), left, right)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2050,41 +1878,18 @@ impl VkRenderer {
         right: f32,
         alpha: f32,
     ) -> Result<(), String> {
-        let legend = shortcut_sheet::shown_legend();
-        let layout = self.layout_for_rows(&legend, style, family, u, left, right);
-        let band = D2D_RECT_F {
-            left,
+        let lp = LegendPaint {
+            pal,
+            style,
+            family,
+            u,
             top,
+            left,
             right,
-            bottom: top + BAR_H * u,
+            alpha,
+            dip_scale: self.dip_scale,
         };
-        let cs = ComboStyle::bar(u);
-        for (n, &(i, start, _)) in layout.items.iter().enumerate() {
-            if n > 0 {
-                let sep_left = start - layout.sep_w + BAR_GAP * u;
-                self.draw_text_px(
-                    style,
-                    LEGEND_SEP,
-                    text_px(BAR_SEP_PX, u),
-                    sep_left,
-                    band,
-                    pal.text,
-                    ALPHA_SEP * alpha,
-                )?;
-            }
-            let row = &legend[i];
-            let parts = combo_parts(row.keys, family);
-            let w = self.draw_combo(style, &parts, &cs, start, band, pal.text, alpha)?;
-            self.draw_text_px(
-                style,
-                row.label,
-                text_px(BAR_LABEL_PX, u),
-                start + w + BAR_LABEL_GAP * u,
-                band,
-                pal.text,
-                alpha,
-            )?;
-        }
+        paint_legend(&mut self.gfx, &shortcut_sheet::shown_legend(), &lp);
         Ok(())
     }
 

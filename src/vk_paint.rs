@@ -1947,3 +1947,277 @@ unsafe fn paint_strip_columns(
         strip_word(g, sp, geom, word, label, selected, color, a);
     }
 }
+
+pub(crate) const BAR_H: f32 = 80.0;
+pub(crate) const BAR_GLYPH: f32 = 38.0;
+pub(crate) const BAR_SHARE: f32 = 44.0;
+pub(crate) const BAR_GAP: f32 = 6.0;
+pub(crate) const BAR_LABEL_GAP: f32 = 6.0;
+pub(crate) const BAR_LABEL_PX: f32 = 19.0;
+pub(crate) const BAR_CONNECTOR_PX: f32 = 17.0;
+pub(crate) const BAR_PREFIX_PX: f32 = 20.0;
+pub(crate) const BAR_SEP_PX: f32 = 18.0;
+pub(crate) const SHEET_PAD_TOP: f32 = 16.0;
+pub(crate) const SHEET_PAD_X: f32 = 24.0;
+pub(crate) const SHEET_PAD_BOTTOM: f32 = 16.0;
+pub(crate) const SHEET_COL_GAP: f32 = 40.0;
+pub(crate) const SHEET_ROW_H: f32 = 70.0;
+pub(crate) const SHEET_HEADER_PX: f32 = 18.0;
+pub(crate) const SHEET_ACTION_PX: f32 = 19.0;
+pub(crate) const SHEET_TOKEN_PX: f32 = 17.0;
+pub(crate) const SHEET_GLYPH: f32 = 28.0;
+pub(crate) const SHEET_SHARE: f32 = 32.0;
+pub(crate) const SHEET_TOKEN_GAP: f32 = 8.0;
+pub(crate) const SHEET_ACTION_GAP: f32 = 24.0;
+pub(crate) const SHEET_TRAIL: f32 = 24.0;
+pub(crate) const LEGEND_SEP: &str = "\u{00B7}";
+pub(crate) const ALPHA_SECONDARY: f32 = 0xA6 as f32 / 255.0;
+pub(crate) const ALPHA_SEP: f32 = 0x66 as f32 / 255.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ComboStyle {
+    pub(crate) glyph: f32,
+    pub(crate) share: f32,
+    pub(crate) gap: f32,
+    pub(crate) prefix_px: f32,
+    pub(crate) connector_px: f32,
+}
+
+impl ComboStyle {
+    pub(crate) fn bar(u: f32) -> Self {
+        Self {
+            glyph: BAR_GLYPH * u,
+            share: BAR_SHARE * u,
+            gap: BAR_GAP * u,
+            prefix_px: text_px(BAR_PREFIX_PX, u),
+            connector_px: text_px(BAR_CONNECTOR_PX, u),
+        }
+    }
+
+    pub(crate) fn sheet(u: f32) -> Self {
+        Self {
+            glyph: SHEET_GLYPH * u,
+            share: SHEET_SHARE * u,
+            gap: SHEET_TOKEN_GAP * u,
+            prefix_px: text_px(SHEET_TOKEN_PX, u),
+            connector_px: text_px(SHEET_TOKEN_PX, u),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ComboPart {
+    Icon(VkIcon, bool),
+    Prefix(&'static str),
+    Connector(&'static str),
+}
+
+pub(crate) fn combo_parts(tokens: &[crate::win::controller_tips::TipToken], family: ControllerIconFamily) -> Vec<ComboPart> {
+    tokens
+        .iter()
+        .filter_map(|&t| match t {
+            crate::win::controller_tips::TipToken::Button(b) => family
+                .hint_icon(b)
+                .map(|i| ComboPart::Icon(i, b == "SELECT")),
+            crate::win::controller_tips::TipToken::Text(t) if t == "/" => Some(ComboPart::Connector(t)),
+            crate::win::controller_tips::TipToken::Text(t) => Some(ComboPart::Prefix(t)),
+            crate::win::controller_tips::TipToken::Plus => Some(ComboPart::Connector("+")),
+            crate::win::controller_tips::TipToken::Dot => Some(ComboPart::Connector(LEGEND_SEP)),
+        })
+        .collect()
+}
+
+pub(crate) type Measure<'a> = &'a dyn Fn(&str, f32) -> f32;
+
+pub(crate) fn part_width(part: &ComboPart, cs: &ComboStyle, measure: Measure) -> f32 {
+    match *part {
+        ComboPart::Icon(_, true) => cs.share,
+        ComboPart::Icon(_, false) => cs.glyph,
+        ComboPart::Prefix(t) => measure(t, cs.prefix_px),
+        ComboPart::Connector(t) => measure(t, cs.connector_px),
+    }
+}
+
+pub(crate) fn combo_width(parts: &[ComboPart], cs: &ComboStyle, measure: Measure) -> f32 {
+    parts
+        .iter()
+        .map(|p| part_width(p, cs, measure))
+        .sum::<f32>()
+        + cs.gap * parts.len().saturating_sub(1) as f32
+}
+
+pub fn legend_band_height(scale: f32, look: impl Into<VkLook>) -> f32 {
+    let look = look.into();
+    ((BAR_H - style_spec(look).pad_y) * ref_unit(scale, look)).max(0.0)
+}
+
+pub(crate) fn bar_item_width(
+    row: &crate::win::shortcut_sheet::SheetRow,
+    family: ControllerIconFamily,
+    u: f32,
+    measure: Measure,
+) -> f32 {
+    combo_width(&combo_parts(row.keys, family), &ComboStyle::bar(u), measure)
+        + BAR_LABEL_GAP * u
+        + measure(row.label, text_px(BAR_LABEL_PX, u))
+}
+
+pub(crate) fn bar_sep_width(u: f32, measure: Measure) -> f32 {
+    2.0 * BAR_GAP * u + measure(LEGEND_SEP, text_px(BAR_SEP_PX, u))
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BarLayout {
+    pub(crate) items: Vec<(usize, f32, f32)>,
+    pub(crate) sep_w: f32,
+}
+
+pub(crate) fn bar_layout(widths: &[f32], sep_w: f32, left: f32, right: f32) -> BarLayout {
+    let kept = crate::win::shortcut_sheet::fit_legend(widths, sep_w, right - left);
+    let total =
+        kept.iter().map(|&i| widths[i]).sum::<f32>() + sep_w * kept.len().saturating_sub(1) as f32;
+    let mut x = (left + right - total) * 0.5;
+    let items = kept
+        .into_iter()
+        .map(|i| {
+            let at = x;
+            x += widths[i] + sep_w;
+            (i, at, widths[i])
+        })
+        .collect();
+    BarLayout { items, sep_w }
+}
+
+pub(crate) fn legend_span(rects: &[crate::vk_geom::KeyRect], client_w: f32, pad_x: f32) -> (f32, f32) {
+    let (l, r) = rects.iter().fold((pad_x, client_w - pad_x), |(l, r), kr| {
+        (l.min(kr.left), r.max(kr.right))
+    });
+    if l > r {
+        (0.0, client_w)
+    } else {
+        (l.max(0.0), r.min(client_w))
+    }
+}
+
+pub(crate) unsafe fn paint_combo(
+    g: &mut Gfx,
+    style: VkStyle,
+    parts: &[ComboPart],
+    cs: &ComboStyle,
+    left: f32,
+    band: Edges,
+    text: u32,
+    alpha: f32,
+    dip_scale: f32,
+) -> f32 {
+    let mut x = left;
+    for part in parts {
+        let w = match *part {
+            ComboPart::Icon(icon, share) => {
+                let w = if share { cs.share } else { cs.glyph };
+                let slot = Edges {
+                    left: x,
+                    right: x + w,
+                    ..band
+                };
+                paint_icon(g, icon, slot, text, alpha, w, dip_scale);
+                w
+            }
+            ComboPart::Prefix(t) => paint_text_px(
+                g,
+                style,
+                t,
+                cs.prefix_px,
+                x,
+                band.rect(),
+                text,
+                ALPHA_SECONDARY * alpha,
+            ),
+            ComboPart::Connector(t) => paint_text_px(
+                g,
+                style,
+                t,
+                cs.connector_px,
+                x,
+                band.rect(),
+                text,
+                ALPHA_SECONDARY * alpha,
+            ),
+        };
+        x += w + cs.gap;
+    }
+    (x - cs.gap - left).max(0.0)
+}
+
+pub(crate) unsafe fn legend_layout(
+    g: &Gfx,
+    rows: &[crate::win::shortcut_sheet::SheetRow],
+    style: VkStyle,
+    family: ControllerIconFamily,
+    u: f32,
+    left: f32,
+    right: f32,
+) -> BarLayout {
+    let measure = |t: &str, px: f32| paint_measure_px(g, style, t, px);
+    let widths: Vec<f32> = rows
+        .iter()
+        .map(|row| bar_item_width(row, family, u, &measure))
+        .collect();
+    bar_layout(&widths, bar_sep_width(u, &measure), left, right)
+}
+
+pub(crate) struct LegendPaint<'a> {
+    pub(crate) pal: &'a VkPalette,
+    pub(crate) style: VkStyle,
+    pub(crate) family: ControllerIconFamily,
+    pub(crate) u: f32,
+    pub(crate) top: f32,
+    pub(crate) left: f32,
+    pub(crate) right: f32,
+    pub(crate) alpha: f32,
+    pub(crate) dip_scale: f32,
+}
+
+pub(crate) unsafe fn paint_legend(
+    g: &mut Gfx,
+    legend: &[crate::win::shortcut_sheet::SheetRow],
+    lp: &LegendPaint,
+) {
+    let (pal, style, family, u, alpha) = (lp.pal, lp.style, lp.family, lp.u, lp.alpha);
+    let layout = legend_layout(g, legend, style, family, u, lp.left, lp.right);
+    let band = Edges {
+        left: lp.left,
+        top: lp.top,
+        right: lp.right,
+        bottom: lp.top + BAR_H * u,
+    };
+    let cs = ComboStyle::bar(u);
+    for (n, &(i, start, _)) in layout.items.iter().enumerate() {
+        if n > 0 {
+            let sep_left = start - layout.sep_w + BAR_GAP * u;
+            paint_text_px(
+                g,
+                style,
+                LEGEND_SEP,
+                text_px(BAR_SEP_PX, u),
+                sep_left,
+                band.rect(),
+                pal.text,
+                ALPHA_SEP * alpha,
+            );
+        }
+        let row = &legend[i];
+        let parts = combo_parts(row.keys, family);
+        let w = paint_combo(g, style, &parts, &cs, start, band, pal.text, alpha, lp.dip_scale);
+        paint_text_px(
+            g,
+            style,
+            row.label,
+            text_px(BAR_LABEL_PX, u),
+            start + w + BAR_LABEL_GAP * u,
+            band.rect(),
+            pal.text,
+            alpha,
+        );
+    }
+}
