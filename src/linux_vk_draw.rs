@@ -8,7 +8,6 @@ use crate::config::{KeyboardTheme, VkStyle};
 use crate::mono_ui::Gfx;
 use crate::vk_paint::VkLook;
 use crate::vk_geom::{self, KeyRect};
-use crate::vk_key::{VK_BACK, VK_DOWN, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP};
 use crate::vk_motion::{self, concentric_radius};
 use crate::vk_nav::{KeyAction, KeyPos, KeyRow};
 use crate::vk_predict::StripState;
@@ -88,7 +87,6 @@ struct Rgb {
 
 struct Pal {
     bg: Rgb,
-    key: Rgb,
     key_action: Rgb,
     accent: Rgb,
     sel_ring: Rgb,
@@ -278,7 +276,6 @@ fn render_keyboard(
     );
     let key_h = rects.first().map(|r| r.bottom - r.top).unwrap_or(spec.design_kh);
     let unit = key_h / spec.design_kh;
-    let radius = spec.key_radius * unit;
     let now = Instant::now();
     let target = rects.iter().find(|r| r.pos == frame.sel).map(|r| (r.left, r.top, r.right, r.bottom));
     if let Some(tgt) = target {
@@ -310,15 +307,11 @@ fn render_keyboard(
     };
     for rect in &rects {
         let selected = highlight && rect.pos == frame.sel;
-        let press = if highlight {
-            frame.pressed.filter(|(p, _)| *p == rect.pos).map(|(_, s)| s).unwrap_or(1.0)
-        } else {
-            1.0
-        };
-        paint_key(g, frame, &spec, &pal, rect, unit, key_h, scale, radius, selected, press, true);
+        let press = if highlight { press_of(frame, rect.pos) } else { None };
+        paint_key(g, frame, rect, unit, key_h, scale, selected, press);
     }
     if highlight {
-        stroke_ring(g, glide, &spec, &pal, unit, scale, radius);
+        stroke_ring(g, glide, frame, unit, key_h, scale);
     }
     let (strip_alpha, strip_dy) = if frame.strip.is_some() {
         if glide.strip_at.is_none() {
@@ -571,106 +564,81 @@ fn clone_pixmap(src: &Pixmap) -> Option<Pixmap> {
     Pixmap::from_vec(src.data().to_vec(), size)
 }
 
+fn press_of(frame: &Frame, pos: KeyPos) -> Option<f32> {
+    frame.pressed.filter(|(p, _)| *p == pos).map(|(_, s)| s)
+}
+
+fn vk_palette(frame: &Frame) -> crate::vk_paint::VkPalette {
+    let look = frame.look();
+    crate::vk_theme::themed_palette(crate::vk_paint::style_palette(look.style, frame.dark), look.style, frame.theme)
+}
+
+fn key_style<'a>(frame: &Frame, pal: &'a crate::vk_paint::VkPalette, unit: f32, key_h: f32, scale: f32) -> crate::vk_paint::KeyStyle<'a> {
+    let look = frame.look();
+    let label_px = spec_for(look).label_px * unit * scale;
+    crate::vk_paint::KeyStyle {
+        look,
+        pal,
+        unit: unit * scale,
+        key_h: key_h * scale,
+        dip_scale: 1.0,
+        glyph_px: label_px * 1.1,
+        hint_px: (label_px * 0.5).clamp(10.0, 20.0),
+        icons: icon_family(frame),
+    }
+}
+
+fn icon_family(frame: &Frame) -> crate::vk_paint::ControllerIconFamily {
+    if frame.ps5 {
+        crate::vk_paint::ControllerIconFamily::Ps5
+    } else {
+        crate::vk_paint::ControllerIconFamily::Xbox
+    }
+}
+
+fn device_edges(left: f32, top: f32, right: f32, bottom: f32, scale: f32) -> crate::vk_paint::Edges {
+    crate::vk_paint::Edges {
+        left: left * scale,
+        top: top * scale,
+        right: right * scale,
+        bottom: bottom * scale,
+    }
+}
+
 fn paint_key(
     g: &mut Gfx,
     frame: &Frame,
-    spec: &Spec,
-    pal: &Pal,
     rect: &KeyRect,
     unit: f32,
     key_h: f32,
     scale: f32,
-    radius: f32,
     selected: bool,
-    press: f32,
-    shadow: bool,
+    press: Option<f32>,
 ) {
     let Some(key) = frame.rows.get(rect.pos.row).and_then(|row| row.keys.get(rect.pos.col)) else { return };
-    let (left, top, right, bottom) = scaled_about(rect, press);
-    let action = is_action(&key.action);
-    let modifier = !selected
-        && ((matches!(key.action, KeyAction::Shift) && frame.shift && frame.caps)
-            || (matches!(key.action, KeyAction::Symbols) && frame.symbol && frame.symbol_locked));
-    let (fill_c, label_c) = if selected {
-        (pal.accent, pal.sel_text)
-    } else if modifier {
-        (mix(pal.key, pal.accent, 0.35), pal.text)
-    } else if action {
-        (pal.key_action, pal.text)
-    } else {
-        (pal.key, pal.text)
+    let pal = vk_palette(frame);
+    let ks = key_style(frame, &pal, unit, key_h, scale);
+    let st = crate::vk_paint::KeyState {
+        selected,
+        press_scale: press,
+        shift: frame.shift,
+        caps: frame.caps,
+        symbols: frame.symbol,
+        symbols_locked: frame.symbol_locked,
+        voice_available: crate::config::gamepad_settings().voice_enabled,
+        tonal_row: rect.pos.row == 0 && frame.rows.len() == 5,
+        glyph: crate::vk_paint::key_glyph(key),
+        hint: crate::vk_paint::key_hint(key),
     };
-    if shadow {
-        if selected {
-            if let Some((dy, blur, alpha)) = spec.sel_shadow {
-                blur_shadow(g, left * scale, top * scale, (right - left) * scale, (bottom - top) * scale, radius * scale, dy * unit * scale, blur * unit * scale, alpha);
-            }
-        } else if spec.key_shadow_dy > 0.0 {
-            let dy = (spec.key_shadow_dy * unit).max(1.0);
-            round_rect(g, left * scale, (top + dy) * scale, (right - left) * scale, (bottom - top) * scale, radius * scale, Rgb { r: 0, g: 0, b: 0 }, (spec.key_shadow_alpha * 255.0) as u8);
-        }
-    }
-    round_rect(g, left * scale, top * scale, (right - left) * scale, (bottom - top) * scale, radius * scale, fill_c, 255);
-    let locked = (matches!(key.action, KeyAction::Shift) && frame.caps) || (matches!(key.action, KeyAction::Symbols) && frame.symbol_locked);
-    if locked {
-        let pill_w = ((right - left) * 0.28).min(24.0 * unit);
-        let pill_h = (3.0 * unit).max(2.0);
-        let cx = (left + right) * 0.5;
-        let yb = bottom - 5.0 * unit;
-        round_rect(g, (cx - pill_w * 0.5) * scale, (yb - pill_h) * scale, pill_w * scale, pill_h * scale, pill_h * 0.5 * scale, if selected { pal.sel_text } else { pal.accent }, 255);
-    }
-    let is_space = matches!(key.action, KeyAction::Vk(vk) if vk == VK_SPACE);
-    let dim = if selected { pal.sel_text } else { pal.text_dim };
-    let dim_a = (spec.number_alpha * 255.0) as u8;
-    if let Some(sub) = key.sublabel.as_deref().filter(|_| !is_space) {
-        let band = band_at(left, top, right, spec.number_cy * unit, key_h);
-        text(g, sub, band, spec.number_px * unit * scale, Weight::NORMAL, dim, dim_a, scale, spec.families);
-    }
-    if matches!(key.action, KeyAction::VoiceInput) {
-        blit_svg(g, MIC, left, top, right, bottom, spec.icon_px * unit, scale, Some(label_c), 255);
-    } else if is_space {
-        if let Some(word) = spec.space_label {
-            text(g, word, (left, top, right, bottom), spec.space_label_px * unit * scale, Weight::NORMAL, label_c, 255, scale, spec.families);
-        } else if let Some(sub) = key.sublabel.as_deref() {
-            let cap = band_at(left, top, right, spec.caption_cy * unit, key_h);
-            text(g, sub, cap, spec.number_px * unit * scale, Weight::NORMAL, dim, dim_a, scale, spec.families);
-            let icon = band_at(left, top, right, spec.space_icon_cy * unit, key_h);
-            blit_svg(g, SPACE, icon.0, icon.1, icon.2, icon.3, spec.space_icon_px * unit, scale, Some(label_c), 255);
-        }
-    } else if let Some((svg, large)) = key_icon(&key.action, frame.caps) {
-        let px = if large { spec.icon_large_px } else { spec.icon_px } * unit;
-        blit_svg(g, svg, left, top, right, bottom, px, scale, Some(label_c), 255);
-    } else {
-        let mut glyph = key.label.clone();
-        if spec.trim_symbols_label && matches!(key.action, KeyAction::Symbols) {
-            glyph = glyph.trim_start_matches('?').to_string();
-        }
-        if !glyph.is_empty() {
-            let weight = weight(if glyph.chars().count() > 1 { spec.word_weight } else { spec.label_weight });
-            let px = if glyph.chars().count() > 1 { spec.word_px } else { spec.label_px };
-            let band = if key.sublabel.is_some() {
-                band_at(left, top, right, spec.label_cy * unit, key_h)
-            } else {
-                (left, top, right, bottom)
-            };
-            text(g, &glyph, band, px * unit * scale, weight, label_c, 255, scale, spec.families);
-        }
-    }
-    if let Some(hint) = key_hint(&key.action) {
-        let badge = spec.hint_badge * unit;
-        let inset = spec.hint_inset * unit;
-        let bx = left + inset;
-        let by = top + inset;
-        if let Some(svg) = hint_svg(frame.ps5, hint) {
-            blit_svg(g, svg, bx, by, bx + badge, by + badge, badge, scale, None, 255);
-        }
-    }
+    let edges = device_edges(rect.left, rect.top, rect.right, rect.bottom, scale);
+    unsafe { crate::vk_paint::paint_key(g, key, edges, &ks, &st, None) };
 }
 
-fn stroke_ring(g: &mut Gfx, glide: &Glide, spec: &Spec, pal: &Pal, unit: f32, scale: f32, radius: f32) {
+fn stroke_ring(g: &mut Gfx, glide: &Glide, frame: &Frame, unit: f32, key_h: f32, scale: f32) {
     let Some((l, t, r, b)) = glide.ring else { return };
-    let ring_w = (spec.sel_ring_w * unit).max(1.0);
-    stroke_rect(g, (l + ring_w * 0.5) * scale, (t + ring_w * 0.5) * scale, (r - l - ring_w) * scale, (b - t - ring_w) * scale, (radius - ring_w * 0.5).max(0.0) * scale, pal.sel_ring, 255, ring_w * scale);
+    let pal = vk_palette(frame);
+    let ks = key_style(frame, &pal, unit, key_h, scale);
+    unsafe { crate::vk_paint::paint_focus_ring(g, device_edges(l, t, r, b, scale), &ks, press_of(frame, frame.sel)) };
 }
 
 fn erase_key(g: &mut Gfx, rect: &KeyRect, spec: &Spec, pal: &Pal, unit: f32, scale: f32) {
@@ -712,25 +680,25 @@ fn advance_glide(glide: &mut Glide, frame: &Frame, target: Option<(f32, f32, f32
 }
 
 fn paint_live(g: &mut Gfx, frame: &Frame, glide: &mut Glide, step: bool) {
-    let (spec, pal, rects, unit, scale, radius, key_h) = scene(frame);
+    let (spec, pal, rects, unit, scale, _, key_h) = scene(frame);
     let target = rects.iter().find(|r| r.pos == frame.sel).map(|r| (r.left, r.top, r.right, r.bottom));
     if step {
         advance_glide(glide, frame, target, Instant::now());
     }
     if let Some(sel_index) = rects.iter().position(|r| r.pos == frame.sel) {
         erase_key(g, &rects[sel_index], &spec, &pal, unit, scale);
-        let press = frame.pressed.filter(|(p, _)| *p == rects[sel_index].pos).map(|(_, s)| s).unwrap_or(1.0);
-        paint_key(g, frame, &spec, &pal, &rects[sel_index], unit, key_h, scale, radius, true, press, true);
+        let press = press_of(frame, rects[sel_index].pos);
+        paint_key(g, frame, &rects[sel_index], unit, key_h, scale, true, press);
         if let Some((pos, press)) = frame.pressed {
             if pos != rects[sel_index].pos {
                 if let Some(other) = rects.iter().find(|rect| rect.pos == pos) {
                     erase_key(g, other, &spec, &pal, unit, scale);
-                    paint_key(g, frame, &spec, &pal, other, unit, key_h, scale, radius, false, press, true);
+                    paint_key(g, frame, other, unit, key_h, scale, false, Some(press));
                 }
             }
         }
     }
-    stroke_ring(g, glide, &spec, &pal, unit, scale, radius);
+    stroke_ring(g, glide, frame, unit, key_h, scale);
     if frame.floating {
         let panel_r = spec.panel_radius * unit * scale;
         let x = FLOATING_PANEL_INSET * scale;
@@ -1043,7 +1011,6 @@ fn palette(look: VkLook, dark: bool, theme: &KeyboardTheme) -> Pal {
     let v = crate::vk_theme::themed_palette(crate::vk_paint::style_palette(look.style, dark), look.style, *theme);
     Pal {
         bg: from_colorref(v.bg),
-        key: from_colorref(v.key),
         key_action: from_colorref(v.key_action),
         accent: from_colorref(v.accent),
         sel_ring: from_colorref(v.sel_ring),
@@ -1069,60 +1036,11 @@ fn from_colorref(color: u32) -> Rgb {
     Rgb { r: (color & 0xff) as u8, g: ((color >> 8) & 0xff) as u8, b: ((color >> 16) & 0xff) as u8 }
 }
 
-fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
-    let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
-    Rgb { r: m(a.r, b.r), g: m(a.g, b.g), b: m(a.b, b.b) }
-}
 
-fn scaled_about(rect: &KeyRect, press: f32) -> (f32, f32, f32, f32) {
-    let cx = (rect.left + rect.right) * 0.5;
-    let cy = (rect.top + rect.bottom) * 0.5;
-    let s = press.clamp(0.9, 1.0);
-    (
-        cx + (rect.left - cx) * s,
-        cy + (rect.top - cy) * s,
-        cx + (rect.right - cx) * s,
-        cy + (rect.bottom - cy) * s,
-    )
-}
 
-fn band_at(left: f32, top: f32, right: f32, cy: f32, h: f32) -> (f32, f32, f32, f32) {
-    let y = top + cy;
-    (left, y - h * 0.5, right, y + h * 0.5)
-}
 
-fn is_action(action: &KeyAction) -> bool {
-    matches!(action, KeyAction::Vk(vk) if *vk == VK_BACK || *vk == VK_RETURN)
-}
 
-fn key_hint(action: &KeyAction) -> Option<&'static str> {
-    match action {
-        KeyAction::Vk(vk) if *vk == VK_BACK => Some("B"),
-        KeyAction::Vk(vk) if *vk == VK_RETURN => Some("START"),
-        KeyAction::Vk(vk) if *vk == VK_SPACE => Some("Y"),
-        KeyAction::Shift => Some("RT"),
-        KeyAction::Symbols => Some("LT"),
-        KeyAction::PredictPrev => Some("LB"),
-        KeyAction::PredictNext => Some("RB"),
-        KeyAction::VoiceInput => Some("R3"),
-        _ => None,
-    }
-}
 
-fn key_icon(action: &KeyAction, shift: bool) -> Option<(&'static str, bool)> {
-    match action {
-        KeyAction::Vk(vk) if *vk == VK_BACK => Some((BACKSPACE, true)),
-        KeyAction::Vk(vk) if *vk == VK_RETURN => Some((ENTER, true)),
-        KeyAction::Vk(vk) if *vk == VK_LEFT => Some((CHEV_L, false)),
-        KeyAction::Vk(vk) if *vk == VK_RIGHT => Some((CHEV_R, false)),
-        KeyAction::Vk(vk) if *vk == VK_UP => Some((CHEV_U, false)),
-        KeyAction::Vk(vk) if *vk == VK_DOWN => Some((CHEV_D, false)),
-        KeyAction::PredictPrev => Some((CHEV_L, false)),
-        KeyAction::PredictNext => Some((CHEV_R, false)),
-        KeyAction::Shift => Some((if shift { CAPS_FILL } else { SHIFT }, false)),
-        _ => None,
-    }
-}
 
 fn hint_svg(ps5: bool, hint: &str) -> Option<&'static str> {
     Some(match (ps5, hint) {
@@ -1154,16 +1072,6 @@ fn hint_svg(ps5: bool, hint: &str) -> Option<&'static str> {
     })
 }
 
-const SHIFT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 16a1 1 0 0 0 1-1v-2a1 1 0 0 1 1-1h3.293a.707.707 0 0 0 .5-1.207l-6.939-6.939a1.207 1.207 0 0 0-1.708 0l-6.94 6.94a.707.707 0 0 0 .5 1.206H8a1 1 0 0 1 1 1v2a1 1 0 0 0 1 1z"/><path d="M9 20h6"/></svg>"#;
-const CAPS_FILL: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1v-6a1 1 0 0 1 1-1h3.293a.707.707 0 0 0 .5-1.207l-7.086-7.086a1 1 0 0 0-1.414 0l-7.086 7.086a.707.707 0 0 0 .5 1.207H8a1 1 0 0 1 1 1z"/></svg>"#;
-const BACKSPACE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 5a2 2 0 0 0-1.344.519l-6.328 5.74a1 1 0 0 0 0 1.481l6.328 5.741A2 2 0 0 0 10 19h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z"/><path d="m12 9 6 6"/><path d="m18 9-6 6"/></svg>"#;
-const ENTER: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 4v7a4 4 0 0 1-4 4H4"/><path d="m9 10-5 5 5 5"/></svg>"#;
-const MIC: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></svg>"#;
-const SPACE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 17v1c0 .5-.5 1-1 1H3c-.5 0-1-.5-1-1v-1"/></svg>"#;
-const CHEV_L: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>"#;
-const CHEV_R: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>"#;
-const CHEV_U: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>"#;
-const CHEV_D: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>"#;
 
 fn cref(color: Rgb) -> u32 {
     color.r as u32 | (color.g as u32) << 8 | (color.b as u32) << 16
@@ -1188,9 +1096,6 @@ fn stroke_rect(g: &mut Gfx, x: f32, y: f32, w: f32, h: f32, radius: f32, color: 
     unsafe { g.ring(outer, radius + half, width, cref(color), alpha as f32 / 255.0) };
 }
 
-fn blur_shadow(g: &mut Gfx, x: f32, y: f32, w: f32, h: f32, radius: f32, dy: f32, blur: f32, alpha: f32) {
-    unsafe { crate::vk_paint::paint_blur_strokes(g, device(x, y, w, h), radius, dy, blur, alpha) };
-}
 
 fn clip_round(g: &mut Gfx, x: f32, y: f32, w: f32, h: f32, radius: f32) {
     let pixmap = g.canvas().0;
@@ -1367,20 +1272,7 @@ pub fn paint_selected_key(g: &mut Gfx, frame: &Frame, press: f32) -> Option<KeyP
     let width = (local.right * scale).ceil().max(1.0) as u32;
     let height = (local.bottom * scale).ceil().max(1.0) as u32;
     g.begin(width, height);
-    paint_key(
-        g,
-        frame,
-        &spec,
-        &pal,
-        &local,
-        unit,
-        key_h,
-        scale,
-        radius,
-        true,
-        press,
-        true,
-    );
+    paint_key(g, frame, &local, unit, key_h, scale, true, (press < 0.999).then_some(press));
     Some(KeyPatch {
         width,
         height,
