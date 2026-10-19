@@ -2221,3 +2221,451 @@ pub(crate) unsafe fn paint_legend(
         );
     }
 }
+
+pub(crate) const ALPHA_LINE: f32 = 0x14 as f32 / 255.0;
+
+pub(crate) const SIDE_PAD: f32 = 24.0;
+pub(crate) const SIDE_LABEL_PX: f32 = 38.0;
+pub(crate) const SIDE_GLYPH: f32 = 48.0;
+pub(crate) const SIDE_SHARE: f32 = 56.0;
+pub(crate) const SIDE_TOKEN_GAP: f32 = 8.0;
+pub(crate) const SIDE_LABEL_GAP: f32 = 16.0;
+pub(crate) const SIDE_FILL_ALPHA: f32 = 0x99 as f32 / 255.0;
+
+pub(crate) const HINT_H: f32 = 88.0;
+pub(crate) const MS_COLS: usize = 3;
+pub(crate) const MS_SCALE: f32 = 3.0;
+pub(crate) const MS_PAD: f32 = 32.0;
+pub(crate) const MS_GAP: f32 = 20.0;
+pub(crate) const MS_TILE_PAD: f32 = 26.0;
+pub(crate) const MS_TITLE_PX: f32 = 24.0;
+pub(crate) const MS_TITLE_H: f32 = 48.0;
+pub(crate) const MS_LABEL_PX: f32 = 26.0;
+pub(crate) const MS_LABEL_GAP: f32 = 20.0;
+pub(crate) const MS_ROW_H: f32 = 62.0;
+pub(crate) const MS_GLYPH: f32 = 44.0;
+pub(crate) const MS_SHARE: f32 = 50.0;
+pub(crate) const MS_RADIUS: f32 = 16.0;
+
+
+pub(crate) fn sheet_combo_style(u: f32) -> ComboStyle {
+    ComboStyle {
+        glyph: MS_GLYPH * u,
+        share: MS_SHARE * u,
+        gap: SIDE_TOKEN_GAP * u,
+        prefix_px: text_px(MS_LABEL_PX, u),
+        connector_px: text_px(MS_LABEL_PX, u),
+    }
+}
+
+pub(crate) fn side_combo_style(u: f32) -> ComboStyle {
+    ComboStyle {
+        glyph: SIDE_GLYPH * u,
+        share: SIDE_SHARE * u,
+        gap: SIDE_TOKEN_GAP * u,
+        prefix_px: text_px(SIDE_LABEL_PX, u),
+        connector_px: text_px(SIDE_LABEL_PX, u),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SheetMetrics {
+    pub(crate) u: f32,
+    pub(crate) cs: ComboStyle,
+    pub(crate) row_h: f32,
+    pub(crate) header_px: f32,
+    pub(crate) action_px: f32,
+    pub(crate) action_gap: f32,
+    pub(crate) trail: f32,
+    pub(crate) col_gap: f32,
+}
+
+impl SheetMetrics {
+    pub(crate) fn at(u: f32) -> Self {
+        Self {
+            u,
+            cs: ComboStyle::sheet(u),
+            row_h: SHEET_ROW_H * u,
+            header_px: text_px(SHEET_HEADER_PX, u),
+            action_px: text_px(SHEET_ACTION_PX, u),
+            action_gap: SHEET_ACTION_GAP * u,
+            trail: SHEET_TRAIL * u,
+            col_gap: SHEET_COL_GAP * u,
+        }
+    }
+}
+
+pub(crate) struct SheetColumn {
+    pub(crate) lines: Vec<crate::win::shortcut_sheet::Line>,
+    pub(crate) combo_w: f32,
+    pub(crate) width: f32,
+}
+
+pub(crate) fn sheet_columns(
+    family: ControllerIconFamily,
+    m: &SheetMetrics,
+    measure: Measure,
+) -> Vec<SheetColumn> {
+    crate::win::shortcut_sheet::shown_columns()
+        .into_iter()
+        .map(|lines| {
+            let mut combo_w = 0.0f32;
+            let mut label_w = 0.0f32;
+            let mut header_w = 0.0f32;
+            for line in &lines {
+                match line {
+                    crate::win::shortcut_sheet::Line::Row(row) => {
+                        combo_w = combo_w.max(combo_width(
+                            &combo_parts(row.keys, family),
+                            &m.cs,
+                            measure,
+                        ));
+                        label_w = label_w.max(measure(row.label, m.action_px));
+                    }
+                    crate::win::shortcut_sheet::Line::Title(t) => header_w = header_w.max(measure(t, m.header_px)),
+                    crate::win::shortcut_sheet::Line::Blank => {}
+                }
+            }
+            let width = (combo_w + m.action_gap + label_w + m.trail).max(header_w);
+            SheetColumn {
+                lines,
+                combo_w,
+                width,
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn sheet_block_size(total: f32, m: &SheetMetrics) -> (f32, f32) {
+    let lines = crate::win::shortcut_sheet::shown_line_count() as f32;
+    (
+        total + 2.0 * SHEET_PAD_X * m.u,
+        (SHEET_PAD_TOP + SHEET_PAD_BOTTOM) * m.u + lines * m.row_h,
+    )
+}
+
+pub(crate) fn sheet_total_width(cols: &[SheetColumn], m: &SheetMetrics) -> f32 {
+    let n = cols.len();
+    let divider = if n >= 2 { m.col_gap + 1.0 } else { 0.0 };
+    cols.iter().map(|c| c.width).sum::<f32>() + m.col_gap * n.saturating_sub(1) as f32 + divider
+}
+
+pub(crate) struct SheetPaint<'a> {
+    pub(crate) pal: &'a VkPalette,
+    pub(crate) style: VkStyle,
+    pub(crate) family: ControllerIconFamily,
+    pub(crate) dip_scale: f32,
+}
+
+pub(crate) unsafe fn paint_sheet_hint(
+    g: &mut Gfx,
+    sp: &SheetPaint,
+    u: f32,
+    center_x: f32,
+    keys_top: f32,
+    client_w: f32,
+) {
+    let (pal, style) = (sp.pal, sp.style);
+    let hint = &crate::win::shortcut_sheet::SHEET_HINT;
+    let cs = side_combo_style(u);
+    let parts = combo_parts(hint.keys, sp.family);
+    let label_px = text_px(SIDE_LABEL_PX, u);
+    let combo_w = {
+        let measure = |t: &str, px: f32| paint_measure_px(g, style, t, px);
+        combo_width(&parts, &cs, &measure)
+    };
+    let label_w = paint_measure_px(g, style, hint.label, label_px);
+    let pad = SIDE_PAD * u;
+    let h = HINT_H * u;
+    let w = (combo_w + SIDE_LABEL_GAP * u + label_w + 2.0 * pad).min(client_w);
+    let left = (center_x - w * 0.5).clamp(0.0, (client_w - w).max(0.0));
+    let top = ((keys_top - h) * 0.5).max(0.0);
+    let pill = Edges {
+        left,
+        top,
+        right: left + w,
+        bottom: top + h,
+    };
+    let r = h * 0.5;
+    g.fill(pill.rect(), r, pal.key, 1.0);
+    g.ring(pill.rect(), r, 1.0, pal.panel_stroke, pal.panel_stroke_alpha * 2.0);
+    let x = pill.left + pad;
+    paint_combo(g, style, &parts, &cs, x, pill, pal.text, 1.0, sp.dip_scale);
+    paint_text_px(
+        g,
+        style,
+        hint.label,
+        label_px,
+        x + combo_w + SIDE_LABEL_GAP * u,
+        pill.rect(),
+        pal.text,
+        1.0,
+    );
+}
+
+pub(crate) unsafe fn modern_sheet_layout(
+    g: &Gfx,
+    style: VkStyle,
+    family: ControllerIconFamily,
+    unit: f32,
+    panel: Edges,
+    groups: &[(&'static str, Vec<crate::win::shortcut_sheet::SheetRow>)],
+) -> (f32, Vec<f32>) {
+    let cols = MS_COLS as f32;
+    let grid_rows = groups.len().div_ceil(MS_COLS);
+    let avail_w = (panel.right - panel.left).max(1.0);
+    let avail_h = (panel.bottom - panel.top).max(1.0);
+    let row_heights = |u: f32| -> Vec<f32> {
+        (0..grid_rows)
+            .map(|gr| {
+                let n = groups
+                    .iter()
+                    .skip(gr * MS_COLS)
+                    .take(MS_COLS)
+                    .map(|(_, rows)| rows.len())
+                    .max()
+                    .unwrap_or(0) as f32;
+                (MS_TITLE_H + 2.0 * MS_TILE_PAD) * u + n * MS_ROW_H * u
+            })
+            .collect()
+    };
+    let needed_h = |u: f32| {
+        row_heights(u).iter().sum::<f32>()
+            + (2.0 * MS_PAD + MS_GAP * (grid_rows as f32 - 1.0).max(0.0)) * u
+    };
+    let needed_w = |u: f32| {
+        let measure = |t: &str, px: f32| paint_measure_px(g, style, t, px);
+        let cs = sheet_combo_style(u);
+        let tile = groups
+            .iter()
+            .map(|(_, rows)| {
+                let combo = rows
+                    .iter()
+                    .map(|r| combo_width(&combo_parts(r.keys, family), &cs, &measure))
+                    .fold(0.0f32, f32::max);
+                let label = rows
+                    .iter()
+                    .map(|r| measure(r.label, text_px(MS_LABEL_PX, u)))
+                    .fold(0.0f32, f32::max);
+                combo + MS_LABEL_GAP * u + label + 2.0 * MS_TILE_PAD * u
+            })
+            .fold(0.0f32, f32::max);
+        tile * cols + (2.0 * MS_PAD + MS_GAP * (cols - 1.0)) * u
+    };
+    let mut u = unit.max(1e-3);
+    for _ in 0..4 {
+        let fit = (avail_h / needed_h(u)).min(avail_w / needed_w(u));
+        if fit >= 1.0 {
+            break;
+        }
+        u *= fit * 0.995;
+    }
+    (u, row_heights(u))
+}
+
+pub(crate) unsafe fn paint_modern_sheet(
+    g: &mut Gfx,
+    sp: &SheetPaint,
+    unit: f32,
+    panel: Edges,
+    radius: Option<f32>,
+    alpha: f32,
+) {
+    let (pal, style, family) = (sp.pal, sp.style, sp.family);
+    let r = radius.unwrap_or(0.0);
+    g.fill(panel.rect(), r, pal.bg, alpha);
+    let groups: Vec<(&'static str, Vec<crate::win::shortcut_sheet::SheetRow>)> =
+        crate::win::shortcut_sheet::MODERN_GROUPS
+            .iter()
+            .map(|group| (group.title, crate::win::shortcut_sheet::shown_rows(group)))
+            .collect();
+    let (u, row_heights) = modern_sheet_layout(g, style, family, unit, panel, &groups);
+    let pad = MS_PAD * u;
+    let gap = MS_GAP * u;
+    let total_h =
+        row_heights.iter().sum::<f32>() + gap * (row_heights.len() as f32 - 1.0).max(0.0);
+    let tile_w =
+        (panel.right - panel.left - 2.0 * pad - gap * (MS_COLS as f32 - 1.0)) / MS_COLS as f32;
+    let mut y = panel.top + ((panel.bottom - panel.top - total_h) * 0.5).max(pad);
+    let tile_r = MS_RADIUS * u;
+    let cs = sheet_combo_style(u);
+    let label_px = text_px(MS_LABEL_PX, u);
+    for (gr, &row_h) in row_heights.iter().enumerate() {
+        for (gc, (title, rows)) in groups.iter().skip(gr * MS_COLS).take(MS_COLS).enumerate() {
+            let left = panel.left + pad + gc as f32 * (tile_w + gap);
+            let tile = Edges {
+                left,
+                top: y,
+                right: left + tile_w,
+                bottom: y + row_h,
+            };
+            g.fill(tile.rect(), tile_r, pal.key, SIDE_FILL_ALPHA * alpha);
+            let inner = tile.deflate(MS_TILE_PAD * u);
+            let title_band = Edges {
+                bottom: inner.top + MS_TITLE_H * u,
+                ..inner
+            };
+            paint_text_px(
+                g,
+                style,
+                title,
+                text_px(MS_TITLE_PX, u),
+                inner.left,
+                title_band.rect(),
+                pal.text,
+                ALPHA_SECONDARY * alpha,
+            );
+            let parts: Vec<Vec<ComboPart>> =
+                rows.iter().map(|r| combo_parts(r.keys, family)).collect();
+            let combo_w = {
+                let measure = |t: &str, px: f32| paint_measure_px(g, style, t, px);
+                parts
+                    .iter()
+                    .map(|p| combo_width(p, &cs, &measure))
+                    .fold(0.0f32, f32::max)
+            };
+            for (i, (row, p)) in rows.iter().zip(&parts).enumerate() {
+                let band = Edges {
+                    top: title_band.bottom + i as f32 * MS_ROW_H * u,
+                    bottom: title_band.bottom + (i as f32 + 1.0) * MS_ROW_H * u,
+                    ..inner
+                };
+                paint_combo(g, style, p, &cs, inner.left, band, pal.text, alpha, sp.dip_scale);
+                paint_text_px(
+                    g,
+                    style,
+                    row.label,
+                    label_px,
+                    inner.left + combo_w + MS_LABEL_GAP * u,
+                    band.rect(),
+                    pal.text,
+                    alpha,
+                );
+            }
+        }
+        y += row_h + gap;
+    }
+}
+
+pub(crate) unsafe fn sheet_fit(
+    g: &Gfx,
+    style: VkStyle,
+    family: ControllerIconFamily,
+    unit: f32,
+    panel: Edges,
+) -> (SheetMetrics, Vec<SheetColumn>, f32) {
+    let measure = |t: &str, px: f32| paint_measure_px(g, style, t, px);
+    let avail_w = (panel.right - panel.left).max(1.0);
+    let avail_h = (panel.bottom - panel.top).max(1.0);
+    let mut u = unit.max(1e-3);
+    let mut m = SheetMetrics::at(u);
+    let mut cols = sheet_columns(family, &m, &measure);
+    let mut total = sheet_total_width(&cols, &m);
+    for _ in 0..3 {
+        let (w, h) = sheet_block_size(total, &m);
+        let fit = (avail_w / w.max(1.0)).min(avail_h / h.max(1.0));
+        if (fit - 1.0).abs() < 0.002 {
+            break;
+        }
+        u = (u * fit).max(0.05);
+        m = SheetMetrics::at(u);
+        cols = sheet_columns(family, &m, &measure);
+        total = sheet_total_width(&cols, &m);
+    }
+    while u > 0.05 {
+        let (w, h) = sheet_block_size(total, &m);
+        if w <= avail_w + 0.5 && h <= avail_h + 0.5 {
+            break;
+        }
+        u *= 0.98;
+        m = SheetMetrics::at(u);
+        cols = sheet_columns(family, &m, &measure);
+        total = sheet_total_width(&cols, &m);
+    }
+    (m, cols, total)
+}
+
+pub(crate) unsafe fn paint_shortcut_sheet(
+    g: &mut Gfx,
+    sp: &SheetPaint,
+    unit: f32,
+    panel: Edges,
+    radius: Option<f32>,
+    alpha: f32,
+) {
+    use crate::win::shortcut_sheet::{self, Line};
+    let (pal, style, family) = (sp.pal, sp.style, sp.family);
+    let r = radius.unwrap_or(0.0);
+    g.fill(panel.rect(), r, pal.bg, alpha);
+    if radius.is_some() {
+        g.ring(panel.rect(), r, 1.0, pal.panel_stroke, pal.panel_stroke_alpha * alpha);
+    }
+    let (m, cols, total) = sheet_fit(g, style, family, unit, panel);
+    let lines = shortcut_sheet::shown_line_count() as f32;
+    let block_h = (SHEET_PAD_TOP + SHEET_PAD_BOTTOM) * m.u + lines * m.row_h;
+    let top =
+        panel.top + ((panel.bottom - panel.top - block_h) * 0.5).max(0.0) + SHEET_PAD_TOP * m.u;
+    let mut x = (panel.left + panel.right - total) * 0.5;
+    let n = cols.len();
+    for (ci, col) in cols.iter().enumerate() {
+        for (i, line) in col.lines.iter().enumerate() {
+            let band = Edges {
+                left: x,
+                top: top + i as f32 * m.row_h,
+                right: x + col.width,
+                bottom: top + (i as f32 + 1.0) * m.row_h,
+            };
+            match line {
+                Line::Title(t) => {
+                    paint_text_px(
+                        g,
+                        style,
+                        t,
+                        m.header_px,
+                        x,
+                        band.rect(),
+                        pal.text,
+                        ALPHA_SECONDARY * alpha,
+                    );
+                }
+                Line::Row(row) => {
+                    let parts = combo_parts(row.keys, family);
+                    paint_combo(g, style, &parts, &m.cs, x, band, pal.text, alpha, sp.dip_scale);
+                    paint_text_px(
+                        g,
+                        style,
+                        row.label,
+                        m.action_px,
+                        x + col.combo_w + m.action_gap,
+                        band.rect(),
+                        pal.text,
+                        alpha,
+                    );
+                }
+                Line::Blank => {}
+            }
+            if shortcut_sheet::hairline_below(&col.lines, i) {
+                let y = (band.bottom - 1.0).round();
+                let hair = Edges {
+                    left: x.round(),
+                    top: y,
+                    right: (x + col.width).round(),
+                    bottom: y + 1.0,
+                };
+                g.fill_rect(hair.rect(), pal.text, ALPHA_LINE * alpha);
+            }
+        }
+        x += col.width + m.col_gap;
+        if n >= 2 && ci == n - 2 {
+            let dx = x.round();
+            let divider = Edges {
+                left: dx,
+                top: top.round(),
+                right: dx + 1.0,
+                bottom: (top + lines * m.row_h).round(),
+            };
+            g.fill_rect(divider.rect(), pal.text, ALPHA_LINE * alpha);
+            x += 1.0 + m.col_gap;
+        }
+    }
+}

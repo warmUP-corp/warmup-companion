@@ -56,7 +56,11 @@ use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
 use super::controller_tips::TipToken;
 use super::nimbus_orb::{drive_scale, mood_drive, NimbusMood, NimbusOrb, ORB_FRAME_FILL};
-use super::shortcut_sheet::{self, Line};
+use super::shortcut_sheet;
+#[cfg(feature = "vk-panels")]
+use windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_CLIP;
+#[cfg(test)]
+use super::shortcut_sheet::Line;
 use crate::config::VkStyle;
 use crate::mono_ui::{Gfx, user_locale_name};
 #[cfg(test)]
@@ -70,12 +74,18 @@ pub(crate) use crate::vk_paint::{
 };
 #[cfg(test)]
 use crate::vk_paint::{bar_layout, legend_layout, BarLayout, BAR_LABEL_PX, BAR_SEP_PX};
-pub(crate) use crate::vk_paint::{
-    combo_parts, combo_width, legend_span, paint_combo, paint_legend, ComboPart, ComboStyle, LegendPaint, Measure, ALPHA_SECONDARY, BAR_H, LEGEND_SEP,
-    SHEET_ACTION_GAP, SHEET_ACTION_PX, SHEET_COL_GAP, SHEET_HEADER_PX, SHEET_PAD_BOTTOM,
-    SHEET_PAD_TOP, SHEET_PAD_X, SHEET_ROW_H, SHEET_TRAIL,
-};
+pub(crate) use crate::vk_paint::{legend_span, paint_legend, LegendPaint, BAR_H, LEGEND_SEP};
+#[cfg(test)]
+use crate::vk_paint::{combo_parts, combo_width, text_px, ComboPart, ComboStyle, SHEET_PAD_X};
 pub use crate::vk_paint::legend_band_height;
+pub(crate) use crate::vk_paint::{
+    paint_modern_sheet, paint_sheet_hint, paint_shortcut_sheet, SheetPaint, MS_SCALE,
+};
+#[cfg(test)]
+use crate::vk_paint::{
+    sheet_block_size, sheet_columns, sheet_combo_style, sheet_fit, sheet_total_width,
+    side_combo_style, SheetColumn, SheetMetrics,
+};
 pub use crate::vk_geom::KeyRect;
 pub use crate::vk_paint::{
     FLOATING_PANEL_INSET,
@@ -96,7 +106,6 @@ pub use crate::vk_paint::{
     strip_slots,
     style_palette,
     style_spec,
-    text_px,
 };
 
 #[cfg(feature = "vk-panels")]
@@ -272,59 +281,6 @@ const SEL_GLIDE_TAU: f32 = 0.045;
 
 pub const STRIP_BAND_H: f32 = 67.0;
 
-const ALPHA_LINE: f32 = 0x14 as f32 / 255.0;
-
-
-
-
-
-
-
-
-
-const SIDE_PAD: f32 = 24.0;
-const SIDE_LABEL_PX: f32 = 38.0;
-const SIDE_GLYPH: f32 = 48.0;
-const SIDE_SHARE: f32 = 56.0;
-const SIDE_TOKEN_GAP: f32 = 8.0;
-const SIDE_LABEL_GAP: f32 = 16.0;
-const SIDE_FILL_ALPHA: f32 = 0x99 as f32 / 255.0;
-
-const HINT_H: f32 = 88.0;
-const MS_COLS: usize = 3;
-const MS_SCALE: f32 = 3.0;
-const MS_PAD: f32 = 32.0;
-const MS_GAP: f32 = 20.0;
-const MS_TILE_PAD: f32 = 26.0;
-const MS_TITLE_PX: f32 = 24.0;
-const MS_TITLE_H: f32 = 48.0;
-const MS_LABEL_PX: f32 = 26.0;
-const MS_LABEL_GAP: f32 = 20.0;
-const MS_ROW_H: f32 = 62.0;
-const MS_GLYPH: f32 = 44.0;
-const MS_SHARE: f32 = 50.0;
-const MS_RADIUS: f32 = 16.0;
-
-fn sheet_combo_style(u: f32) -> ComboStyle {
-    ComboStyle {
-        glyph: MS_GLYPH * u,
-        share: MS_SHARE * u,
-        gap: SIDE_TOKEN_GAP * u,
-        prefix_px: text_px(MS_LABEL_PX, u),
-        connector_px: text_px(MS_LABEL_PX, u),
-    }
-}
-
-fn side_combo_style(u: f32) -> ComboStyle {
-    ComboStyle {
-        glyph: SIDE_GLYPH * u,
-        share: SIDE_SHARE * u,
-        gap: SIDE_TOKEN_GAP * u,
-        prefix_px: text_px(SIDE_LABEL_PX, u),
-        connector_px: text_px(SIDE_LABEL_PX, u),
-    }
-}
-
 fn tip_item(token: TipToken, family: ControllerIconFamily) -> Option<TipItem> {
     match token {
         TipToken::Button(b) => family.hint_icon(b).map(TipItem::Icon),
@@ -332,93 +288,6 @@ fn tip_item(token: TipToken, family: ControllerIconFamily) -> Option<TipItem> {
         TipToken::Plus => Some(TipItem::Text("+", true)),
         TipToken::Dot => Some(TipItem::Text(LEGEND_SEP, true)),
     }
-}
-
-
-
-
-
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct SheetMetrics {
-    u: f32,
-    cs: ComboStyle,
-    row_h: f32,
-    header_px: f32,
-    action_px: f32,
-    action_gap: f32,
-    trail: f32,
-    col_gap: f32,
-}
-
-impl SheetMetrics {
-    fn at(u: f32) -> Self {
-        Self {
-            u,
-            cs: ComboStyle::sheet(u),
-            row_h: SHEET_ROW_H * u,
-            header_px: text_px(SHEET_HEADER_PX, u),
-            action_px: text_px(SHEET_ACTION_PX, u),
-            action_gap: SHEET_ACTION_GAP * u,
-            trail: SHEET_TRAIL * u,
-            col_gap: SHEET_COL_GAP * u,
-        }
-    }
-}
-
-struct SheetColumn {
-    lines: Vec<Line>,
-    combo_w: f32,
-    width: f32,
-}
-
-fn sheet_columns(
-    family: ControllerIconFamily,
-    m: &SheetMetrics,
-    measure: Measure,
-) -> Vec<SheetColumn> {
-    shortcut_sheet::shown_columns()
-        .into_iter()
-        .map(|lines| {
-            let mut combo_w = 0.0f32;
-            let mut label_w = 0.0f32;
-            let mut header_w = 0.0f32;
-            for line in &lines {
-                match line {
-                    Line::Row(row) => {
-                        combo_w = combo_w.max(combo_width(
-                            &combo_parts(row.keys, family),
-                            &m.cs,
-                            measure,
-                        ));
-                        label_w = label_w.max(measure(row.label, m.action_px));
-                    }
-                    Line::Title(t) => header_w = header_w.max(measure(t, m.header_px)),
-                    Line::Blank => {}
-                }
-            }
-            let width = (combo_w + m.action_gap + label_w + m.trail).max(header_w);
-            SheetColumn {
-                lines,
-                combo_w,
-                width,
-            }
-        })
-        .collect()
-}
-
-fn sheet_block_size(total: f32, m: &SheetMetrics) -> (f32, f32) {
-    let lines = shortcut_sheet::shown_line_count() as f32;
-    (
-        total + 2.0 * SHEET_PAD_X * m.u,
-        (SHEET_PAD_TOP + SHEET_PAD_BOTTOM) * m.u + lines * m.row_h,
-    )
-}
-
-fn sheet_total_width(cols: &[SheetColumn], m: &SheetMetrics) -> f32 {
-    let n = cols.len();
-    let divider = if n >= 2 { m.col_gap + 1.0 } else { 0.0 };
-    cols.iter().map(|c| c.width).sum::<f32>() + m.col_gap * n.saturating_sub(1) as f32 + divider
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -544,7 +413,6 @@ pub fn dock_height_for_full_keys(
     top_inset + block_h + kh * 0.25
 }
 
-
 impl KeyRect {
     fn rect(&self) -> D2D_RECT_F {
         D2D_RECT_F {
@@ -556,9 +424,6 @@ impl KeyRect {
     }
 
 }
-
-
-
 
 pub fn strip_hit_slot(
     client_w: f32,
@@ -959,6 +824,16 @@ impl VkRenderer {
         };
         self.style_fonts = Some(built);
         Ok(())
+    }
+
+    #[cfg(feature = "vk-panels")]
+    unsafe fn draw_svg_icon(
+        &mut self,
+        icon: VkIcon,
+        rect: D2D_RECT_F,
+        color: u32,
+    ) -> Result<(), String> {
+        self.draw_svg_icon_alpha(icon, rect, color, 1.0)
     }
 
     unsafe fn draw_svg_icon_alpha(
@@ -1554,6 +1429,7 @@ impl VkRenderer {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     unsafe fn draw_sheet_hint(
         &mut self,
         pal: &VkPalette,
@@ -1564,112 +1440,16 @@ impl VkRenderer {
         keys_top: f32,
         client_w: f32,
     ) -> Result<(), String> {
-        let cs = side_combo_style(u);
-        let parts = combo_parts(shortcut_sheet::SHEET_HINT.keys, family);
-        let label_px = text_px(SIDE_LABEL_PX, u);
-        let combo_w = {
-            let measure = |t: &str, px: f32| self.measure_px(style, t, px);
-            combo_width(&parts, &cs, &measure)
-        };
-        let label_w = self.measure_px(style, shortcut_sheet::SHEET_HINT.label, label_px);
-        let pad = SIDE_PAD * u;
-        let h = HINT_H * u;
-        let w = (combo_w + SIDE_LABEL_GAP * u + label_w + 2.0 * pad).min(client_w);
-        let left = (center_x - w * 0.5).clamp(0.0, (client_w - w).max(0.0));
-        let top = ((keys_top - h) * 0.5).max(0.0);
-        let pill = D2D_RECT_F {
-            left,
-            top,
-            right: left + w,
-            bottom: top + h,
-        };
-        let fill = solid_brush(&self.d2d_context, colorref(pal.key))?;
-        let stroke = solid_brush(
-            &self.d2d_context,
-            colorref_alpha(pal.panel_stroke, pal.panel_stroke_alpha * 2.0),
-        )?;
-        let r = h * 0.5;
-        self.d2d_context
-            .FillRoundedRectangle(&rounded(pill, r), &fill);
-        self.d2d_context.DrawRoundedRectangle(
-            &rounded(deflate(pill, 0.5), (r - 0.5).max(0.0)),
-            &stroke,
-            1.0,
-            None,
-        );
-        let x = pill.left + pad;
-        self.draw_combo(style, &parts, &cs, x, pill, pal.text, 1.0)?;
-        self.draw_text_px(
+        let sp = SheetPaint {
+            pal,
             style,
-            shortcut_sheet::SHEET_HINT.label,
-            label_px,
-            x + combo_w + SIDE_LABEL_GAP * u,
-            pill,
-            pal.text,
-            1.0,
-        )?;
+            family,
+            dip_scale: self.dip_scale,
+        };
+        paint_sheet_hint(&mut self.gfx, &sp, u, center_x, keys_top, client_w);
         Ok(())
     }
 
-    unsafe fn modern_sheet_layout(
-        &self,
-        style: VkStyle,
-        family: ControllerIconFamily,
-        unit: f32,
-        panel: D2D_RECT_F,
-        groups: &[(&'static str, Vec<shortcut_sheet::SheetRow>)],
-    ) -> (f32, Vec<f32>) {
-        let cols = MS_COLS as f32;
-        let grid_rows = groups.len().div_ceil(MS_COLS);
-        let avail_w = (panel.right - panel.left).max(1.0);
-        let avail_h = (panel.bottom - panel.top).max(1.0);
-        let row_heights = |u: f32| -> Vec<f32> {
-            (0..grid_rows)
-                .map(|gr| {
-                    let n = groups
-                        .iter()
-                        .skip(gr * MS_COLS)
-                        .take(MS_COLS)
-                        .map(|(_, rows)| rows.len())
-                        .max()
-                        .unwrap_or(0) as f32;
-                    (MS_TITLE_H + 2.0 * MS_TILE_PAD) * u + n * MS_ROW_H * u
-                })
-                .collect()
-        };
-        let needed_h = |u: f32| {
-            row_heights(u).iter().sum::<f32>()
-                + (2.0 * MS_PAD + MS_GAP * (grid_rows as f32 - 1.0).max(0.0)) * u
-        };
-        let needed_w = |u: f32| {
-            let measure = |t: &str, px: f32| self.measure_px(style, t, px);
-            let cs = sheet_combo_style(u);
-            let tile = groups
-                .iter()
-                .map(|(_, rows)| {
-                    let combo = rows
-                        .iter()
-                        .map(|r| combo_width(&combo_parts(r.keys, family), &cs, &measure))
-                        .fold(0.0f32, f32::max);
-                    let label = rows
-                        .iter()
-                        .map(|r| measure(r.label, text_px(MS_LABEL_PX, u)))
-                        .fold(0.0f32, f32::max);
-                    combo + MS_LABEL_GAP * u + label + 2.0 * MS_TILE_PAD * u
-                })
-                .fold(0.0f32, f32::max);
-            tile * cols + (2.0 * MS_PAD + MS_GAP * (cols - 1.0)) * u
-        };
-        let mut u = unit.max(1e-3);
-        for _ in 0..4 {
-            let fit = (avail_h / needed_h(u)).min(avail_w / needed_w(u));
-            if fit >= 1.0 {
-                break;
-            }
-            u *= fit * 0.995;
-        }
-        (u, row_heights(u))
-    }
 
     #[allow(clippy::too_many_arguments)]
     unsafe fn draw_modern_sheet(
@@ -1682,84 +1462,19 @@ impl VkRenderer {
         radius: Option<f32>,
         alpha: f32,
     ) -> Result<(), String> {
-        let r = radius.unwrap_or(0.0);
-        let fill = solid_brush(&self.d2d_context, colorref_alpha(pal.bg, alpha))?;
-        self.d2d_context
-            .FillRoundedRectangle(&rounded(panel, r), &fill);
-        let groups: Vec<(&'static str, Vec<shortcut_sheet::SheetRow>)> =
-            shortcut_sheet::MODERN_GROUPS
-                .iter()
-                .map(|g| (g.title, shortcut_sheet::shown_rows(g)))
-                .collect();
-        let (u, row_heights) = self.modern_sheet_layout(style, family, unit, panel, &groups);
-        let pad = MS_PAD * u;
-        let gap = MS_GAP * u;
-        let total_h =
-            row_heights.iter().sum::<f32>() + gap * (row_heights.len() as f32 - 1.0).max(0.0);
-        let tile_w =
-            (panel.right - panel.left - 2.0 * pad - gap * (MS_COLS as f32 - 1.0)) / MS_COLS as f32;
-        let mut y = panel.top + ((panel.bottom - panel.top - total_h) * 0.5).max(pad);
-        let tile_fill = solid_brush(
-            &self.d2d_context,
-            colorref_alpha(pal.key, SIDE_FILL_ALPHA * alpha),
-        )?;
-        let tile_r = MS_RADIUS * u;
-        let cs = sheet_combo_style(u);
-        let label_px = text_px(MS_LABEL_PX, u);
-        for (gr, &row_h) in row_heights.iter().enumerate() {
-            for (gc, (title, rows)) in groups.iter().skip(gr * MS_COLS).take(MS_COLS).enumerate() {
-                let left = panel.left + pad + gc as f32 * (tile_w + gap);
-                let tile = D2D_RECT_F {
-                    left,
-                    top: y,
-                    right: left + tile_w,
-                    bottom: y + row_h,
-                };
-                self.d2d_context
-                    .FillRoundedRectangle(&rounded(tile, tile_r), &tile_fill);
-                let inner = deflate(tile, MS_TILE_PAD * u);
-                let title_band = D2D_RECT_F {
-                    bottom: inner.top + MS_TITLE_H * u,
-                    ..inner
-                };
-                self.draw_text_px(
-                    style,
-                    title,
-                    text_px(MS_TITLE_PX, u),
-                    inner.left,
-                    title_band,
-                    pal.text,
-                    ALPHA_SECONDARY * alpha,
-                )?;
-                let parts: Vec<Vec<ComboPart>> =
-                    rows.iter().map(|r| combo_parts(r.keys, family)).collect();
-                let combo_w = {
-                    let measure = |t: &str, px: f32| self.measure_px(style, t, px);
-                    parts
-                        .iter()
-                        .map(|p| combo_width(p, &cs, &measure))
-                        .fold(0.0f32, f32::max)
-                };
-                for (i, (row, p)) in rows.iter().zip(&parts).enumerate() {
-                    let band = D2D_RECT_F {
-                        top: title_band.bottom + i as f32 * MS_ROW_H * u,
-                        bottom: title_band.bottom + (i as f32 + 1.0) * MS_ROW_H * u,
-                        ..inner
-                    };
-                    self.draw_combo(style, p, &cs, inner.left, band, pal.text, alpha)?;
-                    self.draw_text_px(
-                        style,
-                        row.label,
-                        label_px,
-                        inner.left + combo_w + MS_LABEL_GAP * u,
-                        band,
-                        pal.text,
-                        alpha,
-                    )?;
-                }
-            }
-            y += row_h + gap;
-        }
+        let sp = SheetPaint {
+            pal,
+            style,
+            family,
+            dip_scale: self.dip_scale,
+        };
+        let panel = Edges {
+            left: panel.left,
+            top: panel.top,
+            right: panel.right,
+            bottom: panel.bottom,
+        };
+        paint_modern_sheet(&mut self.gfx, &sp, unit, panel, radius, alpha);
         Ok(())
     }
     unsafe fn text_format(&self, style: VkStyle, px: f32) -> Result<IDWriteTextFormat, String> {
@@ -1792,58 +1507,9 @@ impl VkRenderer {
         Ok(f)
     }
 
+    #[cfg(test)]
     unsafe fn measure_px(&self, style: VkStyle, text: &str, px: f32) -> f32 {
         crate::vk_paint::paint_measure_px(&self.gfx, style, text, px)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    unsafe fn draw_text_px(
-        &mut self,
-        style: VkStyle,
-        text: &str,
-        px: f32,
-        left: f32,
-        band: D2D_RECT_F,
-        color: u32,
-        alpha: f32,
-    ) -> Result<f32, String> {
-        let g = &mut self.gfx;
-        let w = crate::vk_paint::paint_text_px(
-            g,
-            style,
-            text,
-            px,
-            left,
-            crate::mono_ui::Rect {
-                x: band.left,
-                y: band.top,
-                w: band.right - band.left,
-                h: band.bottom - band.top,
-            },
-            color,
-            alpha,
-        );
-        Ok(w)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    unsafe fn draw_combo(
-        &mut self,
-        style: VkStyle,
-        parts: &[ComboPart],
-        cs: &ComboStyle,
-        left: f32,
-        band: D2D_RECT_F,
-        text: u32,
-        alpha: f32,
-    ) -> Result<f32, String> {
-        let band = Edges {
-            left: band.left,
-            top: band.top,
-            right: band.right,
-            bottom: band.bottom,
-        };
-        Ok(paint_combo(&mut self.gfx, style, parts, cs, left, band, text, alpha, self.dip_scale))
     }
 
     #[cfg(test)]
@@ -1893,6 +1559,7 @@ impl VkRenderer {
         Ok(())
     }
 
+    #[cfg(test)]
     unsafe fn sheet_fit(
         &self,
         style: VkStyle,
@@ -1900,35 +1567,13 @@ impl VkRenderer {
         unit: f32,
         panel: D2D_RECT_F,
     ) -> (SheetMetrics, Vec<SheetColumn>, f32) {
-        let measure = |t: &str, px: f32| self.measure_px(style, t, px);
-        let avail_w = (panel.right - panel.left).max(1.0);
-        let avail_h = (panel.bottom - panel.top).max(1.0);
-        let mut u = unit.max(1e-3);
-        let mut m = SheetMetrics::at(u);
-        let mut cols = sheet_columns(family, &m, &measure);
-        let mut total = sheet_total_width(&cols, &m);
-        for _ in 0..3 {
-            let (w, h) = sheet_block_size(total, &m);
-            let fit = (avail_w / w.max(1.0)).min(avail_h / h.max(1.0));
-            if (fit - 1.0).abs() < 0.002 {
-                break;
-            }
-            u = (u * fit).max(0.05);
-            m = SheetMetrics::at(u);
-            cols = sheet_columns(family, &m, &measure);
-            total = sheet_total_width(&cols, &m);
-        }
-        while u > 0.05 {
-            let (w, h) = sheet_block_size(total, &m);
-            if w <= avail_w + 0.5 && h <= avail_h + 0.5 {
-                break;
-            }
-            u *= 0.98;
-            m = SheetMetrics::at(u);
-            cols = sheet_columns(family, &m, &measure);
-            total = sheet_total_width(&cols, &m);
-        }
-        (m, cols, total)
+        let panel = Edges {
+            left: panel.left,
+            top: panel.top,
+            right: panel.right,
+            bottom: panel.bottom,
+        };
+        sheet_fit(&self.gfx, style, family, unit, panel)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1942,97 +1587,19 @@ impl VkRenderer {
         radius: Option<f32>,
         alpha: f32,
     ) -> Result<(), String> {
-        let r = radius.unwrap_or(0.0);
-        let fill = solid_brush(&self.d2d_context, colorref_alpha(pal.bg, alpha))?;
-        self.d2d_context
-            .FillRoundedRectangle(&rounded(panel, r), &fill);
-        if radius.is_some() {
-            let stroke = solid_brush(
-                &self.d2d_context,
-                colorref_alpha(pal.panel_stroke, pal.panel_stroke_alpha * alpha),
-            )?;
-            self.d2d_context.DrawRoundedRectangle(
-                &rounded(deflate(panel, 0.5), (r - 0.5).max(0.0)),
-                &stroke,
-                1.0,
-                None,
-            );
-        }
-
-        let (m, cols, total) = self.sheet_fit(style, family, unit, panel);
-        let lines = shortcut_sheet::shown_line_count() as f32;
-        let block_h = (SHEET_PAD_TOP + SHEET_PAD_BOTTOM) * m.u + lines * m.row_h;
-        let top =
-            panel.top + ((panel.bottom - panel.top - block_h) * 0.5).max(0.0) + SHEET_PAD_TOP * m.u;
-        let line_brush = solid_brush(
-            &self.d2d_context,
-            colorref_alpha(pal.text, ALPHA_LINE * alpha),
-        )?;
-        let mut x = (panel.left + panel.right - total) * 0.5;
-        let n = cols.len();
-        for (ci, col) in cols.iter().enumerate() {
-            for (i, line) in col.lines.iter().enumerate() {
-                let band = D2D_RECT_F {
-                    left: x,
-                    top: top + i as f32 * m.row_h,
-                    right: x + col.width,
-                    bottom: top + (i as f32 + 1.0) * m.row_h,
-                };
-                match line {
-                    Line::Title(t) => {
-                        self.draw_text_px(
-                            style,
-                            t,
-                            m.header_px,
-                            x,
-                            band,
-                            pal.text,
-                            ALPHA_SECONDARY * alpha,
-                        )?;
-                    }
-                    Line::Row(row) => {
-                        let parts = combo_parts(row.keys, family);
-                        self.draw_combo(style, &parts, &m.cs, x, band, pal.text, alpha)?;
-                        self.draw_text_px(
-                            style,
-                            row.label,
-                            m.action_px,
-                            x + col.combo_w + m.action_gap,
-                            band,
-                            pal.text,
-                            alpha,
-                        )?;
-                    }
-                    Line::Blank => {}
-                }
-                if shortcut_sheet::hairline_below(&col.lines, i) {
-                    let y = (band.bottom - 1.0).round();
-                    self.d2d_context.FillRectangle(
-                        &D2D_RECT_F {
-                            left: x.round(),
-                            top: y,
-                            right: (x + col.width).round(),
-                            bottom: y + 1.0,
-                        },
-                        &line_brush,
-                    );
-                }
-            }
-            x += col.width + m.col_gap;
-            if n >= 2 && ci == n - 2 {
-                let dx = x.round();
-                self.d2d_context.FillRectangle(
-                    &D2D_RECT_F {
-                        left: dx,
-                        top: top.round(),
-                        right: dx + 1.0,
-                        bottom: (top + lines * m.row_h).round(),
-                    },
-                    &line_brush,
-                );
-                x += 1.0 + m.col_gap;
-            }
-        }
+        let sp = SheetPaint {
+            pal,
+            style,
+            family,
+            dip_scale: self.dip_scale,
+        };
+        let panel = Edges {
+            left: panel.left,
+            top: panel.top,
+            right: panel.right,
+            bottom: panel.bottom,
+        };
+        paint_shortcut_sheet(&mut self.gfx, &sp, unit, panel, radius, alpha);
         Ok(())
     }
 
