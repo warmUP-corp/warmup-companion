@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.10.4
+
+- **The TV keyboard keeps its size at high display scaling.** In TV layout the keyboard stops growing at 45% of the screen height. Before, it grew with Windows scaling and took about two thirds of a 4K TV at 225%, and the whole screen on 1440p at 225%.
+- **No empty band above the word suggestions on TV.** The suggestion strip is now exactly as tall as its chips, so the space above them matches the space below the keys.
+- **The floating keyboard sits on the bottom edge of the screen** instead of hovering above it.
+- **Built-in app presets.** VLC, Spotify, File Explorer and Discord now appear on the Apps page next to Web browsers, ready to use and each with its own on/off switch. They only use X, Y, LT, RT and the D-pad, so click, right-click and Enter keep working. VLC: X play/pause, Y full screen, D-pad seek and volume, LT/RT previous/next. Spotify: X play/pause, D-pad previous/next track and volume. File Explorer: D-pad back/forward/parent folder, LT/RT tabs. Discord: D-pad previous/next channel, Y quick switcher, X mute.
+- **Presets that fit the app.** Picking an action for a button now offers shortcuts for that app, and browsers gain Address bar and Full screen.
+- **The Apps list shows when it scrolls.** A hint under the list says how many apps are above or below.
+
 ## v0.10.3
 
 - **A held key can no longer get stuck on the sign-in screen.** On the PIN/password screen, a held button (A, B, Y, LB/RB) acts once instead of auto-repeating, so a lost button release can't keep typing into the PIN box. Turning the controller off now clears any held key or move while the keyboard is open.
