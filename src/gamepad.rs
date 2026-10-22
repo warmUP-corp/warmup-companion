@@ -452,6 +452,8 @@ pub struct GamepadPoll {
     last_desktop_watch: Option<(String, String)>,
     #[cfg(windows)]
     last_service_backend_sync: Instant,
+    #[cfg(windows)]
+    uac_key_nav: bool,
 }
 
 impl GamepadPoll {
@@ -633,6 +635,8 @@ impl GamepadPoll {
             last_desktop_watch: None,
             #[cfg(windows)]
             last_service_backend_sync: crate::time_util::stale(SERVICE_BACKEND_SYNC_MIN),
+            #[cfg(windows)]
+            uac_key_nav: false,
         }
     }
 
@@ -931,7 +935,19 @@ impl GamepadPoll {
         if let Some(edge) = desktop_reopen {
             edges.push(edge);
         }
+        #[cfg(windows)]
+        let uac_front = !changes.is_empty() && crate::vk_nav::foreground_is_uac_consent();
+        #[cfg(windows)]
+        if lx.hypot(ly) > crate::config::gamepad_settings().cursor_deadzone
+            || (!changes.is_empty() && !uac_front)
+        {
+            self.uac_key_nav = false;
+        }
         for change in changes {
+            #[cfg(windows)]
+            if uac_front && self.uac_prompt_input(cursor, change) {
+                continue;
+            }
             if forward_only_while_sleeping(sleeping, change.button) {
                 if change.button != Button::Lb {
                     crate::pipe_server::publish_button(change.button.as_str(), change.pressed);
@@ -1276,6 +1292,36 @@ impl GamepadPoll {
             ));
             Some(VkLoopAction::Close)
         }
+    }
+
+    #[cfg(windows)]
+    fn uac_prompt_input(&mut self, cursor: &mut PcCursor, change: ButtonChange) -> bool {
+        use enigo::Key;
+        let keys = match change.button {
+            Button::Up | Button::Left => vec![Key::Shift, Key::Tab],
+            Button::Down | Button::Right => vec![Key::Tab],
+            Button::A if self.a_cursor_down => return false,
+            Button::A if change.pressed && !self.uac_key_nav => return false,
+            Button::A => vec![Key::Space],
+            Button::B if self.b_cursor_down => return false,
+            Button::B => vec![Key::Escape],
+            _ => return false,
+        };
+        if change.pressed {
+            if matches!(
+                change.button,
+                Button::Up | Button::Down | Button::Left | Button::Right
+            ) {
+                self.uac_key_nav = true;
+            }
+            crate::install::log_line(&format!(
+                "UAC prompt: {} -> {keys:?}",
+                change.button.as_str()
+            ));
+            cursor.tap_chord(keys);
+            self.backend.haptic_tick();
+        }
+        true
     }
 
     #[cfg(windows)]
