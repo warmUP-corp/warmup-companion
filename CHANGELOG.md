@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.10.5
 
 - **Answer Windows permission prompts with the controller.** While a UAC prompt is in front (on the secure desktop or, with the secure desktop turned off, on the normal desktop), the D-pad moves between Yes, No and Show more details (right/down = Tab, left/up = Shift+Tab), A presses the highlighted button once the D-pad has been used, and B answers No (Esc). Until the D-pad is used, A keeps clicking where the stick cursor points, and moving the stick hands A back to the cursor. Only the controller the companion reads itself drives the prompt; nothing sent over the warmUP pipe can press a button there, and Windows' own default focus is left as it is.
 
