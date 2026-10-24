@@ -24,7 +24,7 @@ mod vk_gate;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod vk_motion;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 mod crash;
 #[cfg(any(windows, target_os = "linux"))]
 mod install;
@@ -102,13 +102,13 @@ mod gamepad_backend;
 mod hid_gamepad;
 #[cfg(all(windows, feature = "gamepad"))]
 mod hid_reader;
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 mod library_watch;
 #[cfg(all(windows, feature = "gamepad"))]
 mod pad_decode;
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 mod parental_guard;
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 mod parental_store;
 #[cfg(feature = "gamepad")]
 mod app_profiles;
@@ -117,11 +117,11 @@ mod pc_cursor;
 #[cfg(feature = "gamepad")]
 mod touchpad_gestures;
 mod predict_dict;
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 mod process_guard;
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 mod playtime_store;
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 mod playtime_tracker;
 #[cfg(all(windows, feature = "gamepad"))]
 mod xinput_backend;

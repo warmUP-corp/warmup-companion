@@ -1,6 +1,6 @@
 //! Persisted library watchlist for offline playtime tracking while warmUP is closed.
 
-#![cfg(windows)]
+#![cfg(any(windows, target_os = "linux"))]
 
 use std::sync::{Mutex, OnceLock};
 
