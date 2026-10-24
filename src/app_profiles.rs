@@ -163,6 +163,17 @@ fn builtins() -> impl Iterator<Item = &'static Builtin> {
     BUILTINS.iter()
 }
 
+#[cfg(target_os = "linux")]
+fn listed(builtin: &Builtin) -> bool {
+    !std::ptr::eq(builtin, &HYPRLAND)
+        || std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some_and(|v| !v.is_empty())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn listed(_builtin: &Builtin) -> bool {
+    true
+}
+
 pub const APP_PRESETS: &[(&str, &str)] = &[
     ("Copy", "ctrl+c"),
     ("Paste", "ctrl+v"),
@@ -264,6 +275,7 @@ impl Profile {
 
 pub fn builtin_profiles() -> Vec<Profile> {
     builtins()
+        .filter(|b| listed(b))
         .map(|b| {
             let mut p = Profile {
                 exes: b.exes.iter().map(|s| s.to_string()).collect(),
