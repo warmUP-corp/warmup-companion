@@ -107,6 +107,7 @@ pub(super) fn center_items() -> Vec<Item> {
                 options: mic_options(),
             },
         ));
+        items.extend(voice_items());
     }
     items
 }
@@ -201,8 +202,47 @@ pub(super) unsafe fn confirm_signin_only(_owner: HWND) -> bool {
     false
 }
 
-pub(super) fn run_voice_download(_id: &'static str) -> bool {
-    false
+pub(super) fn run_voice_download(id: &'static str) -> bool {
+    #[cfg(feature = "speech")]
+    {
+        match crate::linux_speech::download_model(id, |pct| {
+            set_voice_dl(Some(VoiceDl::Running(id, pct)))
+        }) {
+            Ok(()) => true,
+            Err(e) => {
+                crate::install::log_line(&format!("control center: voice download {id}: {e}"));
+                false
+            }
+        }
+    }
+    #[cfg(not(feature = "speech"))]
+    {
+        let _ = id;
+        false
+    }
+}
+
+pub(super) fn voice_model_installed(id: &str) -> bool {
+    #[cfg(feature = "speech")]
+    {
+        crate::linux_speech::model_installed(id)
+    }
+    #[cfg(not(feature = "speech"))]
+    {
+        let _ = id;
+        false
+    }
+}
+
+pub(super) fn voice_engine() -> String {
+    #[cfg(feature = "speech")]
+    {
+        crate::linux_speech::engine()
+    }
+    #[cfg(not(feature = "speech"))]
+    {
+        String::new()
+    }
 }
 
 pub(super) fn program_name(name: &str) -> String {

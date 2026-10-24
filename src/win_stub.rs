@@ -122,7 +122,12 @@ pub mod vk_ui {
 
 pub mod speech_input {
     #[cfg_attr(not(feature = "gamepad"), allow(dead_code))]
-    pub fn set_engine(_name: &str) {}
+    pub fn set_engine(name: &str) {
+        #[cfg(feature = "speech")]
+        crate::linux_speech::set_engine(name);
+        #[cfg(not(feature = "speech"))]
+        let _ = name;
+    }
 
     #[cfg_attr(not(feature = "gamepad"), allow(dead_code))]
     pub fn unload_engine() {

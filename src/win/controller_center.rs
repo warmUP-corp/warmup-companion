@@ -273,6 +273,12 @@ fn led_choice(swatch: i32, effect: i32) -> (Option<&'static str>, &'static str) 
     }
 }
 
+#[cfg(not(windows))]
+const VOICE_MODELS: &[(&str, &str, &str)] = &[
+    ("Parakeet Redux", "parakeet-redux", "420 MB"),
+    ("Parakeet (NVIDIA)", "parakeet", "670 MB"),
+];
+#[cfg(windows)]
 const VOICE_MODELS: &[(&str, &str, &str)] = &[
     ("Parakeet Redux", "parakeet-redux", "420 MB"),
     ("Parakeet (NVIDIA)", "parakeet", "670 MB"),
@@ -338,6 +344,12 @@ fn read_speech(name: &str) -> String {
         .unwrap_or_default()
 }
 
+#[cfg(not(windows))]
+fn voice_installed(id: &str) -> bool {
+    voice_model_installed(id)
+}
+
+#[cfg(windows)]
 fn voice_installed(id: &str) -> bool {
     let dir = speech_dir();
     match id {
@@ -369,7 +381,10 @@ fn voice_active(id: &str) -> bool {
     if !voice_installed(id) {
         return false;
     }
+    #[cfg(windows)]
     let engine = read_speech("engine.txt");
+    #[cfg(not(windows))]
+    let engine = voice_engine();
     if id.starts_with("parakeet") {
         engine == id
     } else {

@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, the Control Center Voice tab downloads and removes the Parakeet (NVIDIA) and Parakeet Redux dictation models, with the ONNX Runtime they need, and shows the download progress, like on Windows. The model and runtime no longer have to be copied in by hand.
 - On Linux, the tray has a Microphone menu while voice typing is on, and Control Center has the Voice tab with a Microphone choice. The list shows the PipeWire or PulseAudio inputs by name, and dictation records from the chosen one. Default follows the system input.
 - On Linux, `warmup-companion --controller-center` and the `--gamepad` developer mode show the tray icon like on Windows, and `--controller-center` keeps running after its window closes instead of exiting.
 - On Linux, Ctrl+Alt+C opens Control Center and Ctrl+Alt+V starts or stops voice typing, like on Windows. They are registered through the desktop's global shortcuts portal, and on Hyprland the companion binds the keys itself. The tray shows the shortcut next to Control Center.

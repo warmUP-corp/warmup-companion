@@ -12,6 +12,20 @@ use cpal::{FromSample, Sample, SampleFormat};
 const MAX_RECORD_S: f32 = 180.0;
 const AUTO_STOP_S: f32 = 2.5;
 const PORT: u16 = 17182;
+const RUNTIME: &str = "libonnxruntime.so";
+const ORT_VERSION: &str = "1.24.4";
+const PARAKEET_REPO: &str = "istupakov/parakeet-tdt-0.6b-v3-onnx";
+const PARAKEET_REV: &str = "main";
+const PARAKEET_FILES: [&str; 3] = [
+    "encoder-model.int8.onnx",
+    "decoder_joint-model.int8.onnx",
+    "vocab.txt",
+];
+const REDUX_REPO: &str = "eschmidbauer/parakeet-redux-onnx";
+const REDUX_REV: &str = "1c285ba78d6f1880803f65355133a5ad3559a407";
+const REDUX_FILES: [&str; 3] = ["encoder-model.onnx", "decoder_joint-model.onnx", "vocab.txt"];
+const MODEL_IDS: [&str; 2] = ["parakeet", "parakeet-redux"];
+const DOWNLOAD_POLL: Duration = Duration::from_millis(250);
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -124,6 +138,200 @@ fn pick_device(host: &cpal::Host) -> Option<cpal::Device> {
     host.default_input_device()
 }
 
+fn engine_path() -> PathBuf {
+    speech_dir().join("engine.txt")
+}
+
+pub fn engine() -> String {
+    std::fs::read_to_string(engine_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| MODEL_IDS.contains(&s.as_str()))
+        .unwrap_or_else(|| "parakeet".to_string())
+}
+
+pub fn set_engine(name: &str) {
+    let next = if name == "parakeet-redux" {
+        "parakeet-redux"
+    } else {
+        "parakeet"
+    };
+    let changed = engine() != next;
+    if let Some(parent) = engine_path().parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(engine_path(), next);
+    if changed {
+        quit_server();
+    }
+}
+
+pub fn model_installed(id: &str) -> bool {
+    let dir = speech_dir().join(id);
+    MODEL_IDS.contains(&id) && has_model(&dir) && runtime_for(&dir).is_some()
+}
+
+pub fn parakeet_available() -> bool {
+    model_installed("parakeet")
+}
+
+pub fn redux_available() -> bool {
+    model_installed("parakeet-redux")
+}
+
+pub fn download_model(id: &str, progress: impl Fn(u8)) -> Result<(), String> {
+    let (repo, rev, files): (&str, &str, &[&str]) = match id {
+        "parakeet" => (PARAKEET_REPO, PARAKEET_REV, &PARAKEET_FILES),
+        "parakeet-redux" => (REDUX_REPO, REDUX_REV, &REDUX_FILES),
+        _ => return Err(format!("unknown voice model {id}")),
+    };
+    let dir = speech_dir().join(id);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut jobs: Vec<(String, PathBuf)> = files
+        .iter()
+        .filter(|f| !dir.join(f).is_file())
+        .map(|f| {
+            (
+                format!("https://huggingface.co/{repo}/resolve/{rev}/{f}?download=true"),
+                dir.join(f),
+            )
+        })
+        .collect();
+    let runtime = dir.join(RUNTIME);
+    let sibling = MODEL_IDS
+        .iter()
+        .map(|other| speech_dir().join(other).join(RUNTIME))
+        .find(|p| *p != runtime && p.is_file());
+    let archive = dir.join("onnxruntime.tgz");
+    let need_runtime = !runtime.is_file();
+    if need_runtime {
+        match &sibling {
+            Some(from) => {
+                std::fs::copy(from, &runtime).map_err(|e| format!("{}: {e}", runtime.display()))?;
+            }
+            None => jobs.push((ort_url()?, archive.clone())),
+        }
+    }
+    let sizes: Vec<u64> = jobs.iter().map(|(url, _)| remote_size(url)).collect();
+    let total = sizes.iter().sum::<u64>().max(1);
+    let mut done = 0u64;
+    progress(0);
+    for ((url, path), size) in jobs.iter().zip(&sizes) {
+        crate::install::log_line(&format!("speech: downloading {url}"));
+        fetch(url, path, |got| {
+            progress((((done + got) * 100) / total).min(99) as u8);
+        })?;
+        done += size;
+    }
+    if archive.is_file() {
+        let unpacked = unpack_runtime(&archive, &dir);
+        let _ = std::fs::remove_file(&archive);
+        unpacked?;
+    }
+    if !model_installed(id) {
+        return Err(format!("{} is incomplete after the download", dir.display()));
+    }
+    set_engine(id);
+    progress(100);
+    Ok(())
+}
+
+fn ort_url() -> Result<String, String> {
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "aarch64",
+        other => return Err(format!("no ONNX Runtime build for {other}")),
+    };
+    Ok(format!(
+        "https://github.com/microsoft/onnxruntime/releases/download/v{ORT_VERSION}/onnxruntime-linux-{arch}-{ORT_VERSION}.tgz"
+    ))
+}
+
+fn curl() -> Command {
+    let mut command = Command::new("curl");
+    command
+        .args(["-fsSL", "--proto", "=https", "--proto-redir", "=https"])
+        .args(["--connect-timeout", "15", "-A", "warmup-companion"]);
+    command
+}
+
+fn remote_size(url: &str) -> u64 {
+    let Ok(output) = curl().args(["-I", url]).stderr(Stdio::null()).output() else {
+        return 0;
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<u64>().ok())
+                .flatten()
+        })
+        .last()
+        .unwrap_or(0)
+}
+
+fn fetch(url: &str, path: &Path, on_progress: impl Fn(u64)) -> Result<(), String> {
+    let part = path.with_extension("part");
+    let _ = std::fs::remove_file(&part);
+    let mut child = curl()
+        .arg("-o")
+        .arg(&part)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("curl is needed to download voice models: {e}"))?;
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| format!("curl: {e}"))? {
+            break status;
+        }
+        on_progress(std::fs::metadata(&part).map_or(0, |m| m.len()));
+        std::thread::sleep(DOWNLOAD_POLL);
+    };
+    if !status.success() {
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let _ = pipe.read_to_string(&mut stderr);
+        }
+        let _ = std::fs::remove_file(&part);
+        return Err(format!("{url}: {}", stderr.trim()));
+    }
+    std::fs::rename(&part, path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn unpack_runtime(archive: &Path, dir: &Path) -> Result<(), String> {
+    let staging = dir.join("onnxruntime-unpack");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|e| format!("{}: {e}", staging.display()))?;
+    let pattern = format!("*/lib/{RUNTIME}.{ORT_VERSION}");
+    let status = Command::new("tar")
+        .arg("-xzf")
+        .arg(archive)
+        .arg("-C")
+        .arg(&staging)
+        .args(["--wildcards", &pattern])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("tar: {e}"))?;
+    let found = std::fs::read_dir(&staging)
+        .ok()
+        .and_then(|mut entries| entries.find_map(|e| e.ok()))
+        .map(|e| e.path().join("lib").join(format!("{RUNTIME}.{ORT_VERSION}")))
+        .filter(|p| p.is_file());
+    let result = match (status.success(), found) {
+        (true, Some(lib)) => std::fs::rename(&lib, dir.join(RUNTIME))
+            .map_err(|e| format!("{}: {e}", dir.join(RUNTIME).display())),
+        _ => Err(format!("{} has no {RUNTIME}", archive.display())),
+    };
+    let _ = std::fs::remove_dir_all(&staging);
+    result
+}
+
 pub fn request_stop() {
     STOP.store(true, Ordering::SeqCst);
 }
@@ -202,7 +410,7 @@ pub fn toggle() {
         return;
     }
     if !available() {
-        let message = "Dictation needs the Parakeet model and ONNX Runtime next to it.";
+        let message = "Dictation needs a voice model. Download Parakeet in Control Center under Voice.";
         crate::install::log_line(message);
         let _ = crate::linux_notify::notify("Warmup Companion", message);
         return;
@@ -501,9 +709,16 @@ fn has_model(dir: &Path) -> bool {
 }
 
 fn model_dir() -> Option<PathBuf> {
-    let own = crate::paths::data_dir().join("speech").join("parakeet");
-    if has_model(&own) {
-        return Some(own);
+    let classic = speech_dir().join("parakeet");
+    let redux = speech_dir().join("parakeet-redux");
+    if engine() == "parakeet-redux" && has_model(&redux) {
+        return Some(redux);
+    }
+    if has_model(&classic) {
+        return Some(classic);
+    }
+    if has_model(&redux) {
+        return Some(redux);
     }
     if let Some(home) = std::env::var_os("HOME") {
         let bundled = PathBuf::from(home)
@@ -516,17 +731,19 @@ fn model_dir() -> Option<PathBuf> {
 }
 
 fn onnx_runtime() -> Option<PathBuf> {
+    runtime_for(&model_dir()?)
+}
+
+fn runtime_for(dir: &Path) -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("ORT_DYLIB_PATH") {
         let path = PathBuf::from(path);
         if path.is_file() {
             return Some(path);
         }
     }
-    if let Some(dir) = model_dir() {
-        let beside = dir.join("libonnxruntime.so");
-        if beside.is_file() {
-            return Some(beside);
-        }
+    let beside = dir.join(RUNTIME);
+    if beside.is_file() {
+        return Some(beside);
     }
     [
         "/usr/lib/libonnxruntime.so",
