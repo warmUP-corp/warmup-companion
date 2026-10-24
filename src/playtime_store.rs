@@ -1,6 +1,6 @@
 //! Pending offline play-session store (disk + session finalize math).
 
-#![cfg(windows)]
+#![cfg(any(windows, target_os = "linux"))]
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};

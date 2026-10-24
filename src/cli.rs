@@ -424,6 +424,14 @@ pub fn dispatch_install_or_service(args: &[String]) {
             crate::install::run_install();
             std::process::exit(0);
         }
+        Some("install-dev") => {
+            let Some(path) = args.get(2) else {
+                eprintln!("usage: warmup-companion install-dev <path-to-warmup>");
+                std::process::exit(2);
+            };
+            crate::install::run_install_dev(std::path::Path::new(path));
+            std::process::exit(0);
+        }
         Some("uninstall") => {
             crate::install::run_uninstall();
             std::process::exit(0);

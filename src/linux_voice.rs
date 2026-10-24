@@ -20,6 +20,7 @@ use wayland_client::protocol::wl_output;
 use wayland_client::{Connection, QueueHandle};
 
 static SHOWN: AtomicBool = AtomicBool::new(false);
+const ORB_ROOM: f32 = 1.25;
 
 pub fn show() {
     if SHOWN.swap(true, Ordering::SeqCst) {
@@ -117,6 +118,7 @@ struct Pill {
     orb_visible: bool,
     level: f32,
     level_at: Option<Instant>,
+    started: Option<Instant>,
     shown_gen: u64,
     gfx: crate::mono_ui::Gfx,
 }
@@ -174,6 +176,7 @@ impl Pill {
             orb_visible: false,
             level: 0.0,
             level_at: None,
+            started: None,
             shown_gen: u64::MAX,
             gfx: crate::mono_ui::Gfx::new(1, 1)?,
         })
@@ -189,7 +192,8 @@ impl Pill {
             return;
         }
         let accent = crate::linux_vk::voice_accent();
-        if !crate::linux_vk::paint_voice_screen(&mut self.gfx, width, height, phase, 0.0, false, None, 0, accent) {
+        let t = self.started.get_or_insert_with(Instant::now).elapsed().as_secs_f32();
+        if !crate::linux_vk::paint_voice_screen(&mut self.gfx, width, height, phase, t, accent) {
             return;
         }
         let pixels = crate::linux_vk::draw_argb(&self.gfx.pixels());
@@ -209,7 +213,7 @@ impl Pill {
         let scale = (height as f32 / 1080.0).clamp(0.85, 2.0);
         let slot = (96.0 * scale).min((width.min(height) as f32) * 0.9).max(1.0);
         let margin = (48.0 * scale).min((width as f32 - slot).max(0.0));
-        let side = (slot * 1.25).round().max(1.0) as u32;
+        let side = (slot * ORB_ROOM).round().max(1.0) as u32;
         let center = margin + slot * 0.5;
         let right = (center - side as f32 * 0.5).round().max(0.0) as i32;
         if self.orb_placed == Some((side, right)) {
@@ -227,7 +231,7 @@ impl Pill {
             return;
         }
         let gen = crate::linux_nimbus::frame_generation();
-        if self.orb_visible && self.shown_gen == gen {
+        if self.orb_visible && self.shown_gen == gen && crate::linux_nimbus::has_frame() {
             return;
         }
         self.draw_orb(qh);
@@ -238,12 +242,7 @@ impl Pill {
         if !self.orb_ready || side == 0 {
             return;
         }
-        let Some((px, bytes)) = crate::linux_nimbus::latest_frame() else {
-            return;
-        };
-        if px == 0 {
-            return;
-        }
+        let nimbus = crate::linux_nimbus::latest_frame();
         let now = Instant::now();
         let dt_ms = self.level_at.map(|t| now.duration_since(t).as_secs_f32() * 1000.0).unwrap_or(0.0);
         self.level_at = Some(now);
@@ -254,11 +253,16 @@ impl Pill {
             target
         };
         let phase = crate::linux_speech::phase();
-        let Some(pixmap) = crate::linux_vk::paint_voice_orb(side, phase, self.level, &bytes, px) else {
+        let t = now.duration_since(*self.started.get_or_insert(now)).as_secs_f32();
+        let accent = crate::linux_vk::voice_accent();
+        let slot = side as f32 / ORB_ROOM;
+        let nimbus = nimbus.as_ref().map(|(px, bytes)| (bytes.as_slice(), *px));
+        if !crate::linux_vk::paint_voice_orb(&mut self.gfx, side, slot, phase, self.level, t, nimbus, accent) {
             return;
-        };
-        let pixels = crate::linux_vk::draw_argb(pixmap.data());
-        if self.upload(&pixels, (pixmap.width(), pixmap.height()), qh, false) {
+        }
+        let pixels = crate::linux_vk::draw_argb(&self.gfx.pixels());
+        let size = (self.gfx.width(), self.gfx.height());
+        if self.upload(&pixels, size, qh, false) {
             self.shown_gen = crate::linux_nimbus::frame_generation();
             self.orb_visible = true;
         }

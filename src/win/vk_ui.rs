@@ -745,36 +745,20 @@ unsafe fn target_monitor_rect() -> windows::Win32::Foundation::RECT {
     super::monitor::active_monitor_rect()
 }
 
-const TV_MAX_HEIGHT_FRAC: f32 = 0.45;
-
 unsafe fn ui_scale() -> f32 {
     let look = vk_look();
     let mut dpi = target_monitor_dpi_scale();
     if look.tv_layout() {
         let m = target_monitor_rect();
-        dpi = tv_capped_dpi(dpi, m.bottom - m.top, &vk_nav::rows_snapshot(), look);
+        dpi = crate::vk_geom::tv_capped_dpi(
+            dpi,
+            m.bottom - m.top,
+            &vk_nav::rows_snapshot(),
+            look,
+            key_scale(1.0, 1.0),
+        );
     }
     key_scale(dpi, crate::config::vk_bar_scale())
-}
-
-fn tv_capped_dpi(
-    dpi: f32,
-    full_h: i32,
-    rows: &[vk_nav::KeyRow],
-    look: vk_renderer::VkLook,
-) -> f32 {
-    let s1 = key_scale(1.0, 1.0);
-    let h1 = vk_renderer::dock_height_for_full_keys(
-        vk_renderer::REF_MON_W * s1,
-        rows,
-        vk_renderer::strip_band_height(s1, look),
-        look,
-    );
-    if h1 > 0.0 {
-        dpi.min(TV_MAX_HEIGHT_FRAC * full_h.max(1) as f32 / h1)
-    } else {
-        dpi
-    }
 }
 
 unsafe fn top_inset() -> f32 {

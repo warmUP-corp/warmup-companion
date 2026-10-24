@@ -40,6 +40,49 @@ pub fn notify_with_actions(
     Ok(chosen)
 }
 
+pub fn notify_screenshot(path: &std::path::Path, copied: bool) {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let body = if copied {
+        format!("{name} \u{b7} copied to clipboard")
+    } else {
+        name
+    };
+    let shown = notify_rust::Notification::new()
+        .summary("Screenshot taken")
+        .body(&body)
+        .icon(&path.to_string_lossy())
+        .action("default", "Open")
+        .show();
+    let handle = match shown {
+        Ok(handle) => handle,
+        Err(error) => {
+            crate::install::log_line(&format!("screenshot notification failed: {error}"));
+            return;
+        }
+    };
+    let path = path.to_path_buf();
+    let _ = std::thread::Builder::new()
+        .name("warmup-screenshot-toast".into())
+        .spawn(move || {
+            handle.wait_for_action(|action| {
+                if action == "default" {
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(&path)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .map(|mut child| {
+                            std::thread::spawn(move || child.wait());
+                        });
+                }
+            });
+        });
+}
+
 fn marker_path() -> PathBuf {
     crate::paths::state_dir().join(".welcome_shown")
 }

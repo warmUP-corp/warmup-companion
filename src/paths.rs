@@ -160,15 +160,15 @@ pub fn mapping_db_file() -> PathBuf {
 }
 
 pub fn library_watch_file() -> PathBuf {
-    data_dir().join("library-watch.json")
+    state_dir().join("library-watch.json")
 }
 
 pub fn parental_guard_file() -> PathBuf {
-    data_dir().join("parental-guard.json")
+    state_dir().join("parental-guard.json")
 }
 
 pub fn pending_play_sessions_file() -> PathBuf {
-    data_dir().join("pending-play-sessions.json")
+    state_dir().join("pending-play-sessions.json")
 }
 
 pub fn personal_dict_file() -> Option<PathBuf> {

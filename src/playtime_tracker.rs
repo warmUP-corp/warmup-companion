@@ -1,6 +1,6 @@
 //! Offline playtime tracking while warmUP is disconnected from the companion pipe.
 
-#![cfg(windows)]
+#![cfg(any(windows, target_os = "linux"))]
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -183,7 +183,7 @@ fn match_process_to_game(
             if game
                 .install_dir_prefixes
                 .iter()
-                .any(|prefix| path.starts_with(prefix))
+                .any(|prefix| path.starts_with(prefix_key(prefix).as_ref()))
             {
                 install_matches.push(game.game_id.as_str());
             }
@@ -222,12 +222,33 @@ fn match_process_to_game(
     None
 }
 
+#[cfg(windows)]
+fn prefix_key(prefix: &str) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Borrowed(prefix)
+}
+
+#[cfg(not(windows))]
+fn prefix_key(prefix: &str) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Owned(prefix.replace('/', "\\").to_ascii_lowercase())
+}
+
+#[cfg(windows)]
 fn exe_stem_lower(exe_name: &str) -> String {
     let lower = exe_name.to_ascii_lowercase();
     lower
         .strip_suffix(".exe")
         .unwrap_or(lower.as_str())
         .to_string()
+}
+
+#[cfg(not(windows))]
+fn exe_stem_lower(exe_name: &str) -> String {
+    let stem = exe_name.split('.').next().unwrap_or(exe_name);
+    if stem.is_empty() {
+        exe_name.to_ascii_lowercase()
+    } else {
+        stem.to_ascii_lowercase()
+    }
 }
 
 #[cfg(test)]

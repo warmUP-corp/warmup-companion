@@ -36,15 +36,7 @@ const HAPTIC_ALERT_MS: u32 = 45;
 const HAPTIC_TICK_MS: u32 = 8;
 
 fn warmup_browser_foreground(button: Button) -> bool {
-    #[cfg(windows)]
-    {
-        matches!(button, Button::L3 | Button::R3) && crate::vk_nav::foreground_is_warmup_browser()
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = button;
-        false
-    }
+    matches!(button, Button::L3 | Button::R3) && crate::vk_nav::foreground_is_warmup_browser()
 }
 
 /// Desktop text-entry shortcuts belong to the companion, not the launcher's dock/topbar.
@@ -945,7 +937,6 @@ impl GamepadPoll {
             crate::gamepad_backend::poll_mode_is_sleep() && !Self::service_signin_desktop();
         #[cfg(not(windows))]
         let sleeping = crate::gamepad_backend::poll_mode_is_sleep();
-        #[cfg(windows)]
         {
             let chord = sleeping
                 && self.shot_select_down
@@ -1034,7 +1025,6 @@ impl GamepadPoll {
             ) {
                 crate::pipe_server::publish_button(change.button.as_str(), change.pressed);
             }
-            #[cfg(windows)]
             if is_guide_launch(
                 change,
                 crate::pipe_server::desktop_connected(),
@@ -1059,7 +1049,6 @@ impl GamepadPoll {
                 }
                 continue;
             }
-            #[cfg(windows)]
             if matches!(change.button, Button::Lt | Button::Rt) && !Self::service_signin_desktop() {
                 let chord_held = self.shot_lb_down && self.shot_rb_down;
                 if chord_held && change.pressed {
@@ -1129,7 +1118,6 @@ impl GamepadPoll {
                     self.backend.haptic_confirm();
                 }
             }
-            #[cfg(windows)]
             if view_action == ViewChordAction::Paste {
                 let skip = native_vk_suppressed || Self::service_signin_desktop();
                 crate::install::log_line(&format!(
@@ -1154,7 +1142,6 @@ impl GamepadPoll {
                     // Distinct, softer feedback: the chord registered, but warmUP
                     // isn't installed, so we don't fake the launch buzz.
                     self.backend.haptic_tick();
-                    #[cfg(windows)]
                     crate::install::log_line("launch hotkey ignored: warmUP is not installed");
                 }
             }

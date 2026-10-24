@@ -201,7 +201,7 @@ warmUP (desktop, not elevated) sends one NDJSON line after a successful `hello`.
 
 No up-frame ack. Behavior:
 
-1. If Kid Mode blocking is active (`parental_guard.enabled` from the last `parental_guard` / `hello` snapshot), the companion **refuses** the request and stays running. It logs the refusal to the service log. If `C:\ProgramData\WarmupVk\parental-security.log` already exists, it appends one JSON line: `{"kind":"shut-down-refused","detail":"Kid Mode blocking is active","ts":<unix_secs>}`.
+1. If Kid Mode blocking is active (`parental_guard.enabled` from the last `parental_guard` / `hello` snapshot), the companion **refuses** the request and stays running. It logs the refusal to the service log. If the parental security log already exists (`C:\ProgramData\WarmupVk\parental-security.log` on Windows, `$XDG_STATE_HOME/warmup-companion/parental-security.log` on Linux), it appends one JSON line: `{"kind":"shut-down-refused","detail":"Kid Mode blocking is active","ts":<unix_secs>}`.
 2. Otherwise the companion writes the clean-exit marker `C:\ProgramData\WarmupVk\companion-clean-exit` first (mtime is what warmUP's Kid Mode watchdog treats as a graceful stop; 30s window), then asks SCM to stop `WarmupVkSvc` (`sc stop` from the LocalSystem worker). The service process exits; the client sees the pipe drop.
 
 `Restart App` / updates must not send this frame. Use it only for "Close Companion with warmUP".

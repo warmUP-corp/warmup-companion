@@ -71,3 +71,16 @@ pub fn capture_native_crash(summary: String) {
         client.flush(None);
     }
 }
+
+#[cfg(target_os = "linux")]
+pub fn capture_native_crash(summary: String) {
+    sentry::configure_scope(|scope| {
+        scope.set_tag("component", "service");
+        scope.set_tag("crash_kind", "linux_signal");
+        scope.set_tag("service_mode", crate::config::service_mode().to_string());
+    });
+    sentry::capture_message(&summary, sentry::Level::Fatal);
+    if let Some(client) = sentry::Hub::current().client() {
+        client.flush(None);
+    }
+}

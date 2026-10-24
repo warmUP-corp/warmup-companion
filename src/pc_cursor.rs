@@ -35,6 +35,10 @@ fn screen_scale() -> (f32, f32) {
             return (w as f32 / REF_WIDTH, h as f32 / REF_HEIGHT);
         }
     }
+    #[cfg(target_os = "linux")]
+    if let Some((w, h)) = crate::linux_game_detect::focused_output_logical_size() {
+        return (w / REF_WIDTH, h / REF_HEIGHT);
+    }
     (1.0, 1.0)
 }
 
@@ -883,6 +887,19 @@ fn apply_uinput(
     notch_rem: &mut (i32, i32),
     cmd: Cmd,
 ) {
+    let cmd = match cmd {
+        Cmd::Screenshot { window_only } => {
+            let _ = std::thread::Builder::new()
+                .name("warmup-screenshot".into())
+                .spawn(move || copy_screen_to_clipboard(window_only));
+            return;
+        }
+        Cmd::Swipe(swipe) => {
+            apply_swipe(keyboard, swipe);
+            return;
+        }
+        cmd => cmd,
+    };
     let Some(mouse) = mouse else {
         return;
     };
@@ -945,44 +962,192 @@ fn apply_uinput(
                 emit_rel(mouse, &axes);
             }
         }
-        Cmd::Swipe(swipe) => {
-            use crate::touchpad_gestures::Swipe;
-            if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
-                let lua = match swipe {
-                    Swipe::Left => r#"hl.dsp.focus({ workspace = "e-1" })"#,
-                    Swipe::Right => r#"hl.dsp.focus({ workspace = "e+1" })"#,
-                    Swipe::Up | Swipe::Down => return,
-                };
-                let _ = std::thread::Builder::new()
-                    .name("hypr-swipe".into())
-                    .spawn(move || crate::linux_game_detect::hypr_dispatch(lua));
-                return;
-            }
-            let kde = std::env::var("XDG_CURRENT_DESKTOP")
-                .map(|d| d.split(':').any(|p| p.eq_ignore_ascii_case("KDE")))
-                .unwrap_or(false);
-            if !kde {
-                return;
-            }
-            let keys = match swipe {
-                Swipe::Left => vec![Key::Control, Key::Meta, Key::LeftArrow],
-                Swipe::Right => vec![Key::Control, Key::Meta, Key::RightArrow],
-                Swipe::Up => vec![Key::Meta, Key::Other(b'W' as u32)],
-                Swipe::Down => vec![Key::Meta, Key::Other(b'D' as u32)],
-            };
-            if let Some(keyboard) = keyboard {
-                tap_uinput_chord(keyboard, &keys);
-            }
-        }
         Cmd::Chord(keys) => {
             if let Some(keyboard) = keyboard {
                 tap_uinput_chord(keyboard, &keys);
             }
         }
-        Cmd::Screenshot { .. } => {
-            crate::install::log_line("screenshot is not available on linux in this stage");
-        }
+        Cmd::Swipe(_) | Cmd::Screenshot { .. } => {}
     }
+}
+
+#[cfg(target_os = "linux")]
+fn apply_swipe(
+    keyboard: Option<&mut evdev::uinput::VirtualDevice>,
+    swipe: crate::touchpad_gestures::Swipe,
+) {
+    use crate::touchpad_gestures::Swipe;
+    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
+        let lua = match swipe {
+            Swipe::Left => r#"hl.dsp.focus({ workspace = "e-1" })"#,
+            Swipe::Right => r#"hl.dsp.focus({ workspace = "e+1" })"#,
+            Swipe::Up => r#"hl.dsp.focus({ workspace = "previous_per_monitor" })"#,
+            Swipe::Down => r#"hl.dsp.focus({ workspace = "emptym" })"#,
+        };
+        let _ = std::thread::Builder::new()
+            .name("hypr-swipe".into())
+            .spawn(move || {
+                if swipe == Swipe::Down
+                    && crate::linux_game_detect::active_workspace_windows() == Some(0)
+                {
+                    return;
+                }
+                crate::linux_game_detect::hypr_dispatch(lua);
+            });
+        return;
+    }
+    let kde = std::env::var("XDG_CURRENT_DESKTOP")
+        .map(|d| d.split(':').any(|p| p.eq_ignore_ascii_case("KDE")))
+        .unwrap_or(false);
+    if !kde {
+        return;
+    }
+    let keys = match swipe {
+        Swipe::Left => vec![Key::Control, Key::Meta, Key::LeftArrow],
+        Swipe::Right => vec![Key::Control, Key::Meta, Key::RightArrow],
+        Swipe::Up => vec![Key::Meta, Key::Other(b'W' as u32)],
+        Swipe::Down => vec![Key::Meta, Key::Other(b'D' as u32)],
+    };
+    if let Some(keyboard) = keyboard {
+        tap_uinput_chord(keyboard, &keys);
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn copy_screen_to_clipboard(window_only: bool) {
+    let png = match capture_png(window_only) {
+        Ok(png) => png,
+        Err(error) => {
+            crate::install::log_line(&format!("screenshot: {error}"));
+            let _ = crate::linux_notify::notify("Screenshot failed", &error);
+            return;
+        }
+    };
+    let copied = crate::image_paste::copy_to_clipboard("image/png", &png);
+    let suffix = if window_only { " window" } else { "" };
+    let stem = crate::image_paste::timestamp_stem("Screenshot", suffix);
+    let Some(path) = crate::image_paste::save_bytes(&stem, "png", &png, "screenshot") else {
+        return;
+    };
+    if copied {
+        crate::image_paste::remember_screenshot(path.clone(), crate::image_paste::clip_seq(&png));
+    }
+    crate::linux_notify::notify_screenshot(&path, copied);
+}
+
+#[cfg(target_os = "linux")]
+fn capture_png(window_only: bool) -> Result<Vec<u8>, String> {
+    let geometry = if window_only {
+        let geometry = crate::linux_game_detect::active_window_geometry();
+        if geometry.is_none() {
+            crate::install::log_line("screenshot: no active window geometry, capturing the whole screen");
+        }
+        geometry
+    } else {
+        None
+    };
+    let grim_error = match grim_png(geometry) {
+        Ok(png) => return Ok(png),
+        Err(error) => error,
+    };
+    crate::install::log_line(&format!("screenshot: grim: {grim_error}; trying the desktop portal"));
+    portal_png().map_err(|error| format!("grim: {grim_error}; portal: {error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn grim_png(geometry: Option<(i64, i64, i64, i64)>) -> Result<Vec<u8>, String> {
+    let mut cmd = std::process::Command::new("grim");
+    if let Some((x, y, w, h)) = geometry {
+        cmd.arg("-g").arg(format!("{x},{y} {w}x{h}"));
+    }
+    let out = cmd
+        .arg("-")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    if !out.stdout.starts_with(b"\x89PNG") {
+        return Err("output is not a PNG".into());
+    }
+    Ok(out.stdout)
+}
+
+#[cfg(target_os = "linux")]
+fn portal_png() -> Result<Vec<u8>, String> {
+    let uri = zbus::block_on(futures_lite::future::or(portal_uri(), async {
+        async_io::Timer::after(std::time::Duration::from_secs(30)).await;
+        Err("no answer from the desktop portal".to_string())
+    }))?;
+    let path = uri
+        .strip_prefix("file://")
+        .ok_or_else(|| format!("unexpected portal uri {uri}"))?;
+    let path = std::path::PathBuf::from(crate::image_paste::percent_decode(path));
+    let bytes = std::fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    if path.starts_with(std::env::temp_dir()) {
+        let _ = std::fs::remove_file(&path);
+    }
+    if !bytes.starts_with(b"\x89PNG") {
+        return Err("portal image is not a PNG".into());
+    }
+    Ok(bytes)
+}
+
+#[cfg(target_os = "linux")]
+async fn portal_uri() -> Result<String, String> {
+    use futures_lite::StreamExt;
+    use std::collections::HashMap;
+    use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+    let conn = zbus::Connection::session()
+        .await
+        .map_err(|error| error.to_string())?;
+    let sender = conn
+        .unique_name()
+        .ok_or("no D-Bus name")?
+        .trim_start_matches(':')
+        .replace('.', "_");
+    let token = format!("warmup_shot_{}", std::process::id());
+    let request_path = format!("/org/freedesktop/portal/desktop/request/{sender}/{token}");
+    let request = zbus::Proxy::new(
+        &conn,
+        "org.freedesktop.portal.Desktop",
+        request_path.as_str(),
+        "org.freedesktop.portal.Request",
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let mut responses = request
+        .receive_signal("Response")
+        .await
+        .map_err(|error| error.to_string())?;
+    let portal = zbus::Proxy::new(
+        &conn,
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.portal.Screenshot",
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let mut options: HashMap<&str, Value> = HashMap::new();
+    options.insert("handle_token", Value::from(token.as_str()));
+    options.insert("interactive", Value::from(false));
+    let _: OwnedObjectPath = portal
+        .call("Screenshot", &("", options))
+        .await
+        .map_err(|error| error.to_string())?;
+    let message = responses.next().await.ok_or("portal closed the request")?;
+    let (code, results): (u32, HashMap<String, OwnedValue>) = message
+        .body()
+        .deserialize()
+        .map_err(|error| error.to_string())?;
+    if code != 0 {
+        return Err(format!("portal refused the screenshot (response {code})"));
+    }
+    results
+        .get("uri")
+        .and_then(|value| String::try_from(value.clone()).ok())
+        .ok_or_else(|| "portal returned no uri".to_string())
 }
 
 #[cfg(target_os = "linux")]

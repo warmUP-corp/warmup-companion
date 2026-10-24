@@ -176,7 +176,7 @@ pub(super) fn handshake<R: Read, W: Write>(
         library_watch: None,
     });
     session.write_frame(reply.to_ndjson_line().as_bytes())?;
-    #[cfg(all(windows, feature = "gamepad"))]
+    #[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
     {
         crate::playtime_tracker::on_desktop_connected(&identity.owner);
         if protocol_version == PROTOCOL_VERSION {
@@ -186,7 +186,7 @@ pub(super) fn handshake<R: Read, W: Write>(
     Ok((HashSet::new(), sync))
 }
 
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 fn flush_play_sessions<R: Read, W: Write>(
     session: &mut Session<R, W>,
     owner: &TrackingOwner,
@@ -386,7 +386,7 @@ fn drain_inbound<R: Read, W: Write>(
 }
 
 fn handle_shut_down() {
-    #[cfg(all(windows, feature = "gamepad"))]
+    #[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
     {
         if crate::parental_guard::is_blocking_active() {
             crate::install::log_line("pipe shut_down refused: Kid Mode blocking is active");

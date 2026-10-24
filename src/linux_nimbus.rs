@@ -104,6 +104,10 @@ pub fn latest_frame() -> Option<(u32, Vec<u8>)> {
     frame_slot().lock().ok().and_then(|guard| guard.clone())
 }
 
+pub fn has_frame() -> bool {
+    frame_slot().lock().map(|guard| guard.is_some()).unwrap_or(false)
+}
+
 pub fn frame_generation() -> u64 {
     FRAME_GEN.load(Ordering::Relaxed)
 }

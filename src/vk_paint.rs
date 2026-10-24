@@ -596,6 +596,787 @@ pub fn prompt_spec(style: VkStyle) -> Option<&'static PromptSpec> {
 }
 
 
+pub const PROMPT_PILL_H: f32 = 116.0;
+pub const PROMPT_LABEL_PX: f32 = 28.0;
+pub const PROMPT_FAMILIES: &[&str] = &["Segoe UI", "Noto Sans", "DejaVu Sans"];
+pub const CONTROLLER_ART_PX: u32 = 1254;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ControllerArt {
+    DualSense,
+    XboxOne,
+}
+
+impl ControllerArt {
+    pub(crate) fn from_label(label: &str) -> Option<Self> {
+        let l = label.to_ascii_lowercase();
+        if l.contains("dualsense")
+            || l.contains("dualshock")
+            || l.contains("playstation")
+            || l.contains("ps5")
+            || l.contains("ps4")
+            || l.contains("hid slot")
+            || l.contains("sony")
+            || l == "wireless controller"
+        {
+            Some(Self::DualSense)
+        } else if l.contains("xbox") || l.contains("xinput") {
+            Some(Self::XboxOne)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn png(self) -> &'static [u8] {
+        match self {
+            Self::DualSense => include_bytes!("../assets/controller-models/dualsense-controller.png"),
+            Self::XboxOne => include_bytes!("../assets/controller-models/xbox-one-controller.png"),
+        }
+    }
+
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::DualSense => "controller-art-dualsense",
+            Self::XboxOne => "controller-art-xbox-one",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct PromptCard<'a> {
+    pub bg: u32,
+    pub border: u32,
+    pub text_color: u32,
+    pub pill_border: u32,
+    pub pill_text: u32,
+    pub prefix: &'a str,
+    pub suffix: &'a str,
+    pub show_l3: bool,
+    pub title: &'a str,
+    pub controller_label: &'a str,
+    pub card_t: f32,
+    pub style: VkStyle,
+}
+
+pub struct PromptCanvas {
+    pub cw: f32,
+    pub ch: f32,
+    pub dpr: f32,
+    pub t: f32,
+    pub title_px: f32,
+    pub dip_scale: f32,
+}
+
+pub type ArtPainter<'a> = &'a mut dyn FnMut(&mut Gfx, ControllerArt, Rect, f32);
+
+fn lerp_xywh(a: Rect, b: Rect, t: f32) -> Rect {
+    Rect {
+        x: lerp(a.x, b.x, t),
+        y: lerp(a.y, b.y, t),
+        w: lerp(a.w, b.w, t),
+        h: lerp(a.h, b.h, t),
+    }
+}
+
+fn edges_of(r: Rect) -> Edges {
+    Edges {
+        left: r.x,
+        top: r.y,
+        right: r.x + r.w,
+        bottom: r.y + r.h,
+    }
+}
+
+unsafe fn stroke_centered(g: &mut Gfx, r: Rect, radius: f32, width: f32, c: u32, alpha: f32) {
+    let h = width * 0.5;
+    g.ring(
+        Rect {
+            x: r.x - h,
+            y: r.y - h,
+            w: r.w + width,
+            h: r.h + width,
+        },
+        radius + h,
+        width,
+        c,
+        alpha,
+    );
+}
+
+unsafe fn scale_about_point(g: &mut Gfx, c: &PromptCanvas, s: f32, cx: f32, cy: f32) {
+    g.transform(s * c.dpr, cx * (1.0 - s) * c.dpr, cy * (1.0 - s) * c.dpr);
+}
+
+unsafe fn paint_prompt_art(
+    g: &mut Gfx,
+    p: &PromptCard,
+    rect: Rect,
+    tint: u32,
+    alpha: f32,
+    dip_scale: f32,
+    art: ArtPainter<'_>,
+) {
+    match ControllerArt::from_label(p.controller_label) {
+        Some(kind) => art(g, kind, rect, alpha),
+        None => {
+            let edges = edges_of(rect);
+            paint_icon(g, VkIcon::Gamepad, edges, tint, alpha, icon_draw_px(VkIcon::Gamepad, rect.h), dip_scale);
+        }
+    }
+}
+
+pub unsafe fn paint_prompt_card(
+    g: &mut Gfx,
+    p: &PromptCard,
+    c: &PromptCanvas,
+    art: ArtPainter<'_>,
+) -> Result<(), String> {
+    if let Some(spec) = prompt_spec(p.style) {
+        return paint_prompt_card_spec(g, p, spec, c, art);
+    }
+    let (cw, ch) = (c.cw, c.ch);
+    let card_t = p.card_t.clamp(0.0, 1.0);
+    let prompt_alpha = 1.0 - (card_t / 0.3).clamp(0.0, 1.0);
+    let content_alpha = ((card_t - 0.35) / 0.65).clamp(0.0, 1.0);
+    let content_alpha = content_alpha * content_alpha * (3.0 - 2.0 * content_alpha);
+    let border = colorref_mix(p.border, p.pill_border, 1.0 - card_t);
+    let t = c.t;
+    let pulse = (t * lerp(0.33, 0.72, card_t)).fract();
+    let pulse_alpha = (1.0 - pulse).powi(2);
+    let breathe = ((t * std::f32::consts::TAU * 0.33).sin() * 0.5 + 0.5) * 0.015;
+    let scale = 1.0 - (0.015 - breathe) * prompt_alpha;
+    let pill_cy = ch - PROMPT_PILL_H * 0.5;
+    scale_about_point(g, c, scale, cw * 0.5, pill_cy);
+
+    let pill = Rect {
+        x: 4.0,
+        y: ch - PROMPT_PILL_H + 4.0,
+        w: cw - 8.0,
+        h: PROMPT_PILL_H - 8.0,
+    };
+    let card_w = (cw * 0.55).min(cw - 8.0);
+    let card_top = ch * 0.21;
+    let card = Rect {
+        x: (cw - card_w) * 0.5,
+        y: card_top,
+        w: card_w,
+        h: ch - 8.0 - card_top,
+    };
+    let panel = lerp_xywh(pill, card, card_t);
+    let radius = PROMPT_PILL_H * 0.5 - 2.0;
+    let glow = colorref_mix(0x00FFFFFF, border, lerp(0.38, 0.45, card_t));
+    g.fill(panel, radius, p.bg, lerp(1.0, 0.94, card_t));
+    stroke_centered(
+        g,
+        panel,
+        radius,
+        2.0 + lerp(8.0, 12.0, card_t) * pulse,
+        glow,
+        lerp(0.30, 0.22, card_t) * pulse_alpha,
+    );
+    stroke_centered(g, panel, radius, lerp(1.5, 1.2, card_t), glow, lerp(1.0, 0.84, card_t));
+
+    if prompt_alpha > 0.01 {
+        let chip = (PROMPT_PILL_H * 0.70).clamp(26.0, 96.0);
+        let gap = 12.0;
+        let measure = |g: &Gfx, s: &str| g.measure_full(s, PROMPT_LABEL_PX, 600, PROMPT_FAMILIES);
+        let w_prefix = measure(g, p.prefix);
+        let w_suffix = measure(g, p.suffix);
+        let total = if p.show_l3 {
+            w_prefix + gap + chip + gap + w_suffix
+        } else {
+            w_prefix
+        };
+        let mut x = ((cw - total) * 0.5).max(0.0);
+        let band_top = ch - PROMPT_PILL_H;
+        let label = |g: &Gfx, s: &str, x: f32, w: f32| {
+            g.text_full(
+                s,
+                Rect {
+                    x,
+                    y: band_top,
+                    w,
+                    h: PROMPT_PILL_H,
+                },
+                PROMPT_LABEL_PX,
+                600,
+                PROMPT_FAMILIES,
+                p.pill_text,
+                prompt_alpha,
+                Align::Left,
+                VAlign::Center,
+                false,
+            )
+        };
+        label(g, p.prefix, x, w_prefix);
+        if p.show_l3 {
+            x += w_prefix + gap;
+            let chip_rect = Rect {
+                x,
+                y: pill_cy - chip * 0.5,
+                w: chip,
+                h: chip,
+            };
+            let icon = ControllerIconFamily::from_label(p.controller_label).l3_icon();
+            paint_icon(
+                g,
+                icon,
+                edges_of(chip_rect),
+                p.pill_text,
+                prompt_alpha,
+                icon_draw_px(icon, chip),
+                c.dip_scale,
+            );
+            x += chip + gap;
+        }
+        if !p.suffix.is_empty() {
+            label(g, p.suffix, x, w_suffix);
+        }
+    }
+
+    if content_alpha > 0.01 {
+        let name_rise = 10.0 * (1.0 - content_alpha);
+        g.text_full(
+            p.title,
+            Rect {
+                x: 0.0,
+                y: 16.0 + name_rise,
+                w: cw,
+                h: card_top - 28.0,
+            },
+            c.title_px,
+            600,
+            PROMPT_FAMILIES,
+            p.text_color,
+            content_alpha,
+            Align::Center,
+            VAlign::Center,
+            false,
+        );
+        let image_cx = cw * 0.5;
+        let image_cy = card.y + card.h * 0.5;
+        let image_scale = 0.90 + 0.10 * content_alpha;
+        let ring_hw = 148.0 * image_scale + 20.0 * pulse;
+        let ring_hh = 120.0 * image_scale + 20.0 * pulse;
+        stroke_centered(
+            g,
+            Rect {
+                x: image_cx - ring_hw,
+                y: image_cy - ring_hh,
+                w: ring_hw * 2.0,
+                h: ring_hh * 2.0,
+            },
+            104.0 * image_scale + 20.0 * pulse,
+            2.0,
+            glow,
+            0.20 * content_alpha * pulse_alpha,
+        );
+        let img_hw = 124.0 * image_scale;
+        let img_hh = 108.0 * image_scale;
+        let image_rect = Rect {
+            x: image_cx - img_hw,
+            y: image_cy - img_hh,
+            w: img_hw * 2.0,
+            h: img_hh * 2.0,
+        };
+        paint_prompt_art(g, p, image_rect, p.text_color, content_alpha, c.dip_scale, art);
+    }
+    g.transform(c.dpr, 0.0, 0.0);
+    Ok(())
+}
+
+unsafe fn paint_prompt_card_spec(
+    g: &mut Gfx,
+    p: &PromptCard,
+    spec: &PromptSpec,
+    c: &PromptCanvas,
+    art: ArtPainter<'_>,
+) -> Result<(), String> {
+    let (cw, ch) = (c.cw, c.ch);
+    let card_t = p.card_t.clamp(0.0, 1.0);
+    let prompt_alpha = 1.0 - (card_t / 0.3).clamp(0.0, 1.0);
+    let content_alpha = ((card_t - 0.35) / 0.65).clamp(0.0, 1.0);
+    let content_alpha = content_alpha * content_alpha * (3.0 - 2.0 * content_alpha);
+    let t = c.t;
+    let breathe = ((t * std::f32::consts::TAU * 0.33).sin() * 0.5 + 0.5) * 0.015;
+    let scale = 1.0 - (0.015 - breathe) * prompt_alpha;
+    let white = 0x00FFFFFF;
+
+    let (items, pill_text, pill_text_alpha, stroke_alpha) = if p.show_l3 {
+        let chip = ControllerIconFamily::from_label(p.controller_label).l3_icon();
+        (
+            vec![
+                (None, p.prefix.trim(), 0.0),
+                (Some(chip), "", spec.chip_px),
+                (None, p.suffix.trim(), 0.0),
+            ],
+            white,
+            1.0,
+            spec.ready_stroke_alpha,
+        )
+    } else {
+        (
+            vec![(Some(VkIcon::Gamepad), "", spec.gamepad_px), (None, spec.no_pad_label, 0.0)],
+            spec.dim_text,
+            spec.dim_alpha,
+            spec.no_pad_stroke_alpha,
+        )
+    };
+    let items: Vec<(Option<VkIcon>, &str, f32)> = items
+        .into_iter()
+        .filter(|(icon, text, _)| icon.is_some() || !text.is_empty())
+        .map(|(icon, text, w)| match icon {
+            Some(_) => (icon, text, w),
+            None => (icon, text, g.measure_full(text, spec.label_px, 500, spec.families)),
+        })
+        .collect();
+    let content_w =
+        items.iter().map(|i| i.2).sum::<f32>() + spec.pill_gap * items.len().saturating_sub(1) as f32;
+    let pill_w = (content_w + spec.pill_pad_x * 2.0).min(cw - 8.0);
+    let pill_bottom = ch - spec.pill_bottom;
+    let pill = Rect {
+        x: (cw - pill_w) * 0.5,
+        y: pill_bottom - spec.pill_h,
+        w: pill_w,
+        h: spec.pill_h,
+    };
+    let pill_cy = pill_bottom - spec.pill_h * 0.5;
+    let card_bottom = ch - spec.card_bottom;
+    let card_w = spec.card_w.min(cw - 8.0);
+    let card_top = (card_bottom - spec.card_h).max(0.0);
+    let card = Rect {
+        x: (cw - card_w) * 0.5,
+        y: card_top,
+        w: card_w,
+        h: card_bottom - card_top,
+    };
+    let panel = lerp_xywh(pill, card, card_t);
+    let (pdy, pblur, palpha) = spec.pill_shadow;
+    let (cdy, cblur, calpha) = spec.card_shadow;
+    let fill = colorref_mix(spec.card_fill, spec.pill_fill, card_t);
+    let fill_alpha = lerp(spec.pill_fill_alpha, spec.card_fill_alpha, card_t);
+
+    scale_about_point(g, c, scale, cw * 0.5, pill_cy);
+    paint_outer_shadow(
+        g,
+        panel,
+        spec.radius,
+        lerp(pdy, cdy, card_t),
+        lerp(pblur, cblur, card_t),
+        lerp(palpha, calpha, card_t),
+    )?;
+    g.fill(panel, spec.radius, fill, fill_alpha);
+    g.ring(panel, spec.radius, 1.0, white, lerp(stroke_alpha, spec.card_stroke_alpha, card_t));
+
+    if prompt_alpha > 0.01 {
+        let mut x = (cw - content_w) * 0.5;
+        for (icon, text, w) in items {
+            let slot = Rect {
+                x,
+                y: pill.y,
+                w,
+                h: pill.h,
+            };
+            match icon {
+                Some(icon) => {
+                    let opacity = if icon.is_controller_tip() {
+                        prompt_alpha
+                    } else {
+                        pill_text_alpha * prompt_alpha
+                    };
+                    paint_icon(g, icon, edges_of(slot), pill_text, opacity, w, c.dip_scale);
+                }
+                None => g.text_full(
+                    text,
+                    slot,
+                    spec.label_px,
+                    500,
+                    spec.families,
+                    pill_text,
+                    pill_text_alpha * prompt_alpha,
+                    Align::Left,
+                    VAlign::Center,
+                    false,
+                ),
+            }
+            x += w + spec.pill_gap;
+        }
+    }
+
+    if content_alpha > 0.01 {
+        let rise = 10.0 * (1.0 - content_alpha);
+        let title_top = card.y + spec.card_pad_y;
+        g.text_full(
+            p.title,
+            Rect {
+                x: card.x,
+                y: title_top + rise,
+                w: card.w,
+                h: spec.title_h,
+            },
+            spec.title_px,
+            600,
+            spec.families,
+            white,
+            content_alpha,
+            Align::Center,
+            VAlign::Center,
+            false,
+        );
+        let stage_top = title_top + spec.title_h + spec.card_gap;
+        let stage_cy = stage_top + spec.stage_h * 0.5;
+        g.radial_fill(
+            cw * 0.5,
+            stage_cy,
+            spec.stage_w * 0.5,
+            spec.stage_h * 0.5,
+            &[(0.0, white, spec.stage_glow_alpha), (1.0, white, 0.0)],
+            content_alpha,
+        );
+        let image_scale = 0.90 + 0.10 * content_alpha;
+        let art_rect = Rect {
+            x: cw * 0.5 - spec.art_w * 0.5 * image_scale,
+            y: stage_cy - spec.art_h * 0.5 * image_scale,
+            w: spec.art_w * image_scale,
+            h: spec.art_h * image_scale,
+        };
+        paint_prompt_art(g, p, art_rect, white, content_alpha, c.dip_scale, art);
+
+        let status_top = stage_top + spec.stage_h + spec.card_gap;
+        let status_w = g.measure_full(spec.status_label, spec.status_px, 500, spec.families);
+        let row_w = spec.check_px + spec.status_gap + status_w;
+        let x = (cw - row_w) * 0.5;
+        let row = |left: f32, w: f32| Rect {
+            x: left,
+            y: status_top,
+            w,
+            h: spec.status_h,
+        };
+        paint_icon(
+            g,
+            VkIcon::Check,
+            edges_of(row(x, spec.check_px)),
+            white,
+            content_alpha,
+            spec.check_px,
+            c.dip_scale,
+        );
+        g.text_full(
+            spec.status_label,
+            row(x + spec.check_px + spec.status_gap, status_w),
+            spec.status_px,
+            500,
+            spec.families,
+            spec.dim_text,
+            spec.dim_alpha * content_alpha,
+            Align::Left,
+            VAlign::Center,
+            false,
+        );
+    }
+    g.transform(c.dpr, 0.0, 0.0);
+    Ok(())
+}
+
+pub struct TipsPill<'a> {
+    pub bg: u32,
+    pub border: u32,
+    pub text: u32,
+    pub controller_label: &'a str,
+    pub cue: &'a [crate::win::controller_tips::TipToken],
+    pub prev_cue: Option<&'a [crate::win::controller_tips::TipToken]>,
+    pub morph_t: f32,
+    pub index: usize,
+    pub count: usize,
+    pub alpha: f32,
+    pub scale: f32,
+    pub style: VkStyle,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum TipItem {
+    Icon(VkIcon),
+    Text(&'static str, bool),
+}
+
+pub(crate) fn tip_item(token: crate::win::controller_tips::TipToken, family: ControllerIconFamily) -> Option<TipItem> {
+    use crate::win::controller_tips::TipToken;
+    match token {
+        TipToken::Button(b) => family.hint_icon(b).map(TipItem::Icon),
+        TipToken::Text(t) => Some(TipItem::Text(t, false)),
+        TipToken::Plus => Some(TipItem::Text("+", true)),
+        TipToken::Dot => Some(TipItem::Text(LEGEND_SEP, true)),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TipFont {
+    px: f32,
+    weight: i32,
+    families: &'static [&'static str],
+}
+
+unsafe fn tip_items(
+    g: &Gfx,
+    tokens: &[crate::win::controller_tips::TipToken],
+    family: ControllerIconFamily,
+    font: TipFont,
+    chip_px: f32,
+    gap: f32,
+) -> (Vec<(TipItem, f32)>, f32) {
+    let items: Vec<(TipItem, f32)> = tokens
+        .iter()
+        .filter_map(|&token| tip_item(token, family))
+        .map(|item| {
+            let w = match item {
+                TipItem::Icon(_) => chip_px,
+                TipItem::Text(t, _) => g.measure_full(t, font.px, font.weight, font.families),
+            };
+            (item, w)
+        })
+        .collect();
+    let w = items.iter().map(|i| i.1).sum::<f32>() + gap * items.len().saturating_sub(1) as f32;
+    (items, w)
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_tip_row(
+    g: &mut Gfx,
+    items: &[(TipItem, f32)],
+    left: f32,
+    band: Rect,
+    gap: f32,
+    font: TipFont,
+    text: u32,
+    dim: u32,
+    alpha: f32,
+    dip_scale: f32,
+) {
+    if alpha <= 0.01 {
+        return;
+    }
+    let mut x = left;
+    for (item, w) in items {
+        let slot = Rect {
+            x,
+            y: band.y,
+            w: *w,
+            h: band.h,
+        };
+        match *item {
+            TipItem::Icon(icon) => paint_icon(g, icon, edges_of(slot), text, alpha, *w, dip_scale),
+            TipItem::Text(t, faint) => g.text_full(
+                t,
+                slot,
+                font.px,
+                font.weight,
+                font.families,
+                if faint { dim } else { text },
+                if faint { alpha * 0.6 } else { alpha },
+                Align::Left,
+                VAlign::Center,
+                false,
+            ),
+        }
+        x += w + gap;
+    }
+}
+
+pub unsafe fn paint_tips(g: &mut Gfx, p: &TipsPill, c: &PromptCanvas) -> Result<(), String> {
+    let (cw, ch) = (c.cw, c.ch);
+    let spec = prompt_spec(p.style);
+    let family = ControllerIconFamily::from_label(p.controller_label);
+    let (label, counter_font) = match spec {
+        Some(s) => (
+            TipFont {
+                px: s.label_px,
+                weight: 500,
+                families: s.families,
+            },
+            TipFont {
+                px: s.status_px,
+                weight: 500,
+                families: s.families,
+            },
+        ),
+        None => (
+            TipFont {
+                px: PROMPT_LABEL_PX,
+                weight: 600,
+                families: PROMPT_FAMILIES,
+            },
+            TipFont {
+                px: c.title_px,
+                weight: 600,
+                families: PROMPT_FAMILIES,
+            },
+        ),
+    };
+    let (pill_h, pill_bottom, radius, chip, gap, pad_x) = match spec {
+        Some(s) => (s.pill_h, s.pill_bottom, s.radius, s.chip_px, s.pill_gap, s.pill_pad_x),
+        None => (96.0, 6.0, 46.0, 56.0, 12.0, 36.0),
+    };
+    let (text, dim) = match spec {
+        Some(s) => (0x00FFFFFF, s.dim_text),
+        None => (p.text, mix_color(p.text, p.bg, 0.58)),
+    };
+
+    let counter = format!("{}/{}", p.index + 1, p.count.max(1));
+    let counter_w = g.measure_full(&counter, counter_font.px, counter_font.weight, counter_font.families);
+    let counter_gap = gap * 2.0;
+    let (items, content_w) = tip_items(g, p.cue, family, label, chip, gap);
+    let prev = p.prev_cue.map(|tokens| tip_items(g, tokens, family, label, chip, gap));
+    let morph_t = if prev.is_some() { p.morph_t.clamp(0.0, 1.0) } else { 1.0 };
+    let pill_w_for = |w: f32| (w + counter_gap + counter_w + pad_x * 2.0).min(cw - 8.0);
+    let pill_w = match &prev {
+        Some((_, prev_w)) => lerp(pill_w_for(*prev_w), pill_w_for(content_w), morph_t),
+        None => pill_w_for(content_w),
+    };
+    let bottom = ch - pill_bottom;
+    let pill = Rect {
+        x: (cw - pill_w) * 0.5,
+        y: bottom - pill_h,
+        w: pill_w,
+        h: pill_h,
+    };
+    let pill_cy = bottom - pill_h * 0.5;
+    let alpha = p.alpha.clamp(0.0, 1.0);
+
+    scale_about_point(g, c, p.scale, cw * 0.5, pill_cy);
+    match spec {
+        Some(s) => {
+            let (dy, blur, a) = s.pill_shadow;
+            paint_outer_shadow(g, pill, radius, dy, blur, a * alpha)?;
+            g.fill(pill, radius, s.pill_fill, s.pill_fill_alpha * alpha);
+            g.ring(pill, radius, 1.0, 0x00FFFFFF, s.ready_stroke_alpha * alpha);
+        }
+        None => {
+            let pulse = (c.t * 0.33).fract();
+            let pulse_alpha = (1.0 - pulse).powi(2);
+            let glow = colorref_mix(0x00FFFFFF, p.border, 0.38);
+            g.fill(pill, radius, p.bg, alpha);
+            stroke_centered(g, pill, radius, 2.0 + 8.0 * pulse, glow, 0.30 * pulse_alpha * alpha);
+            stroke_centered(g, pill, radius, 1.5, glow, alpha);
+        }
+    }
+
+    let counter_left = pill.x + pill.w - pad_x - counter_w;
+    let row_right = counter_left - counter_gap;
+    let row_left = pill.x + pad_x;
+    let centred = |w: f32| row_left + ((row_right - row_left - w) * 0.5).max(0.0);
+    let old_alpha = 1.0 - (morph_t / 0.3).clamp(0.0, 1.0);
+    let new_alpha = ((morph_t - 0.35) / 0.65).clamp(0.0, 1.0);
+    let new_alpha = if prev.is_some() {
+        new_alpha * new_alpha * (3.0 - 2.0 * new_alpha)
+    } else {
+        1.0
+    };
+    if let Some((prev_items, prev_w)) = &prev {
+        paint_tip_row(g, prev_items, centred(*prev_w), pill, gap, label, text, dim, old_alpha * alpha, c.dip_scale);
+    }
+    paint_tip_row(g, &items, centred(content_w), pill, gap, label, text, dim, new_alpha * alpha, c.dip_scale);
+
+    let divider_x = counter_left - counter_gap * 0.5;
+    g.line(
+        divider_x,
+        pill_cy - pill_h * 0.22,
+        divider_x,
+        pill_cy + pill_h * 0.22,
+        1.0,
+        dim,
+        0.25 * alpha,
+    );
+    g.text_full(
+        &counter,
+        Rect {
+            x: counter_left,
+            y: pill.y,
+            w: counter_w,
+            h: pill.h,
+        },
+        counter_font.px,
+        counter_font.weight,
+        counter_font.families,
+        dim,
+        0.8 * alpha,
+        Align::Left,
+        VAlign::Center,
+        false,
+    );
+    g.transform(c.dpr, 0.0, 0.0);
+    Ok(())
+}
+
+pub fn voice_slot(cw: f32, ch: f32) -> Rect {
+    let scale = (ch / 1080.0).clamp(0.85, 2.0);
+    let size = (96.0 * scale).min(cw.min(ch) * 0.9).max(1.0);
+    let margin = (48.0 * scale).min((cw - size).max(0.0));
+    let left = (cw - margin - size).max(0.0);
+    let top = ((ch - size) * 0.5).max(0.0);
+    Rect {
+        x: left,
+        y: top,
+        w: size,
+        h: size,
+    }
+}
+
+pub fn scale_rect_about_center(r: Rect, scale: f32) -> Rect {
+    let cx = r.x + r.w * 0.5;
+    let cy = r.y + r.h * 0.5;
+    let w = r.w * scale;
+    let h = r.h * scale;
+    Rect {
+        x: cx - w * 0.5,
+        y: cy - h * 0.5,
+        w,
+        h,
+    }
+}
+
+pub type NimbusPainter<'a> = &'a mut dyn FnMut(&mut Gfx, Rect, f32) -> bool;
+
+pub unsafe fn paint_voice_cloud(g: &mut Gfx, slot: Rect, accent: u32, alpha: f32, t: f32, nimbus: NimbusPainter<'_>) {
+    if !nimbus(g, slot, alpha) {
+        let unit = (slot.w * 0.42).max(1.0);
+        paint_voice_orb(g, accent, 0.0, true, slot.x + slot.w * 0.5, slot.y + slot.h * 0.5, unit, alpha, t);
+    }
+}
+
+pub fn voice_border_alpha(alpha: f32, transcribing: bool, t: f32) -> f32 {
+    if transcribing {
+        let pulse = 0.5 + 0.5 * (t * 2.4).sin();
+        alpha * (0.8 + 0.7 * pulse)
+    } else {
+        alpha
+    }
+}
+
+pub unsafe fn paint_voice_screen(
+    g: &mut Gfx,
+    cw: f32,
+    ch: f32,
+    accent: u32,
+    alpha: f32,
+    transcribing: bool,
+    t: f32,
+    orb_fill: Option<f32>,
+    nimbus: NimbusPainter<'_>,
+) -> Result<(), String> {
+    paint_display_border(g, cw, ch, accent, voice_border_alpha(alpha, transcribing, t).min(1.0))?;
+    if let Some(fill) = orb_fill {
+        let slot = scale_rect_about_center(voice_slot(cw, ch), fill);
+        paint_voice_cloud(g, slot, accent, alpha, t, nimbus);
+    }
+    Ok(())
+}
+
+pub unsafe fn paint_floating_panel(g: &mut Gfx, panel: Rect, radius: f32, stroke_w: f32, pal: &VkPalette) {
+    g.fill(panel, radius, pal.bg, 1.0);
+    g.ring(panel, radius, stroke_w, pal.panel_stroke, pal.panel_stroke_alpha);
+}
+
+
 pub fn strip_slots(look: impl Into<VkLook>) -> usize {
     style_spec(look).chip_slots
 }

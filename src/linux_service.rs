@@ -4,6 +4,10 @@ use crate::warmup_launch::run_boot_gamepad_loop;
 use crate::App;
 
 pub fn run() -> Result<(), String> {
+    std::panic::set_hook(Box::new(|info| {
+        crate::sentry_telemetry::capture_panic(info, "service");
+        crate::install::log_line(&format!("SERVICE PANIC: {info}"));
+    }));
     let wayland = std::env::var("WAYLAND_DISPLAY").unwrap_or_default();
     if wayland.is_empty() {
         let message = "WAYLAND_DISPLAY is not set, so the companion cannot see your compositor. uwsm exports the graphical session into the user manager. On a plain Hyprland session run: dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_RUNTIME_DIR. Then: systemctl --user restart warmup-companion";
@@ -17,6 +21,7 @@ pub fn run() -> Result<(), String> {
     }
     std::env::set_var("WARMUP_VK_SERVICE", "1");
     install_stop_signals();
+    crate::crash::install();
     crate::install::log_line("warmup-companion service starting (SDL3 + uinput)");
     crate::linux_game_detect::start();
     crate::linux_tray::spawn();

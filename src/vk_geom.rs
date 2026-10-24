@@ -59,6 +59,44 @@ pub fn grid_size(
     (grid_w, block_h)
 }
 
+pub const TV_MAX_HEIGHT_FRAC: f32 = 0.45;
+
+pub fn dock_height_for_full_keys(
+    scale_w: f32,
+    rows: &[KeyRow],
+    top_inset: f32,
+    key_aspect: f32,
+    gap_design: f32,
+    design_kh: f32,
+) -> f32 {
+    let (_, block_h) = grid_size(scale_w, rows, key_aspect, gap_design, design_kh);
+    let kh = key_metrics(scale_w, f32::INFINITY, rows, 0.0, key_aspect, gap_design, design_kh).1;
+    top_inset + block_h + kh * 0.25
+}
+
+pub fn tv_capped_dpi(
+    dpi: f32,
+    full_h: i32,
+    rows: &[KeyRow],
+    look: crate::vk_paint::VkLook,
+    unit_scale: f32,
+) -> f32 {
+    let spec = crate::vk_paint::style_spec(look);
+    let h1 = dock_height_for_full_keys(
+        REF_MON_W * unit_scale,
+        rows,
+        crate::vk_paint::strip_band_height(unit_scale, look),
+        spec.key_aspect,
+        spec.gap,
+        spec.design_kh,
+    );
+    if h1 > 0.0 {
+        dpi.min(TV_MAX_HEIGHT_FRAC * full_h.max(1) as f32 / h1)
+    } else {
+        dpi
+    }
+}
+
 pub fn key_rects(
     client_w: f32,
     client_h: f32,

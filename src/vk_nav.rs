@@ -830,6 +830,18 @@ pub fn paste_clipboard() {
             }
         }
     }
+    #[cfg(all(target_os = "linux", feature = "gamepad"))]
+    {
+        let (_, exe, class, _) = foreground_info();
+        if crate::image_paste::is_terminal(&exe, &class) {
+            if let Some(text) = crate::image_paste::terminal_paste_text(&exe) {
+                send_text_direct(&text);
+                return;
+            }
+            crate::linux_type::tap_ctrl_shift(b'V' as u16);
+            return;
+        }
+    }
     inject_ctrl_key(VIRTUAL_KEY(b'V' as u16));
 }
 
@@ -1008,7 +1020,7 @@ pub fn send_text_direct(text: &str) {
     // exactly where a transcript went — including when the guard below skips it.
     let (hwnd, exe, class, title) = foreground_info();
     let warmup_browser_foreground = foreground_is_warmup_browser_info(&exe, &title);
-    let skip_warmup = exe.eq_ignore_ascii_case("warmup.exe") && !warmup_browser_foreground;
+    let skip_warmup = is_warmup_exe(&exe) && !warmup_browser_foreground;
     diag_inject_log(&format!(
         "send_text_direct: chars={} fg=0x{hwnd:x} exe='{exe}' class='{class}' title='{title}' browser_active={} browser_fg={warmup_browser_foreground} skip_warmup={skip_warmup}",
         text.chars().count(),
@@ -1092,7 +1104,20 @@ pub(crate) fn window_exe(hwnd: windows::Win32::Foundation::HWND) -> String {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+fn foreground_info() -> (usize, String, String, String) {
+    let Some((exe, class, title)) = crate::linux_game_detect::foreground_window() else {
+        return (0, String::new(), String::new(), String::new());
+    };
+    let base = if class.eq_ignore_ascii_case("dev.warmup.console") {
+        "warmup".to_string()
+    } else {
+        exe.rsplit('/').next().unwrap_or(&exe).to_string()
+    };
+    (0, base, class, title)
+}
+
+#[cfg(not(any(windows, all(target_os = "linux", feature = "gamepad"))))]
 fn foreground_info() -> (usize, String, String, String) {
     (0, String::new(), String::new(), String::new())
 }
@@ -1101,7 +1126,19 @@ fn foreground_info() -> (usize, String, String, String) {
 /// standalone browser/overlay. The docked keyboard must not resize this window:
 /// Guide-close leaves it foreground, and reflowing it brings the launcher back.
 pub(crate) fn is_warmup_launcher_window(exe: &str, title: &str) -> bool {
-    exe.eq_ignore_ascii_case("warmup.exe") && !is_warmup_browser_title(title)
+    is_warmup_exe(exe) && !is_warmup_browser_title(title)
+}
+
+#[cfg(windows)]
+fn is_warmup_exe(exe: &str) -> bool {
+    exe.eq_ignore_ascii_case("warmup.exe")
+}
+
+#[cfg(not(windows))]
+fn is_warmup_exe(exe: &str) -> bool {
+    exe.eq_ignore_ascii_case("warmup.exe")
+        || exe.eq_ignore_ascii_case("warmup")
+        || exe.eq_ignore_ascii_case("dev.warmup.console")
 }
 
 fn is_warmup_browser_title(title: &str) -> bool {
@@ -1112,7 +1149,7 @@ fn is_warmup_browser_title(title: &str) -> bool {
 /// True if the OS foreground window belongs to the warmUP desktop app.
 fn foreground_is_warmup_browser_info(exe: &str, title: &str) -> bool {
     crate::pipe_server::browser_active()
-        && exe.eq_ignore_ascii_case("warmup.exe")
+        && is_warmup_exe(exe)
         && is_warmup_browser_title(title)
 }
 
@@ -1244,6 +1281,13 @@ pub fn start_voice_input() {
             set_voice_input_active(false);
             return;
         }
+        if !crate::linux_speech::running() {
+            let (_, exe, _, title) = foreground_info();
+            if is_warmup_exe(&exe) && !foreground_is_warmup_browser_info(&exe, &title) {
+                crate::install::log_line("vk voice input ignored: warmUP launcher is foreground");
+                return;
+            }
+        }
         crate::linux_speech::toggle();
         return;
     }
@@ -1279,7 +1323,7 @@ pub fn start_voice_input() {
     // but behave like normal desktop/browser text entry, so allow R3 there only when
     // the explicit browser mode is set AND the foreground warmUP window is the browser.
     let (_, exe, _, title) = foreground_info();
-    if exe.eq_ignore_ascii_case("warmup.exe") && !foreground_is_warmup_browser_info(&exe, &title) {
+    if is_warmup_exe(&exe) && !foreground_is_warmup_browser_info(&exe, &title) {
         crate::install::log_line("vk voice input ignored: warmUP launcher is foreground");
         return;
     }

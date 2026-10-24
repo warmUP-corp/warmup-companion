@@ -1,6 +1,6 @@
 //! Persist Kid Mode guard config under ProgramData.
 
-#![cfg(windows)]
+#![cfg(any(windows, target_os = "linux"))]
 
 use crate::protocol::ParentalGuardPayload;
 

@@ -1,7 +1,5 @@
 use std::time::Instant;
 
-use cosmic_text::Weight;
-use crate::mono_ui::Align;
 use tiny_skia::Pixmap;
 
 use crate::config::{KeyboardTheme, VkStyle};
@@ -64,10 +62,7 @@ struct Rgb {
 
 struct Pal {
     bg: Rgb,
-    accent: Rgb,
     sel_ring: Rgb,
-    panel_stroke: Rgb,
-    panel_stroke_alpha: f32,
 }
 
 pub struct Frame {
@@ -75,6 +70,7 @@ pub struct Frame {
     pub logical_h: f32,
     pub scale: f32,
     pub scale_w: f32,
+    pub ui: f32,
     pub rows: Vec<KeyRow>,
     pub sel: KeyPos,
     pub style: VkStyle,
@@ -93,6 +89,8 @@ pub struct Frame {
     pub floating: bool,
     pub sheet: bool,
     pub sheet_hint: bool,
+    pub voice: Option<Voice>,
+    pub slide: f32,
 }
 
 pub struct Glide {
@@ -128,11 +126,7 @@ pub fn ui_scale() -> f32 {
     crate::config::vk_bar_scale() / crate::config::COMPACT_BAR_SCALE
 }
 
-pub fn floating_bottom_margin(output_h: f32) -> i32 {
-    ((output_h.max(0.0) * 0.04).round() as i32).clamp(28, 80)
-}
-
-pub fn layout_scale(style: VkStyle) -> f32 {
+pub fn design_scale(style: VkStyle) -> f32 {
     let key_w = match style {
         VkStyle::Normal | VkStyle::Modern => 138.0,
         VkStyle::Mono => 137.0,
@@ -140,22 +134,26 @@ pub fn layout_scale(style: VkStyle) -> f32 {
     key_w / REF_KEY_W
 }
 
-pub fn layout_scale_w(style: VkStyle) -> f32 {
-    REF_MON_W * layout_scale(style)
+pub fn layout_scale(look: VkLook, output_h: f32, rows: &[KeyRow]) -> f32 {
+    let design = design_scale(look.style);
+    if !look.tv_layout() {
+        return design;
+    }
+    let unit = 1.0 / crate::config::COMPACT_BAR_SCALE;
+    let capped = vk_geom::tv_capped_dpi(design / unit, output_h.round() as i32, rows, look, unit);
+    (capped * unit).min(design)
 }
 
 pub fn card_size(output_w: f32, output_h: f32, docked: bool, rows: &[KeyRow], look: VkLook) -> (u32, u32) {
     let spec = spec_for(look);
-    let scale = layout_scale(look.style);
+    let scale = layout_scale(look, output_h, rows);
     let scale_w = REF_MON_W * scale;
     let (grid_w, block_h) = vk_geom::grid_size(scale_w, rows, spec.key_aspect, spec.gap, spec.design_kh);
     let chrome = crate::vk_paint::strip_band_height(scale, look);
     let legend = legend_band_height(scale, look);
     let (pad_x, pad_y) = crate::vk_paint::floating_pad(scale, look);
     let full = if docked && look.tv_layout() {
-        let (_, kh, _) =
-            vk_geom::key_metrics(scale_w, f32::INFINITY, rows, 0.0, spec.key_aspect, spec.gap, spec.design_kh);
-        chrome + block_h + kh * 0.25
+        vk_geom::dock_height_for_full_keys(scale_w, rows, chrome, spec.key_aspect, spec.gap, spec.design_kh)
     } else {
         chrome + block_h + pad_y * 2.0 + legend
     };
@@ -227,9 +225,9 @@ fn render_keyboard(
     let look = frame.look();
     let spec = spec_for(look);
     let pal = palette(frame);
-    let lu = crate::vk_paint::ref_unit(ui_scale(), look);
-    let top_inset = crate::vk_paint::strip_band_height(ui_scale(), look);
-    let legend_h = legend_band_height(ui_scale(), look);
+    let lu = crate::vk_paint::ref_unit(frame.ui, look);
+    let top_inset = crate::vk_paint::strip_band_height(frame.ui, look);
+    let legend_h = legend_band_height(frame.ui, look);
     let rects = vk_geom::key_rects(
         frame.logical_w,
         (frame.logical_h - legend_h).max(40.0),
@@ -254,18 +252,15 @@ fn render_keyboard(
         let y = FLOATING_PANEL_INSET * scale;
         let w = (frame.logical_w - 2.0 * FLOATING_PANEL_INSET) * scale;
         let h = (frame.logical_h - 2.0 * FLOATING_PANEL_INSET) * scale;
-        round_rect(g, x, y, w, h, panel_r * scale, pal.bg, 255);
-        stroke_rect(
-            g,
-            x + 0.5 * scale,
-            y + 0.5 * scale,
-            (w - scale).max(1.0),
-            (h - scale).max(1.0),
-            (panel_r - 0.5).max(0.0) * scale,
-            pal.panel_stroke,
-            (pal.panel_stroke_alpha * 255.0) as u8,
-            scale.max(1.0),
-        );
+        unsafe {
+            crate::vk_paint::paint_floating_panel(
+                g,
+                crate::mono_ui::Rect { x, y, w, h },
+                panel_r * scale,
+                scale.max(1.0),
+                &frame.pal,
+            );
+        }
         Some((x, y, w, h, panel_r * scale))
     } else {
         fill(g, pal.bg, 255);
@@ -319,7 +314,7 @@ fn render_keyboard(
 
 fn paint_legend(g: &mut Gfx, frame: &Frame, rects: &[KeyRect], lu: f32, scale: f32) {
     let look = frame.look();
-        let pad_x = crate::vk_paint::floating_pad(ui_scale(), look).0;
+        let pad_x = crate::vk_paint::floating_pad(frame.ui, look).0;
     let (left, right) = crate::vk_paint::legend_span(rects, frame.logical_w, pad_x);
     let lp = crate::vk_paint::LegendPaint {
         pal: &frame.pal,
@@ -353,7 +348,7 @@ pub(crate) fn keyboard_stamp(frame: &Frame) -> u64 {
     frame.logical_h.to_bits().hash(&mut hasher);
     frame.scale.to_bits().hash(&mut hasher);
     frame.scale_w.to_bits().hash(&mut hasher);
-    ui_scale().to_bits().hash(&mut hasher);
+    frame.ui.to_bits().hash(&mut hasher);
     matches!(frame.style, VkStyle::Mono).hash(&mut hasher);
     frame.ps5.hash(&mut hasher);
     frame.shift.hash(&mut hasher);
@@ -364,6 +359,7 @@ pub(crate) fn keyboard_stamp(frame: &Frame) -> u64 {
     frame.dark.hash(&mut hasher);
     frame.sheet_hint.hash(&mut hasher);
     frame.voice_available.hash(&mut hasher);
+    frame.voice.is_some().hash(&mut hasher);
     frame.theme.bg.hash(&mut hasher);
     frame.theme.key.hash(&mut hasher);
     frame.theme.accent.hash(&mut hasher);
@@ -467,7 +463,10 @@ fn paint_key(
         hint: crate::vk_paint::key_hint(key),
     };
     let edges = device_edges(rect.left, rect.top, rect.right, rect.bottom, scale);
-    unsafe { crate::vk_paint::paint_key(g, key, edges, ks, &st, None) };
+    let mut voice_paint = |_: &mut Gfx, _: crate::vk_paint::Edges, _: f32| {};
+    let voice: Option<&mut dyn FnMut(&mut Gfx, crate::vk_paint::Edges, f32)> =
+        if frame.voice.is_some() { Some(&mut voice_paint) } else { None };
+    unsafe { crate::vk_paint::paint_key(g, key, edges, ks, &st, voice) };
 }
 
 fn stroke_ring(g: &mut Gfx, glide: &Glide, frame: &Frame, ks: &crate::vk_paint::KeyStyle, scale: f32) {
@@ -485,8 +484,8 @@ fn scene(frame: &Frame) -> (&'static Spec, Pal, Vec<KeyRect>, f32, f32, f32, f32
     let look = frame.look();
     let spec = spec_for(look);
     let pal = palette(frame);
-    let top_inset = crate::vk_paint::strip_band_height(ui_scale(), look);
-    let legend_h = legend_band_height(ui_scale(), look);
+    let top_inset = crate::vk_paint::strip_band_height(frame.ui, look);
+    let legend_h = legend_band_height(frame.ui, look);
     let rects = vk_geom::key_rects(
         frame.logical_w,
         (frame.logical_h - legend_h).max(40.0),
@@ -568,7 +567,7 @@ fn draw_sheet_frame(g: &mut Gfx, frame: &Frame) {
     let radius = frame.floating.then_some(spec.panel_radius * unit * scale);
     unsafe {
         if look.tv_layout() {
-            let u = crate::vk_paint::ref_unit(ui_scale(), look) * crate::vk_paint::MS_SCALE * scale;
+            let u = crate::vk_paint::ref_unit(frame.ui, look) * crate::vk_paint::MS_SCALE * scale;
             crate::vk_paint::paint_modern_sheet(g, &sp, u, inset_panel, radius, 1.0);
         } else {
             let panel = if frame.floating {
@@ -593,7 +592,7 @@ fn paint_sheet_hint(g: &mut Gfx, frame: &Frame, rects: &[KeyRect], scale: f32) {
     let left = rects.iter().map(|r| r.left).fold(f32::INFINITY, f32::min);
     let right = rects.iter().map(|r| r.right).fold(f32::NEG_INFINITY, f32::max);
     let top = rects.iter().map(|r| r.top).fold(f32::INFINITY, f32::min);
-    let u = crate::vk_paint::ref_unit(ui_scale(), frame.look());
+    let u = crate::vk_paint::ref_unit(frame.ui, frame.look());
         let sp = sheet_paint(frame, &frame.pal);
     unsafe {
         crate::vk_paint::paint_sheet_hint(
@@ -658,10 +657,7 @@ fn palette(frame: &Frame) -> Pal {
     let v = &frame.pal;
     Pal {
         bg: from_colorref(v.bg),
-        accent: from_colorref(v.accent),
         sel_ring: from_colorref(v.sel_ring),
-        panel_stroke: from_colorref(v.panel_stroke),
-        panel_stroke_alpha: v.panel_stroke_alpha,
     }
 }
 
@@ -669,9 +665,6 @@ pub fn themed_palette(look: VkLook, dark: bool, theme: &KeyboardTheme) -> crate:
     crate::vk_theme::themed_palette(crate::vk_paint::style_palette(look.style, dark), look.style, *theme)
 }
 
-fn rgb(v: u32) -> Rgb {
-    Rgb { r: ((v >> 16) & 0xff) as u8, g: ((v >> 8) & 0xff) as u8, b: (v & 0xff) as u8 }
-}
 
 fn from_colorref(color: u32) -> Rgb {
     Rgb { r: (color & 0xff) as u8, g: ((color >> 8) & 0xff) as u8, b: ((color >> 16) & 0xff) as u8 }
@@ -701,12 +694,6 @@ fn round_rect(g: &mut Gfx, x: f32, y: f32, w: f32, h: f32, radius: f32, color: R
     unsafe { g.fill(device(x, y, w, h), radius, cref(color), alpha as f32 / 255.0) };
 }
 
-fn stroke_rect(g: &mut Gfx, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Rgb, alpha: u8, width: f32) {
-    let width = width.max(1.0);
-    let half = width * 0.5;
-    let outer = device(x - half, y - half, w + width, h + width);
-    unsafe { g.ring(outer, radius + half, width, cref(color), alpha as f32 / 255.0) };
-}
 
 
 fn clip_round(g: &mut Gfx, x: f32, y: f32, w: f32, h: f32, radius: f32) {
@@ -754,52 +741,8 @@ fn clear_span(data: &mut [u8], width: i32, py: i32, from: i32, to: i32) {
     }
 }
 
-fn text(
-    g: &mut Gfx,
-    value: &str,
-    band: (f32, f32, f32, f32),
-    px: f32,
-    weight: Weight,
-    color: Rgb,
-    alpha: u8,
-    scale: f32,
-    family: &[&str],
-) {
-    text_aligned(g, value, band, px, weight, color, alpha, scale, Align::Center, family);
-}
 
 
-fn text_aligned(
-    g: &mut Gfx,
-    value: &str,
-    band: (f32, f32, f32, f32),
-    px: f32,
-    weight: Weight,
-    color: Rgb,
-    alpha: u8,
-    scale: f32,
-    align: Align,
-    family: &[&str],
-) {
-    if value.is_empty() || px < 4.0 {
-        return;
-    }
-    let r = device(band.0 * scale, band.1 * scale, (band.2 - band.0) * scale, (band.3 - band.1) * scale);
-    unsafe {
-        g.text_full(
-            value,
-            r,
-            px,
-            weight.0 as i32,
-            family,
-            cref(color),
-            alpha as f32 / 255.0,
-            align,
-            crate::mono_ui::VAlign::Center,
-            false,
-        )
-    };
-}
 
 
 pub struct KeyPatch {
@@ -822,8 +765,102 @@ pub fn paint_base(g: &mut Gfx, frame: &Frame, glide: &mut Glide) {
     render_keyboard(g, frame, glide, false);
 }
 
-pub fn voice_spot(frame: &Frame) -> Option<(f32, f32, f32)> {
-    let (_spec, _pal, rects, _unit, scale, _radius, _key_h) = scene(frame);
+pub enum Hit {
+    Slot(usize),
+    Key(KeyPos, crate::vk_nav::KeyCell),
+}
+
+pub fn hit_test(
+    logical_w: f32,
+    logical_h: f32,
+    scale_w: f32,
+    ui: f32,
+    rows: &[KeyRow],
+    look: VkLook,
+    x: f32,
+    y: f32,
+) -> Option<Hit> {
+    let spec = spec_for(look);
+    let rects = vk_geom::key_rects(
+        logical_w,
+        (logical_h - legend_band_height(ui, look)).max(40.0),
+        scale_w,
+        rows,
+        crate::vk_paint::strip_band_height(ui, look),
+        spec.key_aspect,
+        spec.gap,
+        spec.design_kh,
+    );
+    let key_h = rects.first().map(|r| r.bottom - r.top)?;
+    if let Some(strip) = crate::vk_predict::strip(crate::vk_paint::strip_slots(look), look.style == VkStyle::Mono) {
+        let geom = crate::vk_paint::StripGeom::above(&rects, spec, key_h / spec.design_kh);
+        let slot = geom
+            .slot_rects(spec, &strip.visible)
+            .into_iter()
+            .find(|(_, r)| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+            .map(|(slot, _)| slot);
+        if let Some(slot) = slot {
+            return Some(Hit::Slot(slot));
+        }
+    }
+    rects
+        .iter()
+        .find(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+        .and_then(|r| rows.get(r.pos.row).and_then(|row| row.keys.get(r.pos.col)).cloned().map(|key| Hit::Key(r.pos, key)))
+}
+
+pub const ORB_FRAME_FILL: f32 = 0.94;
+
+#[derive(Clone, Copy)]
+pub struct Voice {
+    pub phase: u8,
+    pub level: f32,
+    pub t: f32,
+}
+
+impl Voice {
+    fn transcribing(&self) -> bool {
+        self.phase == 2
+    }
+
+    fn pulse(&self) -> f32 {
+        0.5 + 0.5 * (self.t * 2.4).sin()
+    }
+
+    pub fn orb_scale(&self) -> f32 {
+        let drive = match self.phase {
+            1 => 0.5 + 0.5 * self.level.clamp(0.0, 1.0),
+            2 => self.pulse(),
+            _ => 0.5,
+        };
+        0.70 + 0.36 * drive.clamp(0.0, 1.0)
+    }
+
+    fn halo_alpha(&self) -> f32 {
+        match self.phase {
+            1 => 0.28 + 0.34 * self.level.clamp(0.0, 1.0),
+            2 => 0.28 + 0.42 * self.pulse(),
+            _ => 0.18,
+        }
+    }
+}
+
+pub struct VoiceKey {
+    pub key: crate::mono_ui::Rect,
+    pub ball: crate::mono_ui::Rect,
+    pub halo: crate::mono_ui::Rect,
+    pub halo_radius: f32,
+    pub halo_w: f32,
+    pub halo_alpha: f32,
+    pub accent: u32,
+}
+
+pub fn voice_key(frame: &Frame) -> Option<VoiceKey> {
+    if frame.sheet {
+        return None;
+    }
+    let voice = frame.voice?;
+    let (spec, _pal, rects, unit, scale, _radius, _key_h) = scene(frame);
     let rect = rects.iter().find(|rect| {
         frame
             .rows
@@ -831,10 +868,112 @@ pub fn voice_spot(frame: &Frame) -> Option<(f32, f32, f32)> {
             .and_then(|row| row.keys.get(rect.pos.col))
             .is_some_and(|key| matches!(key.action, KeyAction::VoiceInput))
     })?;
-    let side = (rect.right - rect.left).min(rect.bottom - rect.top) * 0.86 * scale;
-    let cx = (rect.left + rect.right) * 0.5 * scale;
-    let cy = (rect.top + rect.bottom) * 0.5 * scale;
-    Some((cx - side * 0.5, cy - side * 0.5, side))
+    let key = device_edges(rect.left, rect.top, rect.right, rect.bottom, scale).rect();
+    let radius = spec.key_radius * unit * scale;
+    let side = key.w.min(key.h).max(1.0);
+    let ball = side * ORB_FRAME_FILL * voice.orb_scale();
+    let cx = key.x + key.w * 0.5;
+    let cy = key.y + key.h * 0.5;
+    Some(VoiceKey {
+        key,
+        ball: crate::mono_ui::Rect {
+            x: cx - ball * 0.5,
+            y: cy - ball * 0.5,
+            w: ball,
+            h: ball,
+        },
+        halo: crate::mono_ui::Rect {
+            x: key.x - scale,
+            y: key.y - scale,
+            w: key.w + 2.0 * scale,
+            h: key.h + 2.0 * scale,
+        },
+        halo_radius: radius + scale,
+        halo_w: 2.0 * scale,
+        halo_alpha: voice.halo_alpha(),
+        accent: frame.pal.accent,
+    })
+}
+
+impl VoiceKey {
+    pub fn halo_rgba(&self) -> [f32; 4] {
+        let c = from_colorref(self.accent);
+        let a = self.halo_alpha.clamp(0.0, 1.0);
+        [c.r as f32 / 255.0 * a, c.g as f32 / 255.0 * a, c.b as f32 / 255.0 * a, a]
+    }
+}
+
+pub fn paint_voice_key(g: &mut Gfx, frame: &Frame, glide: &Glide, nimbus: Option<(&[u8], u32)>) {
+    let (Some(voice), Some(spot)) = (frame.voice, voice_key(frame)) else {
+        return;
+    };
+    unsafe {
+        g.push_clip(spot.key, true);
+        if !draw_nimbus(g, nimbus, spot.ball, 1.0) {
+            crate::vk_paint::paint_voice_orb(
+                g,
+                spot.accent,
+                voice.level,
+                voice.transcribing(),
+                spot.ball.x + spot.ball.w * 0.5,
+                spot.ball.y + spot.ball.h * 0.5,
+                (spot.key.w.min(spot.key.h) * 0.56).max(1.0),
+                1.25,
+                voice.t,
+            );
+        }
+        g.pop_clip();
+        g.ring(spot.halo, spot.halo_radius, spot.halo_w, spot.accent, spot.halo_alpha);
+    }
+    let (_, _, rects, unit, scale, _, key_h) = scene(frame);
+    let selected_voice = rects.iter().any(|r| {
+        r.pos == frame.sel
+            && frame
+                .rows
+                .get(r.pos.row)
+                .and_then(|row| row.keys.get(r.pos.col))
+                .is_some_and(|key| matches!(key.action, KeyAction::VoiceInput))
+    });
+    if selected_voice {
+        let ks = key_style(frame, unit, key_h, scale);
+        stroke_ring(g, glide, frame, &ks, scale);
+    }
+}
+
+pub fn paint_voice_fallback(g: &mut Gfx, frame: &Frame, spot: &VoiceKey) -> Option<(u32, Vec<u8>, crate::mono_ui::Rect)> {
+    let voice = frame.voice?;
+    let side = spot.key.w.max(spot.key.h).ceil().max(1.0);
+    let px = side as u32;
+    g.begin(px, px);
+    let c = side * 0.5;
+    unsafe {
+        crate::vk_paint::paint_voice_orb(
+            g,
+            spot.accent,
+            voice.level,
+            voice.transcribing(),
+            c,
+            c,
+            (spot.key.w.min(spot.key.h) * 0.56).max(1.0),
+            1.25,
+            voice.t,
+        );
+    }
+    let cx = spot.key.x + spot.key.w * 0.5;
+    let cy = spot.key.y + spot.key.h * 0.5;
+    let pixels = g.pixels().to_vec();
+    Some((px, pixels, crate::mono_ui::Rect { x: cx - c, y: cy - c, w: side, h: side }))
+}
+
+fn draw_nimbus(g: &mut Gfx, nimbus: Option<(&[u8], u32)>, dst: crate::mono_ui::Rect, alpha: f32) -> bool {
+    let Some((bytes, px)) = nimbus.filter(|(bytes, px)| *px > 0 && bytes.len() >= (*px as usize).pow(2) * 4) else {
+        return false;
+    };
+    unsafe {
+        g.set_image("nimbus", px, px, &bytes[..(px as usize).pow(2) * 4]);
+        g.draw_image("nimbus", dst, alpha, false);
+    }
+    true
 }
 
 pub fn paint_selected_key(g: &mut Gfx, frame: &Frame, press: f32) -> Option<KeyPatch> {
@@ -868,169 +1007,82 @@ pub fn paint_selected_key(g: &mut Gfx, frame: &Frame, press: f32) -> Option<KeyP
     })
 }
 
-pub fn paint_voice_key(g: &mut Gfx, frame: &Frame, orb: &[u8], orb_px: u32) {
-    let (_spec, pal, rects, _unit, scale, _radius, _key_h) = scene(frame);
-    let Some(rect) = rects.iter().find(|rect| {
-        frame
-            .rows
-            .get(rect.pos.row)
-            .and_then(|row| row.keys.get(rect.pos.col))
-            .is_some_and(|key| matches!(key.action, KeyAction::VoiceInput))
-    }) else {
-        return;
-    };
-    let side = (rect.right - rect.left).min(rect.bottom - rect.top) * 0.86;
-    let cx = (rect.left + rect.right) * 0.5;
-    let cy = (rect.top + rect.bottom) * 0.5;
-    blit_premul(
-        g.canvas().0,
-        orb,
-        orb_px,
-        (cx - side * 0.5) * scale,
-        (cy - side * 0.5) * scale,
-        side * scale,
-    );
-    stroke_rect(
-        g,
-        rect.left * scale,
-        rect.top * scale,
-        (rect.right - rect.left) * scale,
-        (rect.bottom - rect.top) * scale,
-        ((rect.bottom - rect.top) * 0.16) * scale,
-        pal.accent,
-        180,
-        (2.0 * scale).max(1.0),
-    );
-}
-
-pub fn voice_swell(phase: u8, level: f32) -> f32 {
-    let drive = match phase {
-        2 => {
-            let t = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs_f32())
-                .unwrap_or(0.0);
-            0.5 + 0.5 * (t * 2.4).sin()
-        }
-        1 => 0.5 + 0.5 * level.clamp(0.0, 1.0),
-        _ => 0.5,
-    };
-    let scale = 0.70 + 0.36 * drive.clamp(0.0, 1.0);
-    let rest = 0.70 + 0.36 * 0.5;
-    scale / rest
-}
-
-pub fn paint_voice_orb(side: u32, phase: u8, level: f32, orb: &[u8], orb_px: u32) -> Option<Pixmap> {
-    if side == 0 {
-        return None;
-    }
-    let mut pixmap = Pixmap::new(side, side)?;
-    let swell = voice_swell(phase, level);
-    let drawn = (side as f32 * 0.94 * swell / 1.25).clamp(1.0, side as f32);
-    let origin = (side as f32 - drawn) * 0.5;
-    blit_premul(&mut pixmap, orb, orb_px, origin, origin, drawn);
-    Some(pixmap)
-}
-
-pub fn paint_voice_screen(
+pub fn paint_voice_orb(
     g: &mut Gfx,
-    width: u32,
-    height: u32,
-    phase: u8,
-    level: f32,
-    show_orb: bool,
-    orb: Option<&[u8]>,
-    orb_px: u32,
+    side: u32,
+    slot: f32,
+    voice: Voice,
+    nimbus: Option<(&[u8], u32)>,
     accent: u32,
 ) -> bool {
+    if side == 0 {
+        return false;
+    }
+    g.begin(side, side);
+    let c = side as f32 * 0.5;
+    let room = crate::mono_ui::Rect {
+        x: c - slot * 0.5,
+        y: c - slot * 0.5,
+        w: slot,
+        h: slot,
+    };
+    let ball = crate::vk_paint::scale_rect_about_center(room, ORB_FRAME_FILL * voice.orb_scale());
+    let mut paint_nimbus = |g: &mut Gfx, dst: crate::mono_ui::Rect, alpha: f32| draw_nimbus(g, nimbus, dst, alpha);
+    unsafe { crate::vk_paint::paint_voice_cloud(g, ball, accent, 1.0, voice.t, &mut paint_nimbus) };
+    true
+}
+
+pub fn paint_voice_screen(g: &mut Gfx, width: u32, height: u32, voice: Voice, accent: u32) -> bool {
     if width == 0 || height == 0 {
         return false;
     }
     g.begin(width, height);
-    let border_alpha = if phase == 2 {
-        let t = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs_f32())
-            .unwrap_or(0.0);
-        let pulse = 0.5 + 0.5 * (t * 2.4).sin();
-        0.8 + 0.7 * pulse
-    } else {
-        1.0
+    let mut no_cloud = |_: &mut Gfx, _: crate::mono_ui::Rect, _: f32| false;
+    unsafe {
+        crate::vk_paint::paint_voice_screen(
+            g,
+            width as f32,
+            height as f32,
+            accent,
+            1.0,
+            voice.transcribing(),
+            voice.t,
+            None,
+            &mut no_cloud,
+        )
+    }
+    .is_ok()
+}
+
+fn overlay_label_px(height: f32) -> f32 {
+    (height / 12.0).clamp(14.0, 48.0)
+}
+
+pub fn paint_tips_pill(g: &mut Gfx, pill: &crate::vk_paint::TipsPill, width: f32, height: f32, scale: f32, t: f32) -> bool {
+    let scale = scale.max(1.0);
+    g.begin((width * scale).round().max(1.0) as u32, (height * scale).round().max(1.0) as u32);
+    let canvas = crate::vk_paint::PromptCanvas {
+        cw: width,
+        ch: height,
+        dpr: scale,
+        t,
+        title_px: overlay_label_px(height),
+        dip_scale: scale,
     };
-    if unsafe {
-        crate::vk_paint::paint_display_border(g, width as f32, height as f32, accent, border_alpha.min(1.0))
-    }
-    .is_err()
-    {
-        return false;
-    }
-    if show_orb {
-        if let Some(orb) = orb {
-            let (x, y, side) = voice_screen_slot(width as f32, height as f32, phase, level);
-            blit_premul(g.canvas().0, orb, orb_px, x, y, side);
-        }
-    }
-    true
+    let painted = unsafe { crate::vk_paint::paint_tips(g, pill, &canvas) }.is_ok();
+    unsafe { g.transform(1.0, 0.0, 0.0) };
+    painted
 }
 
-fn voice_screen_slot(width: f32, height: f32, phase: u8, level: f32) -> (f32, f32, f32) {
-    let scale = (height / 1080.0).clamp(0.85, 2.0);
-    let size = (96.0 * scale).min(width.min(height) * 0.9).max(1.0);
-    let margin = (48.0 * scale).min((width - size).max(0.0));
-    let left = (width - margin - size).max(0.0);
-    let top = ((height - size) * 0.5).max(0.0);
-    let swell = voice_swell(phase, level);
-    let side = (size * 0.94 * swell).max(1.0);
-    let cx = left + size * 0.5;
-    let cy = top + size * 0.5;
-    (cx - side * 0.5, cy - side * 0.5, side)
-}
-
-fn blit_premul(pixmap: &mut Pixmap, src: &[u8], src_px: u32, x: f32, y: f32, size: f32) {
-    if src_px == 0 || size < 1.0 {
+pub fn slide_down(pixels: &mut [u8], width: u32, offset: u32) {
+    let row = width as usize * 4;
+    let rows = if row == 0 { 0 } else { pixels.len() / row };
+    let shift = (offset as usize).min(rows);
+    if shift == 0 {
         return;
     }
-    let width = pixmap.width();
-    let height = pixmap.height();
-    let dest = pixmap.data_mut();
-    let x0 = x.floor() as i32;
-    let y0 = y.floor() as i32;
-    let side = size.ceil() as i32;
-    for row in 0..side {
-        let dy = y0 + row;
-        if dy < 0 || dy >= height as i32 {
-            continue;
-        }
-        let sy = ((row as f32 / size) * src_px as f32) as u32;
-        if sy >= src_px {
-            continue;
-        }
-        for col in 0..side {
-            let dx = x0 + col;
-            if dx < 0 || dx >= width as i32 {
-                continue;
-            }
-            let sx = ((col as f32 / size) * src_px as f32) as u32;
-            if sx >= src_px {
-                continue;
-            }
-            let si = ((sy * src_px + sx) * 4) as usize;
-            if si + 3 >= src.len() {
-                continue;
-            }
-            let sa = src[si + 3] as u32;
-            if sa == 0 {
-                continue;
-            }
-            let di = ((dy as u32 * width + dx as u32) * 4) as usize;
-            let inv = 255 - sa;
-            for channel in 0..3 {
-                let blended = src[si + channel] as u32 + dest[di + channel] as u32 * inv / 255;
-                dest[di + channel] = blended.min(255) as u8;
-            }
-            dest[di + 3] = (sa + dest[di + 3] as u32 * inv / 255).min(255) as u8;
-        }
-    }
+    pixels.copy_within(0..(rows - shift) * row, shift * row);
+    pixels[..shift * row].fill(0);
 }
 
 pub fn to_argb(pixels: &[u8]) -> Vec<u8> {
@@ -1044,14 +1096,6 @@ pub fn to_argb(pixels: &[u8]) -> Vec<u8> {
     out
 }
 
-pub fn paint_prompt(g: &mut Gfx, text_value: &str, scale: f32) {
-    let scale = scale.max(1.0);
-    let logical_w = 520.0;
-    let logical_h = 72.0;
-    g.begin((logical_w * scale) as u32, (logical_h * scale) as u32);
-    fill(g, rgb(0x15161C), 235);
-    text(g, text_value, (16.0, 16.0, logical_w - 16.0, logical_h - 16.0), 22.0 * scale, Weight::MEDIUM, rgb(0xFFFFFF), 255, 1.0, &["Noto Sans"]);
-}
 
 #[cfg(test)]
 mod tests {
@@ -1062,17 +1106,17 @@ mod tests {
 
     #[test]
     fn voice_swell_grows_with_the_mic() {
-        let quiet = super::voice_swell(1, 0.0);
-        let loud = super::voice_swell(1, 1.0);
-        assert!((quiet - 1.0).abs() < 0.001, "{quiet}");
+        let quiet = super::Voice { phase: 1, level: 0.0, t: 0.0 }.orb_scale();
+        let loud = super::Voice { phase: 1, level: 1.0, t: 0.0 }.orb_scale();
+        let idle = super::Voice { phase: 0, level: 0.0, t: 0.0 }.orb_scale();
+        assert!((quiet - idle).abs() < 0.001, "{quiet}");
         assert!(loud > quiet + 0.15, "{loud}");
     }
 
     #[test]
     fn voice_screen_is_a_border_with_a_cloud() {
-        let orb = vec![255u8, 255, 255, 255];
         let mut g = Gfx::new(1, 1).expect("gfx");
-        assert!(super::paint_voice_screen(&mut g, 800, 480, 1, 1.0, true, Some(&orb), 1, 0xA6D1FF));
+        assert!(super::paint_voice_screen(&mut g, 800, 480, super::Voice { phase: 1, level: 0.0, t: 0.0 }, 0xA6D1FF));
         assert_eq!((g.width(), g.height()), (800, 480));
         let edge = g.pixels()[3];
         let centre = g.pixels()[((240 * 800 + 400) * 4 + 3) as usize];
@@ -1088,6 +1132,7 @@ mod tests {
             logical_h: 460.0,
             scale: 1.0,
             scale_w: 1920.0 * 1.25,
+            ui: super::ui_scale(),
             rows: rows_for_test(),
             sel: KeyPos { row: 1, col: 1 },
             style: VkStyle::Normal,
@@ -1106,6 +1151,8 @@ mod tests {
             floating: true,
             sheet: false,
             sheet_hint: false,
+            voice: None,
+            slide: 0.0,
         };
         let mut glide = Glide::default();
         let started = std::time::Instant::now();
@@ -1150,6 +1197,7 @@ mod tests {
             logical_h: 546.0,
             scale: 1.0,
             scale_w: 1920.0,
+            ui: super::ui_scale(),
             rows: rows_for_test(),
             sel: KeyPos { row: 0, col: 0 },
             style: VkStyle::Normal,
@@ -1168,6 +1216,8 @@ mod tests {
             floating: true,
             sheet: true,
             sheet_hint: false,
+            voice: None,
+            slide: 0.0,
         };
         paint_frame(&mut g, &frame, &mut Glide::default());
         assert!(g.pixels().chunks_exact(4).any(|px| px[0] != 0x1F || px[1] != 0x1F || px[2] != 0x1F));
