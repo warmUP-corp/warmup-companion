@@ -137,27 +137,19 @@ static HYPRLAND: Builtin = Builtin {
         ("LT", "hypr:workspace e-1"),
         ("RT", "hypr:workspace e+1"),
         ("Y", "hypr:togglespecialworkspace"),
-        ("X", "hypr:fullscreen 0"),
+        ("X", "hypr:fullscreen 1"),
     ],
     presets: &[
         ("Previous workspace", "hypr:workspace e-1"),
         ("Next workspace", "hypr:workspace e+1"),
-        ("Workspace 1", "hypr:workspace 1"),
-        ("Workspace 2", "hypr:workspace 2"),
-        ("Workspace 3", "hypr:workspace 3"),
-        ("Workspace 4", "hypr:workspace 4"),
-        ("Workspace 5", "hypr:workspace 5"),
-        ("Workspace 6", "hypr:workspace 6"),
-        ("Workspace 7", "hypr:workspace 7"),
-        ("Workspace 8", "hypr:workspace 8"),
-        ("Workspace 9", "hypr:workspace 9"),
+        ("Back and forth", "hypr:workspace previous_per_monitor"),
+        ("Toggle special workspace", "hypr:togglespecialworkspace"),
         ("Move window to previous workspace", "hypr:movetoworkspace e-1"),
         ("Move window to next workspace", "hypr:movetoworkspace e+1"),
-        ("Toggle special workspace", "hypr:togglespecialworkspace"),
         ("Fullscreen", "hypr:fullscreen 0"),
+        ("Maximize", "hypr:fullscreen 1"),
         ("Toggle floating", "hypr:togglefloating"),
         ("Close window", "hypr:killactive"),
-        ("Back and forth", "hypr:workspace previous_per_monitor"),
     ],
 };
 
@@ -618,7 +610,15 @@ pub fn keycaps(spec: &str) -> Vec<String> {
             .presets
             .iter()
             .find(|(_, c)| c.eq_ignore_ascii_case(spec.trim()))
-            .map_or_else(|| spec.trim().to_string(), |(l, _)| l.to_string());
+            .map(|(l, _)| l.to_string())
+            .or_else(|| {
+                let n = spec.trim().get(15..)?.trim();
+                (spec.trim().get(..15)?.eq_ignore_ascii_case("hypr:workspace ")
+                    && !n.is_empty()
+                    && n.chars().all(|c| c.is_ascii_digit()))
+                .then(|| format!("Workspace {n}"))
+            })
+            .unwrap_or_else(|| spec.trim().to_string());
         return vec![label];
     }
     spec.split('+').map(key_label).collect()
