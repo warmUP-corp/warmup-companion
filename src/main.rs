@@ -117,7 +117,8 @@ mod pc_cursor;
 #[cfg(feature = "gamepad")]
 mod touchpad_gestures;
 mod predict_dict;
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
+#[cfg_attr(not(windows), allow(dead_code))]
 mod process_guard;
 #[cfg(all(windows, feature = "gamepad"))]
 mod playtime_store;
