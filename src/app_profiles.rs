@@ -13,22 +13,117 @@ pub const BUTTONS: [&str; 14] = [
     "A", "B", "X", "Y", "LB", "RB", "LT", "RT", "SELECT", "START", "LEFT", "RIGHT", "UP", "DOWN",
 ];
 
-const BROWSER_PROFILE: &[(&str, &str)] = &[
-    ("B", "ctrl+w"),
-    ("Y", "ctrl+t"),
-    ("RT", "ctrl+tab"),
-    ("LT", "ctrl+shift+tab"),
-];
+pub struct Builtin {
+    pub name: &'static str,
+    pub exes: &'static [&'static str],
+    pub map: &'static [(&'static str, &'static str)],
+    pub presets: &'static [(&'static str, &'static str)],
+}
 
-pub const BROWSER_PRESETS: &[(&str, &str)] = &[
-    ("Close tab", "ctrl+w"),
-    ("New tab", "ctrl+t"),
-    ("Reopen closed tab", "ctrl+shift+t"),
-    ("Next tab", "ctrl+tab"),
-    ("Previous tab", "ctrl+shift+tab"),
-    ("Back", "alt+left"),
-    ("Forward", "alt+right"),
-    ("Reload", "f5"),
+pub const BUILTINS: &[Builtin] = &[
+    Builtin {
+        name: "Web browsers",
+        exes: BROWSERS,
+        map: &[
+            ("B", "ctrl+w"),
+            ("Y", "ctrl+t"),
+            ("RT", "ctrl+tab"),
+            ("LT", "ctrl+shift+tab"),
+        ],
+        presets: &[
+            ("Close tab", "ctrl+w"),
+            ("New tab", "ctrl+t"),
+            ("Reopen closed tab", "ctrl+shift+t"),
+            ("Next tab", "ctrl+tab"),
+            ("Previous tab", "ctrl+shift+tab"),
+            ("Back", "alt+left"),
+            ("Forward", "alt+right"),
+            ("Reload", "f5"),
+            ("Address bar", "ctrl+l"),
+            ("Full screen", "f11"),
+        ],
+    },
+    Builtin {
+        name: "VLC",
+        exes: &["vlc.exe"],
+        map: &[
+            ("X", "space"),
+            ("Y", "f"),
+            ("LEFT", "alt+left"),
+            ("RIGHT", "alt+right"),
+            ("UP", "ctrl+up"),
+            ("DOWN", "ctrl+down"),
+            ("LT", "p"),
+            ("RT", "n"),
+        ],
+        presets: &[
+            ("Play / pause", "space"),
+            ("Full screen", "f"),
+            ("Back 10 s", "alt+left"),
+            ("Forward 10 s", "alt+right"),
+            ("Volume up", "ctrl+up"),
+            ("Volume down", "ctrl+down"),
+            ("Previous", "p"),
+            ("Next", "n"),
+            ("Mute", "m"),
+            ("Subtitles", "v"),
+        ],
+    },
+    Builtin {
+        name: "Spotify",
+        exes: &["spotify.exe"],
+        map: &[
+            ("X", "space"),
+            ("LEFT", "ctrl+left"),
+            ("RIGHT", "ctrl+right"),
+            ("UP", "ctrl+up"),
+            ("DOWN", "ctrl+down"),
+        ],
+        presets: &[
+            ("Play / pause", "space"),
+            ("Previous track", "ctrl+left"),
+            ("Next track", "ctrl+right"),
+            ("Volume up", "ctrl+up"),
+            ("Volume down", "ctrl+down"),
+        ],
+    },
+    Builtin {
+        name: "File Explorer",
+        exes: &["explorer.exe"],
+        map: &[
+            ("LEFT", "alt+left"),
+            ("RIGHT", "alt+right"),
+            ("UP", "alt+up"),
+            ("RT", "ctrl+tab"),
+            ("LT", "ctrl+shift+tab"),
+        ],
+        presets: &[
+            ("Back", "alt+left"),
+            ("Forward", "alt+right"),
+            ("Parent folder", "alt+up"),
+            ("Next tab", "ctrl+tab"),
+            ("Previous tab", "ctrl+shift+tab"),
+            ("New tab", "ctrl+t"),
+            ("Close tab", "ctrl+w"),
+        ],
+    },
+    Builtin {
+        name: "Discord",
+        exes: &["discord.exe"],
+        map: &[
+            ("UP", "alt+up"),
+            ("DOWN", "alt+down"),
+            ("Y", "ctrl+k"),
+            ("X", "ctrl+shift+m"),
+        ],
+        presets: &[
+            ("Previous channel", "alt+up"),
+            ("Next channel", "alt+down"),
+            ("Quick switcher", "ctrl+k"),
+            ("Mute mic", "ctrl+shift+m"),
+            ("Deafen", "ctrl+shift+d"),
+        ],
+    },
 ];
 
 pub const APP_PRESETS: &[(&str, &str)] = &[
@@ -106,8 +201,8 @@ pub struct Profile {
 
 impl Profile {
     pub fn name(&self) -> String {
-        if self.browsers {
-            return "Web browsers".into();
+        if let Some(b) = builtin_for(&self.exes[0]) {
+            return b.name.into();
         }
         let exe = &self.exes[0];
         let stem = exe
@@ -130,15 +225,20 @@ impl Profile {
     }
 }
 
-pub fn browser_profile() -> Profile {
-    let mut p = Profile {
-        exes: BROWSERS.iter().map(|s| s.to_string()).collect(),
-        browsers: true,
-        enabled: true,
-        map: Default::default(),
-    };
-    p.map = p.builtin_map();
-    p
+pub fn builtin_profiles() -> Vec<Profile> {
+    BUILTINS
+        .iter()
+        .map(|b| {
+            let mut p = Profile {
+                exes: b.exes.iter().map(|s| s.to_string()).collect(),
+                browsers: b.exes == BROWSERS,
+                enabled: true,
+                map: Default::default(),
+            };
+            p.map = p.builtin_map();
+            p
+        })
+        .collect()
 }
 
 pub fn new_profile(exe: &str) -> Profile {
@@ -150,15 +250,23 @@ pub fn new_profile(exe: &str) -> Profile {
     }
 }
 
-fn is_browser(exe: &str) -> bool {
-    BROWSERS.iter().any(|b| b.eq_ignore_ascii_case(exe))
+fn builtin_for(exe: &str) -> Option<&'static Builtin> {
+    BUILTINS
+        .iter()
+        .find(|b| b.exes.iter().any(|e| e.eq_ignore_ascii_case(exe)))
+}
+
+pub fn has_builtin(exe: &str) -> bool {
+    builtin_for(exe).is_some()
+}
+
+pub fn presets_for(exe: &str) -> &'static [(&'static str, &'static str)] {
+    builtin_for(exe).map_or(APP_PRESETS, |b| b.presets)
 }
 
 fn builtin(exe: &str, button: &str) -> Option<&'static str> {
-    if !is_browser(exe) {
-        return None;
-    }
-    BROWSER_PROFILE
+    builtin_for(exe)?
+        .map
         .iter()
         .find(|(b, _)| b.eq_ignore_ascii_case(button))
         .map(|(_, c)| *c)
@@ -291,7 +399,7 @@ pub fn load(settings: &str) -> (bool, Vec<Profile>) {
         let Some((exe, _)) = line.split_once('=').and_then(|(k, _)| split_key(k)) else {
             continue;
         };
-        if !exe.is_empty() && !is_browser(exe) && !exes.iter().any(|e| e.eq_ignore_ascii_case(exe))
+        if !exe.is_empty() && !has_builtin(exe) && !exes.iter().any(|e| e.eq_ignore_ascii_case(exe))
         {
             exes.push(exe);
         }
@@ -306,8 +414,8 @@ pub fn load(settings: &str) -> (bool, Vec<Profile>) {
             }
         }
     };
-    let mut profiles = vec![browser_profile()];
-    read(&mut profiles[0]);
+    let mut profiles = builtin_profiles();
+    profiles.iter_mut().for_each(read);
     for exe in exes {
         let mut p = new_profile(exe);
         read(&mut p);
@@ -323,7 +431,7 @@ pub fn settings_lines(on: bool, profiles: &[Profile]) -> Vec<(String, String)> {
     }
     for p in profiles {
         for exe in &p.exes {
-            if !p.browsers || !p.enabled {
+            if !has_builtin(exe) || !p.enabled {
                 out.push((
                     format!("profile.{exe}"),
                     if p.enabled { "on" } else { "off" }.to_string(),

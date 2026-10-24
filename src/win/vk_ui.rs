@@ -745,8 +745,36 @@ unsafe fn target_monitor_rect() -> windows::Win32::Foundation::RECT {
     super::monitor::active_monitor_rect()
 }
 
+const TV_MAX_HEIGHT_FRAC: f32 = 0.45;
+
 unsafe fn ui_scale() -> f32 {
-    key_scale(target_monitor_dpi_scale(), crate::config::vk_bar_scale())
+    let look = vk_look();
+    let mut dpi = target_monitor_dpi_scale();
+    if look.tv_layout() {
+        let m = target_monitor_rect();
+        dpi = tv_capped_dpi(dpi, m.bottom - m.top, &vk_nav::rows_snapshot(), look);
+    }
+    key_scale(dpi, crate::config::vk_bar_scale())
+}
+
+fn tv_capped_dpi(
+    dpi: f32,
+    full_h: i32,
+    rows: &[vk_nav::KeyRow],
+    look: vk_renderer::VkLook,
+) -> f32 {
+    let s1 = key_scale(1.0, 1.0);
+    let h1 = vk_renderer::dock_height_for_full_keys(
+        vk_renderer::REF_MON_W * s1,
+        rows,
+        vk_renderer::strip_band_height(s1, look),
+        look,
+    );
+    if h1 > 0.0 {
+        dpi.min(TV_MAX_HEIGHT_FRAC * full_h.max(1) as f32 / h1)
+    } else {
+        dpi
+    }
 }
 
 unsafe fn top_inset() -> f32 {
@@ -811,9 +839,8 @@ unsafe fn floating_card_rect(
     let (w, card_h) = floating_card_size(grid_w, block_h, chrome, bottom_inset(), pad_x, pad_y);
     let w = w.min(full_w);
     let card_h = card_h.clamp(100, full_h);
-    let margin = (((full_h as f32) * 0.04).round() as i32).clamp(28, 80);
     let x = m.left + (full_w - w) / 2;
-    let y = m.bottom - card_h - margin;
+    let y = m.bottom - card_h;
     (x, y, w, card_h)
 }
 

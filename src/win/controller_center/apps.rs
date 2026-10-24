@@ -158,7 +158,7 @@ fn profile_index(st: &State, exe: &str) -> Option<usize> {
 }
 
 fn name(st: &State, p: &Profile) -> String {
-    if !p.browsers {
+    if !ap::has_builtin(&p.exes[0]) {
         if let Some((n, _)) = installed(st)
             .iter()
             .find(|(_, e)| e.eq_ignore_ascii_case(&p.exes[0]))
@@ -193,11 +193,7 @@ fn button_name(ps: bool, i: usize) -> &'static str {
 }
 
 fn options(p: &Profile) -> Vec<Opt> {
-    let presets = if p.browsers {
-        ap::BROWSER_PRESETS
-    } else {
-        ap::APP_PRESETS
-    };
+    let presets = ap::presets_for(&p.exes[0]);
     std::iter::once(Opt::Default)
         .chain(presets.iter().map(|(l, c)| Opt::Preset(l, c)))
         .chain(std::iter::once(Opt::Custom))
@@ -419,7 +415,7 @@ pub(super) fn reset(ui: &mut Ui) {
         return;
     }
     match st.editing {
-        Some(i) if st.profiles[i].browsers => {
+        Some(i) if ap::has_builtin(&st.profiles[i].exes[0]) => {
             st.profiles[i].map = st.profiles[i].builtin_map();
         }
         Some(i) => {
@@ -428,7 +424,7 @@ pub(super) fn reset(ui: &mut Ui) {
         }
         None => {
             st.on = true;
-            st.profiles = vec![ap::browser_profile()];
+            st.profiles = ap::builtin_profiles();
             st.first = 0;
             ui.focus = Target::AppsToggle;
         }
@@ -875,7 +871,7 @@ pub(super) fn hints(ui: &Ui) -> Vec<(&'static [usize], &'static str)> {
                 (G_B, "Back"),
                 (
                     G_Y,
-                    if p.browsers {
+                    if ap::has_builtin(&p.exes[0]) {
                         "Reset to built-in"
                     } else {
                         "Remove app"
@@ -1148,6 +1144,8 @@ pub(super) unsafe fn draw_row(ui: &Ui, g: &mut Gfx, target: Target, r: Rect) {
             );
             let caption = if p.browsers {
                 browser_caption()
+            } else if ap::has_builtin(&p.exes[0]) {
+                format!("Built-in \u{00B7} {}", p.exes[0])
             } else {
                 p.exes[0].clone()
             };
@@ -1196,6 +1194,33 @@ pub(super) unsafe fn draw_row(ui: &Ui, g: &mut Gfx, target: Target, r: Rect) {
                 1.0,
                 Align::Left,
             );
+            let below = st.profiles.len().saturating_sub(st.first + MAX_ROWS);
+            let more = match (below, st.first) {
+                (0, 0) => return,
+                (0, above) => format!("{above} more above \u{00B7} scroll up"),
+                (below, _) => format!("{below} more below \u{00B7} scroll down"),
+            };
+            let y = r.y + r.h + 8.0;
+            let mw = g.measure(&more, 11.0, false);
+            let x0 = r.x + (r.w - (20.0 + mw)) / 2.0;
+            if below > 0 {
+                g.icon(
+                    Icon::ChevronDown,
+                    rect(x0, y + 3.0, 14.0, 14.0),
+                    t.dim,
+                    DIM_ALPHA,
+                    s,
+                );
+            }
+            g.text(
+                &more,
+                rect(x0 + 20.0, y, mw + 4.0, 20.0),
+                11.0,
+                false,
+                t.dim,
+                DIM_ALPHA,
+                Align::Left,
+            );
         }
         Target::ProfileHeader => {
             let Some(p) = editing_profile(st) else {
@@ -1218,9 +1243,10 @@ pub(super) unsafe fn draw_row(ui: &Ui, g: &mut Gfx, target: Target, r: Rect) {
                 1.0,
                 Align::Left,
             );
-            let caption = if p.browsers {
+            let caption = if ap::has_builtin(&p.exes[0]) {
                 format!("Built-in profile \u{00B7} {}", {
-                    let names: Vec<&str> = ap::BROWSERS
+                    let names: Vec<&str> = p
+                        .exes
                         .iter()
                         .map(|b| b.trim_end_matches(".exe"))
                         .collect();
@@ -1264,7 +1290,7 @@ pub(super) unsafe fn draw_row(ui: &Ui, g: &mut Gfx, target: Target, r: Rect) {
                     Align::Left,
                 ),
             }
-            if p.browsers && p.map[i] != p.builtin_map()[i] {
+            if ap::has_builtin(&p.exes[0]) && p.map[i] != p.builtin_map()[i] {
                 g.circle(r.x + 229.0, r.y + 24.0, 3.0, t.accent);
             }
         }

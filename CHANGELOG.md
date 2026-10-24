@@ -40,6 +40,18 @@
 - On Linux, a connected controller moves the pointer, scrolls, clicks, and presses Enter while warmUP is closed. The companion installs into your home folder and starts with the graphical session.
 - Gaming distributions already allow the virtual pointer. Other distributions can install the bundled device rule so the companion can create it.
 - The desktop talks to the companion through a socket that only your user can open.
+## v0.10.5
+
+- **Answer Windows permission prompts with the controller.** While a UAC prompt is in front (on the secure desktop or, with the secure desktop turned off, on the normal desktop), the D-pad moves between Yes, No and Show more details (right/down = Tab, left/up = Shift+Tab), A presses the highlighted button once the D-pad has been used, and B answers No (Esc). Until the D-pad is used, A keeps clicking where the stick cursor points, and moving the stick hands A back to the cursor. Only the controller the companion reads itself drives the prompt; nothing sent over the warmUP pipe can press a button there, and Windows' own default focus is left as it is.
+
+## v0.10.4
+
+- **The TV keyboard keeps its size at high display scaling.** In TV layout the keyboard stops growing at 45% of the screen height. Before, it grew with Windows scaling and took about two thirds of a 4K TV at 225%, and the whole screen on 1440p at 225%.
+- **No empty band above the word suggestions on TV.** The suggestion strip is now exactly as tall as its chips, so the space above them matches the space below the keys.
+- **The floating keyboard sits on the bottom edge of the screen** instead of hovering above it.
+- **Built-in app presets.** VLC, Spotify, File Explorer and Discord now appear on the Apps page next to Web browsers, ready to use and each with its own on/off switch. They only use X, Y, LT, RT and the D-pad, so click, right-click and Enter keep working. VLC: X play/pause, Y full screen, D-pad seek and volume, LT/RT previous/next. Spotify: X play/pause, D-pad previous/next track and volume. File Explorer: D-pad back/forward/parent folder, LT/RT tabs. Discord: D-pad previous/next channel, Y quick switcher, X mute.
+- **Presets that fit the app.** Picking an action for a button now offers shortcuts for that app, and browsers gain Address bar and Full screen.
+- **The Apps list shows when it scrolls.** A hint under the list says how many apps are above or below.
 
 ## v0.10.3
 

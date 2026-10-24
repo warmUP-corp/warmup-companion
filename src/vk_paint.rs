@@ -421,7 +421,7 @@ pub static MODERN_SPEC: StyleSpec = StyleSpec {
     sel_ring_w: 2.0,
     strip: StripLook::Chips,
     chip_slots: 5,
-    strip_bar_h: 128.0,
+    strip_bar_h: 94.0,
     chip_px: 38.0,
     chip_sel_weight: 500,
     chip_text_alpha: 0xE6 as f32 / 255.0,
@@ -616,7 +616,7 @@ pub fn strip_band_height(scale: f32, look: impl Into<VkLook>) -> f32 {
     let look = look.into();
     let spec = style_spec(look);
     let pad = if look.tv_layout() {
-        spec.pad_y
+        0.0
     } else {
         -spec.pad_y
     };
