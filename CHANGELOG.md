@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, a mouse click or a tap on the on-screen keyboard presses that key, and a click on a suggestion types it, like on Windows. The keyboard still does not take keyboard focus.
 - On Linux, the one-time "Press L3 for keyboard" hint is the same pill as on Windows, with the controller's L3 glyph, the keyboard theme colours and the Mono style's own look, instead of a plain dark box. The glow around the screen during dictation and the cloud beside it are drawn by the same code as on Windows.
 - On Linux, the mic key during dictation looks like on Windows: the cloud is kept inside the key, the key gets an accent ring that brightens with your voice and pulses while transcribing, and the mic symbol is hidden behind the cloud. If the cloud is not ready yet, the key shows the same coloured orb as Windows.
 - On Linux, the floating keyboard sits on the bottom edge of the screen like on Windows, without a gap below it. On a TV, the keyboard is never taller than 45% of the screen.

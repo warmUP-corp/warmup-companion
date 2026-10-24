@@ -97,7 +97,7 @@ If Steam Input grabs the controller, the pad disappears from SDL. The companion 
 
 The virtual pointer is a relative mouse. The compositor's pointer acceleration still applies, so the on-screen distance will not match the raw stick math one-for-one.
 
-L3 opens the on-screen keyboard on a layer above other windows. It does not take keyboard focus, so typing still goes to the window you were using. Docked mode sits on the bottom edge and reserves that strip; floating mode stays centred on the bottom edge. `warmup-companion type <text>` types into the focused window without opening the keyboard, including characters outside the current layout. Enter on the stick is still its own key, separate from that typing device. The lock screen cannot show the keyboard.
+L3 opens the on-screen keyboard on a layer above other windows. It does not take keyboard focus, so typing still goes to the window you were using. A mouse click or a tap on a key or a suggestion works too. Docked mode sits on the bottom edge and reserves that strip; floating mode stays centred on the bottom edge. `warmup-companion type <text>` types into the focused window without opening the keyboard, including characters outside the current layout. Enter on the stick is still its own key, separate from that typing device. The lock screen cannot show the keyboard.
 
 ## Tray and settings
 

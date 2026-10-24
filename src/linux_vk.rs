@@ -8,6 +8,9 @@ use std::time::Duration;
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
+use smithay_client_toolkit::seat::pointer::{PointerEvent, PointerEventKind, PointerHandler, BTN_LEFT};
+use smithay_client_toolkit::seat::touch::TouchHandler;
+use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::wlr_layer::{
     Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
     LayerSurfaceConfigure,
@@ -16,11 +19,11 @@ use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
 use smithay_client_toolkit::shm::{Shm, ShmHandler};
 use smithay_client_toolkit::{
-    delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
-    registry_handlers,
+    delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
+    delegate_seat, delegate_shm, delegate_touch, registry_handlers,
 };
 use wayland_client::globals::registry_queue_init;
-use wayland_client::protocol::{wl_output, wl_surface};
+use wayland_client::protocol::{wl_output, wl_pointer, wl_seat, wl_surface, wl_touch};
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle};
 use wayland_protocols::wp::fractional_scale::v1::client::{
     wp_fractional_scale_manager_v1, wp_fractional_scale_v1,
@@ -285,6 +288,9 @@ fn keyboard_loop(wake: UnixStream) -> Result<(), String> {
 struct Shell {
     registry_state: RegistryState,
     output_state: OutputState,
+    seat_state: SeatState,
+    pointer: Option<wl_pointer::WlPointer>,
+    touch: Option<wl_touch::WlTouch>,
     shm: Shm,
     pool: SlotPool,
     compositor: CompositorState,
@@ -348,6 +354,9 @@ impl Shell {
         let mut shell = Self {
             registry_state: RegistryState::new(globals),
             output_state: OutputState::new(globals, qh),
+            seat_state: SeatState::new(globals, qh),
+            pointer: None,
+            touch: None,
             shm,
             pool,
             compositor,
@@ -507,14 +516,14 @@ impl Shell {
         let floating = !matches!(vk_layout_mode(), VkLayoutMode::Docked);
         let dark = crate::vk_theme::is_dark_theme();
         let theme = crate::config::keyboard_theme();
-        let layout = draw::layout_scale(look, self.output_size().1, &rows);
+        let (scale_w, ui) = self.key_scales(look, &rows);
         let voice = self.voice_state();
         let frame = draw::Frame {
             logical_w: self.logical_w as f32,
             logical_h: self.logical_h as f32,
             scale,
-            scale_w: draw::REF_MON_W * layout,
-            ui: draw::ui_scale() * layout / draw::design_scale(look.style),
+            scale_w,
+            ui,
             rows,
             sel: crate::vk_nav::selection(),
             style: look.style,
@@ -636,6 +645,37 @@ impl Shell {
         Ok(())
     }
 
+    fn key_scales(&self, look: crate::vk_paint::VkLook, rows: &[crate::vk_nav::KeyRow]) -> (f32, f32) {
+        let layout = draw::layout_scale(look, self.output_size().1, rows);
+        (
+            draw::REF_MON_W * layout,
+            draw::ui_scale() * layout / draw::design_scale(look.style),
+        )
+    }
+
+    fn click(&mut self, surface: &wl_surface::WlSurface, x: f32, y: f32) {
+        if surface != self.layer.wl_surface() || !self.configured {
+            return;
+        }
+        let look = self.look();
+        if crate::vk_sheet::shown() && look.tv_layout() {
+            return;
+        }
+        let rows = crate::vk_nav::rows_snapshot();
+        let (scale_w, ui) = self.key_scales(look, &rows);
+        match draw::hit_test(self.logical_w as f32, self.logical_h as f32, scale_w, ui, &rows, look, x, y) {
+            Some(draw::Hit::Slot(slot)) => {
+                let mut sink = crate::vk_nav::SendInputSink;
+                if crate::vk_predict::commit_slot(slot, &mut sink).is_some() {
+                    crate::vk_nav::after_insert();
+                }
+            }
+            Some(draw::Hit::Key(pos, key)) => crate::vk_nav::activate_at(pos, &key),
+            None => return,
+        }
+        self.dirty = true;
+    }
+
     fn voice_state(&mut self) -> Option<draw::Voice> {
         #[cfg(feature = "speech")]
         if crate::linux_speech::visual_active() {
@@ -675,6 +715,94 @@ impl Shell {
         surface.frame(qh, surface.clone());
         let _ = self.conn.flush();
     }
+}
+
+impl SeatHandler for Shell {
+    fn seat_state(&mut self) -> &mut SeatState {
+        &mut self.seat_state
+    }
+
+    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+
+    fn new_capability(
+        &mut self,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+        seat: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        if capability == Capability::Pointer && self.pointer.is_none() {
+            self.pointer = self.seat_state.get_pointer(qh, &seat).ok();
+        }
+        if capability == Capability::Touch && self.touch.is_none() {
+            self.touch = self.seat_state.get_touch(qh, &seat).ok();
+        }
+    }
+
+    fn remove_capability(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        if capability == Capability::Pointer {
+            if let Some(pointer) = self.pointer.take() {
+                pointer.release();
+            }
+        }
+        if capability == Capability::Touch {
+            if let Some(touch) = self.touch.take() {
+                touch.release();
+            }
+        }
+    }
+
+    fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+}
+
+impl PointerHandler for Shell {
+    fn pointer_frame(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_pointer::WlPointer,
+        events: &[PointerEvent],
+    ) {
+        for event in events {
+            if let PointerEventKind::Press { button, .. } = event.kind {
+                if button == BTN_LEFT {
+                    self.click(&event.surface, event.position.0 as f32, event.position.1 as f32);
+                }
+            }
+        }
+    }
+}
+
+impl TouchHandler for Shell {
+    fn down(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_touch::WlTouch,
+        _: u32,
+        _: u32,
+        surface: wl_surface::WlSurface,
+        _: i32,
+        position: (f64, f64),
+    ) {
+        self.click(&surface, position.0 as f32, position.1 as f32);
+    }
+
+    fn up(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_touch::WlTouch, _: u32, _: u32, _: i32) {}
+
+    fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_touch::WlTouch, _: u32, _: i32, _: (f64, f64)) {}
+
+    fn shape(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_touch::WlTouch, _: i32, _: f64, _: f64) {}
+
+    fn orientation(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_touch::WlTouch, _: i32, _: f64) {}
+
+    fn cancel(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_touch::WlTouch) {}
 }
 
 impl Drop for Shell {
@@ -986,7 +1114,7 @@ impl ProvidesRegistryState for Shell {
     fn registry(&mut self) -> &mut RegistryState {
         &mut self.registry_state
     }
-    registry_handlers![OutputState];
+    registry_handlers![OutputState, SeatState];
 }
 
 delegate_compositor!(Shell);
@@ -994,6 +1122,9 @@ delegate_output!(Shell);
 delegate_shm!(Shell);
 delegate_layer!(Shell);
 delegate_registry!(Shell);
+delegate_seat!(Shell);
+delegate_pointer!(Shell);
+delegate_touch!(Shell);
 
 impl Dispatch<wp_fractional_scale_v1::WpFractionalScaleV1, ()> for Shell {
     fn event(

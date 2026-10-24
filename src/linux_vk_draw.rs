@@ -764,6 +764,50 @@ pub fn paint_base(g: &mut Gfx, frame: &Frame, glide: &mut Glide) {
     render_keyboard(g, frame, glide, false);
 }
 
+pub enum Hit {
+    Slot(usize),
+    Key(KeyPos, crate::vk_nav::KeyCell),
+}
+
+pub fn hit_test(
+    logical_w: f32,
+    logical_h: f32,
+    scale_w: f32,
+    ui: f32,
+    rows: &[KeyRow],
+    look: VkLook,
+    x: f32,
+    y: f32,
+) -> Option<Hit> {
+    let spec = spec_for(look);
+    let rects = vk_geom::key_rects(
+        logical_w,
+        (logical_h - legend_band_height(ui, look)).max(40.0),
+        scale_w,
+        rows,
+        crate::vk_paint::strip_band_height(ui, look),
+        spec.key_aspect,
+        spec.gap,
+        spec.design_kh,
+    );
+    let key_h = rects.first().map(|r| r.bottom - r.top)?;
+    if let Some(strip) = crate::vk_predict::strip(crate::vk_paint::strip_slots(look), look.style == VkStyle::Mono) {
+        let geom = crate::vk_paint::StripGeom::above(&rects, spec, key_h / spec.design_kh);
+        let slot = geom
+            .slot_rects(spec, &strip.visible)
+            .into_iter()
+            .find(|(_, r)| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+            .map(|(slot, _)| slot);
+        if let Some(slot) = slot {
+            return Some(Hit::Slot(slot));
+        }
+    }
+    rects
+        .iter()
+        .find(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+        .and_then(|r| rows.get(r.pos.row).and_then(|row| row.keys.get(r.pos.col)).cloned().map(|key| Hit::Key(r.pos, key)))
+}
+
 pub const ORB_FRAME_FILL: f32 = 0.94;
 
 #[derive(Clone, Copy)]
