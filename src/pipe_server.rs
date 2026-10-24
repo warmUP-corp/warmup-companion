@@ -952,7 +952,7 @@ fn drain_parental_blocked() -> Vec<ParentalBlockedPayload> {
         .unwrap_or_default()
 }
 
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 fn apply_library_watch(owner: &TrackingOwner, payload: &crate::protocol::LibraryWatchPayload) {
     if let Err(error) = crate::library_watch::apply_watch(owner, payload) {
         crate::install::log_line(&format!(
@@ -961,7 +961,7 @@ fn apply_library_watch(owner: &TrackingOwner, payload: &crate::protocol::Library
     }
 }
 
-#[cfg(not(all(windows, feature = "gamepad")))]
+#[cfg(not(all(any(windows, target_os = "linux"), feature = "gamepad")))]
 fn apply_library_watch(_owner: &TrackingOwner, _payload: &crate::protocol::LibraryWatchPayload) {}
 
 #[cfg(all(windows, feature = "gamepad"))]
@@ -972,7 +972,7 @@ fn apply_parental_guard(payload: &ParentalGuardPayload) {
 #[cfg(not(all(windows, feature = "gamepad")))]
 fn apply_parental_guard(_payload: &ParentalGuardPayload) {}
 
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 fn apply_play_sessions_ack(
     owner: &TrackingOwner,
     payload: &crate::protocol::PlaySessionsAckPayload,
@@ -981,7 +981,7 @@ fn apply_play_sessions_ack(
     crate::playtime_tracker::apply_play_sessions_ack(owner, payload, issued)
 }
 
-#[cfg(not(all(windows, feature = "gamepad")))]
+#[cfg(not(all(any(windows, target_os = "linux"), feature = "gamepad")))]
 fn apply_play_sessions_ack(
     _owner: &TrackingOwner,
     _payload: &crate::protocol::PlaySessionsAckPayload,

@@ -1,11 +1,10 @@
 //! Offline playtime tracking while warmUP is disconnected from the companion pipe.
 
-#![cfg(windows)]
+#![cfg(any(windows, target_os = "linux"))]
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use crate::parental_guard;
 use crate::pipe_server::{self, TrackingOwner};
 use crate::playtime_store::{
     acknowledge_closed_sessions, closed_sessions_for_wire, finalize_open, finalize_owner_sessions,
@@ -84,7 +83,7 @@ fn tick_tracker() {
     let now = unix_now_secs();
     let our_pid = std::process::id();
     let processes: Vec<(u32, String, Option<String>)> =
-        parental_guard::snapshot_processes_for_owner(&owner)
+        crate::process_guard::snapshot_processes_for_owner(&owner)
             .into_iter()
             .filter(|(pid, _, _)| *pid != 0 && *pid != our_pid)
             .collect();
@@ -183,7 +182,7 @@ fn match_process_to_game(
             if game
                 .install_dir_prefixes
                 .iter()
-                .any(|prefix| path.starts_with(prefix))
+                .any(|prefix| path.starts_with(prefix_key(prefix).as_ref()))
             {
                 install_matches.push(game.game_id.as_str());
             }
@@ -220,6 +219,16 @@ fn match_process_to_game(
         return Some(stem_matches[0].to_string());
     }
     None
+}
+
+#[cfg(windows)]
+fn prefix_key(prefix: &str) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Borrowed(prefix)
+}
+
+#[cfg(not(windows))]
+fn prefix_key(prefix: &str) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Owned(prefix.replace('/', "\\").to_ascii_lowercase())
 }
 
 fn exe_stem_lower(exe_name: &str) -> String {

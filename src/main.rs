@@ -102,7 +102,7 @@ mod gamepad_backend;
 mod hid_gamepad;
 #[cfg(all(windows, feature = "gamepad"))]
 mod hid_reader;
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 mod library_watch;
 #[cfg(all(windows, feature = "gamepad"))]
 mod pad_decode;
@@ -120,9 +120,9 @@ mod predict_dict;
 #[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 #[cfg_attr(not(windows), allow(dead_code))]
 mod process_guard;
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 mod playtime_store;
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 mod playtime_tracker;
 #[cfg(all(windows, feature = "gamepad"))]
 mod xinput_backend;

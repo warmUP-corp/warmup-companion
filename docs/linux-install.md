@@ -60,6 +60,7 @@ If either variable is missing, the service logs the reason and exits. `verify` a
 | --- | --- |
 | Settings | `$XDG_CONFIG_HOME/warmup-companion/settings.ini` |
 | Log and runtime status | `$XDG_STATE_HOME/warmup-companion/` |
+| Library watchlist and unsent play sessions | `$XDG_STATE_HOME/warmup-companion/library-watch.json`, `pending-play-sessions.json` |
 | Installed binary | `$XDG_DATA_HOME/warmup-companion/bin/warmup-companion` |
 | Input socket | `$XDG_RUNTIME_DIR/warmup/input.sock` |
 
@@ -102,6 +103,8 @@ L3 opens the on-screen keyboard on a layer above other windows. It does not take
 ## Tray and settings
 
 The running service adds a StatusNotifierItem. Left-click it for the companion menu, the same one Windows shows: pause input, Control Center, keyboard settings, game detection, voice typing, updates, the log, diagnostics, uninstall and exit. The D-pad, A and B work in it, and a click outside or Esc closes it. Right-click shows the same settings as a plain menu. Select + Start on the controller also opens and closes Control Center, and the controller drives it while it is open.
+
+While warmUP is closed, the companion counts play time for the games in the watchlist warmUP last sent. It reads `/proc` every two seconds and only looks at your own processes. A game matches by its program name or by its install folder; for a Wine or Proton game the program name is the Windows `.exe` name. A session ends ten seconds after the game is gone and stays in `pending-play-sessions.json` until warmUP connects and confirms it.
 
 `warmup-companion settings` reads and writes `$XDG_CONFIG_HOME/warmup-companion/settings.ini`. `warmup-companion --controller-center` opens Control Center on its own, without the controller. `warmup-companion diagnostics` writes a tarball under `$XDG_STATE_HOME/warmup-companion/diagnostics/`.
 

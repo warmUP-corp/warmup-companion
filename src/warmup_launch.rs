@@ -58,7 +58,7 @@ pub(crate) fn run_boot_gamepad_loop(
     crate::pipe_server::spawn();
     #[cfg(windows)]
     crate::parental_guard::spawn_guardian_loop();
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     crate::playtime_tracker::spawn_tracker_loop();
     let on_action = |action: crate::gamepad::VkLoopAction| match action {
         crate::gamepad::VkLoopAction::Toggle => {
