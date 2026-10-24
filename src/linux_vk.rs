@@ -387,7 +387,7 @@ impl Shell {
         let keyboard_docked = matches!(vk_layout_mode(), VkLayoutMode::Docked);
         let (width, height) = desired_size(output_w, output_h, self.look());
         let docked = keyboard_docked;
-        let margin = if keyboard_docked { 0 } else { draw::floating_bottom_margin(output_h) };
+        let margin = 0;
         let key = (docked, width, height, margin);
         if self.placed == Some(key) {
             return;
@@ -502,11 +502,13 @@ impl Shell {
         let floating = !matches!(vk_layout_mode(), VkLayoutMode::Docked);
         let dark = crate::vk_theme::is_dark_theme();
         let theme = crate::config::keyboard_theme();
+        let layout = draw::layout_scale(look, self.output_size().1, &rows);
         let frame = draw::Frame {
             logical_w: self.logical_w as f32,
             logical_h: self.logical_h as f32,
             scale,
-            scale_w: draw::layout_scale_w(look.style),
+            scale_w: draw::REF_MON_W * layout,
+            ui: draw::ui_scale() * layout / draw::design_scale(look.style),
             rows,
             sel: crate::vk_nav::selection(),
             style: look.style,

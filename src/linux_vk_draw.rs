@@ -75,6 +75,7 @@ pub struct Frame {
     pub logical_h: f32,
     pub scale: f32,
     pub scale_w: f32,
+    pub ui: f32,
     pub rows: Vec<KeyRow>,
     pub sel: KeyPos,
     pub style: VkStyle,
@@ -128,11 +129,7 @@ pub fn ui_scale() -> f32 {
     crate::config::vk_bar_scale() / crate::config::COMPACT_BAR_SCALE
 }
 
-pub fn floating_bottom_margin(output_h: f32) -> i32 {
-    ((output_h.max(0.0) * 0.04).round() as i32).clamp(28, 80)
-}
-
-pub fn layout_scale(style: VkStyle) -> f32 {
+pub fn design_scale(style: VkStyle) -> f32 {
     let key_w = match style {
         VkStyle::Normal | VkStyle::Modern => 138.0,
         VkStyle::Mono => 137.0,
@@ -140,22 +137,26 @@ pub fn layout_scale(style: VkStyle) -> f32 {
     key_w / REF_KEY_W
 }
 
-pub fn layout_scale_w(style: VkStyle) -> f32 {
-    REF_MON_W * layout_scale(style)
+pub fn layout_scale(look: VkLook, output_h: f32, rows: &[KeyRow]) -> f32 {
+    let design = design_scale(look.style);
+    if !look.tv_layout() {
+        return design;
+    }
+    let unit = 1.0 / crate::config::COMPACT_BAR_SCALE;
+    let capped = vk_geom::tv_capped_dpi(design / unit, output_h.round() as i32, rows, look, unit);
+    (capped * unit).min(design)
 }
 
 pub fn card_size(output_w: f32, output_h: f32, docked: bool, rows: &[KeyRow], look: VkLook) -> (u32, u32) {
     let spec = spec_for(look);
-    let scale = layout_scale(look.style);
+    let scale = layout_scale(look, output_h, rows);
     let scale_w = REF_MON_W * scale;
     let (grid_w, block_h) = vk_geom::grid_size(scale_w, rows, spec.key_aspect, spec.gap, spec.design_kh);
     let chrome = crate::vk_paint::strip_band_height(scale, look);
     let legend = legend_band_height(scale, look);
     let (pad_x, pad_y) = crate::vk_paint::floating_pad(scale, look);
     let full = if docked && look.tv_layout() {
-        let (_, kh, _) =
-            vk_geom::key_metrics(scale_w, f32::INFINITY, rows, 0.0, spec.key_aspect, spec.gap, spec.design_kh);
-        chrome + block_h + kh * 0.25
+        vk_geom::dock_height_for_full_keys(scale_w, rows, chrome, spec.key_aspect, spec.gap, spec.design_kh)
     } else {
         chrome + block_h + pad_y * 2.0 + legend
     };
@@ -227,9 +228,9 @@ fn render_keyboard(
     let look = frame.look();
     let spec = spec_for(look);
     let pal = palette(frame);
-    let lu = crate::vk_paint::ref_unit(ui_scale(), look);
-    let top_inset = crate::vk_paint::strip_band_height(ui_scale(), look);
-    let legend_h = legend_band_height(ui_scale(), look);
+    let lu = crate::vk_paint::ref_unit(frame.ui, look);
+    let top_inset = crate::vk_paint::strip_band_height(frame.ui, look);
+    let legend_h = legend_band_height(frame.ui, look);
     let rects = vk_geom::key_rects(
         frame.logical_w,
         (frame.logical_h - legend_h).max(40.0),
@@ -319,7 +320,7 @@ fn render_keyboard(
 
 fn paint_legend(g: &mut Gfx, frame: &Frame, rects: &[KeyRect], lu: f32, scale: f32) {
     let look = frame.look();
-        let pad_x = crate::vk_paint::floating_pad(ui_scale(), look).0;
+        let pad_x = crate::vk_paint::floating_pad(frame.ui, look).0;
     let (left, right) = crate::vk_paint::legend_span(rects, frame.logical_w, pad_x);
     let lp = crate::vk_paint::LegendPaint {
         pal: &frame.pal,
@@ -353,7 +354,7 @@ pub(crate) fn keyboard_stamp(frame: &Frame) -> u64 {
     frame.logical_h.to_bits().hash(&mut hasher);
     frame.scale.to_bits().hash(&mut hasher);
     frame.scale_w.to_bits().hash(&mut hasher);
-    ui_scale().to_bits().hash(&mut hasher);
+    frame.ui.to_bits().hash(&mut hasher);
     matches!(frame.style, VkStyle::Mono).hash(&mut hasher);
     frame.ps5.hash(&mut hasher);
     frame.shift.hash(&mut hasher);
@@ -485,8 +486,8 @@ fn scene(frame: &Frame) -> (&'static Spec, Pal, Vec<KeyRect>, f32, f32, f32, f32
     let look = frame.look();
     let spec = spec_for(look);
     let pal = palette(frame);
-    let top_inset = crate::vk_paint::strip_band_height(ui_scale(), look);
-    let legend_h = legend_band_height(ui_scale(), look);
+    let top_inset = crate::vk_paint::strip_band_height(frame.ui, look);
+    let legend_h = legend_band_height(frame.ui, look);
     let rects = vk_geom::key_rects(
         frame.logical_w,
         (frame.logical_h - legend_h).max(40.0),
@@ -568,7 +569,7 @@ fn draw_sheet_frame(g: &mut Gfx, frame: &Frame) {
     let radius = frame.floating.then_some(spec.panel_radius * unit * scale);
     unsafe {
         if look.tv_layout() {
-            let u = crate::vk_paint::ref_unit(ui_scale(), look) * crate::vk_paint::MS_SCALE * scale;
+            let u = crate::vk_paint::ref_unit(frame.ui, look) * crate::vk_paint::MS_SCALE * scale;
             crate::vk_paint::paint_modern_sheet(g, &sp, u, inset_panel, radius, 1.0);
         } else {
             let panel = if frame.floating {
@@ -593,7 +594,7 @@ fn paint_sheet_hint(g: &mut Gfx, frame: &Frame, rects: &[KeyRect], scale: f32) {
     let left = rects.iter().map(|r| r.left).fold(f32::INFINITY, f32::min);
     let right = rects.iter().map(|r| r.right).fold(f32::NEG_INFINITY, f32::max);
     let top = rects.iter().map(|r| r.top).fold(f32::INFINITY, f32::min);
-    let u = crate::vk_paint::ref_unit(ui_scale(), frame.look());
+    let u = crate::vk_paint::ref_unit(frame.ui, frame.look());
         let sp = sheet_paint(frame, &frame.pal);
     unsafe {
         crate::vk_paint::paint_sheet_hint(
@@ -1088,6 +1089,7 @@ mod tests {
             logical_h: 460.0,
             scale: 1.0,
             scale_w: 1920.0 * 1.25,
+            ui: super::ui_scale(),
             rows: rows_for_test(),
             sel: KeyPos { row: 1, col: 1 },
             style: VkStyle::Normal,
@@ -1150,6 +1152,7 @@ mod tests {
             logical_h: 546.0,
             scale: 1.0,
             scale_w: 1920.0,
+            ui: super::ui_scale(),
             rows: rows_for_test(),
             sel: KeyPos { row: 0, col: 0 },
             style: VkStyle::Normal,

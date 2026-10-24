@@ -407,10 +407,15 @@ pub fn dock_height_for_full_keys(
     top_inset: f32,
     look: impl Into<VkLook>,
 ) -> f32 {
-    let look = look.into();
-    let (_, block_h) = grid_size(scale_w, rows, look);
-    let kh = key_metrics(scale_w, f32::INFINITY, rows, 0.0, look).1;
-    top_inset + block_h + kh * 0.25
+    let spec = style_spec(look);
+    crate::vk_geom::dock_height_for_full_keys(
+        scale_w,
+        rows,
+        top_inset,
+        spec.key_aspect,
+        spec.gap,
+        spec.design_kh,
+    )
 }
 
 impl KeyRect {
