@@ -937,7 +937,6 @@ impl GamepadPoll {
             crate::gamepad_backend::poll_mode_is_sleep() && !Self::service_signin_desktop();
         #[cfg(not(windows))]
         let sleeping = crate::gamepad_backend::poll_mode_is_sleep();
-        #[cfg(windows)]
         {
             let chord = sleeping
                 && self.shot_select_down
@@ -1050,7 +1049,6 @@ impl GamepadPoll {
                 }
                 continue;
             }
-            #[cfg(windows)]
             if matches!(change.button, Button::Lt | Button::Rt) && !Self::service_signin_desktop() {
                 let chord_held = self.shot_lb_down && self.shot_rb_down;
                 if chord_held && change.pressed {

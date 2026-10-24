@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, LB + RB + RT takes a screenshot and LB + RB + LT takes one of the focused window, and holding View + LB does it while a game has the controller, like on Windows. The picture is copied to the clipboard, saved under Pictures/Screenshots with the Windows file name, and a notification opens it. The companion uses `grim` and `wl-copy`, and falls back to the desktop's screenshot portal.
 - On Linux with Hyprland, the stick moves the pointer at a speed matched to the focused screen, like on Windows. On a screen larger than 1080p, one stick throw now crosses the same share of the screen instead of moving slower.
 - On Linux, the Guide or PS button opens warmUP when it is closed, like on Windows. The Control Center switch turns it off. warmUP started from the controller keeps running when the companion restarts.
 - On Linux, the companion finds the warmUP launcher: the `.deb` or `.rpm` install, the AppImage in `~/.local/bin`, a `warmup` on `PATH`, or `WARMUP_EXE`. `warmup-companion install-dev <path>` installs the companion and points it at a warmUP built from source, like on Windows.

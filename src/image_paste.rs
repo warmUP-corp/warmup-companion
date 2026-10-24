@@ -81,6 +81,7 @@ pub fn remember_screenshot(path: PathBuf, seq: u32) {
     remember_image(path, seq);
 }
 
+#[cfg(windows)]
 pub fn terminal_paste_text(exe: &str) -> Option<String> {
     use windows::Win32::System::DataExchange::{
         CloseClipboard, GetClipboardSequenceNumber, IsClipboardFormatAvailable,
@@ -143,6 +144,7 @@ pub fn terminal_paste_text(exe: &str) -> Option<String> {
     Some(text)
 }
 
+#[cfg(windows)]
 fn open_clipboard() -> bool {
     use windows::Win32::System::DataExchange::OpenClipboard;
     for _ in 0..10 {
@@ -154,6 +156,7 @@ fn open_clipboard() -> bool {
     false
 }
 
+#[cfg(windows)]
 fn clipboard_files() -> Vec<PathBuf> {
     use windows::Win32::System::DataExchange::GetClipboardData;
     use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
@@ -178,6 +181,7 @@ fn clipboard_files() -> Vec<PathBuf> {
     out
 }
 
+#[cfg(windows)]
 fn clipboard_image_rgba() -> Option<(u32, u32, Vec<u8>)> {
     use windows::Win32::Graphics::Gdi::{GetDC, GetObjectW, ReleaseDC, BITMAP, HBITMAP};
     use windows::Win32::System::DataExchange::GetClipboardData;
@@ -206,6 +210,7 @@ fn clipboard_image_rgba() -> Option<(u32, u32, Vec<u8>)> {
     }
 }
 
+#[cfg(windows)]
 pub(crate) fn bitmap_rgba(
     hdc: windows::Win32::Graphics::Gdi::HDC,
     bitmap: windows::Win32::Graphics::Gdi::HBITMAP,
@@ -253,6 +258,7 @@ pub(crate) fn bitmap_rgba(
     Some(bgra)
 }
 
+#[cfg(windows)]
 pub(crate) fn timestamp_stem(prefix: &str, suffix: &str) -> String {
     let st = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
     format!(
@@ -261,40 +267,9 @@ pub(crate) fn timestamp_stem(prefix: &str, suffix: &str) -> String {
     )
 }
 
+#[cfg(windows)]
 pub(crate) fn save_png(stem: &str, width: u32, height: u32, rgba: &[u8], tag: &str) -> Option<PathBuf> {
-    let Some(dir) = screenshots_dir() else {
-        crate::install::log_line(&format!("{tag} save: could not resolve Screenshots folder"));
-        return None;
-    };
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        crate::install::log_line(&format!("{tag} save: create_dir_all failed: {e}"));
-        return None;
-    }
-
-    let mut opened = None;
-    for n in 1..100 {
-        let name = if n == 1 {
-            format!("{stem}.png")
-        } else {
-            format!("{stem} ({n}).png")
-        };
-        let path = dir.join(name);
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(f) => {
-                opened = Some((f, path));
-                break;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => {
-                crate::install::log_line(&format!("{tag} save: create file failed: {e}"));
-                return None;
-            }
-        }
-    }
-    let Some((file, path)) = opened else {
-        crate::install::log_line(&format!("{tag} save: no free file name"));
-        return None;
-    };
+    let (file, path) = create_unique(stem, "png", tag)?;
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
@@ -322,6 +297,43 @@ pub(crate) fn save_png(stem: &str, width: u32, height: u32, rgba: &[u8], tag: &s
     Some(path)
 }
 
+fn create_unique(stem: &str, ext: &str, tag: &str) -> Option<(std::fs::File, PathBuf)> {
+    let Some(dir) = screenshots_dir() else {
+        crate::install::log_line(&format!("{tag} save: could not resolve Screenshots folder"));
+        return None;
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        crate::install::log_line(&format!("{tag} save: create_dir_all failed: {e}"));
+        return None;
+    }
+
+    let mut opened = None;
+    for n in 1..100 {
+        let name = if n == 1 {
+            format!("{stem}.{ext}")
+        } else {
+            format!("{stem} ({n}).{ext}")
+        };
+        let path = dir.join(name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(f) => {
+                opened = Some((f, path));
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                crate::install::log_line(&format!("{tag} save: create file failed: {e}"));
+                return None;
+            }
+        }
+    }
+    if opened.is_none() {
+        crate::install::log_line(&format!("{tag} save: no free file name"));
+    }
+    opened
+}
+
+#[cfg(windows)]
 fn screenshots_dir() -> Option<PathBuf> {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::System::Com::CoTaskMemFree;
@@ -355,6 +367,129 @@ fn screenshots_dir() -> Option<PathBuf> {
             }
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn timestamp_stem(prefix: &str, suffix: &str) -> String {
+    let now = unsafe { libc::time(std::ptr::null_mut()) };
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&now, &mut tm) };
+    format!(
+        "{prefix} {:04}-{:02}-{:02} {:02}{:02}{:02}{suffix}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec,
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn save_bytes(stem: &str, ext: &str, bytes: &[u8], tag: &str) -> Option<PathBuf> {
+    use std::io::Write;
+    let (mut file, path) = create_unique(stem, ext, tag)?;
+    if let Err(e) = file.write_all(bytes).and_then(|_| file.flush()) {
+        crate::install::log_line(&format!("{tag} save: write failed: {e}"));
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    crate::install::log_line(&format!("{tag} saved: {}", path.display()));
+    Some(path)
+}
+
+#[cfg(target_os = "linux")]
+fn screenshots_dir() -> Option<PathBuf> {
+    pictures_dir().map(|dir| dir.join("Screenshots"))
+}
+
+#[cfg(target_os = "linux")]
+fn pictures_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("XDG_PICTURES_DIR").map(PathBuf::from) {
+        if dir.is_absolute() {
+            return Some(dir);
+        }
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .unwrap_or_else(|| home.join(".config"));
+    if let Ok(text) = std::fs::read_to_string(config.join("user-dirs.dirs")) {
+        for line in text.lines() {
+            let Some(value) = line.trim().strip_prefix("XDG_PICTURES_DIR=") else {
+                continue;
+            };
+            let value = value.trim().trim_matches('"');
+            let dir = match value.strip_prefix("$HOME") {
+                Some(rest) => home.join(rest.trim_start_matches('/')),
+                None => PathBuf::from(value),
+            };
+            if dir.is_absolute() && dir != home {
+                return Some(dir);
+            }
+        }
+    }
+    Some(home.join("Pictures"))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn clip_seq(bytes: &[u8]) -> u32 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish() as u32
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn copy_to_clipboard(mime: &str, bytes: &[u8]) -> bool {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let child = Command::new("wl-copy")
+        .args(["--type", mime])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    let mut child = match child {
+        Ok(child) => child,
+        Err(e) => {
+            crate::install::log_line(&format!("clipboard: wl-copy failed to start: {e}"));
+            return false;
+        }
+    };
+    let wrote = child
+        .stdin
+        .take()
+        .is_some_and(|mut stdin| stdin.write_all(bytes).is_ok());
+    let ok = child.wait().is_ok_and(|status| status.success());
+    if !(wrote && ok) {
+        crate::install::log_line("clipboard: wl-copy failed");
+    }
+    wrote && ok
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let value = std::str::from_utf8(&bytes[i + 1..i + 3])
+                .ok()
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+            if let Some(value) = value {
+                out.push(value);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(test)]

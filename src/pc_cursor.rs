@@ -983,10 +983,148 @@ fn apply_uinput(
                 tap_uinput_chord(keyboard, &keys);
             }
         }
-        Cmd::Screenshot { .. } => {
-            crate::install::log_line("screenshot is not available on linux in this stage");
+        Cmd::Screenshot { window_only } => {
+            let _ = std::thread::Builder::new()
+                .name("warmup-screenshot".into())
+                .spawn(move || copy_screen_to_clipboard(window_only));
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn copy_screen_to_clipboard(window_only: bool) {
+    let png = match capture_png(window_only) {
+        Ok(png) => png,
+        Err(error) => {
+            crate::install::log_line(&format!("screenshot: {error}"));
+            let _ = crate::linux_notify::notify("Screenshot failed", &error);
+            return;
+        }
+    };
+    let copied = crate::image_paste::copy_to_clipboard("image/png", &png);
+    let suffix = if window_only { " window" } else { "" };
+    let stem = crate::image_paste::timestamp_stem("Screenshot", suffix);
+    let Some(path) = crate::image_paste::save_bytes(&stem, "png", &png, "screenshot") else {
+        return;
+    };
+    if copied {
+        crate::image_paste::remember_screenshot(path.clone(), crate::image_paste::clip_seq(&png));
+    }
+    crate::linux_notify::notify_screenshot(&path, copied);
+}
+
+#[cfg(target_os = "linux")]
+fn capture_png(window_only: bool) -> Result<Vec<u8>, String> {
+    let geometry = if window_only {
+        let geometry = crate::linux_game_detect::active_window_geometry();
+        if geometry.is_none() {
+            crate::install::log_line("screenshot: no active window geometry, capturing the whole screen");
+        }
+        geometry
+    } else {
+        None
+    };
+    let grim_error = match grim_png(geometry) {
+        Ok(png) => return Ok(png),
+        Err(error) => error,
+    };
+    crate::install::log_line(&format!("screenshot: grim: {grim_error}; trying the desktop portal"));
+    portal_png().map_err(|error| format!("grim: {grim_error}; portal: {error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn grim_png(geometry: Option<(i64, i64, i64, i64)>) -> Result<Vec<u8>, String> {
+    let mut cmd = std::process::Command::new("grim");
+    if let Some((x, y, w, h)) = geometry {
+        cmd.arg("-g").arg(format!("{x},{y} {w}x{h}"));
+    }
+    let out = cmd
+        .arg("-")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    if !out.stdout.starts_with(b"\x89PNG") {
+        return Err("output is not a PNG".into());
+    }
+    Ok(out.stdout)
+}
+
+#[cfg(target_os = "linux")]
+fn portal_png() -> Result<Vec<u8>, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("warmup-screenshot-portal".into())
+        .spawn(move || {
+            let _ = tx.send(portal_uri());
+        })
+        .map_err(|error| error.to_string())?;
+    let uri = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .map_err(|_| "no answer from the desktop portal".to_string())??;
+    let path = uri
+        .strip_prefix("file://")
+        .ok_or_else(|| format!("unexpected portal uri {uri}"))?;
+    let path = std::path::PathBuf::from(crate::image_paste::percent_decode(path));
+    let bytes = std::fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    if path.starts_with(std::env::temp_dir()) {
+        let _ = std::fs::remove_file(&path);
+    }
+    if !bytes.starts_with(b"\x89PNG") {
+        return Err("portal image is not a PNG".into());
+    }
+    Ok(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn portal_uri() -> Result<String, String> {
+    use std::collections::HashMap;
+    use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+    let conn = zbus::blocking::Connection::session().map_err(|error| error.to_string())?;
+    let sender = conn
+        .unique_name()
+        .ok_or("no D-Bus name")?
+        .trim_start_matches(':')
+        .replace('.', "_");
+    let token = format!("warmup_shot_{}", std::process::id());
+    let request_path = format!("/org/freedesktop/portal/desktop/request/{sender}/{token}");
+    let request = zbus::blocking::Proxy::new(
+        &conn,
+        "org.freedesktop.portal.Desktop",
+        request_path.as_str(),
+        "org.freedesktop.portal.Request",
+    )
+    .map_err(|error| error.to_string())?;
+    let mut responses = request
+        .receive_signal("Response")
+        .map_err(|error| error.to_string())?;
+    let portal = zbus::blocking::Proxy::new(
+        &conn,
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.portal.Screenshot",
+    )
+    .map_err(|error| error.to_string())?;
+    let mut options: HashMap<&str, Value> = HashMap::new();
+    options.insert("handle_token", Value::from(token.as_str()));
+    options.insert("interactive", Value::from(false));
+    let _: OwnedObjectPath = portal
+        .call("Screenshot", &("", options))
+        .map_err(|error| error.to_string())?;
+    let message = responses.next().ok_or("portal closed the request")?;
+    let (code, results): (u32, HashMap<String, OwnedValue>) = message
+        .body()
+        .deserialize()
+        .map_err(|error| error.to_string())?;
+    if code != 0 {
+        return Err(format!("portal refused the screenshot (response {code})"));
+    }
+    results
+        .get("uri")
+        .and_then(|value| String::try_from(value.clone()).ok())
+        .ok_or_else(|| "portal returned no uri".to_string())
 }
 
 #[cfg(target_os = "linux")]

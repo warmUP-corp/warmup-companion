@@ -381,6 +381,14 @@ fn hypr_surface(command: &std::path::Path) -> Result<Surface, String> {
     })
 }
 
+pub fn active_window_geometry() -> Option<(i64, i64, i64, i64)> {
+    let (command, _) = hypr_runtime()?;
+    let window = hypr_json(&command, "j/activewindow").ok()?;
+    let (x, y) = json_pair(&window, "at");
+    let (w, h) = json_pair(&window, "size");
+    (w > 0 && h > 0).then_some((x, y, w, h))
+}
+
 pub fn focused_output_logical_size() -> Option<(f32, f32)> {
     let (command, _) = hypr_runtime()?;
     let monitors = hypr_json(&command, "j/monitors").ok()?;

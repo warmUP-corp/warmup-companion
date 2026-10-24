@@ -125,6 +125,20 @@ The running service adds a StatusNotifierItem. Left-click it for the companion m
 
 `warmup-companion settings` reads and writes `$XDG_CONFIG_HOME/warmup-companion/settings.ini`. `warmup-companion --controller-center` opens Control Center on its own, without the controller. `warmup-companion diagnostics` writes a tarball under `$XDG_STATE_HOME/warmup-companion/diagnostics/`.
 
+## Screenshots
+
+LB + RB + RT takes a screenshot of every screen, and LB + RB + LT takes one of the focused window. While a game has the controller, holding View + LB takes a screenshot of every screen. Each one is copied to the clipboard, saved as `Screenshot <date> <time>.png` (`... window.png` for a window) in `Screenshots` under your Pictures folder (`XDG_PICTURES_DIR`, usually `~/Pictures`), and announced with a notification that opens the file.
+
+The companion captures with `grim` and copies with `wl-copy`:
+
+```sh
+sudo pacman -S grim wl-clipboard        # Arch / Omarchy
+sudo apt install grim wl-clipboard      # Debian / Ubuntu
+sudo dnf install grim wl-clipboard      # Fedora
+```
+
+The focused window is found through Hyprland. On other desktops, or when `grim` cannot capture (KDE Plasma), the companion asks the desktop's screenshot portal instead. The portal always captures the whole screen and may ask for permission the first time.
+
 ## Hyprland-only features
 
 These v0.10 features read Hyprland's IPC socket, so they work only on Hyprland:

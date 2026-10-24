@@ -4179,6 +4179,7 @@ dependencies = [
  "windows 0.58.0",
  "windows-service",
  "xkbcommon 0.8.0",
+ "zbus",
 ]
 
 [[package]]
