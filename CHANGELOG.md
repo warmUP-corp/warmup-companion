@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, Ctrl+Alt+C opens Control Center and Ctrl+Alt+V starts or stops voice typing, like on Windows. They are registered through the desktop's global shortcuts portal, and on Hyprland the companion binds the keys itself. The tray shows the shortcut next to Control Center.
 - On Linux, updates use the same window as Windows. Check for updates, Install update and the update notification open it: it lists what is new, shows the download, the SHA-256 check and the install as they happen, can cancel the download, and has the Check automatically switch. The controller drives it with the D-pad, A and B. The update notification has Install and Later buttons.
 - On Linux, the tray menu matches Windows: Show controller tips lists the controller shortcuts in a notification, the Keyboard menu has the Display choice (Auto, TV or Desk) and, on the TV layout, Show shortcut hint, and the Updates menu shows when updates were last checked.
 - On Linux, `warmup-companion install` works while the companion is running. It used to fail with "Text file busy"; the new binary now replaces the running one and the running service restarts on it.

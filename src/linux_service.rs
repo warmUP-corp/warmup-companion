@@ -29,6 +29,7 @@ pub fn run() -> Result<(), String> {
     if let Some(session) = app.vk_session.take() {
         session.close();
     }
+    crate::linux_hotkeys::release();
     match &result {
         Ok(()) => crate::install::log_line("service gamepad loop returned"),
         Err(error) => crate::install::log_line(&format!("service gamepad loop failed: {error}")),

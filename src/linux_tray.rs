@@ -27,6 +27,7 @@ pub fn spawn() {
         .name("warmup-tray".into())
         .spawn(|| {
             crate::linux_notify::show_welcome_if_first_run();
+            crate::linux_hotkeys::spawn();
             let service = ksni::TrayService::new(CompanionTray);
             if let Ok(mut handle) = HANDLE.lock() {
                 *handle = Some(service.handle());
@@ -251,7 +252,9 @@ fn menu_entries() -> Vec<Entry> {
             crate::gamepad_backend::userland_poll_paused(),
         ),
         Entry::toggle("Gamepad cursor", CMD_CURSOR, gs.cursor_enabled),
-        Entry::command("Control Center…", CMD_CENTER).with_accel("Select+Start"),
+        Entry::command("Control Center…", CMD_CENTER).with_accel(
+            crate::linux_hotkeys::center_accel().unwrap_or_else(|| "Select+Start".into()),
+        ),
         Entry::command("Show controller tips", CMD_TIPS),
         Entry::toggle("Sign-in controller hints", CMD_SIGNIN_HINTS, gs.signin_hints),
         Entry::submenu("Keyboard", keyboard),

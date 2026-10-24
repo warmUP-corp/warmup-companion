@@ -118,6 +118,7 @@ fontdb = { version = "0.16", default-features = false, features = ["std"] }
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 ksni = "0.2.2"
 notify-rust = "4"
+zbus = "5"
 wgpu = "23"
 pollster = "0.4"
 wayland-client = { version = "0.31", features = ["system", "dlopen"] }

@@ -45,6 +45,8 @@ mod tray;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
 mod linux_tray;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
+mod linux_hotkeys;
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
 mod linux_notify;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
 mod linux_panel;

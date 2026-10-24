@@ -1,0 +1,499 @@
+use std::collections::HashMap;
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::Duration;
+
+use zbus::blocking::{Connection, Proxy};
+use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value};
+
+const DEST: &str = "org.freedesktop.portal.Desktop";
+const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
+const IFACE: &str = "org.freedesktop.portal.GlobalShortcuts";
+const REGISTRY: &str = "org.freedesktop.host.portal.Registry";
+const APP_ID: &str = "warmup-companion";
+const UNIT_NAME: &str = "warmup-companion.service";
+const SYNC_EVERY: Duration = Duration::from_secs(1);
+const SIGNAL_POLL: Duration = Duration::from_millis(100);
+const LABEL_PREFIX: &str = "warmUP Companion: ";
+
+#[derive(Clone, Copy, PartialEq)]
+enum Hotkey {
+    Center,
+    Voice,
+}
+
+impl Hotkey {
+    const ALL: [Hotkey; 2] = [Hotkey::Center, Hotkey::Voice];
+
+    fn id(self) -> &'static str {
+        match self {
+            Hotkey::Center => "control-center",
+            Hotkey::Voice => "voice-typing",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Hotkey::Center => "Open Control Center",
+            Hotkey::Voice => "Start or stop voice typing",
+        }
+    }
+
+    fn portal_trigger(self) -> &'static str {
+        match self {
+            Hotkey::Center => "CTRL+ALT+c",
+            Hotkey::Voice => "CTRL+ALT+v",
+        }
+    }
+
+    fn hypr_key(self) -> &'static str {
+        match self {
+            Hotkey::Center => "C",
+            Hotkey::Voice => "V",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Hotkey::Center => "Ctrl+Alt+C",
+            Hotkey::Voice => "Ctrl+Alt+V",
+        }
+    }
+
+    fn signal(self) -> &'static str {
+        match self {
+            Hotkey::Center => "SIGUSR1",
+            Hotkey::Voice => "SIGUSR2",
+        }
+    }
+
+    fn from_id(id: &str) -> Option<Hotkey> {
+        Hotkey::ALL.into_iter().find(|h| h.id() == id)
+    }
+
+    fn run(self) {
+        match self {
+            Hotkey::Center => {
+                crate::win::controller_center::toggle();
+            }
+            Hotkey::Voice => {
+                if crate::config::voice_enabled() {
+                    crate::vk_nav::start_voice_input();
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+enum Target {
+    Global(String),
+    Signal(&'static str),
+}
+
+static STARTED: AtomicBool = AtomicBool::new(false);
+static CENTER_ACCEL: Mutex<Option<String>> = Mutex::new(None);
+static CENTER_SIGNAL: AtomicBool = AtomicBool::new(false);
+static VOICE_SIGNAL: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn center_accel() -> Option<String> {
+    CENTER_ACCEL.lock().ok().and_then(|a| a.clone())
+}
+
+fn set_center_accel(label: Option<String>) {
+    if let Ok(mut a) = CENTER_ACCEL.lock() {
+        *a = label;
+    }
+    crate::linux_tray::refresh();
+}
+
+pub(crate) fn spawn() {
+    if STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("warmup-hotkeys".into())
+        .spawn(run);
+}
+
+pub(crate) fn release() {
+    if !STARTED.load(Ordering::SeqCst) || !hyprland() {
+        return;
+    }
+    for hotkey in Hotkey::ALL {
+        hypr_unbind(hotkey);
+    }
+}
+
+fn run() {
+    match Portal::open() {
+        Ok(portal) => {
+            if let Some(trigger) = portal.triggers.get(Hotkey::Center.id()) {
+                set_center_accel(Some(trigger.clone()));
+            }
+            if hyprland() {
+                let names = global_names();
+                for hotkey in Hotkey::ALL {
+                    if portal.triggers.contains_key(hotkey.id()) {
+                        continue;
+                    }
+                    if let Some(name) = names.get(hotkey.id()) {
+                        spawn_hypr_sync(hotkey, Target::Global(name.clone()));
+                    }
+                }
+            }
+            portal.listen();
+        }
+        Err(e) => {
+            log(&format!("global shortcuts portal unavailable: {e}"));
+            if hyprland() && service_main() {
+                install_signal_handlers();
+                for hotkey in Hotkey::ALL {
+                    spawn_hypr_sync(hotkey, Target::Signal(hotkey.signal()));
+                }
+                poll_signals();
+            }
+        }
+    }
+}
+
+struct Portal {
+    conn: Connection,
+    session: OwnedObjectPath,
+    triggers: HashMap<String, String>,
+}
+
+impl Portal {
+    fn open() -> Result<Portal, String> {
+        ensure_desktop_entry();
+        let conn = Connection::session().map_err(err)?;
+        let registry = Proxy::new(&conn, DEST, PORTAL_PATH, REGISTRY).map_err(err)?;
+        let none: HashMap<&str, Value> = HashMap::new();
+        if let Err(e) = registry.call::<_, _, ()>("Register", &(APP_ID, none)) {
+            log(&format!("portal registry: {e}"));
+        }
+        let proxy = Proxy::new(&conn, DEST, PORTAL_PATH, IFACE).map_err(err)?;
+        let token = format!("warmup_session_{}", std::process::id());
+        let mut options: HashMap<&str, Value> = HashMap::new();
+        options.insert("handle_token", Value::from(token.as_str()));
+        options.insert("session_handle_token", Value::from(token.as_str()));
+        let results = request(&conn, &token, || {
+            proxy
+                .call::<_, _, OwnedObjectPath>("CreateSession", &(options,))
+                .map(|_| ())
+        })?;
+        let session = results
+            .get("session_handle")
+            .and_then(|v| String::try_from(v.clone()).ok())
+            .ok_or("portal returned no session")?;
+        let session = OwnedObjectPath::try_from(session).map_err(err)?;
+
+        let shortcuts: Vec<(&str, HashMap<&str, Value>)> = Hotkey::ALL
+            .iter()
+            .map(|h| {
+                let mut props: HashMap<&str, Value> = HashMap::new();
+                props.insert("description", Value::from(h.description()));
+                props.insert("preferred_trigger", Value::from(h.portal_trigger()));
+                (h.id(), props)
+            })
+            .collect();
+        let token = format!("warmup_bind_{}", std::process::id());
+        let mut options: HashMap<&str, Value> = HashMap::new();
+        options.insert("handle_token", Value::from(token.as_str()));
+        let session_path: ObjectPath = session.as_ref();
+        let results = request(&conn, &token, || {
+            proxy
+                .call::<_, _, OwnedObjectPath>(
+                    "BindShortcuts",
+                    &(session_path.clone(), shortcuts, "", options),
+                )
+                .map(|_| ())
+        })?;
+        let mut triggers = HashMap::new();
+        if let Some(bound) = results.get("shortcuts") {
+            let bound: Vec<(String, HashMap<String, OwnedValue>)> =
+                bound.try_clone().map_err(err)?.try_into().map_err(err)?;
+            for (id, props) in bound {
+                let trigger = props
+                    .get("trigger_description")
+                    .and_then(|v| String::try_from(v.clone()).ok())
+                    .unwrap_or_default();
+                if !trigger.is_empty() {
+                    triggers.insert(id, trigger);
+                }
+            }
+        }
+        log(&format!("global shortcuts bound: {triggers:?}"));
+        Ok(Portal {
+            conn,
+            session,
+            triggers,
+        })
+    }
+
+    fn listen(&self) {
+        let Ok(proxy) = Proxy::new(&self.conn, DEST, PORTAL_PATH, IFACE) else {
+            return;
+        };
+        let Ok(signals) = proxy.receive_signal("Activated") else {
+            return;
+        };
+        for message in signals {
+            let Ok((session, id, _, _)) = message
+                .body()
+                .deserialize::<(OwnedObjectPath, String, u64, HashMap<String, OwnedValue>)>()
+            else {
+                continue;
+            };
+            if session != self.session {
+                continue;
+            }
+            if let Some(hotkey) = Hotkey::from_id(&id) {
+                hotkey.run();
+            }
+        }
+    }
+}
+
+fn request(
+    conn: &Connection,
+    token: &str,
+    call: impl FnOnce() -> zbus::Result<()>,
+) -> Result<HashMap<String, OwnedValue>, String> {
+    let sender = conn
+        .unique_name()
+        .ok_or("no bus name")?
+        .trim_start_matches(':')
+        .replace('.', "_");
+    let path = format!("{PORTAL_PATH}/request/{sender}/{token}");
+    let request = Proxy::new(conn, DEST, path.as_str(), "org.freedesktop.portal.Request")
+        .map_err(err)?;
+    let mut responses = request.receive_signal("Response").map_err(err)?;
+    call().map_err(err)?;
+    let message = responses.next().ok_or("portal closed the request")?;
+    let (code, results): (u32, HashMap<String, OwnedValue>) =
+        message.body().deserialize().map_err(err)?;
+    if code != 0 {
+        return Err(format!("portal answered {code}"));
+    }
+    Ok(results)
+}
+
+fn ensure_desktop_entry() {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+    let dir = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/share"))
+        .join("applications");
+    let path = dir.join(format!("{APP_ID}.desktop"));
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| APP_ID.to_string());
+    let entry = format!(
+        "[Desktop Entry]\nType=Application\nName=warmUP Companion\nExec={exe}\nIcon=input-gaming\nNoDisplay=true\n"
+    );
+    if std::fs::read_to_string(&path).is_ok_and(|current| current == entry) {
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, entry)) {
+        log(&format!("{}: {e}", path.display()));
+        return;
+    }
+    std::thread::sleep(Duration::from_millis(500));
+}
+
+fn service_main() -> bool {
+    Command::new("systemctl")
+        .args(["--user", "show", "-p", "MainPID", "--value", UNIT_NAME])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok())
+        == Some(std::process::id())
+}
+
+fn hyprland() -> bool {
+    std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some()
+}
+
+fn hyprctl(args: &[&str]) -> Option<String> {
+    let output = Command::new("hyprctl").args(args).output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn global_names() -> HashMap<&'static str, String> {
+    let mut names = HashMap::new();
+    let listing = hyprctl(&["globalshortcuts"]).unwrap_or_default();
+    for line in listing.lines() {
+        let Some((name, description)) = line.split_once(" -> ") else {
+            continue;
+        };
+        for hotkey in Hotkey::ALL {
+            if name.ends_with(&format!(":{}", hotkey.id()))
+                && description.trim() == hotkey.description()
+            {
+                names.insert(hotkey.id(), name.trim().to_string());
+            }
+        }
+    }
+    names
+}
+
+fn bound_by_other(hotkey: Hotkey) -> bool {
+    let Some(json) = hyprctl(&["binds", "-j"]) else {
+        return false;
+    };
+    let Ok(serde_json::Value::Array(binds)) = serde_json::from_str::<serde_json::Value>(&json)
+    else {
+        return false;
+    };
+    binds.iter().any(|b| {
+        b["modmask"].as_u64() == Some(12)
+            && b["submap"].as_str().unwrap_or_default().is_empty()
+            && b["key"]
+                .as_str()
+                .is_some_and(|k| k.eq_ignore_ascii_case(hotkey.hypr_key()))
+            && !b["description"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with(LABEL_PREFIX)
+    })
+}
+
+fn hypr_bind(hotkey: Hotkey, target: &Target) -> bool {
+    hypr_unbind(hotkey);
+    if bound_by_other(hotkey) {
+        log(&format!("{} is already bound in Hyprland", hotkey.label()));
+        return false;
+    }
+    let description = format!("{LABEL_PREFIX}{}", hotkey.description());
+    let (dispatcher, arg) = match target {
+        Target::Global(name) => ("global", name.clone()),
+        Target::Signal(sig) => (
+            "exec",
+            format!("systemctl --user kill --kill-whom=main -s {sig} {UNIT_NAME}"),
+        ),
+    };
+    let legacy = format!(
+        "CTRL ALT, {}, {description}, {dispatcher}, {arg}",
+        hotkey.hypr_key()
+    );
+    match hyprctl(&["keyword", "bindd", &legacy]) {
+        Some(out) if out.contains("non-legacy") => {
+            let lua_dispatcher = match dispatcher {
+                "global" => format!("hl.dsp.global({})", lua_string(&arg)),
+                _ => format!("hl.dsp.exec_cmd({})", lua_string(&arg)),
+            };
+            let lua = format!(
+                "hl.bind(\"CTRL + ALT + {}\", {lua_dispatcher}, {{ description = {} }})",
+                hotkey.hypr_key(),
+                lua_string(&description)
+            );
+            hyprctl(&["eval", &lua]).is_some()
+        }
+        Some(out) => out.is_empty() || out == "ok",
+        None => false,
+    }
+}
+
+fn hypr_unbind(hotkey: Hotkey) {
+    let ours = hyprctl(&["binds", "-j"])
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .any(|b| {
+            b["modmask"].as_u64() == Some(12)
+                && b["key"]
+                    .as_str()
+                    .is_some_and(|k| k.eq_ignore_ascii_case(hotkey.hypr_key()))
+                && b["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with(LABEL_PREFIX)
+        });
+    if !ours {
+        return;
+    }
+    let legacy = format!("CTRL ALT, {}", hotkey.hypr_key());
+    if let Some(out) = hyprctl(&["keyword", "unbind", &legacy]) {
+        if out.contains("non-legacy") {
+            let lua = format!("hl.unbind(\"CTRL + ALT + {}\")", hotkey.hypr_key());
+            let _ = hyprctl(&["eval", &lua]);
+        }
+    }
+}
+
+fn lua_string(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn wanted(hotkey: Hotkey) -> bool {
+    match hotkey {
+        Hotkey::Center => true,
+        Hotkey::Voice => crate::config::voice_enabled(),
+    }
+}
+
+fn spawn_hypr_sync(hotkey: Hotkey, target: Target) {
+    let _ = std::thread::Builder::new()
+        .name(format!("warmup-hotkey-{}", hotkey.id()))
+        .spawn(move || {
+            let mut bound: Option<bool> = None;
+            loop {
+                let want = wanted(hotkey);
+                if bound != Some(want) {
+                    let ok = if want {
+                        hypr_bind(hotkey, &target)
+                    } else {
+                        hypr_unbind(hotkey);
+                        false
+                    };
+                    if hotkey == Hotkey::Center {
+                        set_center_accel(ok.then(|| hotkey.label().to_string()));
+                    }
+                    bound = Some(want);
+                }
+                std::thread::sleep(SYNC_EVERY);
+            }
+        });
+}
+
+extern "C" fn on_signal(sig: libc::c_int) {
+    if sig == libc::SIGUSR1 {
+        CENTER_SIGNAL.store(true, Ordering::SeqCst);
+    } else if sig == libc::SIGUSR2 {
+        VOICE_SIGNAL.store(true, Ordering::SeqCst);
+    }
+}
+
+fn install_signal_handlers() {
+    let handler = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    unsafe {
+        libc::signal(libc::SIGUSR1, handler);
+        libc::signal(libc::SIGUSR2, handler);
+    }
+}
+
+fn poll_signals() {
+    loop {
+        if CENTER_SIGNAL.swap(false, Ordering::SeqCst) {
+            Hotkey::Center.run();
+        }
+        if VOICE_SIGNAL.swap(false, Ordering::SeqCst) {
+            Hotkey::Voice.run();
+        }
+        std::thread::sleep(SIGNAL_POLL);
+    }
+}
+
+fn err(e: impl std::fmt::Display) -> String {
+    e.to_string()
+}
+
+fn log(msg: &str) {
+    crate::install::log_line(&format!("hotkeys: {msg}"));
+}
