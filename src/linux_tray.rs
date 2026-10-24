@@ -125,11 +125,8 @@ impl Tray for CompanionTray {
                     ),
                 ],
             ),
-            check("Voice typing", settings.voice_enabled, |_| {
-                toggle_bool("voice_enabled", crate::config::gamepad_settings().voice_enabled);
-            }),
         ];
-        items.extend(mic_items(settings.voice_enabled));
+        items.extend(voice_items(settings.voice_enabled));
         items.extend([
             submenu("Updates", update_items(settings.update_check)),
             submenu(
@@ -180,7 +177,14 @@ const CMD_SIDE_TIPS: usize = 23;
 const CMD_DISPLAY_AUTO: usize = 24;
 const CMD_DISPLAY_TV: usize = 25;
 const CMD_DISPLAY_DESK: usize = 26;
+#[cfg(feature = "speech")]
 const CMD_MIC_DEFAULT: usize = 27;
+const CMD_VOICE_OFF: usize = 28;
+#[cfg(feature = "speech")]
+const CMD_ENGINE_PARAKEET: usize = 29;
+#[cfg(feature = "speech")]
+const CMD_ENGINE_REDUX: usize = 30;
+#[cfg(feature = "speech")]
 const CMD_MIC_BASE: usize = 100;
 
 fn menu_entries() -> Vec<Entry> {
@@ -303,9 +307,29 @@ fn menu_entries() -> Vec<Entry> {
 }
 
 fn voice_entries(voice_on: bool) -> Vec<Entry> {
-    let mut entries = vec![Entry::toggle("Voice typing", CMD_VOICE, voice_on)];
     #[cfg(feature = "speech")]
-    if voice_on && crate::linux_speech::available() {
+    if crate::linux_speech::available() {
+        let mut entries = Vec::new();
+        let engine = crate::linux_speech::engine();
+        let mut engines = vec![Entry::radio("Off", CMD_VOICE_OFF, !voice_on)];
+        if show_parakeet() {
+            engines.push(Entry::radio(
+                "Parakeet (NVIDIA)",
+                CMD_ENGINE_PARAKEET,
+                voice_on && engine == "parakeet",
+            ));
+        }
+        if crate::linux_speech::redux_available() {
+            engines.push(Entry::radio(
+                "Parakeet Redux",
+                CMD_ENGINE_REDUX,
+                voice_on && engine == "parakeet-redux",
+            ));
+        }
+        entries.push(Entry::submenu("Voice engine", engines));
+        if !voice_on {
+            return entries;
+        }
         let current = crate::linux_speech::mic_choice();
         let mut mics = vec![Entry::radio(
             "Default (system)",
@@ -317,8 +341,27 @@ fn voice_entries(voice_on: bool) -> Vec<Entry> {
             mics.push(Entry::radio(mic.label, CMD_MIC_BASE + i, on));
         }
         entries.push(Entry::submenu("Microphone", mics));
+        return entries;
     }
-    entries
+    vec![Entry::toggle("Voice typing", CMD_VOICE, voice_on)]
+}
+
+#[cfg(feature = "speech")]
+fn show_parakeet() -> bool {
+    crate::linux_speech::parakeet_available() || !crate::linux_speech::redux_available()
+}
+
+#[cfg(feature = "speech")]
+fn use_engine(id: &str) {
+    crate::linux_speech::set_engine(id);
+    set_voice(true);
+}
+
+fn set_voice(on: bool) {
+    let current = crate::config::gamepad_settings().voice_enabled;
+    if current != on {
+        toggle_bool("voice_enabled", current);
+    }
 }
 
 fn run_command(cmd: usize) {
@@ -354,6 +397,11 @@ fn run_command(cmd: usize) {
         CMD_DISPLAY_AUTO => set_display("auto"),
         CMD_DISPLAY_TV => set_display("tv"),
         CMD_DISPLAY_DESK => set_display("desk"),
+        CMD_VOICE_OFF => set_voice(false),
+        #[cfg(feature = "speech")]
+        CMD_ENGINE_PARAKEET => use_engine("parakeet"),
+        #[cfg(feature = "speech")]
+        CMD_ENGINE_REDUX => use_engine("parakeet-redux"),
         #[cfg(feature = "speech")]
         CMD_MIC_DEFAULT => crate::linux_speech::set_mic_choice(""),
         #[cfg(feature = "speech")]
@@ -385,9 +433,29 @@ fn menu_spec(at: POINT) -> Spec {
     }
 }
 
-fn mic_items(voice_on: bool) -> Vec<MenuItem<CompanionTray>> {
+fn voice_items(voice_on: bool) -> Vec<MenuItem<CompanionTray>> {
     #[cfg(feature = "speech")]
-    if voice_on && crate::linux_speech::available() {
+    if crate::linux_speech::available() {
+        let engine = crate::linux_speech::engine();
+        let mut engines = vec![check("Off", !voice_on, |_| set_voice(false))];
+        if show_parakeet() {
+            engines.push(check(
+                "Parakeet (NVIDIA)",
+                voice_on && engine == "parakeet",
+                |_| use_engine("parakeet"),
+            ));
+        }
+        if crate::linux_speech::redux_available() {
+            engines.push(check(
+                "Parakeet Redux",
+                voice_on && engine == "parakeet-redux",
+                |_| use_engine("parakeet-redux"),
+            ));
+        }
+        let mut items = vec![submenu("Voice engine", engines)];
+        if !voice_on {
+            return items;
+        }
         let current = crate::linux_speech::mic_choice();
         let mut mics = vec![check("Default (system)", current.is_none(), |_| {
             crate::linux_speech::set_mic_choice("")
@@ -399,10 +467,12 @@ fn mic_items(voice_on: bool) -> Vec<MenuItem<CompanionTray>> {
                 crate::linux_speech::set_mic_choice(&name)
             }));
         }
-        return vec![submenu("Microphone", mics)];
+        items.push(submenu("Microphone", mics));
+        return items;
     }
-    let _ = voice_on;
-    Vec::new()
+    vec![check("Voice typing", voice_on, |_| {
+        toggle_bool("voice_enabled", crate::config::gamepad_settings().voice_enabled);
+    })]
 }
 
 fn keyboard_items() -> Vec<MenuItem<CompanionTray>> {

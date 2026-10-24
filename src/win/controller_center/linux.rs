@@ -89,10 +89,13 @@ pub(super) fn hide() {
     }
 }
 
+#[cfg(feature = "speech")]
 const MIC_OPTIONS: usize = 4;
+#[cfg(feature = "speech")]
 const MIC_LABEL_CHARS: usize = 17;
 
 pub(super) fn center_items() -> Vec<Item> {
+    #[cfg_attr(not(feature = "speech"), allow(unused_mut))]
     let mut items: Vec<Item> = items()
         .into_iter()
         .filter(|it| !matches!(it.kind, Kind::Check { key: "run_mode", .. }))
