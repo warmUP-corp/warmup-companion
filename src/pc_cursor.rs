@@ -35,6 +35,10 @@ fn screen_scale() -> (f32, f32) {
             return (w as f32 / REF_WIDTH, h as f32 / REF_HEIGHT);
         }
     }
+    #[cfg(target_os = "linux")]
+    if let Some((w, h)) = crate::linux_game_detect::focused_output_logical_size() {
+        return (w / REF_WIDTH, h / REF_HEIGHT);
+    }
     (1.0, 1.0)
 }
 

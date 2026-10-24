@@ -381,6 +381,32 @@ fn hypr_surface(command: &std::path::Path) -> Result<Surface, String> {
     })
 }
 
+pub fn focused_output_logical_size() -> Option<(f32, f32)> {
+    let (command, _) = hypr_runtime()?;
+    let monitors = hypr_json(&command, "j/monitors").ok()?;
+    let rows = monitors.as_array()?;
+    let monitor = rows
+        .iter()
+        .find(|row| row.get("focused").and_then(|value| value.as_bool()) == Some(true))
+        .or_else(|| rows.first())?;
+    let width = monitor.get("width")?.as_f64()?;
+    let height = monitor.get("height")?.as_f64()?;
+    let scale = monitor
+        .get("scale")
+        .and_then(|value| value.as_f64())
+        .filter(|scale| *scale > 0.0)
+        .unwrap_or(1.0);
+    let rotated = monitor
+        .get("transform")
+        .and_then(|value| value.as_i64())
+        .is_some_and(|transform| transform % 2 == 1);
+    let (width, height) = if rotated { (height, width) } else { (width, height) };
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    Some(((width / scale) as f32, (height / scale) as f32))
+}
+
 fn hypr_json(sock: &std::path::Path, cmd: &str) -> Result<serde_json::Value, String> {
     let mut stream = UnixStream::connect(sock)
         .map_err(|error| format!("connect {}: {error}", sock.display()))?;
