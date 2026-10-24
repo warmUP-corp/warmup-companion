@@ -887,6 +887,19 @@ fn apply_uinput(
     notch_rem: &mut (i32, i32),
     cmd: Cmd,
 ) {
+    let cmd = match cmd {
+        Cmd::Screenshot { window_only } => {
+            let _ = std::thread::Builder::new()
+                .name("warmup-screenshot".into())
+                .spawn(move || copy_screen_to_clipboard(window_only));
+            return;
+        }
+        Cmd::Swipe(swipe) => {
+            apply_swipe(keyboard, swipe);
+            return;
+        }
+        cmd => cmd,
+    };
     let Some(mouse) = mouse else {
         return;
     };
@@ -949,46 +962,47 @@ fn apply_uinput(
                 emit_rel(mouse, &axes);
             }
         }
-        Cmd::Swipe(swipe) => {
-            use crate::touchpad_gestures::Swipe;
-            if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
-                let lua = match swipe {
-                    Swipe::Left => r#"hl.dsp.focus({ workspace = "e-1" })"#,
-                    Swipe::Right => r#"hl.dsp.focus({ workspace = "e+1" })"#,
-                    Swipe::Up => r#"hl.dsp.focus({ workspace = "previous" })"#,
-                    Swipe::Down => r#"hl.dsp.focus({ workspace = "emptym" })"#,
-                };
-                let _ = std::thread::Builder::new()
-                    .name("hypr-swipe".into())
-                    .spawn(move || crate::linux_game_detect::hypr_dispatch(lua));
-                return;
-            }
-            let kde = std::env::var("XDG_CURRENT_DESKTOP")
-                .map(|d| d.split(':').any(|p| p.eq_ignore_ascii_case("KDE")))
-                .unwrap_or(false);
-            if !kde {
-                return;
-            }
-            let keys = match swipe {
-                Swipe::Left => vec![Key::Control, Key::Meta, Key::LeftArrow],
-                Swipe::Right => vec![Key::Control, Key::Meta, Key::RightArrow],
-                Swipe::Up => vec![Key::Meta, Key::Other(b'W' as u32)],
-                Swipe::Down => vec![Key::Meta, Key::Other(b'D' as u32)],
-            };
-            if let Some(keyboard) = keyboard {
-                tap_uinput_chord(keyboard, &keys);
-            }
-        }
         Cmd::Chord(keys) => {
             if let Some(keyboard) = keyboard {
                 tap_uinput_chord(keyboard, &keys);
             }
         }
-        Cmd::Screenshot { window_only } => {
-            let _ = std::thread::Builder::new()
-                .name("warmup-screenshot".into())
-                .spawn(move || copy_screen_to_clipboard(window_only));
-        }
+        Cmd::Swipe(_) | Cmd::Screenshot { .. } => {}
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn apply_swipe(
+    keyboard: Option<&mut evdev::uinput::VirtualDevice>,
+    swipe: crate::touchpad_gestures::Swipe,
+) {
+    use crate::touchpad_gestures::Swipe;
+    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
+        let lua = match swipe {
+            Swipe::Left => r#"hl.dsp.focus({ workspace = "e-1" })"#,
+            Swipe::Right => r#"hl.dsp.focus({ workspace = "e+1" })"#,
+            Swipe::Up => r#"hl.dsp.focus({ workspace = "previous" })"#,
+            Swipe::Down => r#"hl.dsp.focus({ workspace = "emptym" })"#,
+        };
+        let _ = std::thread::Builder::new()
+            .name("hypr-swipe".into())
+            .spawn(move || crate::linux_game_detect::hypr_dispatch(lua));
+        return;
+    }
+    let kde = std::env::var("XDG_CURRENT_DESKTOP")
+        .map(|d| d.split(':').any(|p| p.eq_ignore_ascii_case("KDE")))
+        .unwrap_or(false);
+    if !kde {
+        return;
+    }
+    let keys = match swipe {
+        Swipe::Left => vec![Key::Control, Key::Meta, Key::LeftArrow],
+        Swipe::Right => vec![Key::Control, Key::Meta, Key::RightArrow],
+        Swipe::Up => vec![Key::Meta, Key::Other(b'W' as u32)],
+        Swipe::Down => vec![Key::Meta, Key::Other(b'D' as u32)],
+    };
+    if let Some(keyboard) = keyboard {
+        tap_uinput_chord(keyboard, &keys);
     }
 }
 
