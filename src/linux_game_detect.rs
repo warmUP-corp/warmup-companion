@@ -359,6 +359,7 @@ fn hypr_surface(command: &std::path::Path) -> Result<Surface, String> {
             .get("fullscreen")
             .and_then(|value| value.as_i64())
             .unwrap_or(0)
+            & 2
             != 0,
         floating: window
             .get("floating")
