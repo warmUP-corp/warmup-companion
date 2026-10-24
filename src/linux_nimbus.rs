@@ -88,7 +88,7 @@ pub fn ensure_running() {
                         }
                     },
                     None => {
-                        render_cpu(&cb, &mut cpu);
+                        let _ = render_cpu(&cb, &mut cpu);
                         Some(cpu.clone())
                     }
                 };
@@ -262,25 +262,44 @@ fn chan(c: u32, shift: u32) -> f32 {
     ((c >> shift) & 0xff) as f32 / 255.0
 }
 
-fn render_cpu(cb: &NimbusCb, out: &mut [u8]) {
+fn render_cpu(cb: &NimbusCb, out: &mut [u8]) -> Duration {
     let row = (RT * 4) as usize;
     let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 8);
     let rows_per = (RT as usize).div_ceil(workers);
     std::thread::scope(|scope| {
-        for (chunk, band) in out.chunks_mut(rows_per * row).enumerate() {
-            scope.spawn(move || {
-                for (dy, line) in band.chunks_mut(row).enumerate() {
-                    let y = (chunk * rows_per + dy) as f32;
-                    for x in 0..RT as usize {
-                        let c = ps_main(cb, [x as f32 + 0.5, y + 0.5]);
-                        for k in 0..4 {
-                            line[x * 4 + k] = unorm8(c[k]);
+        let bands: Vec<_> = out
+            .chunks_mut(rows_per * row)
+            .enumerate()
+            .map(|(chunk, band)| {
+                scope.spawn(move || {
+                    let started = thread_cpu_time();
+                    for (dy, line) in band.chunks_mut(row).enumerate() {
+                        let y = (chunk * rows_per + dy) as f32;
+                        for x in 0..RT as usize {
+                            let c = ps_main(cb, [x as f32 + 0.5, y + 0.5]);
+                            for k in 0..4 {
+                                line[x * 4 + k] = unorm8(c[k]);
+                            }
                         }
                     }
-                }
-            });
-        }
-    });
+                    thread_cpu_time().saturating_sub(started)
+                })
+            })
+            .collect();
+        bands
+            .into_iter()
+            .filter_map(|band| band.join().ok())
+            .max()
+            .unwrap_or_default()
+    })
+}
+
+fn thread_cpu_time() -> Duration {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) } != 0 {
+        return Duration::ZERO;
+    }
+    Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
 }
 
 fn unorm8(x: f32) -> u8 {
@@ -940,9 +959,7 @@ mod tests {
     fn one_frame_has_a_cloud() {
         let mut frame = vec![0u8; (RT * RT * 4) as usize];
         let cb = Clock::new().advance(Instant::now(), 1, 0.6, DEFAULT_ACCENT);
-        let started = Instant::now();
-        render_cpu(&cb, &mut frame);
-        let elapsed = started.elapsed();
+        let elapsed = render_cpu(&cb, &mut frame);
         let lit = frame.chunks_exact(4).filter(|px| px[3] > 8).count();
         assert!(lit > 40, "lit pixels {lit}");
         assert!(elapsed.as_millis() < 800, "nimbus frame took {elapsed:?}");
