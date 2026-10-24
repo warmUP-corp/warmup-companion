@@ -24,9 +24,37 @@ const TERMINAL_CLASSES: &[&str] = &[
     "consolewindowclass",
 ];
 
+#[cfg(target_os = "linux")]
+const LINUX_TERMINALS: &[&str] = &[
+    "alacritty",
+    "kitty",
+    "foot",
+    "footclient",
+    "org.wezfurlong.wezterm",
+    "wezterm-gui",
+    "com.mitchellh.ghostty",
+    "ghostty",
+    "konsole",
+    "org.kde.konsole",
+    "gnome-terminal",
+    "gnome-terminal-server",
+    "org.gnome.terminal",
+    "xterm",
+];
+
+#[cfg(windows)]
 pub fn is_terminal(exe: &str, class: &str) -> bool {
     TERMINAL_EXES.iter().any(|t| exe.eq_ignore_ascii_case(t))
         || TERMINAL_CLASSES.iter().any(|t| class.eq_ignore_ascii_case(t))
+}
+
+#[cfg(target_os = "linux")]
+pub fn is_terminal(exe: &str, class: &str) -> bool {
+    TERMINAL_EXES.iter().any(|t| exe.eq_ignore_ascii_case(t))
+        || TERMINAL_CLASSES.iter().any(|t| class.eq_ignore_ascii_case(t))
+        || LINUX_TERMINALS
+            .iter()
+            .any(|t| exe.eq_ignore_ascii_case(t) || class.eq_ignore_ascii_case(t))
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -468,6 +496,109 @@ pub(crate) fn copy_to_clipboard(mime: &str, bytes: &[u8]) -> bool {
         crate::install::log_line("clipboard: wl-copy failed");
     }
     wrote && ok
+}
+
+#[cfg(target_os = "linux")]
+fn clipboard_types() -> Option<Vec<String>> {
+    let out = std::process::Command::new("wl-paste")
+        .arg("--list-types")
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return Some(Vec::new());
+    }
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|line| line.trim().to_string())
+            .filter(|line| !line.is_empty())
+            .collect(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn clipboard_bytes(mime: &str) -> Option<Vec<u8>> {
+    let out = std::process::Command::new("wl-paste")
+        .args(["--no-newline", "--type", mime])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    (out.status.success() && !out.stdout.is_empty()).then_some(out.stdout)
+}
+
+#[cfg(target_os = "linux")]
+fn uri_list_paths(text: &str) -> Vec<PathBuf> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.strip_prefix("file://"))
+        .map(|rest| rest.find('/').map_or(rest, |i| &rest[i..]))
+        .map(|path| PathBuf::from(percent_decode(path)))
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+pub fn terminal_paste_text(exe: &str) -> Option<String> {
+    let Some(types) = clipboard_types() else {
+        crate::install::log_line("paste: wl-paste is not installed, falling back to the paste shortcut");
+        return None;
+    };
+    let has = |wanted: &str| types.iter().any(|t| t.eq_ignore_ascii_case(wanted));
+    let files = has("text/uri-list");
+    let text = !files
+        && types.iter().any(|t| {
+            t.starts_with("text/plain") || t == "UTF8_STRING" || t == "STRING" || t == "TEXT"
+        });
+    let image_type = types
+        .iter()
+        .find(|t| t.eq_ignore_ascii_case("image/png"))
+        .or_else(|| types.iter().find(|t| t.starts_with("image/")))
+        .cloned();
+    let image_bytes = if !text && !files {
+        image_type.as_deref().and_then(clipboard_bytes)
+    } else {
+        None
+    };
+    let clip = ClipState {
+        text,
+        image: image_bytes.is_some(),
+        files,
+        seq: image_bytes.as_deref().map(clip_seq).unwrap_or(0),
+    };
+    let last = LAST_IMAGE.lock().ok().and_then(|l| l.clone());
+    let paths = match decide(true, &clip, last.as_ref()) {
+        PasteAction::CtrlV => return None,
+        PasteAction::TypePath(path) => vec![path],
+        PasteAction::TypeFiles => {
+            let files = clipboard_bytes("text/uri-list")
+                .map(|bytes| uri_list_paths(&String::from_utf8_lossy(&bytes)))
+                .unwrap_or_default();
+            if files.is_empty() {
+                crate::install::log_line("paste: text/uri-list had no paths, falling back to the paste shortcut");
+                return None;
+            }
+            files
+        }
+        PasteAction::SaveAndTypePath => {
+            let bytes = image_bytes?;
+            let ext = image_type
+                .as_deref()
+                .and_then(|t| t.strip_prefix("image/"))
+                .map(|ext| if ext.eq_ignore_ascii_case("jpeg") { "jpg" } else { ext })
+                .unwrap_or("png")
+                .to_ascii_lowercase();
+            let Some(path) = save_bytes(&timestamp_stem("Clipboard", ""), &ext, &bytes, "clipboard image") else {
+                crate::install::log_line("paste: saving clipboard image failed, falling back to the paste shortcut");
+                return None;
+            };
+            remember_image(path.clone(), clip.seq);
+            vec![path]
+        }
+    };
+    let text = quote_paths(&paths);
+    crate::install::log_line(&format!("paste: image path into {exe} -> {}", text.trim_end()));
+    Some(text)
 }
 
 #[cfg(target_os = "linux")]

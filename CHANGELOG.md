@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, pasting into a terminal (Alacritty, kitty, foot, WezTerm, Ghostty, Konsole, GNOME Terminal, xterm) uses Ctrl+Shift+V. A copied picture or copied files are typed as quoted paths instead, like on Windows; a picture is saved under Pictures/Screenshots first, and a screenshot you just took is typed as its saved file.
 - On Linux, LB + RB + RT takes a screenshot and LB + RB + LT takes one of the focused window, and holding View + LB does it while a game has the controller, like on Windows. The picture is copied to the clipboard, saved under Pictures/Screenshots with the Windows file name, and a notification opens it. The companion uses `grim` and `wl-copy`, and falls back to the desktop's screenshot portal.
 - On Linux with Hyprland, the stick moves the pointer at a speed matched to the focused screen, like on Windows. On a screen larger than 1080p, one stick throw now crosses the same share of the screen instead of moving slower.
 - On Linux, the Guide or PS button opens warmUP when it is closed, like on Windows. The Control Center switch turns it off. warmUP started from the controller keeps running when the companion restarts.

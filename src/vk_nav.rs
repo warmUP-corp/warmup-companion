@@ -830,6 +830,18 @@ pub fn paste_clipboard() {
             }
         }
     }
+    #[cfg(all(target_os = "linux", feature = "gamepad"))]
+    {
+        let (_, exe, class, _) = foreground_info();
+        if crate::image_paste::is_terminal(&exe, &class) {
+            if let Some(text) = crate::image_paste::terminal_paste_text(&exe) {
+                send_text_direct(&text);
+                return;
+            }
+            crate::linux_type::tap_ctrl_shift(b'V' as u16);
+            return;
+        }
+    }
     inject_ctrl_key(VIRTUAL_KEY(b'V' as u16));
 }
 

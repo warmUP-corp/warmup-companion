@@ -139,6 +139,10 @@ sudo dnf install grim wl-clipboard      # Fedora
 
 The focused window is found through Hyprland. On other desktops, or when `grim` cannot capture (KDE Plasma), the companion asks the desktop's screenshot portal instead. The portal always captures the whole screen and may ask for permission the first time.
 
+## Paste into a terminal
+
+View + Y and the keyboard's paste key send Ctrl+Shift+V when the focused window is a terminal (Alacritty, kitty, foot, WezTerm, Ghostty, Konsole, GNOME Terminal, xterm), and Ctrl+V everywhere else. When the clipboard holds a picture or copied files instead of text, the terminal gets their quoted paths typed in; a picture is saved to Pictures/Screenshots first. This reads the clipboard with `wl-paste` from `wl-clipboard`. The focused window is known on Hyprland and on compositors with `zwlr_foreign_toplevel_management_v1`.
+
 ## Hyprland-only features
 
 These v0.10 features read Hyprland's IPC socket, so they work only on Hyprland:

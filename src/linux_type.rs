@@ -47,6 +47,29 @@ pub fn tap_ctrl(vk: u16) -> bool {
     chord(KeyCode::KEY_LEFTCTRL, code)
 }
 
+pub fn tap_ctrl_shift(vk: u16) -> bool {
+    let layout_code = char::from_u32(vk as u32)
+        .filter(char::is_ascii_alphanumeric)
+        .and_then(chord_code);
+    let Some(code) = layout_code.or_else(|| evdev_from_vk(vk)) else {
+        return false;
+    };
+    match with_board(|board| {
+        let _ = emit(&mut board.device, KeyCode::KEY_LEFTCTRL, 1);
+        let _ = emit(&mut board.device, KeyCode::KEY_LEFTSHIFT, 1);
+        let _ = emit(&mut board.device, code, 1);
+        let _ = emit(&mut board.device, code, 0);
+        let _ = emit(&mut board.device, KeyCode::KEY_LEFTSHIFT, 0);
+        let _ = emit(&mut board.device, KeyCode::KEY_LEFTCTRL, 0);
+    }) {
+        Ok(()) => true,
+        Err(error) => {
+            crate::install::log_line(&format!("text inject: {error}"));
+            false
+        }
+    }
+}
+
 pub fn ctrl_then(ctrl_vk: u16, vk: u16) -> bool {
     tap_ctrl(ctrl_vk) && tap_vk(vk)
 }
