@@ -39,7 +39,6 @@ const LINUX_TERMINALS: &[&str] = &[
     "gnome-terminal",
     "gnome-terminal-server",
     "org.gnome.terminal",
-    "xterm",
 ];
 
 #[cfg(windows)]

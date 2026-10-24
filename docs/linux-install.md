@@ -144,7 +144,7 @@ The focused window is found through Hyprland. On other desktops, or when `grim` 
 
 ## Paste into a terminal
 
-View + Y and the keyboard's paste key send Ctrl+Shift+V when the focused window is a terminal (Alacritty, kitty, foot, WezTerm, Ghostty, Konsole, GNOME Terminal, xterm), and Ctrl+V everywhere else. When the clipboard holds a picture or copied files instead of text, the terminal gets their quoted paths typed in; a picture is saved to Pictures/Screenshots first. This reads the clipboard with `wl-paste` from `wl-clipboard`. The focused window is known on Hyprland and on compositors with `zwlr_foreign_toplevel_management_v1`.
+View + Y and the keyboard's paste key send Ctrl+Shift+V when the focused window is a terminal (Alacritty, kitty, foot, WezTerm, Ghostty, Konsole, GNOME Terminal), and Ctrl+V everywhere else. When the clipboard holds a picture or copied files instead of text, the terminal gets their quoted paths typed in; a picture is saved to Pictures/Screenshots first. This reads the clipboard with `wl-paste` from `wl-clipboard`. The focused window is known on Hyprland and on compositors with `zwlr_foreign_toplevel_management_v1`.
 
 ## Hyprland-only features
 
