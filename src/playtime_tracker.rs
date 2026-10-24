@@ -2,7 +2,8 @@
 
 #![cfg(any(windows, target_os = "linux"))]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::parental_guard;
@@ -11,16 +12,112 @@ use crate::playtime_store::{
     acknowledge_closed_sessions, closed_sessions_for_wire, finalize_open, finalize_owner_sessions,
     new_external_id, persist_pending, store, unix_now_secs, OpenSession,
 };
-use crate::protocol::{LibraryWatchGameEntry, PlaySessionsAckPayload, PlaySessionsPayload};
+#[cfg(test)]
+use crate::protocol::LibraryWatchGameEntry;
+use crate::protocol::{
+    PlaySessionsAckPayload, PlaySessionsPayload, RunningGame, RunningGamesPayload,
+};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const EXIT_MISSES: u32 = 5;
+const RUNNING_GAMES_INTERVAL: Duration = Duration::from_secs(1);
+
+static RUNNING_GAMES: Mutex<(Option<TrackingOwner>, Option<RunningGamesPayload>)> =
+    Mutex::new((None, None));
 
 pub fn spawn_tracker_loop() {
     std::thread::Builder::new()
         .name("warmup-playtime-tracker".into())
         .spawn(tracker_loop)
         .ok();
+    std::thread::Builder::new()
+        .name("warmup-running-games".into())
+        .spawn(running_games_loop)
+        .ok();
+}
+
+pub fn set_running_games_owner(owner: Option<&TrackingOwner>) {
+    if let Ok(mut slot) = RUNNING_GAMES.lock() {
+        *slot = (owner.cloned(), None);
+    }
+}
+
+pub fn current_running_games() -> Option<RunningGamesPayload> {
+    RUNNING_GAMES.lock().ok()?.1.clone()
+}
+
+fn running_games_loop() {
+    loop {
+        let owner = RUNNING_GAMES.lock().ok().and_then(|slot| slot.0.clone());
+        if let Some(owner) = owner {
+            let payload = compute_running_games(&owner);
+            if let Ok(mut slot) = RUNNING_GAMES.lock() {
+                if slot.0.as_ref() == Some(&owner) {
+                    slot.1 = Some(payload);
+                }
+            }
+        }
+        std::thread::sleep(RUNNING_GAMES_INTERVAL);
+    }
+}
+
+fn compute_running_games(owner: &TrackingOwner) -> RunningGamesPayload {
+    let games = crate::library_watch::current_games()
+        .filter(|(watch_owner, _)| watch_owner == owner)
+        .map(|(_, games)| games)
+        .unwrap_or_default();
+    let our_pid = std::process::id();
+    let processes: Vec<(u32, String, Option<String>)> =
+        parental_guard::snapshot_processes_for_owner(owner)
+            .into_iter()
+            .filter(|(pid, _, _)| *pid != 0 && *pid != our_pid)
+            .collect();
+    let fullscreen_pid = foreground_fullscreen_pid();
+    let mut by_game: BTreeMap<String, RunningGame> = BTreeMap::new();
+    for matched in crate::game_list::match_processes(
+        &processes,
+        &games,
+        crate::process_guard::steam_running_app_id,
+    ) {
+        let fullscreen = fullscreen_pid == Some(matched.pid);
+        let key = match &matched.game_id {
+            Some(game_id) => format!("game:{game_id}"),
+            None => format!("image:{}", crate::game_list::normalize(&matched.image_path)),
+        };
+        let entry = RunningGame {
+            game_id: matched.game_id,
+            pid: matched.pid,
+            exe_stem: matched.exe_stem,
+            image_path: matched.image_path,
+            steam_app_id: matched.steam_app_id,
+            fullscreen,
+        };
+        match by_game.get_mut(&key) {
+            Some(existing) => {
+                let fullscreen = existing.fullscreen || fullscreen;
+                if entry.pid < existing.pid {
+                    *existing = entry;
+                }
+                existing.fullscreen = fullscreen;
+            }
+            None => {
+                by_game.insert(key, entry);
+            }
+        }
+    }
+    RunningGamesPayload {
+        games: by_game.into_values().collect(),
+    }
+}
+
+#[cfg(windows)]
+fn foreground_fullscreen_pid() -> Option<u32> {
+    crate::win::game_detect::foreground_fullscreen_pid()
+}
+
+#[cfg(target_os = "linux")]
+fn foreground_fullscreen_pid() -> Option<u32> {
+    crate::linux_game_detect::foreground_fullscreen_pid()
 }
 
 pub fn on_desktop_connected(owner: &TrackingOwner) {
@@ -90,9 +187,13 @@ fn tick_tracker() {
             .collect();
 
     let mut active_by_game: HashMap<String, u32> = HashMap::new();
-    for (pid, exe_name, image_path) in &processes {
-        if let Some(game_id) = match_process_to_game(exe_name, image_path.as_deref(), &games) {
-            active_by_game.entry(game_id).or_insert(*pid);
+    for matched in crate::game_list::match_processes(
+        &processes,
+        &games,
+        crate::process_guard::steam_running_app_id,
+    ) {
+        if let Some(game_id) = matched.game_id {
+            active_by_game.entry(game_id).or_insert(matched.pid);
         }
     }
 
@@ -165,90 +266,16 @@ fn tick_tracker() {
     }
 }
 
+#[cfg(test)]
 fn match_process_to_game(
     exe_name: &str,
     image_path: Option<&str>,
     games: &[LibraryWatchGameEntry],
 ) -> Option<String> {
-    let stem = exe_stem_lower(exe_name);
-    if stem.is_empty() {
-        return None;
-    }
-
-    let path_lower = image_path.map(|path| path.replace('/', "\\").to_ascii_lowercase());
-
-    let mut install_matches: Vec<&str> = Vec::new();
-    if let Some(path) = path_lower.as_deref() {
-        for game in games {
-            if game
-                .install_dir_prefixes
-                .iter()
-                .any(|prefix| path.starts_with(prefix_key(prefix).as_ref()))
-            {
-                install_matches.push(game.game_id.as_str());
-            }
-        }
-        install_matches.sort_unstable();
-        install_matches.dedup();
-        if install_matches.len() == 1 {
-            return Some(install_matches[0].to_string());
-        }
-        if install_matches.len() > 1 {
-            crate::install::log_line(&format!(
-                "playtime tracker: install-dir collision for {path} -> using {}",
-                install_matches[0]
-            ));
-            return Some(install_matches[0].to_string());
-        }
-    }
-
-    let mut stem_matches: Vec<&str> = games
-        .iter()
-        .filter(|game| game.exe_stems.iter().any(|s| s == &stem))
-        .map(|game| game.game_id.as_str())
-        .collect();
-    stem_matches.sort_unstable();
-    stem_matches.dedup();
-    if stem_matches.len() == 1 {
-        return Some(stem_matches[0].to_string());
-    }
-    if stem_matches.len() > 1 {
-        crate::install::log_line(&format!(
-            "playtime tracker: exe-stem collision for {stem} -> using {}",
-            stem_matches[0]
-        ));
-        return Some(stem_matches[0].to_string());
-    }
-    None
-}
-
-#[cfg(windows)]
-fn prefix_key(prefix: &str) -> std::borrow::Cow<'_, str> {
-    std::borrow::Cow::Borrowed(prefix)
-}
-
-#[cfg(not(windows))]
-fn prefix_key(prefix: &str) -> std::borrow::Cow<'_, str> {
-    std::borrow::Cow::Owned(prefix.replace('/', "\\").to_ascii_lowercase())
-}
-
-#[cfg(windows)]
-fn exe_stem_lower(exe_name: &str) -> String {
-    let lower = exe_name.to_ascii_lowercase();
-    lower
-        .strip_suffix(".exe")
-        .unwrap_or(lower.as_str())
-        .to_string()
-}
-
-#[cfg(not(windows))]
-fn exe_stem_lower(exe_name: &str) -> String {
-    let stem = exe_name.split('.').next().unwrap_or(exe_name);
-    if stem.is_empty() {
-        exe_name.to_ascii_lowercase()
-    } else {
-        stem.to_ascii_lowercase()
-    }
+    let processes = [(0, exe_name.to_string(), image_path.map(str::to_string))];
+    crate::game_list::match_processes(&processes, games, |_| None)
+        .into_iter()
+        .find_map(|matched| matched.game_id)
 }
 
 #[cfg(test)]

@@ -163,6 +163,10 @@ pub fn library_watch_file() -> PathBuf {
     state_dir().join("library-watch.json")
 }
 
+pub fn game_list_file() -> PathBuf {
+    state_dir().join("game-list.json")
+}
+
 pub fn parental_guard_file() -> PathBuf {
     state_dir().join("parental-guard.json")
 }

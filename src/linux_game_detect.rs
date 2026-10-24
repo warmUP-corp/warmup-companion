@@ -9,53 +9,6 @@ const EXTERNAL_FULLSCREEN_AXIS_PERCENT: i64 = 85;
 const EXTERNAL_FULLSCREEN_OVERLAP_PERCENT: i64 = 72;
 const DETECT_INTERVAL: Duration = Duration::from_millis(500);
 
-const EXTERNAL_GAME_EXE_DENYLIST: &[&str] = &[
-    "applicationframehost.exe",
-    "arc.exe",
-    "brave.exe",
-    "chrome.exe",
-    "chromium.exe",
-    "ctfmon.exe",
-    "duckduckgo.exe",
-    "dllhost.exe",
-    "dwm.exe",
-    "explorer.exe",
-    "firefox.exe",
-    "lockapp.exe",
-    "msedge.exe",
-    "opera.exe",
-    "perplexity.exe",
-    "runtimebroker.exe",
-    "searchhost.exe",
-    "searchapp.exe",
-    "shellhost.exe",
-    "shellexperiencehost.exe",
-    "startmenuexperiencehost.exe",
-    "steamwebhelper.exe",
-    "systemsettings.exe",
-    "textinputhost.exe",
-    "webviewhost.exe",
-    "widgets.exe",
-    "windowsterminal.exe",
-    "wt.exe",
-    "steam.exe",
-    "epicgameslauncher.exe",
-    "galaxyclient.exe",
-    "gog galaxy.exe",
-    "goggalaxy.exe",
-    "eadesktop.exe",
-    "origin.exe",
-    "ubisoftconnect.exe",
-    "upc.exe",
-    "uplay.exe",
-    "battle.net.exe",
-    "amazon games.exe",
-    "nile.exe",
-    "xboxpcapp.exe",
-    "gamingservices.exe",
-    "warmup.exe",
-];
-
 #[derive(Clone, Copy)]
 struct DetectionCache {
     checked_at: Instant,
@@ -132,6 +85,12 @@ pub fn foreground_window() -> Option<(String, String, String)> {
     }
 }
 
+pub fn foreground_fullscreen_pid() -> Option<u32> {
+    foreground_window();
+    let surface = latest_surface()?;
+    (surface.pid != 0 && surface_is_standalone_game(&surface)).then_some(surface.pid)
+}
+
 pub fn standalone_game_active_cached() -> bool {
     let now = Instant::now();
     let mut slot = match cache().lock() {
@@ -168,7 +127,24 @@ fn surface_active() -> bool {
         .lock()
         .ok()
         .and_then(|slot| slot.clone())
-        .is_some_and(|surface| surface_is_standalone_game(&surface))
+        .is_some_and(|surface| {
+            surface_is_standalone_game(&surface) && surface_is_known_game(&surface)
+        })
+}
+
+fn surface_is_known_game(surface: &Surface) -> bool {
+    if surface.pid == 0 || !crate::game_list::has_index() {
+        return true;
+    }
+    let Some(path) = crate::process_guard::image_path(surface.pid) else {
+        return false;
+    };
+    let steam_app_id = if crate::game_list::is_steam_library_path(&path) {
+        crate::process_guard::steam_running_app_id(surface.pid)
+    } else {
+        None
+    };
+    crate::game_list::is_known_game_image(&path, steam_app_id.as_deref())
 }
 
 fn publish(surface: Option<Surface>) {
@@ -182,6 +158,12 @@ fn surface_is_standalone_game(surface: &Surface) -> bool {
         return false;
     }
     if is_denied(&surface.exe) || is_denied(&surface.class_name) {
+        return false;
+    }
+    let exe_file = format!("{}.exe", basename(&surface.exe));
+    if crate::game_list::AMBIGUOUS_STORE_CLIENT_EXES.contains(&exe_file.as_str())
+        && crate::game_list::is_store_client_path(&surface.exe)
+    {
         return false;
     }
     if surface.fullscreen {
@@ -207,13 +189,15 @@ fn is_denied(name: &str) -> bool {
     if base.is_empty() {
         return false;
     }
-    EXTERNAL_GAME_EXE_DENYLIST.iter().any(|entry| {
-        let stem = deny_stem(entry);
-        base == stem
-            || base
-                .split(|ch: char| ch == '.' || ch == ' ')
-                .any(|part| part == stem)
-    })
+    crate::game_list::denylist_names()
+        .iter()
+        .any(|entry| {
+            let stem = deny_stem(entry);
+            base == stem
+                || base
+                    .split(|ch: char| ch == '.' || ch == ' ')
+                    .any(|part| part == stem)
+        })
 }
 
 fn basename(name: &str) -> String {
@@ -397,7 +381,7 @@ fn hypr_surface(command: &std::path::Path) -> Result<Surface, String> {
     let pid = window.get("pid").and_then(|value| value.as_u64()).unwrap_or(0) as u32;
     let class_name = json_string(&window, "class");
     let title = json_string(&window, "title");
-    let exe = exe_for_pid(pid).unwrap_or_else(|| class_name.clone());
+    let exe = process_image(pid).unwrap_or_else(|| class_name.clone());
     let (x, y) = json_pair(&window, "at");
     let (w, h) = json_pair(&window, "size");
     Ok(Surface {
@@ -599,12 +583,11 @@ fn json_pair(value: &serde_json::Value, key: &str) -> (i64, i64) {
     )
 }
 
-fn exe_for_pid(pid: u32) -> Option<String> {
+fn process_image(pid: u32) -> Option<String> {
     if pid == 0 {
         return None;
     }
-    let link = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
-    Some(link.to_string_lossy().into_owned())
+    crate::process_guard::image_path(pid)
 }
 
 mod wlr {
@@ -838,7 +821,7 @@ mod tests {
         assert!(is_denied("/usr/bin/steam"));
         assert!(is_denied("com.google.Chrome"));
         assert!(is_denied("warmup"));
-        assert!(!is_denied("warmup-companion"));
+        assert!(!is_denied("warmup-tools"));
         assert!(!is_denied("Celeste"));
     }
 }

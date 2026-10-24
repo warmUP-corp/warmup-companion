@@ -60,6 +60,7 @@ The client sends `hello` as its **first** frame after connecting. The server rep
 | `config` | client | desktop's current `GamepadConfig` snapshot (so the companion starts with the right tuning); server omits |
 | `mode` | client | desktop's current mode snapshot; server omits |
 | `companionSettings` | client | full companion-local settings snapshot, resent on each connection; server omits |
+| `gameDetectionRevision` | server | revision of the known-game list the companion has stored (from `game_detection`, kept across restarts); omitted when it has none. The desktop re-sends `game_detection` only when its own revision differs. Additive on v6 |
 
 ## Up frames (companion → desktop)
 
@@ -76,12 +77,20 @@ Each maps to an existing webview event; the desktop re-emits the `payload` uncha
 | `touchpad` | `gamepad:touchpad` | `{ fingers: [{ index: u8, down: bool, x: f32, y: f32, pressure: f32 }] }` |
 | `play_sessions` | _(desktop ingest only)_ | `{ sessions: [{ externalId, gameId, startedAt, endedAt, durationMinutes }] }` |
 | `settings_changed` | _(desktop ingest only)_ | `{ config: GamepadConfig, companionSettings: CompanionSettings }` |
+| `running_games` | _(desktop ingest only)_ | `{ games: [{ gameId: string \| null, pid: u32, exeStem: string, imagePath: string, steamAppId: string \| null, fullscreen: bool }] }` |
 
 Notes:
 - `connection.controllerType` / `button.controllerType`: `"xbox" | "playstation" | "switch" | "generic"` (existing desktop vocabulary).
 - `battery.percent`: `0–100`, or `-1` when the controller reports no level. `wired` = no internal battery.
 - `cursor_moved` / `axis` / `touchpad` are throttled by the companion (≈100 ms) exactly as the desktop poll thread does today.
 - `settings_changed` is additive on v6 (do **not** bump `protocolVersion`). The companion emits it when `C:\ProgramData\WarmupVk\settings.ini` (or runtime status) changes on disk — e.g. Control Center or tray edits. A background thread watches the parent directories with `FindFirstChangeNotification` (no mtime polling); the pipe loop only loads an atomic generation counter. External changes are drained before inbound frames each pass. Pipe-originated writes also wake the watcher, but the companion suppresses the echo when the snapshot still matches its SettingsSync baseline. `config` is the companion snapshot (`keyboardTheme` omitted / `null`; `enabled` and `cursorEnabled` both mirror ini `cursor_enabled`); absent optional LED fields mean “not set in ini”.
+
+- `running_games` is additive on v6. The companion sends it while a desktop is connected, at most once a second and only when the list changed; an empty `games` list means no known game runs. It is computed from the connected user's processes:
+  - Without a `game_detection` list, an entry is a process owned by a `library_watch` game.
+  - With a list, a process is only reported when it is a known game: its normalised image path (trimmed, `\` → `/`, ASCII lowercase) contains one of the `patterns` stored under its file name, or the path contains `/steamapps/common/` and the process's running Steam app id (Windows: `RunningAppID` in the owner's `Software\Valve\Steam` key; Linux: `SteamAppId`, else `SteamGameId`, from the process environment) is in `steamAppIds`, or it runs under one of `localGameDirs`.
+  - `gameId` is the `localGameDirs` entry, else the `library_watch` game whose install folder is the longest prefix of the path. Two games tied on the same folder give `null`. A game without folders is matched by exe stem only when that stem belongs to exactly one game and is not generic (`app`, `bootstrap`, `bootstrapper`, `client`, `crashpad_handler`, `game`, `gamelaunchhelper`, `install`, `launch`, `launcher`, `main`, `play`, `run`, `setup`, `start`, `update`, `updater`).
+  - Denylisted exes, the background-tool stems and Wallpaper Engine (Steam `431960`) are never reported. Several processes of one game collapse into one entry with the lowest `pid`.
+  - `fullscreen` is true when that game owns the foreground window the companion's fullscreen-game heuristic picks. On Linux a Proton game reports its Windows exe as `exeStem` and its `imagePath` resolved through the Wine prefix.
 
 ## Down frames (desktop → companion)
 
@@ -95,6 +104,21 @@ Notes:
 | `library_watch` | `{ enabled: bool, games: [{ gameId, exeStems: string[], installDirPrefixes: string[] }] }` | offline playtime tracking (v6) |
 | `play_sessions_ack` | `{ externalIds: string[] }` | offline playtime tracking (v6) |
 | `shut_down` | `{}` | ask the companion to stop itself (WAR-42); additive on v6 |
+| `game_detection` | `{ revision: u64, chunk: u32, chunks: u32, patterns: string[], steamAppIds: string[], localGameDirs: [{ gameId, prefix }], denylistExes: string[], backgroundToolStems: string[] }` | known-game list for game detection (v6, below) |
+
+### `game_detection` list
+
+warmUP sends its known-game list in one or more chunks so that every NDJSON line stays under 48 KB (the companion drops lines over 64 KB). All chunks of one list carry the same `revision` and `chunks`, and `chunk` counts from `0`. Each chunk carries a slice of the arrays, and the companion appends them in arrival order. It applies the list once every chunk has arrived, then stores it (`game-list.json` beside `library-watch.json`) and replaces the previous list. A chunk for another `revision` restarts collection. A chunk outside `0..chunks`, more than 128 chunks, or a list over the limits (2 MB of text, 20 000 patterns, 30 000 Steam app ids, 4 000 local folders, 4 000 names in each of the two name lists) is rejected and the stored list stays as it was.
+
+| Field | Meaning |
+|---|---|
+| `patterns` | Discord-style win32 path tails, e.g. `binaries/win64/game.exe`; a leading `>` is ignored, matching is on the normalised path |
+| `steamAppIds` | Steam app ids whose games count when they run under `steamapps/common` |
+| `localGameDirs` | install folders of manually added games; `prefix` in either slash style, matched case-insensitively |
+| `denylistExes` | exe file names that are never games; when non-empty it replaces the companion's built-in list |
+| `backgroundToolStems` | exe stems of always-on tools; when non-empty it replaces the built-in `wallpaper32`, `wallpaper64` |
+
+Once a list is stored, the companion's own game signal (sleep on game, standalone game detection) only counts the fullscreen foreground window when its process is a known game by the rules above. Without a list it keeps the plain fullscreen heuristic. The companion also accepts a `game_detection` frame whose fields sit beside `type` instead of inside `payload`.
 
 ### `GamepadConfig` payload
 
@@ -222,6 +246,7 @@ fields keep the native keyboard's current dark/light default for that color slot
 - `axis` is an additive v4-compatible up-frame; old desktop clients ignore it as unknown, old companions simply omit it.
 - `led` is an additive v4-compatible down-frame for one-shot test writes; old companions ignore it as unknown.
 - `shut_down` is an additive v6-compatible down-frame for unelevated companion stop. Old companions ignore it as unknown; Kid Mode blocking refuses it and keeps the service running.
+- `game_detection`, `running_games` and `hello.gameDetectionRevision` are additive on v6. Old companions ignore `game_detection` as unknown and never send the revision, so the desktop keeps sending the list on each connection; old desktops ignore `running_games`.
 - `settings_changed` is an additive v6-compatible up-frame for companion→desktop settings sync when the shared ini changes locally. Old desktops ignore it as unknown.
 - Additive fields may stay on the current protocol when both directions are default/unknown-field tolerant.
 - Breaking changes to the pipe name, framing, `hello` shape, or required frame `payload` fields bump it.
