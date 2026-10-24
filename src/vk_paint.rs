@@ -599,7 +599,6 @@ pub fn prompt_spec(style: VkStyle) -> Option<&'static PromptSpec> {
 pub const PROMPT_PILL_H: f32 = 116.0;
 pub const PROMPT_LABEL_PX: f32 = 28.0;
 pub const PROMPT_FAMILIES: &[&str] = &["Segoe UI", "Noto Sans", "DejaVu Sans"];
-pub const CONTROLLER_ART_PX: u32 = 1254;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ControllerArt {
@@ -631,13 +630,6 @@ impl ControllerArt {
         match self {
             Self::DualSense => include_bytes!("../assets/controller-models/dualsense-controller.png"),
             Self::XboxOne => include_bytes!("../assets/controller-models/xbox-one-controller.png"),
-        }
-    }
-
-    pub(crate) fn key(self) -> &'static str {
-        match self {
-            Self::DualSense => "controller-art-dualsense",
-            Self::XboxOne => "controller-art-xbox-one",
         }
     }
 }

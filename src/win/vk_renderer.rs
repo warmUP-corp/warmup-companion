@@ -8,20 +8,20 @@ use windows::core::{w, Interface};
 use windows::Foundation::Numerics::Matrix3x2;
 use windows::Win32::Foundation::{BOOL, HWND, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
-    D2D1_FILL_MODE_ALTERNATE, D2D1_PIXEL_FORMAT, D2D_POINT_2F, D2D_RECT_F,
-    D2D_SIZE_F, D2D_SIZE_U,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
+#[cfg(feature = "vk-panels")]
+use windows::Win32::Graphics::Direct2D::Common::D2D_POINT_2F;
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory, ID2D1Factory1,
-    ID2D1Resource, ID2D1SolidColorBrush,
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL,
+    D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
+    ID2D1SolidColorBrush,
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
     D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET,
     D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
     D2D1_DRAW_TEXT_OPTIONS_NONE,
     D2D1_FACTORY_TYPE_SINGLE_THREADED,
     D2D1_INTERPOLATION_MODE_LINEAR,
-    D2D1_ROUNDED_RECT, D2D1_SWEEP_DIRECTION_CLOCKWISE,
+    D2D1_ROUNDED_RECT,
     D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
 };
 use windows::Win32::Graphics::Direct3D::{
@@ -38,8 +38,8 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
     DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL,
-    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_FAR,
-    DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_ALIGNMENT_CENTER,
+    DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_CENTER,
     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 #[cfg(feature = "vk-panels")]
@@ -58,7 +58,7 @@ use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 #[cfg(test)]
 use super::controller_tips::TipToken;
 #[cfg(test)]
-use crate::vk_paint::{tip_item, TipItem};
+use crate::vk_paint::{prompt_spec, tip_item, TipItem};
 use super::nimbus_orb::{drive_scale, mood_drive, NimbusMood, NimbusOrb, ORB_FRAME_FILL};
 use super::shortcut_sheet;
 #[cfg(feature = "vk-panels")]
@@ -76,8 +76,10 @@ use crate::vk_paint::{caps_icon, is_action_key, shift_icon, styled_glyph};
 pub(crate) use crate::vk_paint::{icon_draw_px, paint_icon};
 pub(crate) use crate::vk_paint::{
     is_playstation_label, paint_focus_ring, paint_key,
-    paint_strip, ControllerIconFamily, Edges, KeyState, KeyStyle, StripGeom, StripPaint, VkIcon,
+    paint_strip, ControllerIconFamily, Edges, KeyState, KeyStyle, StripGeom, StripPaint,
 };
+#[cfg(any(test, feature = "vk-panels"))]
+pub(crate) use crate::vk_paint::VkIcon;
 #[cfg(test)]
 use crate::vk_paint::{bar_layout, legend_layout, BarLayout, BAR_LABEL_PX, BAR_SEP_PX};
 pub(crate) use crate::vk_paint::{legend_span, paint_legend, LegendPaint, BAR_H};
@@ -96,16 +98,13 @@ pub use crate::vk_geom::KeyRect;
 pub use crate::vk_paint::{
     FLOATING_PANEL_INSET,
     MONO_FAMILIES,
-    PromptSpec,
     StripLook,
     StyleSpec,
     VkLook,
     VkPalette,
-    colorref_mix,
     floating_pad,
     lerp,
     mix_color,
-    prompt_spec,
     ref_key_h,
     ref_unit,
     strip_band_height,
@@ -204,12 +203,8 @@ struct StyleFonts {
     look: VkLook,
     size_key: i32,
     label: IDWriteTextFormat,
+    #[cfg(feature = "vk-panels")]
     word: IDWriteTextFormat,
-    number: IDWriteTextFormat,
-    space: IDWriteTextFormat,
-    chip: IDWriteTextFormat,
-    chip_sel: IDWriteTextFormat,
-    label_corner: IDWriteTextFormat,
 }
 
 
@@ -226,13 +221,9 @@ pub struct VkRenderer {
     d2d_target: Option<ID2D1Bitmap1>,
     dwrite: IDWriteFactory,
     text_format: IDWriteTextFormat,
-    glyph_format: IDWriteTextFormat,
     glyph_px: f32,
-    /// Small font for sublabels, badges, and the legend strip.
-    hint_format: IDWriteTextFormat,
     hint_px: f32,
     style_fonts: Option<StyleFonts>,
-    /// Fixed large font for the connect/keyboard prompt pills (10-foot UI).
     controller_art_cache: HashMap<ControllerArtCacheKey, (ID2D1Bitmap1, u32, u32)>,
     prompt_started: Instant,
     /// Gliding focus-ring rect (client px) + the previous draw time, so the ring
@@ -255,7 +246,6 @@ pub struct VkRenderer {
     nimbus_failed: bool,
     sheet_alpha: f32,
     sheet_tick: Option<Instant>,
-    text_formats: std::cell::RefCell<HashMap<(VkStyle, i32), IDWriteTextFormat>>,
     d3d: ID3D11Device,
     _d2d_device: ID2D1Device,
     _dcomp_device: IDCompositionDevice,
@@ -621,9 +611,7 @@ impl VkRenderer {
             gfx: Gfx::wrap(&d2d_context)?,
             dwrite,
             text_format,
-            glyph_format,
             glyph_px: label_px * 1.1,
-            hint_format,
             hint_px: (label_px * 0.5).clamp(10.0, 20.0),
             style_fonts: None,
             controller_art_cache: HashMap::new(),
@@ -637,7 +625,6 @@ impl VkRenderer {
             nimbus_failed: false,
             sheet_alpha: 0.0,
             sheet_tick: None,
-            text_formats: std::cell::RefCell::new(HashMap::new()),
             d3d,
             _d2d_device: d2d_device,
             _dcomp_device: dcomp_device,
@@ -746,17 +733,8 @@ impl VkRenderer {
             look,
             size_key,
             label: make(spec.label_weight, spec.label_px)?,
+            #[cfg(feature = "vk-panels")]
             word: make(spec.word_weight, spec.word_px)?,
-            number: make(400, spec.number_px)?,
-            space: make(400, spec.space_label_px)?,
-            chip: make(400, spec.chip_px)?,
-            chip_sel: make(spec.chip_sel_weight, spec.chip_px)?,
-            label_corner: {
-                let f = make(spec.label_weight, spec.label_px)?;
-                let _ = f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                let _ = f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_FAR);
-                f
-            },
         };
         self.style_fonts = Some(built);
         Ok(())
@@ -1370,35 +1348,6 @@ impl VkRenderer {
         paint_modern_sheet(&mut self.gfx, &sp, unit, panel, radius, alpha);
         Ok(())
     }
-    unsafe fn text_format(&self, style: VkStyle, px: f32) -> Result<IDWriteTextFormat, String> {
-        let key = (style, (px * 4.0).round() as i32);
-        if let Some(f) = self.text_formats.borrow().get(&key) {
-            return Ok(f.clone());
-        }
-        let mut fonts: Option<IDWriteFontCollection> = None;
-        self.dwrite
-            .GetSystemFontCollection(&mut fonts, false)
-            .map_err(|e| format!("GetSystemFontCollection: {e}"))?;
-        let fonts = fonts.ok_or("GetSystemFontCollection returned null")?;
-        let family = resolve_family(&fonts, style_spec(style).families);
-        let f = self
-            .dwrite
-            .CreateTextFormat(
-                &family,
-                &fonts,
-                DWRITE_FONT_WEIGHT_NORMAL,
-                DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                px.max(1.0),
-                &user_locale_name(),
-            )
-            .map_err(|e| format!("CreateTextFormat ({family}): {e}"))?;
-        let _ = f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-        let _ = f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        let _ = f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-        self.text_formats.borrow_mut().insert(key, f.clone());
-        Ok(f)
-    }
 
     #[cfg(test)]
     unsafe fn measure_px(&self, style: VkStyle, text: &str, px: f32) -> f32 {
@@ -1728,7 +1677,6 @@ impl VkRenderer {
     pub unsafe fn draw_voice(&mut self, pill: &VoicePill) -> Result<(), String> {
         let VoicePill {
             bg,
-            border: _,
             accent,
             text,
             level,
@@ -1816,7 +1764,6 @@ pub use crate::vk_paint::{PromptCard, TipsPill};
 /// enter/exit transition; `label_alpha` fades a freshly swapped phase title in.
 pub struct VoicePill<'a> {
     pub bg: u32,
-    pub border: u32,
     pub accent: u32,
     pub text: u32,
     /// Raw published mic level (0..1); the renderer applies the envelope.
@@ -1831,63 +1778,6 @@ pub struct VoicePill<'a> {
     pub show_orb: bool,
 }
 
-/// Screen rectangle with a rounded-rect hole. The hole's corner radius fills
-/// nothing at the bezel: the outer path is square, so the corner wedge is paint.
-unsafe fn fill_edge_band(
-    ctx: &ID2D1DeviceContext,
-    cw: f32,
-    ch: f32,
-    depth: f32,
-    radius: f32,
-    brush: &ID2D1SolidColorBrush,
-) -> Result<(), String> {
-    let depth = depth.max(1.0);
-    let radius = radius.min(depth).min(cw * 0.5).min(ch * 0.5).max(0.0);
-    let resource: ID2D1Resource = ctx.cast().map_err(|e| format!("d2d resource: {e}"))?;
-    let factory: ID2D1Factory = resource
-        .GetFactory()
-        .map_err(|e| format!("d2d factory: {e}"))?;
-    let geometry = factory
-        .CreatePathGeometry()
-        .map_err(|e| format!("path: {e}"))?;
-    let sink = geometry.Open().map_err(|e| format!("path open: {e}"))?;
-    sink.SetFillMode(D2D1_FILL_MODE_ALTERNATE);
-    let p = |x: f32, y: f32| D2D_POINT_2F { x, y };
-    sink.BeginFigure(p(0.0, 0.0), D2D1_FIGURE_BEGIN_FILLED);
-    sink.AddLine(p(cw, 0.0));
-    sink.AddLine(p(cw, ch));
-    sink.AddLine(p(0.0, ch));
-    sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-
-    let left = depth;
-    let top = depth;
-    let right = (cw - depth).max(left + 1.0);
-    let bottom = (ch - depth).max(top + 1.0);
-    let r = radius;
-    sink.BeginFigure(p(left + r, top), D2D1_FIGURE_BEGIN_FILLED);
-    sink.AddLine(p(right - r, top));
-    let arc = |x: f32, y: f32| D2D1_ARC_SEGMENT {
-        point: p(x, y),
-        size: D2D_SIZE_F {
-            width: r,
-            height: r,
-        },
-        rotationAngle: 0.0,
-        sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
-        arcSize: D2D1_ARC_SIZE_SMALL,
-    };
-    sink.AddArc(&arc(right, top + r));
-    sink.AddLine(p(right, bottom - r));
-    sink.AddArc(&arc(right - r, bottom));
-    sink.AddLine(p(left + r, bottom));
-    sink.AddArc(&arc(left, bottom - r));
-    sink.AddLine(p(left, top + r));
-    sink.AddArc(&arc(left + r, top));
-    sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-    sink.Close().map_err(|e| format!("path close: {e}"))?;
-    ctx.FillGeometry(&geometry, brush, None);
-    Ok(())
-}
 
 fn nimbus_mood(phase: VoicePhase, level: f32) -> NimbusMood {
     match phase {
@@ -2023,7 +1913,7 @@ unsafe fn create_dwrite() -> Result<IDWriteFactory, String> {
     DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).map_err(|e| format!("DWriteCreateFactory: {e}"))
 }
 
-/// `CreateTextFormat` rejects a null locale on some builds; use the user default.
+#[cfg(test)]
 fn key_metrics(
     scale_w: f32,
     client_h: f32,
