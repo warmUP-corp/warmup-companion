@@ -2124,7 +2124,7 @@ impl VkRenderer {
 }
 
 pub(crate) use crate::vk_paint::ControllerArt;
-pub use crate::vk_paint::{PromptCard, TipsPill, PROMPT_PILL_H};
+pub use crate::vk_paint::{PromptCard, TipsPill};
 
 #[derive(Clone, Copy)]
 

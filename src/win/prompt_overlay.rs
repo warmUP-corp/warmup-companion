@@ -35,7 +35,7 @@ use crate::prompt_state::*;
 const WINDOW_CLASS: windows::core::PCWSTR = w!("WarmupPromptOverlayWindow");
 
 /// One canvas for the prompt pill AND the connection card: the pill sits in the
-/// bottom `vk_renderer::PROMPT_PILL_H` band and the card grows upward out of it,
+/// bottom `vk_paint::PROMPT_PILL_H` band and the card grows upward out of it,
 /// so the morph never moves or resizes the window (that is what made it drift).
 const PANEL_W: i32 = 720;
 const PANEL_H: i32 = 420;
