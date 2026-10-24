@@ -4151,6 +4151,7 @@ dependencies = [
 name = "warmup-companion"
 version = "0.10.5"
 dependencies = [
+ "alsa",
  "async-io",
  "cosmic-text",
  "cpal",

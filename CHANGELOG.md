@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, dictation records from the microphone chosen in the tray or the Voice tab also on PipeWire systems without the PulseAudio ALSA plugin. If that microphone cannot be opened, dictation records from the default input and a notification says so, instead of switching silently.
 - On Linux, once a voice model is installed the tray shows the Voice engine menu like Windows: Off, Parakeet (NVIDIA) and, when it is installed, Parakeet Redux. Choosing an engine turns voice typing on with it. Whisper is not offered on Linux.
 - On Linux, dictation applies the `vocabulary` setting like Windows: with the coding vocabulary on, misheard developer terms are fixed ("get push" becomes "git push"), and your own words keep the spelling you gave them.
 - On Linux, the Control Center Voice tab downloads and removes the Parakeet (NVIDIA) and Parakeet Redux dictation models, with the ONNX Runtime they need, and shows the download progress, like on Windows. The model and runtime no longer have to be copied in by hand.

@@ -126,20 +126,217 @@ pub fn list_mics() -> Vec<Mic> {
         .collect()
 }
 
-fn pick_device(host: &cpal::Host) -> Option<cpal::Device> {
-    if let Some(want) = mic_choice().filter(|want| list_mics().iter().any(|m| &m.name == want)) {
-        let pulse = host
-            .input_devices()
-            .ok()
-            .and_then(|mut devices| devices.find(|d| d.name().is_ok_and(|n| n == "pulse")));
-        if let Some(device) = pulse {
-            std::env::set_var("PULSE_SOURCE", &want);
-            crate::install::log_line(&format!("speech: source = {want}"));
-            return Some(device);
+struct MicStream {
+    _cpal: Option<cpal::Stream>,
+    _alsa: Option<AlsaCapture>,
+}
+
+struct AlsaCapture {
+    stop: std::sync::Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for AlsaCapture {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
         }
     }
-    std::env::remove_var("PULSE_SOURCE");
-    host.default_input_device()
+}
+
+static MIC_WARNED: Mutex<Option<String>> = Mutex::new(None);
+
+fn warn_mic_fallback(want: &str, reason: &str) {
+    crate::install::log_line(&format!(
+        "speech: chosen mic {want} unavailable ({reason}), recording from the default input"
+    ));
+    let Ok(mut warned) = MIC_WARNED.lock() else {
+        return;
+    };
+    if warned.as_deref() == Some(want) {
+        return;
+    }
+    *warned = Some(want.to_string());
+    let label = list_mics()
+        .into_iter()
+        .find(|m| m.name == want)
+        .map(|m| m.label)
+        .unwrap_or_else(|| want.to_string());
+    let _ = crate::linux_notify::notify(
+        "Voice typing uses the default microphone",
+        &format!("{label} could not be opened, so dictation records from the default input."),
+    );
+}
+
+fn open_chosen_mic(
+    want: &str,
+    buf: &std::sync::Arc<Mutex<Vec<f32>>>,
+) -> Result<(AlsaCapture, u32), String> {
+    if want.contains('"') || want.contains('\\') {
+        return Err("unsupported source name".into());
+    }
+    let mut errors = Vec::new();
+    for pcm in [
+        format!("pipewire:NODE=\"{want}\""),
+        format!("pulse:DEVICE=\"{want}\""),
+    ] {
+        match open_alsa_capture(&pcm, buf.clone()) {
+            Ok(opened) => {
+                crate::install::log_line(&format!(
+                    "speech: source = {want} via {}",
+                    pcm.split(':').next().unwrap_or("")
+                ));
+                return Ok(opened);
+            }
+            Err(error) => errors.push(error),
+        }
+    }
+    Err(errors.join("; "))
+}
+
+fn open_alsa_capture(
+    pcm_name: &str,
+    buf: std::sync::Arc<Mutex<Vec<f32>>>,
+) -> Result<(AlsaCapture, u32), String> {
+    use alsa::pcm::{Access, Format, HwParams, PCM};
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let (tx, rx) = std::sync::mpsc::channel::<Result<u32, String>>();
+    let name = pcm_name.to_string();
+    let flag = stop.clone();
+    let thread = std::thread::Builder::new()
+        .name("warmup-mic".into())
+        .spawn(move || {
+            let opened = (|| -> Result<(PCM, u32), alsa::Error> {
+                let pcm = PCM::new(&name, alsa::Direction::Capture, false)?;
+                {
+                    let hwp = HwParams::any(&pcm)?;
+                    hwp.set_access(Access::RWInterleaved)?;
+                    hwp.set_format(Format::float())?;
+                    hwp.set_channels(1)?;
+                    hwp.set_rate_near(48_000, alsa::ValueOr::Nearest)?;
+                    hwp.set_period_size_near(960, alsa::ValueOr::Nearest)?;
+                    pcm.hw_params(&hwp)?;
+                }
+                let rate = pcm.hw_params_current()?.get_rate()?;
+                pcm.start()?;
+                Ok((pcm, rate))
+            })();
+            let (pcm, rate) = match opened {
+                Ok(opened) => opened,
+                Err(error) => {
+                    let _ = tx.send(Err(format!("{name}: {error}")));
+                    return;
+                }
+            };
+            let io = match pcm.io_f32() {
+                Ok(io) => io,
+                Err(error) => {
+                    let _ = tx.send(Err(format!("{name}: {error}")));
+                    return;
+                }
+            };
+            let _ = tx.send(Ok(rate));
+            let mut chunk = [0f32; 960];
+            while !flag.load(Ordering::SeqCst) {
+                match io.readi(&mut chunk) {
+                    Ok(frames) => push_mono(&chunk[..frames], 1, &buf),
+                    Err(error) => {
+                        if pcm.try_recover(error, true).is_err() {
+                            crate::install::log_line(&format!("mic stream error: {error}"));
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .map_err(|error| error.to_string())?;
+    match rx.recv() {
+        Ok(Ok(rate)) => Ok((
+            AlsaCapture {
+                stop,
+                thread: Some(thread),
+            },
+            rate,
+        )),
+        Ok(Err(error)) => {
+            let _ = thread.join();
+            Err(error)
+        }
+        Err(_) => {
+            let _ = thread.join();
+            Err(format!("{pcm_name}: capture thread ended"))
+        }
+    }
+}
+
+fn open_mic(buf: &std::sync::Arc<Mutex<Vec<f32>>>) -> Result<(MicStream, u32), String> {
+    if let Some(want) = mic_choice() {
+        if list_mics().iter().any(|m| m.name == want) {
+            match open_chosen_mic(&want, buf) {
+                Ok((capture, rate)) => {
+                    let stream = MicStream {
+                        _cpal: None,
+                        _alsa: Some(capture),
+                    };
+                    return Ok((stream, rate));
+                }
+                Err(error) => warn_mic_fallback(&want, &error),
+            }
+        } else {
+            crate::install::log_line(&format!(
+                "speech: chosen mic {want} is not connected, recording from the default input"
+            ));
+        }
+    }
+    let host = cpal::default_host();
+    let device = host
+        .default_input_device()
+        .ok_or_else(|| "no microphone is available".to_string())?;
+    crate::install::log_line(&format!(
+        "speech: mic = {}",
+        device.name().unwrap_or_else(|_| "<unknown>".into())
+    ));
+    let supported = device
+        .default_input_config()
+        .map_err(|error| format!("default_input_config: {error}"))?;
+    let in_rate = supported.sample_rate().0;
+    let channels = supported.channels() as usize;
+    let sample_format = supported.sample_format();
+    let config: cpal::StreamConfig = supported.into();
+    let err_fn = |error: cpal::StreamError| {
+        crate::install::log_line(&format!("mic stream error: {error}"));
+    };
+    macro_rules! build {
+        ($t:ty) => {{
+            let buf = buf.clone();
+            device.build_input_stream(
+                &config,
+                move |data: &[$t], _: &cpal::InputCallbackInfo| push_mono(data, channels, &buf),
+                err_fn,
+                None,
+            )
+        }};
+    }
+    let stream = match sample_format {
+        SampleFormat::F32 => build!(f32),
+        SampleFormat::F64 => build!(f64),
+        SampleFormat::I16 => build!(i16),
+        SampleFormat::I32 => build!(i32),
+        SampleFormat::I8 => build!(i8),
+        SampleFormat::U16 => build!(u16),
+        SampleFormat::U8 => build!(u8),
+        other => return Err(format!("unsupported mic sample format: {other:?}")),
+    }
+    .map_err(|error| format!("build_input_stream: {error}"))?;
+    stream
+        .play()
+        .map_err(|error| format!("mic stream play: {error}"))?;
+    let stream = MicStream {
+        _cpal: Some(stream),
+        _alsa: None,
+    };
+    Ok((stream, in_rate))
 }
 
 fn engine_path() -> PathBuf {
@@ -586,48 +783,8 @@ fn set_level(level: f32) {
 fn record_and_type() -> Result<(), String> {
     let _media = MediaPause::hold();
     ensure_server()?;
-    let host = cpal::default_host();
-    let device = pick_device(&host).ok_or_else(|| "no microphone is available".to_string())?;
-    crate::install::log_line(&format!(
-        "speech: mic = {}",
-        device.name().unwrap_or_else(|_| "<unknown>".into())
-    ));
-    let supported = device
-        .default_input_config()
-        .map_err(|error| format!("default_input_config: {error}"))?;
-    let in_rate = supported.sample_rate().0;
-    let channels = supported.channels() as usize;
-    let sample_format = supported.sample_format();
-    let config: cpal::StreamConfig = supported.into();
     let buf = std::sync::Arc::new(Mutex::new(Vec::<f32>::new()));
-    let err_fn = |error: cpal::StreamError| {
-        crate::install::log_line(&format!("mic stream error: {error}"));
-    };
-    macro_rules! build {
-        ($t:ty) => {{
-            let buf = buf.clone();
-            device.build_input_stream(
-                &config,
-                move |data: &[$t], _: &cpal::InputCallbackInfo| push_mono(data, channels, &buf),
-                err_fn,
-                None,
-            )
-        }};
-    }
-    let stream = match sample_format {
-        SampleFormat::F32 => build!(f32),
-        SampleFormat::F64 => build!(f64),
-        SampleFormat::I16 => build!(i16),
-        SampleFormat::I32 => build!(i32),
-        SampleFormat::I8 => build!(i8),
-        SampleFormat::U16 => build!(u16),
-        SampleFormat::U8 => build!(u8),
-        other => return Err(format!("unsupported mic sample format: {other:?}")),
-    }
-    .map_err(|error| format!("build_input_stream: {error}"))?;
-    stream
-        .play()
-        .map_err(|error| format!("mic stream play: {error}"))?;
+    let (stream, in_rate) = open_mic(&buf)?;
     let ready = std::thread::spawn(wait_ready);
     let tick = Duration::from_millis(50);
     let dt = tick.as_secs_f32();
