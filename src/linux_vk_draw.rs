@@ -1038,24 +1038,22 @@ pub fn paint_voice_screen(g: &mut Gfx, width: u32, height: u32, voice: Voice, ac
     .is_ok()
 }
 
-pub fn paint_prompt_card(g: &mut Gfx, card: &crate::vk_paint::PromptCard, width: f32, height: f32, scale: f32, t: f32) -> bool {
+fn overlay_label_px(height: f32) -> f32 {
+    (height / 12.0).clamp(14.0, 48.0)
+}
+
+pub fn paint_tips_pill(g: &mut Gfx, pill: &crate::vk_paint::TipsPill, width: f32, height: f32, scale: f32, t: f32) -> bool {
     let scale = scale.max(1.0);
     g.begin((width * scale).round().max(1.0) as u32, (height * scale).round().max(1.0) as u32);
-    unsafe { g.transform(scale, 0.0, 0.0) };
     let canvas = crate::vk_paint::PromptCanvas {
         cw: width,
         ch: height,
         dpr: scale,
         t,
-        title_px: 35.0,
+        title_px: overlay_label_px(height),
         dip_scale: scale,
     };
-    let mut paint_art = |g: &mut Gfx, art: crate::vk_paint::ControllerArt, rect: crate::mono_ui::Rect, alpha: f32| {
-        let px = crate::vk_paint::CONTROLLER_ART_PX as f32;
-        let dest = crate::vk_paint::fit_rect(rect, px, px);
-        unsafe { g.draw_art(art.key(), art.png(), 384, 384, 0.0, dest, alpha, true) };
-    };
-    let painted = unsafe { crate::vk_paint::paint_prompt_card(g, card, &canvas, &mut paint_art) }.is_ok();
+    let painted = unsafe { crate::vk_paint::paint_tips(g, pill, &canvas) }.is_ok();
     unsafe { g.transform(1.0, 0.0, 0.0) };
     painted
 }

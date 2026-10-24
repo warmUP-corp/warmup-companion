@@ -44,9 +44,11 @@ static OUTPUT_IS_TV: AtomicBool = AtomicBool::new(false);
 const SHEET_HINT_FOR: Duration = Duration::from_secs(3);
 const SHOW_SLIDE_MS: f32 = 180.0;
 const HIDE_SLIDE_MS: f32 = 130.0;
-const PROMPT_W: u32 = 720;
-const PROMPT_H: u32 = 420;
-const PROMPT_MARGIN_BOTTOM: i32 = 72;
+const TIPS_W: u32 = 1240;
+const TIPS_H: u32 = 180;
+const TIPS_MARGIN_BOTTOM: i32 = 72;
+const TIPS_FRAME_MS: u16 = 16;
+static OVERLAY_STARTED: AtomicBool = AtomicBool::new(false);
 const PROMPT_BG: u32 = 0x00141414;
 const PROMPT_BORDER: u32 = 0x00997b4c;
 const PROMPT_TEXT: u32 = 0x00FFFFFF;
@@ -161,23 +163,12 @@ fn poke() {
 }
 
 pub fn show_prompt_once() {
-    if std::env::var_os("WARMUP_VK_PROMPT").is_some_and(|value| value == "0") {
-        return;
-    }
-    let path = crate::paths::state_dir().join(".keyboard_prompt_shown");
-    if path.is_file() {
+    if !crate::config::prompt_overlay_enabled() || OVERLAY_STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
     std::thread::Builder::new()
-        .name("warmup-vk-prompt".into())
-        .spawn(move || {
-            if run_prompt().is_ok() {
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let _ = std::fs::write(path, b"1");
-            }
-        })
+        .name("warmup-prompt-overlay".into())
+        .spawn(run_overlay)
         .ok();
 }
 
@@ -938,80 +929,178 @@ fn ps5_pad() -> bool {
             .contains("Wireless Controller")
 }
 
-fn run_prompt() -> Result<(), String> {
+fn run_overlay() {
+    let mut state = crate::prompt_state::PromptState::default();
+    let tips_file = crate::paths::state_dir().join("controller-tips.version");
+    let mut layer: Option<(Connection, wayland_client::EventQueue<Tips>, Tips)> = None;
+    let log = |line: &str| crate::install::log_line(line);
+    loop {
+        if let Some(now) = state.tick_due() {
+            let snapshot = crate::debug_state::snapshot();
+            let voice = voice_phase_name();
+            let inputs = crate::prompt_state::TickInputs {
+                connected: snapshot.connected,
+                vk_open: keyboard_open(),
+                voice,
+                default_desktop: true,
+                on_winlogon: false,
+                userland_debug: false,
+            };
+            let visual = state.visual(
+                now,
+                &inputs,
+                || false,
+                || crate::pipe_server::game_active() || crate::linux_game_detect::standalone_game_active_cached(),
+                &tips_file,
+                &log,
+            );
+            let cue = visual.and_then(|visual| visual.tip_index());
+            match (cue, layer.as_mut()) {
+                (Some(index), Some((_, _, tips))) => tips.show_cue(index, now),
+                (Some(index), None) => match open_tips(index, &snapshot.name) {
+                    Ok(opened) => {
+                        log("prompt ui: shown (controller tips)");
+                        layer = Some(opened);
+                    }
+                    Err(error) => log(&format!("prompt ui: controller tips: {error}")),
+                },
+                (None, Some((_, _, tips))) => tips.hide(now),
+                (None, None) => {}
+            }
+        }
+        let Some((conn, queue, tips)) = layer.as_mut() else {
+            std::thread::sleep(crate::prompt_state::TICK_INTERVAL);
+            continue;
+        };
+        if !pump_tips(conn, queue, tips) || tips.gone() {
+            if let Some((conn, mut queue, mut tips)) = layer.take() {
+                if let smithay_client_toolkit::shell::wlr_layer::SurfaceKind::Wlr(proxy) = tips.layer.kind() {
+                    proxy.destroy();
+                }
+                let _ = queue.roundtrip(&mut tips);
+                drop(tips);
+                drop(queue);
+                let _ = conn.flush();
+                log("prompt ui: hidden");
+            }
+        }
+    }
+}
+
+fn voice_phase_name() -> Option<&'static str> {
+    #[cfg(feature = "speech")]
+    {
+        if !crate::linux_speech::visual_active() {
+            return None;
+        }
+        Some(match crate::linux_speech::phase() {
+            2 => "transcribing",
+            1 => "listening",
+            _ => "starting",
+        })
+    }
+    #[cfg(not(feature = "speech"))]
+    {
+        None
+    }
+}
+
+fn open_tips(
+    index: usize,
+    name: &str,
+) -> Result<(Connection, wayland_client::EventQueue<Tips>, Tips), String> {
     let conn = Connection::connect_to_env().map_err(|error| error.to_string())?;
-    let (globals, mut queue) = registry_queue_init::<Prompt>(&conn).map_err(|error| error.to_string())?;
+    let (globals, queue) = registry_queue_init::<Tips>(&conn).map_err(|error| error.to_string())?;
     let qh = queue.handle();
-    let mut prompt = Prompt::new(&globals, &qh)?;
-    prompt.layer.commit();
-    let deadline = std::time::Instant::now() + Duration::from_secs(6);
-    while std::time::Instant::now() < deadline && !prompt.exit {
-        let _ = queue.dispatch_pending(&mut prompt);
+    let tips = Tips::new(&globals, &qh, index, name)?;
+    tips.layer.commit();
+    Ok((conn, queue, tips))
+}
+
+fn pump_tips(conn: &Connection, queue: &mut wayland_client::EventQueue<Tips>, tips: &mut Tips) -> bool {
+    let qh = queue.handle();
+    let deadline = std::time::Instant::now() + crate::prompt_state::TICK_INTERVAL;
+    while std::time::Instant::now() < deadline && !tips.gone() {
+        if queue.dispatch_pending(tips).is_err() {
+            return false;
+        }
+        if tips.exit {
+            return false;
+        }
+        if tips.configured && (!tips.frame_pending || tips.frame_stale()) {
+            tips.draw(&qh);
+        }
+        if conn.flush().is_err() {
+            return false;
+        }
         let Some(guard) = queue.prepare_read() else {
             continue;
         };
-        let remain = deadline
-            .saturating_duration_since(std::time::Instant::now())
-            .as_millis()
-            .min(400) as u16;
-        let mut fds = [nix::poll::PollFd::new(
-            guard.connection_fd(),
-            nix::poll::PollFlags::POLLIN,
-        )];
-        let _ = nix::poll::poll(&mut fds, nix::poll::PollTimeout::from(remain));
-        if fds[0].any().unwrap_or(false) {
-            let _ = guard.read();
+        let mut fds = [nix::poll::PollFd::new(guard.connection_fd(), nix::poll::PollFlags::POLLIN)];
+        let _ = nix::poll::poll(&mut fds, nix::poll::PollTimeout::from(TIPS_FRAME_MS));
+        if fds[0].any().unwrap_or(false) && guard.read().is_err() {
+            return false;
         }
     }
-    if let smithay_client_toolkit::shell::wlr_layer::SurfaceKind::Wlr(proxy) = prompt.layer.kind() {
-        proxy.destroy();
-    }
-    let _ = queue.roundtrip(&mut prompt);
-    drop(prompt);
-    drop(queue);
-    let _ = conn.flush();
-    Ok(())
+    true
 }
 
-struct Prompt {
+struct Tips {
     registry_state: RegistryState,
     output_state: OutputState,
     shm: Shm,
     pool: SlotPool,
     layer: LayerSurface,
     exit: bool,
-    drawn: bool,
+    configured: bool,
+    frame_pending: bool,
+    frame_at: std::time::Instant,
+    scale: i32,
     gfx: Gfx,
     buffer: Option<Buffer>,
+    controller_label: String,
+    started: std::time::Instant,
+    shown_at: std::time::Instant,
+    hide_at: Option<std::time::Instant>,
+    cue: usize,
+    morph: Option<(usize, std::time::Instant)>,
 }
 
-impl Prompt {
+impl Tips {
     fn new(
         globals: &wayland_client::globals::GlobalList,
         qh: &QueueHandle<Self>,
+        cue: usize,
+        name: &str,
     ) -> Result<Self, String> {
         let compositor = CompositorState::bind(globals, qh).map_err(|error| error.to_string())?;
-        let layer_shell = LayerShell::bind(globals, qh).map_err(|_| {
-            "this compositor has no layer shell, so the keyboard prompt is not shown".to_string()
-        })?;
+        let layer_shell = LayerShell::bind(globals, qh)
+            .map_err(|_| "this compositor has no layer shell, so the controller tips are not shown".to_string())?;
         let shm = Shm::bind(globals, qh).map_err(|error| error.to_string())?;
         let surface = compositor.create_surface(qh);
         let layer = layer_shell.create_layer_surface(
             qh,
             surface,
             Layer::Overlay,
-            Some("warmup-companion-prompt"),
+            Some("warmup-companion-tips"),
             None,
         );
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         layer.set_anchor(Anchor::BOTTOM);
         layer.set_exclusive_zone(0);
-        layer.set_margin(0, 0, PROMPT_MARGIN_BOTTOM, 0);
-        layer.set_size(PROMPT_W, PROMPT_H);
+        layer.set_margin(0, 0, TIPS_MARGIN_BOTTOM, 0);
+        layer.set_size(TIPS_W, TIPS_H);
         if let Ok(region) = smithay_client_toolkit::compositor::Region::new(&compositor) {
             layer.wl_surface().set_input_region(Some(region.wl_region()));
         }
-        let pool = SlotPool::new((PROMPT_W * PROMPT_H * 4 * 4) as usize, &shm).map_err(|error| error.to_string())?;
+        let pool = SlotPool::new((TIPS_W * TIPS_H * 4 * 4) as usize, &shm).map_err(|error| error.to_string())?;
+        let name = name.trim();
+        let controller_label = if name.is_empty() || name.eq_ignore_ascii_case("none") {
+            "Xbox Wireless Controller".to_string()
+        } else {
+            name.to_string()
+        };
+        let now = std::time::Instant::now();
         Ok(Self {
             registry_state: RegistryState::new(globals),
             output_state: OutputState::new(globals, qh),
@@ -1019,33 +1108,82 @@ impl Prompt {
             pool,
             layer,
             exit: false,
-            drawn: false,
+            configured: false,
+            frame_pending: false,
+            frame_at: now,
+            scale: 1,
             gfx: Gfx::new(1, 1)?,
             buffer: None,
+            controller_label,
+            started: now,
+            shown_at: now,
+            hide_at: None,
+            cue,
+            morph: None,
         })
     }
 
+    fn show_cue(&mut self, index: usize, now: std::time::Instant) {
+        if self.hide_at.take().is_some() {
+            self.shown_at = now;
+        }
+        if index != self.cue {
+            self.morph = Some((self.cue, now));
+            self.cue = index;
+        }
+    }
+
+    fn hide(&mut self, now: std::time::Instant) {
+        if self.hide_at.is_none() {
+            self.hide_at = Some(now);
+        }
+    }
+
+    fn gone(&self) -> bool {
+        self.hide_at
+            .is_some_and(|at| at.elapsed().as_secs_f32() * 1000.0 >= crate::vk_motion::VOICE_EXIT_MS)
+    }
+
+    fn frame_stale(&self) -> bool {
+        self.frame_at.elapsed() > Duration::from_millis(250)
+    }
+
+    fn transition(&self, now: std::time::Instant) -> (f32, f32) {
+        let ms = |at: std::time::Instant| now.saturating_duration_since(at).as_secs_f32() * 1000.0;
+        let (mut alpha, scale) = crate::vk_motion::voice_enter(ms(self.shown_at));
+        if let Some(at) = self.hide_at {
+            alpha *= crate::vk_motion::voice_exit(ms(at));
+        }
+        (alpha, scale)
+    }
+
     fn draw(&mut self, qh: &QueueHandle<Self>) {
+        let now = std::time::Instant::now();
+        let (alpha, scale) = self.transition(now);
+        let morph = self.morph.and_then(|(from, start)| {
+            (crate::prompt_state::raw_morph_progress(start, now) < 1.0)
+                .then(|| (from, crate::prompt_state::eased_morph_progress(start, now)))
+        });
+        if morph.is_none() {
+            self.morph = None;
+        }
         let theme = crate::config::keyboard_theme();
-        let bg = theme.bg.unwrap_or(PROMPT_BG);
-        let border = theme.border.or(theme.accent).unwrap_or(PROMPT_BORDER);
-        let text = theme.text.unwrap_or(PROMPT_TEXT);
-        let controller_label = if ps5_pad() { "DualSense Wireless Controller" } else { "Xbox Wireless Controller" };
-        let card = crate::vk_paint::PromptCard {
-            bg,
-            border,
-            text_color: text,
-            pill_border: border,
-            pill_text: text,
-            prefix: "Press ",
-            suffix: " for keyboard",
-            show_l3: true,
-            title: "",
-            controller_label,
-            card_t: 0.0,
+        let pill = crate::vk_paint::TipsPill {
+            bg: theme.bg.unwrap_or(PROMPT_BG),
+            border: theme.border.or(theme.accent).unwrap_or(PROMPT_BORDER),
+            text: theme.text.unwrap_or(PROMPT_TEXT),
+            controller_label: &self.controller_label,
+            cue: crate::win::controller_tips::cue(self.cue),
+            prev_cue: morph.map(|(from, _)| crate::win::controller_tips::cue(from)),
+            morph_t: morph.map(|(_, t)| t).unwrap_or(1.0),
+            index: self.cue,
+            count: crate::win::controller_tips::cue_count(),
+            alpha,
+            scale,
             style: vk_style(),
         };
-        if !draw::paint_prompt_card(&mut self.gfx, &card, PROMPT_W as f32, PROMPT_H as f32, 1.0, 0.0) {
+        let t = self.started.elapsed().as_secs_f32();
+        if !draw::paint_tips_pill(&mut self.gfx, &pill, TIPS_W as f32, TIPS_H as f32, self.scale as f32, t) {
             return;
         }
         let pixels = draw::to_argb(&self.gfx.pixels());
@@ -1062,12 +1200,14 @@ impl Prompt {
         let copy = pixels.len().min(canvas.len());
         canvas[..copy].copy_from_slice(&pixels[..copy]);
         let surface = self.layer.wl_surface();
+        surface.set_buffer_scale(self.scale);
         surface.damage_buffer(0, 0, buffer_w, buffer_h);
         surface.frame(qh, surface.clone());
         if buffer.attach_to(surface).is_ok() {
             self.buffer = Some(buffer);
             self.layer.commit();
-            self.drawn = true;
+            self.frame_pending = true;
+            self.frame_at = now;
         }
     }
 }
@@ -1254,14 +1394,15 @@ impl Dispatch<wp_viewporter::WpViewporter, ()> for Shell {
     }
 }
 
-impl CompositorHandler for Prompt {
+impl CompositorHandler for Tips {
     fn scale_factor_changed(
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
         _: &wl_surface::WlSurface,
-        _: i32,
+        factor: i32,
     ) {
+        self.scale = factor.max(1);
     }
 
     fn transform_changed(
@@ -1273,7 +1414,9 @@ impl CompositorHandler for Prompt {
     ) {
     }
 
-    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {}
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
+        self.frame_pending = false;
+    }
 
     fn surface_enter(
         &mut self,
@@ -1294,7 +1437,7 @@ impl CompositorHandler for Prompt {
     }
 }
 
-impl OutputHandler for Prompt {
+impl OutputHandler for Tips {
     fn output_state(&mut self) -> &mut OutputState {
         &mut self.output_state
     }
@@ -1306,7 +1449,7 @@ impl OutputHandler for Prompt {
     fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
 }
 
-impl LayerShellHandler for Prompt {
+impl LayerShellHandler for Tips {
     fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {
         self.exit = true;
     }
@@ -1319,27 +1462,28 @@ impl LayerShellHandler for Prompt {
         _: LayerSurfaceConfigure,
         _: u32,
     ) {
-        if !self.drawn {
+        self.configured = true;
+        if !self.frame_pending {
             self.draw(qh);
         }
     }
 }
 
-impl ShmHandler for Prompt {
+impl ShmHandler for Tips {
     fn shm_state(&mut self) -> &mut Shm {
         &mut self.shm
     }
 }
 
-impl ProvidesRegistryState for Prompt {
+impl ProvidesRegistryState for Tips {
     fn registry(&mut self) -> &mut RegistryState {
         &mut self.registry_state
     }
     registry_handlers![OutputState];
 }
 
-delegate_compositor!(Prompt);
-delegate_output!(Prompt);
-delegate_shm!(Prompt);
-delegate_layer!(Prompt);
-delegate_registry!(Prompt);
+delegate_compositor!(Tips);
+delegate_output!(Tips);
+delegate_shm!(Tips);
+delegate_layer!(Tips);
+delegate_registry!(Tips);

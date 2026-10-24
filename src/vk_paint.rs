@@ -1078,6 +1078,235 @@ unsafe fn paint_prompt_card_spec(
     Ok(())
 }
 
+pub struct TipsPill<'a> {
+    pub bg: u32,
+    pub border: u32,
+    pub text: u32,
+    pub controller_label: &'a str,
+    pub cue: &'a [crate::win::controller_tips::TipToken],
+    pub prev_cue: Option<&'a [crate::win::controller_tips::TipToken]>,
+    pub morph_t: f32,
+    pub index: usize,
+    pub count: usize,
+    pub alpha: f32,
+    pub scale: f32,
+    pub style: VkStyle,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum TipItem {
+    Icon(VkIcon),
+    Text(&'static str, bool),
+}
+
+pub(crate) fn tip_item(token: crate::win::controller_tips::TipToken, family: ControllerIconFamily) -> Option<TipItem> {
+    use crate::win::controller_tips::TipToken;
+    match token {
+        TipToken::Button(b) => family.hint_icon(b).map(TipItem::Icon),
+        TipToken::Text(t) => Some(TipItem::Text(t, false)),
+        TipToken::Plus => Some(TipItem::Text("+", true)),
+        TipToken::Dot => Some(TipItem::Text(LEGEND_SEP, true)),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TipFont {
+    px: f32,
+    weight: i32,
+    families: &'static [&'static str],
+}
+
+unsafe fn tip_items(
+    g: &Gfx,
+    tokens: &[crate::win::controller_tips::TipToken],
+    family: ControllerIconFamily,
+    font: TipFont,
+    chip_px: f32,
+    gap: f32,
+) -> (Vec<(TipItem, f32)>, f32) {
+    let items: Vec<(TipItem, f32)> = tokens
+        .iter()
+        .filter_map(|&token| tip_item(token, family))
+        .map(|item| {
+            let w = match item {
+                TipItem::Icon(_) => chip_px,
+                TipItem::Text(t, _) => g.measure_full(t, font.px, font.weight, font.families),
+            };
+            (item, w)
+        })
+        .collect();
+    let w = items.iter().map(|i| i.1).sum::<f32>() + gap * items.len().saturating_sub(1) as f32;
+    (items, w)
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn paint_tip_row(
+    g: &mut Gfx,
+    items: &[(TipItem, f32)],
+    left: f32,
+    band: Rect,
+    gap: f32,
+    font: TipFont,
+    text: u32,
+    dim: u32,
+    alpha: f32,
+    dip_scale: f32,
+) {
+    if alpha <= 0.01 {
+        return;
+    }
+    let mut x = left;
+    for (item, w) in items {
+        let slot = Rect {
+            x,
+            y: band.y,
+            w: *w,
+            h: band.h,
+        };
+        match *item {
+            TipItem::Icon(icon) => paint_icon(g, icon, edges_of(slot), text, alpha, *w, dip_scale),
+            TipItem::Text(t, faint) => g.text_full(
+                t,
+                slot,
+                font.px,
+                font.weight,
+                font.families,
+                if faint { dim } else { text },
+                if faint { alpha * 0.6 } else { alpha },
+                Align::Left,
+                VAlign::Center,
+                false,
+            ),
+        }
+        x += w + gap;
+    }
+}
+
+pub unsafe fn paint_tips(g: &mut Gfx, p: &TipsPill, c: &PromptCanvas) -> Result<(), String> {
+    let (cw, ch) = (c.cw, c.ch);
+    let spec = prompt_spec(p.style);
+    let family = ControllerIconFamily::from_label(p.controller_label);
+    let (label, counter_font) = match spec {
+        Some(s) => (
+            TipFont {
+                px: s.label_px,
+                weight: 500,
+                families: s.families,
+            },
+            TipFont {
+                px: s.status_px,
+                weight: 500,
+                families: s.families,
+            },
+        ),
+        None => (
+            TipFont {
+                px: PROMPT_LABEL_PX,
+                weight: 600,
+                families: PROMPT_FAMILIES,
+            },
+            TipFont {
+                px: c.title_px,
+                weight: 600,
+                families: PROMPT_FAMILIES,
+            },
+        ),
+    };
+    let (pill_h, pill_bottom, radius, chip, gap, pad_x) = match spec {
+        Some(s) => (s.pill_h, s.pill_bottom, s.radius, s.chip_px, s.pill_gap, s.pill_pad_x),
+        None => (96.0, 6.0, 46.0, 56.0, 12.0, 36.0),
+    };
+    let (text, dim) = match spec {
+        Some(s) => (0x00FFFFFF, s.dim_text),
+        None => (p.text, mix_color(p.text, p.bg, 0.58)),
+    };
+
+    let counter = format!("{}/{}", p.index + 1, p.count.max(1));
+    let counter_w = g.measure_full(&counter, counter_font.px, counter_font.weight, counter_font.families);
+    let counter_gap = gap * 2.0;
+    let (items, content_w) = tip_items(g, p.cue, family, label, chip, gap);
+    let prev = p.prev_cue.map(|tokens| tip_items(g, tokens, family, label, chip, gap));
+    let morph_t = if prev.is_some() { p.morph_t.clamp(0.0, 1.0) } else { 1.0 };
+    let pill_w_for = |w: f32| (w + counter_gap + counter_w + pad_x * 2.0).min(cw - 8.0);
+    let pill_w = match &prev {
+        Some((_, prev_w)) => lerp(pill_w_for(*prev_w), pill_w_for(content_w), morph_t),
+        None => pill_w_for(content_w),
+    };
+    let bottom = ch - pill_bottom;
+    let pill = Rect {
+        x: (cw - pill_w) * 0.5,
+        y: bottom - pill_h,
+        w: pill_w,
+        h: pill_h,
+    };
+    let pill_cy = bottom - pill_h * 0.5;
+    let alpha = p.alpha.clamp(0.0, 1.0);
+
+    scale_about_point(g, c, p.scale, cw * 0.5, pill_cy);
+    match spec {
+        Some(s) => {
+            let (dy, blur, a) = s.pill_shadow;
+            paint_outer_shadow(g, pill, radius, dy, blur, a * alpha)?;
+            g.fill(pill, radius, s.pill_fill, s.pill_fill_alpha * alpha);
+            g.ring(pill, radius, 1.0, 0x00FFFFFF, s.ready_stroke_alpha * alpha);
+        }
+        None => {
+            let pulse = (c.t * 0.33).fract();
+            let pulse_alpha = (1.0 - pulse).powi(2);
+            let glow = colorref_mix(0x00FFFFFF, p.border, 0.38);
+            g.fill(pill, radius, p.bg, alpha);
+            stroke_centered(g, pill, radius, 2.0 + 8.0 * pulse, glow, 0.30 * pulse_alpha * alpha);
+            stroke_centered(g, pill, radius, 1.5, glow, alpha);
+        }
+    }
+
+    let counter_left = pill.x + pill.w - pad_x - counter_w;
+    let row_right = counter_left - counter_gap;
+    let row_left = pill.x + pad_x;
+    let centred = |w: f32| row_left + ((row_right - row_left - w) * 0.5).max(0.0);
+    let old_alpha = 1.0 - (morph_t / 0.3).clamp(0.0, 1.0);
+    let new_alpha = ((morph_t - 0.35) / 0.65).clamp(0.0, 1.0);
+    let new_alpha = if prev.is_some() {
+        new_alpha * new_alpha * (3.0 - 2.0 * new_alpha)
+    } else {
+        1.0
+    };
+    if let Some((prev_items, prev_w)) = &prev {
+        paint_tip_row(g, prev_items, centred(*prev_w), pill, gap, label, text, dim, old_alpha * alpha, c.dip_scale);
+    }
+    paint_tip_row(g, &items, centred(content_w), pill, gap, label, text, dim, new_alpha * alpha, c.dip_scale);
+
+    let divider_x = counter_left - counter_gap * 0.5;
+    g.line(
+        divider_x,
+        pill_cy - pill_h * 0.22,
+        divider_x,
+        pill_cy + pill_h * 0.22,
+        1.0,
+        dim,
+        0.25 * alpha,
+    );
+    g.text_full(
+        &counter,
+        Rect {
+            x: counter_left,
+            y: pill.y,
+            w: counter_w,
+            h: pill.h,
+        },
+        counter_font.px,
+        counter_font.weight,
+        counter_font.families,
+        dim,
+        0.8 * alpha,
+        Align::Left,
+        VAlign::Center,
+        false,
+    );
+    g.transform(c.dpr, 0.0, 0.0);
+    Ok(())
+}
+
 pub fn voice_slot(cw: f32, ch: f32) -> Rect {
     let scale = (ch / 1080.0).clamp(0.85, 2.0);
     let size = (96.0 * scale).min(cw.min(ch) * 0.9).max(1.0);

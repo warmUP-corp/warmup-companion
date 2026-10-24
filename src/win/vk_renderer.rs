@@ -54,7 +54,10 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
+#[cfg(test)]
 use super::controller_tips::TipToken;
+#[cfg(test)]
+use crate::vk_paint::{tip_item, TipItem};
 use super::nimbus_orb::{drive_scale, mood_drive, NimbusMood, NimbusOrb, ORB_FRAME_FILL};
 use super::shortcut_sheet;
 #[cfg(feature = "vk-panels")]
@@ -74,7 +77,7 @@ pub(crate) use crate::vk_paint::{
 };
 #[cfg(test)]
 use crate::vk_paint::{bar_layout, legend_layout, BarLayout, BAR_LABEL_PX, BAR_SEP_PX};
-pub(crate) use crate::vk_paint::{legend_span, paint_legend, LegendPaint, BAR_H, LEGEND_SEP};
+pub(crate) use crate::vk_paint::{legend_span, paint_legend, LegendPaint, BAR_H};
 #[cfg(test)]
 use crate::vk_paint::{combo_parts, combo_width, text_px, ComboPart, ComboStyle, SHEET_PAD_X};
 pub use crate::vk_paint::legend_band_height;
@@ -202,12 +205,6 @@ struct StyleFonts {
     label_corner: IDWriteTextFormat,
 }
 
-#[derive(Clone)]
-struct PromptFonts {
-    label: IDWriteTextFormat,
-    title: IDWriteTextFormat,
-    status: IDWriteTextFormat,
-}
 
 pub struct VkRenderer {
     width: u32,
@@ -229,8 +226,6 @@ pub struct VkRenderer {
     hint_px: f32,
     style_fonts: Option<StyleFonts>,
     /// Fixed large font for the connect/keyboard prompt pills (10-foot UI).
-    prompt_format: IDWriteTextFormat,
-    prompt_fonts: Option<PromptFonts>,
     controller_art_cache: HashMap<ControllerArtCacheKey, (ID2D1Bitmap1, u32, u32)>,
     prompt_started: Instant,
     /// Gliding focus-ring rect (client px) + the previous draw time, so the ring
@@ -273,14 +268,6 @@ const SEL_GLIDE_TAU: f32 = 0.045;
 
 pub const STRIP_BAND_H: f32 = 67.0;
 
-fn tip_item(token: TipToken, family: ControllerIconFamily) -> Option<TipItem> {
-    match token {
-        TipToken::Button(b) => family.hint_icon(b).map(TipItem::Icon),
-        TipToken::Text(t) => Some(TipItem::Text(t, false)),
-        TipToken::Plus => Some(TipItem::Text("+", true)),
-        TipToken::Dot => Some(TipItem::Text(LEGEND_SEP, true)),
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct ControllerArtCacheKey {
@@ -607,20 +594,6 @@ impl VkRenderer {
                 &locale,
             )
             .map_err(|e| format!("CreateTextFormat (hint): {e}"))?;
-        // Fixed large font for the connect/keyboard prompt pills. The pill window
-        // is short, so `label_px` floors at 14; this is ~2x that so the prompt
-        // reads on a TV across the room (10-foot UI).
-        let prompt_format = dwrite
-            .CreateTextFormat(
-                w!("Segoe UI"),
-                &fonts,
-                DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                28.0,
-                &locale,
-            )
-            .map_err(|e| format!("CreateTextFormat (prompt): {e}"))?;
 
         // Centre labels in their key rects (DWrite defaults to top-left).
         for f in [&text_format, &glyph_format] {
@@ -646,8 +619,6 @@ impl VkRenderer {
             hint_format,
             hint_px: (label_px * 0.5).clamp(10.0, 20.0),
             style_fonts: None,
-            prompt_format,
-            prompt_fonts: None,
             controller_art_cache: HashMap::new(),
             prompt_started: Instant::now(),
             anim_sel: None,
@@ -1670,6 +1641,79 @@ impl VkRenderer {
         Ok(())
     }
 
+    pub unsafe fn draw_tips(&mut self, p: &TipsPill) -> Result<(), String> {
+        let (cw, ch) = self.dip_canvas();
+        let canvas = crate::vk_paint::PromptCanvas {
+            cw,
+            ch,
+            dpr: 1.0,
+            t: self.prompt_started.elapsed().as_secs_f32(),
+            title_px: self.text_format.GetFontSize(),
+            dip_scale: self.dip_scale,
+        };
+        self.d2d_context.BeginDraw();
+        self.d2d_context.Clear(Some(&D2D1_COLOR_F {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        }));
+        crate::vk_paint::paint_tips(&mut self.gfx, p, &canvas)?;
+        self.set_transform(&IDENTITY);
+        self.d2d_context
+            .EndDraw(None, None)
+            .map_err(|e| format!("EndDraw: {e}"))?;
+        self.swapchain
+            .Present(1, DXGI_PRESENT(0))
+            .ok()
+            .map_err(|e| format!("Present: {e}"))?;
+        Ok(())
+    }
+
+    pub unsafe fn draw_prompt_card(&mut self, p: &PromptCard) -> Result<(), String> {
+        let (cw, ch) = self.dip_canvas();
+        let art = match ControllerArt::from_label(p.controller_label) {
+            Some(art) => {
+                self.ensure_controller_art(art)?;
+                self.controller_art_cache
+                    .get(&ControllerArtCacheKey { art })
+                    .map(|(bitmap, w, h)| (bitmap.clone(), *w, *h))
+            }
+            None => None,
+        };
+        let canvas = crate::vk_paint::PromptCanvas {
+            cw,
+            ch,
+            dpr: 1.0,
+            t: self.prompt_started.elapsed().as_secs_f32(),
+            title_px: self.text_format.GetFontSize(),
+            dip_scale: self.dip_scale,
+        };
+        self.d2d_context.BeginDraw();
+        self.d2d_context.Clear(Some(&D2D1_COLOR_F {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        }));
+        let mut paint_art = |g: &mut Gfx, _: ControllerArt, rect: crate::mono_ui::Rect, alpha: f32| {
+            if let Some((bitmap, w, h)) = &art {
+                let dest = crate::vk_paint::fit_rect(rect, *w as f32, *h as f32);
+                g.draw_bitmap(bitmap, dest, alpha.clamp(0.0, 1.0), true);
+            }
+        };
+        crate::vk_paint::paint_prompt_card(&mut self.gfx, p, &canvas, &mut paint_art)?;
+        self.set_transform(&IDENTITY);
+        self.d2d_context
+            .EndDraw(None, None)
+            .map_err(|e| format!("EndDraw: {e}"))?;
+        self.swapchain
+            .Present(1, DXGI_PRESENT(0))
+            .ok()
+            .map_err(|e| format!("Present: {e}"))?;
+        Ok(())
+    }
+
     unsafe fn tip_items(
         &self,
         tokens: &[TipToken],
@@ -1927,58 +1971,6 @@ impl VkRenderer {
         Ok(())
     }
 
-    unsafe fn ensure_prompt_fonts(&mut self, spec: &PromptSpec) -> Result<PromptFonts, String> {
-        if let Some(fonts) = &self.prompt_fonts {
-            return Ok(fonts.clone());
-        }
-        let mut fonts: Option<IDWriteFontCollection> = None;
-        self.dwrite
-            .GetSystemFontCollection(&mut fonts, false)
-            .map_err(|e| format!("GetSystemFontCollection: {e}"))?;
-        let fonts = fonts.ok_or("GetSystemFontCollection returned null")?;
-        let locale = user_locale_name();
-        let family = resolve_family(&fonts, spec.families);
-        let dwrite = &self.dwrite;
-        let make = |weight: i32,
-                    px: f32,
-                    align: DWRITE_TEXT_ALIGNMENT|
-         -> Result<IDWriteTextFormat, String> {
-            let f = dwrite
-                .CreateTextFormat(
-                    &family,
-                    &fonts,
-                    DWRITE_FONT_WEIGHT(weight),
-                    DWRITE_FONT_STYLE_NORMAL,
-                    DWRITE_FONT_STRETCH_NORMAL,
-                    px,
-                    &locale,
-                )
-                .map_err(|e| format!("CreateTextFormat ({family}): {e}"))?;
-            let _ = f.SetTextAlignment(align);
-            let _ = f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            let _ = f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-            Ok(f)
-        };
-        let built = PromptFonts {
-            label: make(
-                500,
-                spec.label_px,
-                DWRITE_TEXT_ALIGNMENT_LEADING,
-            )?,
-            title: make(
-                600,
-                spec.title_px,
-                DWRITE_TEXT_ALIGNMENT_CENTER,
-            )?,
-            status: make(
-                500,
-                spec.status_px,
-                DWRITE_TEXT_ALIGNMENT_LEADING,
-            )?,
-        };
-        self.prompt_fonts = Some(built.clone());
-        Ok(built)
-    }
 
     unsafe fn draw_outer_shadow(
         &mut self,
@@ -2132,29 +2124,10 @@ impl VkRenderer {
 }
 
 pub(crate) use crate::vk_paint::ControllerArt;
-pub use crate::vk_paint::{PromptCard, PROMPT_PILL_H};
+pub use crate::vk_paint::{PromptCard, TipsPill, PROMPT_PILL_H};
 
 #[derive(Clone, Copy)]
-pub struct TipsPill<'a> {
-    pub bg: u32,
-    pub border: u32,
-    pub text: u32,
-    pub controller_label: &'a str,
-    pub cue: &'a [TipToken],
-    pub prev_cue: Option<&'a [TipToken]>,
-    pub morph_t: f32,
-    pub index: usize,
-    pub count: usize,
-    pub alpha: f32,
-    pub scale: f32,
-    pub style: VkStyle,
-}
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum TipItem {
-    Icon(VkIcon),
-    Text(&'static str, bool),
-}
 
 /// Everything one frame of the dictation pill needs. `alpha`/`scale` carry the
 /// enter/exit transition; `label_alpha` fades a freshly swapped phase title in.
