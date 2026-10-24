@@ -668,27 +668,7 @@ fn set_display(display: &str) {
 }
 
 fn show_controller_tips() {
-    use crate::win::controller_tips::{cue, cue_count, TipToken};
-    let mut lines = Vec::new();
-    for index in 0..cue_count() {
-        let mut line = String::new();
-        let mut joined = true;
-        for token in cue(index) {
-            let (text, glue) = match token {
-                TipToken::Button(b) => (*b, false),
-                TipToken::Text(t) => (*t, false),
-                TipToken::Plus => ("+", true),
-                TipToken::Dot => ("\u{b7}", false),
-            };
-            if !line.is_empty() && !joined && !glue {
-                line.push(' ');
-            }
-            line.push_str(text);
-            joined = glue;
-        }
-        lines.push(line);
-    }
-    let _ = crate::linux_notify::notify("Controller tips", &lines.join("\n"));
+    crate::prompt_state::request_controller_tips();
 }
 
 fn open_path(path: &std::path::Path) {
