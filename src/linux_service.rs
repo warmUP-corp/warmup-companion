@@ -17,6 +17,7 @@ pub fn run() -> Result<(), String> {
     }
     std::env::set_var("WARMUP_VK_SERVICE", "1");
     install_stop_signals();
+    crate::crash::install();
     crate::install::log_line("warmup-companion service starting (SDL3 + uinput)");
     crate::linux_game_detect::start();
     crate::linux_tray::spawn();

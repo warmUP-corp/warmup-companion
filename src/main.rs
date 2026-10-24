@@ -24,7 +24,7 @@ mod vk_gate;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod vk_motion;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 mod crash;
 #[cfg(any(windows, target_os = "linux"))]
 mod install;
