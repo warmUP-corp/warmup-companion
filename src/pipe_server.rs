@@ -992,6 +992,14 @@ fn apply_game_detection(payload: &crate::protocol::GameDetectionPayload) {
 fn apply_game_detection(_payload: &crate::protocol::GameDetectionPayload) {}
 
 #[cfg(any(windows, target_os = "linux"))]
+fn reset_game_detection() {
+    crate::game_list::reset_assembly();
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn reset_game_detection() {}
+
+#[cfg(any(windows, target_os = "linux"))]
 fn game_detection_revision() -> Option<u64> {
     crate::game_list::revision()
 }

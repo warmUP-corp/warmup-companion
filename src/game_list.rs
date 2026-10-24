@@ -85,6 +85,7 @@ pub(crate) fn is_store_client_path(image_path: &str) -> bool {
         .any(|hint| path.contains(hint))
 }
 
+#[cfg(windows)]
 pub(crate) fn is_denylisted_exe(exe_file_name: &str, image_path: Option<&str>) -> bool {
     let base = normalize(file_name(&normalize(exe_file_name)));
     if base.is_empty() {
@@ -263,6 +264,17 @@ fn current() -> Option<Arc<Index>> {
 
 fn load_persisted() {
     let path = crate::paths::game_list_file();
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return;
+    };
+    if meta.len() > MAX_TOTAL_BYTES as u64 * 2 {
+        crate::install::log_line(&format!(
+            "game list: ignored {} of {} bytes, over the size limit",
+            path.display(),
+            meta.len()
+        ));
+        return;
+    }
     let Ok(raw) = std::fs::read_to_string(&path) else {
         return;
     };
@@ -315,13 +327,26 @@ pub(crate) fn install(list: &GameList) -> Result<(), GameListError> {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(path, json);
+        let pending = path.with_extension("json.tmp");
+        if std::fs::write(&pending, json).is_ok() && std::fs::rename(&pending, &path).is_err() {
+            let _ = std::fs::remove_file(&pending);
+        }
     }
     Ok(())
 }
 
+pub(crate) fn reset_assembly() {
+    if let Ok(mut slot) = ASSEMBLY.lock() {
+        *slot = None;
+    }
+}
+
 pub(crate) fn has_index() -> bool {
-    current().is_some()
+    current().is_some_and(|index| {
+        !index.patterns_by_file_name.is_empty()
+            || !index.steam_app_ids.is_empty()
+            || !index.local_dirs.is_empty()
+    })
 }
 
 pub(crate) fn revision() -> Option<u64> {
@@ -393,6 +418,7 @@ pub(crate) fn is_background_tool_steam_app(app_id: &str) -> bool {
     BUILTIN_BACKGROUND_TOOL_STEAM_APP_IDS.contains(&app_id.trim())
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn denylist_names() -> Vec<String> {
     let (exes, stems) = match current() {
         Some(index) => (
@@ -534,7 +560,7 @@ pub(crate) fn match_processes(
             continue;
         };
         let stem = exe_stem(file_name(&normalize(exe_name)));
-        if stem.is_empty() || is_denylisted_exe(exe_name, Some(image_path)) {
+        if stem.is_empty() || is_background_tool_stem(&stem) {
             continue;
         }
         let steam_id = is_steam_library_path(image_path)

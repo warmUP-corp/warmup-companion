@@ -61,6 +61,7 @@ pub fn standalone_game_active_cached() -> bool {
     }
 }
 
+#[cfg(feature = "gamepad")]
 pub fn foreground_fullscreen_pid() -> Option<u32> {
     let our_pid = std::process::id();
     let exe_by_pid = pid_to_exe_map();

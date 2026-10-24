@@ -15,7 +15,7 @@ use super::{
     apply_mode, apply_parental_guard, apply_play_sessions_ack, apply_rumble, companion_snapshot,
     current, current_axis, current_battery, current_pads, current_running_games, drain_buttons,
     drain_parental_blocked, ensure_settings_watcher, game_detection_revision,
-    set_native_vk_request, set_running_games_owner, take_cursor_moved, take_touchpad,
+    reset_game_detection, set_native_vk_request, set_running_games_owner, take_cursor_moved, take_touchpad,
     SettingsSync, SETTINGS_GEN,
 };
 
@@ -152,6 +152,7 @@ pub(super) fn handshake<R: Read, W: Write>(
     session: &mut Session<R, W>,
     identity: &ClientIdentity,
 ) -> std::io::Result<(HashSet<String>, SettingsSync)> {
+    reset_game_detection();
     let line = session.read_line()?;
     let protocol_version = match DownFrame::parse_line(line.trim_end()) {
         Ok(DownFrame::Hello(hello)) if is_supported_protocol_version(hello.protocol_version) => {
