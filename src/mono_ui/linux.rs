@@ -712,8 +712,10 @@ impl Gfx {
     }
 
     pub(crate) unsafe fn draw_shadow(&mut self, cards: &[Rect], radius: f32, sigma: f32) {
-        let pixmap = self.pixmap.borrow();
-        let (w, h) = (pixmap.width() as usize, pixmap.height() as usize);
+        let (w, h) = {
+            let pixmap = self.pixmap.borrow();
+            (pixmap.width() as usize, pixmap.height() as usize)
+        };
         let s = self.transform.sx;
         let mapped: Vec<Rect> = cards
             .iter()

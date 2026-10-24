@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- On Linux, the tray menu opens again. Opening it used to stop its window silently the first time, after which clicking the tray icon did nothing until the companion was restarted. The update window was affected in the same way.
+
 ## v0.11.0
 
 - The companion now treats only known games as games, like warmUP. warmUP sends it its list of known games, and the companion stores it. Once it has the list, a fullscreen window only puts the controller to sleep when it belongs to a game on that list, a listed Steam game or a game you added by hand, and offline play time is only counted for those games. Until warmUP has sent a list, the companion behaves as before.
