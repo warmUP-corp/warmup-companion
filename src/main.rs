@@ -11,7 +11,6 @@ mod device_commands;
 mod led_engine;
 mod tracking_owner;
 #[cfg(any(windows, target_os = "linux"))]
-#[allow(dead_code)]
 mod game_list;
 /// Companion IPC wire frames (#347). Pure serde; used by the pipe server and tests.
 #[allow(dead_code)]

@@ -127,7 +127,24 @@ fn surface_active() -> bool {
         .lock()
         .ok()
         .and_then(|slot| slot.clone())
-        .is_some_and(|surface| surface_is_standalone_game(&surface))
+        .is_some_and(|surface| {
+            surface_is_standalone_game(&surface) && surface_is_known_game(&surface)
+        })
+}
+
+fn surface_is_known_game(surface: &Surface) -> bool {
+    if surface.pid == 0 || !crate::game_list::has_index() {
+        return true;
+    }
+    let Some(path) = crate::process_guard::image_path(surface.pid) else {
+        return false;
+    };
+    let steam_app_id = if crate::game_list::is_steam_library_path(&path) {
+        crate::process_guard::steam_running_app_id(surface.pid)
+    } else {
+        None
+    };
+    crate::game_list::is_known_game_image(&path, steam_app_id.as_deref())
 }
 
 fn publish(surface: Option<Surface>) {
@@ -364,7 +381,7 @@ fn hypr_surface(command: &std::path::Path) -> Result<Surface, String> {
     let pid = window.get("pid").and_then(|value| value.as_u64()).unwrap_or(0) as u32;
     let class_name = json_string(&window, "class");
     let title = json_string(&window, "title");
-    let exe = exe_for_pid(pid).unwrap_or_else(|| class_name.clone());
+    let exe = process_image(pid).unwrap_or_else(|| class_name.clone());
     let (x, y) = json_pair(&window, "at");
     let (w, h) = json_pair(&window, "size");
     Ok(Surface {
@@ -566,12 +583,11 @@ fn json_pair(value: &serde_json::Value, key: &str) -> (i64, i64) {
     )
 }
 
-fn exe_for_pid(pid: u32) -> Option<String> {
+fn process_image(pid: u32) -> Option<String> {
     if pid == 0 {
         return None;
     }
-    let link = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
-    Some(link.to_string_lossy().into_owned())
+    crate::process_guard::image_path(pid)
 }
 
 mod wlr {

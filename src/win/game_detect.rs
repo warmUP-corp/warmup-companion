@@ -70,7 +70,30 @@ pub fn foreground_fullscreen_pid() -> Option<u32> {
 fn standalone_game_active() -> bool {
     let our_pid = std::process::id();
     let exe_by_pid = pid_to_exe_map();
-    foreground_external_game_pid(our_pid, &exe_by_pid).is_some()
+    let Some(pid) = foreground_external_game_pid(our_pid, &exe_by_pid) else {
+        return false;
+    };
+    if !crate::game_list::has_index() {
+        return true;
+    }
+    full_image_path(pid).is_some_and(|path| {
+        let steam_app_id = if crate::game_list::is_steam_library_path(&path) {
+            steam_running_app_id(pid)
+        } else {
+            None
+        };
+        crate::game_list::is_known_game_image(&path, steam_app_id.as_deref())
+    })
+}
+
+#[cfg(feature = "gamepad")]
+fn steam_running_app_id(pid: u32) -> Option<String> {
+    crate::process_guard::steam_running_app_id(pid)
+}
+
+#[cfg(not(feature = "gamepad"))]
+fn steam_running_app_id(_pid: u32) -> Option<String> {
+    None
 }
 
 fn pid_to_exe_map() -> HashMap<u32, String> {
@@ -124,6 +147,12 @@ fn is_pid_exe_denylisted(pid: u32, exe_by_pid: &HashMap<u32, String>) -> bool {
     crate::game_list::is_denylisted_exe(&base, None)
 }
 
+#[cfg(feature = "gamepad")]
+fn full_image_path(pid: u32) -> Option<String> {
+    crate::process_guard::image_path(pid)
+}
+
+#[cfg(not(feature = "gamepad"))]
 fn full_image_path(pid: u32) -> Option<String> {
     use windows::core::PWSTR;
     use windows::Win32::System::Threading::{

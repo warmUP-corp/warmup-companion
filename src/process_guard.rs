@@ -18,7 +18,6 @@ pub(crate) fn snapshot_processes_for_owner(
 }
 
 #[cfg(windows)]
-#[allow(dead_code)]
 pub(crate) fn image_path(pid: u32) -> Option<String> {
     full_process_image_path(pid)
 }
@@ -316,7 +315,6 @@ fn largest_visible_hwnd(pid: u32) -> Option<windows::Win32::Foundation::HWND> {
 }
 
 #[cfg(target_os = "linux")]
-#[allow(dead_code)]
 pub(crate) fn image_path(pid: u32) -> Option<String> {
     if !proc_is_live(pid) {
         return None;

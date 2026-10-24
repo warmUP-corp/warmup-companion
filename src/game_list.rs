@@ -616,3 +616,11 @@ pub(crate) fn watch_owner(
         _ => None,
     }
 }
+
+pub(crate) fn is_known_game_image(image_path: &str, steam_app_id: Option<&str>) -> bool {
+    is_detectable_image(image_path)
+        || (is_steam_library_path(image_path)
+            && steam_app_id
+                .is_some_and(|id| is_listed_steam_app(id) && !is_background_tool_steam_app(id)))
+        || local_game_dir_for(image_path).is_some()
+}
