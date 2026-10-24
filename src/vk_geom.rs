@@ -11,6 +11,7 @@ pub struct KeyRect {
     pub bottom: f32,
 }
 
+#[cfg(test)]
 pub struct StyleMetrics {
     pub key_aspect: f32,
     pub gap: f32,
@@ -20,6 +21,7 @@ pub struct StyleMetrics {
     pub pad_y: f32,
 }
 
+#[cfg(test)]
 pub fn style_metrics(mono: bool) -> StyleMetrics {
     if mono {
         StyleMetrics {

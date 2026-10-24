@@ -714,7 +714,6 @@ fn render_prompt(hwnd: HWND) {
                         let (alpha, scale, label_alpha) = voice_transition(now);
                         r.draw_voice(&vk_renderer::VoicePill {
                             bg,
-                            border,
                             accent,
                             text,
                             level: crate::win::speech_input::voice_level(),
