@@ -29,6 +29,8 @@ const REDUX_REPO: &str = "eschmidbauer/parakeet-redux-onnx";
 const REDUX_REV: &str = "1c285ba78d6f1880803f65355133a5ad3559a407";
 const REDUX_FILES: [&str; 3] = ["encoder-model.onnx", "decoder_joint-model.onnx", "vocab.txt"];
 const MODEL_IDS: [&str; 2] = ["parakeet", "parakeet-redux"];
+const MIC_OPEN_WAIT: Duration = Duration::from_secs(5);
+const MIC_STOP_WAIT: Duration = Duration::from_secs(1);
 const MIC_CACHE_FOR: Duration = Duration::from_secs(2);
 const DOWNLOAD_POLL: Duration = Duration::from_millis(250);
 
@@ -150,14 +152,23 @@ struct MicStream {
 
 struct AlsaCapture {
     stop: std::sync::Arc<AtomicBool>,
+    done: std::sync::mpsc::Receiver<()>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for AlsaCapture {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        match self.done.recv_timeout(MIC_STOP_WAIT) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                crate::install::log_line("speech: the mic did not stop, leaving its thread behind");
+            }
+            _ => {
+                let _ = thread.join();
+            }
         }
     }
 }
@@ -219,11 +230,13 @@ fn open_alsa_capture(
     use alsa::pcm::{Access, Format, HwParams, PCM};
     let stop = std::sync::Arc::new(AtomicBool::new(false));
     let (tx, rx) = std::sync::mpsc::channel::<Result<u32, String>>();
+    let (running, done) = std::sync::mpsc::channel::<()>();
     let name = pcm_name.to_string();
     let flag = stop.clone();
     let thread = std::thread::Builder::new()
         .name("warmup-mic".into())
         .spawn(move || {
+            let _running = running;
             let opened = (|| -> Result<(PCM, u32), alsa::Error> {
                 let pcm = PCM::new(&name, alsa::Direction::Capture, false)?;
                 {
@@ -268,10 +281,11 @@ fn open_alsa_capture(
             }
         })
         .map_err(|error| error.to_string())?;
-    match rx.recv() {
+    match rx.recv_timeout(MIC_OPEN_WAIT) {
         Ok(Ok(rate)) => Ok((
             AlsaCapture {
                 stop,
+                done,
                 thread: Some(thread),
             },
             rate,
@@ -280,7 +294,14 @@ fn open_alsa_capture(
             let _ = thread.join();
             Err(error)
         }
-        Err(_) => {
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            stop.store(true, Ordering::SeqCst);
+            Err(format!(
+                "{pcm_name}: no answer in {}s",
+                MIC_OPEN_WAIT.as_secs()
+            ))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
             let _ = thread.join();
             Err(format!("{pcm_name}: capture thread ended"))
         }
