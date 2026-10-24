@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- On Linux with Hyprland, a built-in Hyprland desktop preset is on by default: LT and RT switch to the previous and next workspace, Y toggles the special workspace and X toggles fullscreen, in any app. A per-app profile that sets the same button still wins. On the Apps page it can be turned off or given other workspace and window actions.
+- On Linux with Hyprland, a built-in Hyprland desktop preset is on by default: LT and RT switch to the previous and next workspace, Y toggles the special workspace and X toggles fullscreen, in any app except warmUP itself and a fullscreen game. A per-app profile that sets the same button still wins. On the Apps page it can be turned off or given other workspace and window actions.
 - On Linux, when only Parakeet Redux is installed and no engine was chosen yet, the Voice tab and the tray show Redux as the engine in use, matching what dictation runs.
 - On Linux, choosing a microphone in the tray right after one was plugged in or removed selects the one you clicked. The tray no longer asks PulseAudio or PipeWire for the input list several times a second while an update downloads.
 - On Linux, dictation records from the microphone chosen in the tray or the Voice tab also on PipeWire systems without the PulseAudio ALSA plugin. If that microphone cannot be opened, dictation records from the default input and a notification says so, instead of switching silently.

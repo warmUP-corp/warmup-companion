@@ -498,7 +498,11 @@ pub fn chord_for_foreground(button: &str) -> Option<ProfileAction> {
             }
         }
     }
-    if !hyprland {
+    if !hyprland
+        || crate::pipe_server::launcher_foreground_nav()
+        || crate::gamepad_backend::standalone_game_active_now()
+        || crate::vk_nav::foreground_is_warmup()
+    {
         return None;
     }
     action_for(&settings, HYPRLAND_ID, button)

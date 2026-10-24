@@ -1161,6 +1161,12 @@ pub(crate) fn foreground_is_uac_consent() -> bool {
     foreground_exe().eq_ignore_ascii_case("consent.exe")
 }
 
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+pub(crate) fn foreground_is_warmup() -> bool {
+    let (_, exe, _, _) = foreground_info();
+    is_warmup_exe(&exe)
+}
+
 pub(crate) fn foreground_is_warmup_browser() -> bool {
     let (_, exe, _, title) = foreground_info();
     foreground_is_warmup_browser_info(&exe, &title)
