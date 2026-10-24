@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.11.1
+
 - On Linux, the tray menu opens again. Opening it used to stop its window silently the first time, after which clicking the tray icon did nothing until the companion was restarted. The update window was affected in the same way.
 
 ## v0.11.0
