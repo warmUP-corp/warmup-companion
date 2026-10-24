@@ -7,6 +7,10 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+#[allow(dead_code)]
+#[path = "win/coding_vocab.rs"]
+mod coding_vocab;
 use cpal::{FromSample, Sample, SampleFormat};
 
 const MAX_RECORD_S: f32 = 180.0;
@@ -690,7 +694,7 @@ fn record_and_type() -> Result<(), String> {
     }
     let samples = resample_16k(&all, in_rate);
     let heard = transcribe_via_server(&samples)?;
-    let clean = clean_transcript(&heard);
+    let clean = coding_vocab::current().fix(&clean_transcript(&heard));
     if clean.is_empty() {
         crate::install::log_line(&format!("speech: heard ({secs:.1}s) non-speech, skipped"));
         return Ok(());
