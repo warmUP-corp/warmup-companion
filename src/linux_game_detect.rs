@@ -483,7 +483,11 @@ pub fn hypr_dispatch(lua: &str) -> bool {
 }
 
 pub fn hypr_run(lua: &str, legacy: &str) -> bool {
-    hypr_dispatch(lua) || hypr_dispatch(legacy)
+    let ok = hypr_dispatch(lua) || hypr_dispatch(legacy);
+    if std::env::var_os("WARMUP_DEBUG_LOG").is_some_and(|v| !v.is_empty() && v != "0") {
+        crate::install::log_line(&format!("hyprland profile dispatch: {legacy} ok={ok}"));
+    }
+    ok
 }
 
 fn hypr_reply_ok(text: &str) -> bool {
