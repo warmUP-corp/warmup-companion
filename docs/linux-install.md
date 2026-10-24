@@ -28,6 +28,26 @@ systemctl --user status warmup-companion
 
 Stop it with `warmup-companion stop`. Remove the unit and the installed binary with `warmup-companion uninstall`. Settings, the log, and the socket directory are left in place.
 
+## Finding warmUP
+
+The View + LB + X shortcut opens warmUP. The companion looks for the launcher in this order and uses the first executable file it finds:
+
+1. `WARMUP_EXE`, if set.
+2. The path written in `$XDG_DATA_HOME/warmup-companion/warmup-exe.path` by `install-dev`.
+3. `warmup` next to the installed companion binary.
+4. `$XDG_DATA_HOME/warmup/warmup`.
+5. `~/.local/bin/warmup`, then `~/.local/bin/warmup.AppImage` (where the warmUP Linux guide puts the AppImage).
+6. `/usr/bin/warmup` (the `.deb` and `.rpm` packages), then `/usr/local/bin/warmup`.
+7. A `warmup` on `PATH`.
+
+To point the companion at a warmUP you built from source, install it in DEV mode:
+
+```sh
+./target/release/warmup-companion install-dev ~/Projects/warmUP/apps/desktop/src-tauri/target/debug/warmup
+```
+
+That installs like `install` and also writes the path to `warmup-exe.path`. The target must be a file named `warmup` or a warmUP AppImage. A plain `install` or `uninstall` removes the DEV path again.
+
 ## Update
 
 ```sh

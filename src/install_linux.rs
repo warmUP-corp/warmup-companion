@@ -7,10 +7,47 @@ const UNIT_NAME: &str = "warmup-companion.service";
 const BIN_NAME: &str = "warmup-companion";
 
 pub fn run_install() {
-    if let Err(error) = install_inner() {
+    if let Err(error) = install_inner(None) {
         eprintln!("install failed: {error}");
         std::process::exit(1);
     }
+}
+
+pub fn run_install_dev(path: &Path) {
+    let path = match canonical_dev_exe(path) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("install-dev failed: {error}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(error) = install_inner(Some(&path)) {
+        eprintln!("install-dev failed: {error}");
+        std::process::exit(1);
+    }
+    println!("Installed warmUP companion in DEV mode.");
+    println!("Trusted DEV client: {}", path.display());
+}
+
+fn canonical_dev_exe(path: &Path) -> Result<PathBuf, String> {
+    let path = fs::canonicalize(path)
+        .map_err(|error| format!("invalid DEV executable '{}': {error}", path.display()))?;
+    let is_warmup = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|name| {
+            name == "warmup" || (name.starts_with("warmup") && name.ends_with(".appimage"))
+        });
+    let executable = fs::metadata(&path)
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0);
+    if !executable || !is_warmup {
+        return Err(format!(
+            "DEV target must be an existing warmup binary or warmUP AppImage: {}",
+            path.display()
+        ));
+    }
+    Ok(path)
 }
 
 pub fn run_uninstall() {
@@ -114,11 +151,25 @@ pub fn run_stop() {
     println!("Stopped {UNIT_NAME}.");
 }
 
-fn install_inner() -> Result<(), String> {
+fn install_inner(dev_exe: Option<&Path>) -> Result<(), String> {
     let src = std::env::current_exe().map_err(|error| format!("current exe: {error}"))?;
     let dest = installed_bin();
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("create install dir: {error}"))?;
+    }
+    let dev_file = crate::paths::dev_exe_file();
+    match dev_exe {
+        Some(path) => {
+            if let Some(parent) = dev_file.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("create data dir: {error}"))?;
+            }
+            fs::write(&dev_file, path.to_string_lossy().as_bytes())
+                .map_err(|error| format!("write DEV executable path: {error}"))?;
+        }
+        None => {
+            let _ = fs::remove_file(&dev_file);
+        }
     }
     let replaced = copy_binary(&src, &dest)?;
 
@@ -159,6 +210,7 @@ fn uninstall_inner() -> Result<(), String> {
     if bin.exists() {
         fs::remove_file(&bin).map_err(|error| format!("remove binary: {error}"))?;
     }
+    let _ = fs::remove_file(crate::paths::dev_exe_file());
     crate::install::log_line("uninstalled linux user service");
     Ok(())
 }

@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, the companion finds the warmUP launcher: the `.deb` or `.rpm` install, the AppImage in `~/.local/bin`, a `warmup` on `PATH`, or `WARMUP_EXE`. `warmup-companion install-dev <path>` installs the companion and points it at a warmUP built from source, like on Windows.
 - On Linux, the companion knows when the warmUP launcher is the focused window on Hyprland. Dictation does not start or type into the launcher, and in the warmUP browser window L3 and R3 open the on-screen keyboard and dictation while warmUP is running, like on Windows.
 - On Linux, View + Y pastes the clipboard with the keyboard closed, like on Windows.
 - On Linux, `warmup-companion install` works while the companion is running. It used to fail with "Text file busy"; the new binary now replaces the running one and the running service restarts on it.

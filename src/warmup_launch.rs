@@ -113,16 +113,12 @@ pub(crate) fn run_boot_gamepad_loop(
         }
         crate::gamepad::VkLoopAction::LaunchWarmup => {
             if let Err(e) = launch_warmup_exe() {
-                eprintln!("launch warmup.exe: {e}");
-                #[cfg(windows)]
+                eprintln!("launch {WARMUP_LABEL}: {e}");
                 if service_mode {
-                    crate::install::log_line(&format!("launch warmup.exe failed: {e}"));
+                    crate::install::log_line(&format!("launch {WARMUP_LABEL} failed: {e}"));
                 }
-            } else {
-                #[cfg(windows)]
-                if service_mode {
-                    crate::install::log_line("launched warmup.exe from controller hotkey");
-                }
+            } else if service_mode {
+                crate::install::log_line(&format!("launched {WARMUP_LABEL} from controller hotkey"));
             }
         }
     };
@@ -139,6 +135,12 @@ pub(crate) fn run_boot_gamepad_loop(
         crate::gamepad::run_watch_loop(is_open, on_action)
     }
 }
+
+#[cfg(all(feature = "gamepad", windows))]
+const WARMUP_LABEL: &str = "warmup.exe";
+
+#[cfg(all(feature = "gamepad", not(windows)))]
+const WARMUP_LABEL: &str = "warmUP";
 
 #[cfg(feature = "gamepad")]
 fn launch_warmup_exe() -> Result<(), String> {
@@ -181,6 +183,20 @@ pub(crate) fn warmup_exe_path() -> Result<std::path::PathBuf, String> {
     let dir = current
         .parent()
         .ok_or_else(|| format!("current exe has no parent: {}", current.display()))?;
+    #[cfg(not(windows))]
+    {
+        linux_warmup_candidates(dir)
+            .into_iter()
+            .find(|path| is_executable(path))
+            .ok_or_else(|| {
+                format!(
+                    "warmUP not found; set WARMUP_EXE or write the full path to {}",
+                    dev_exe.display()
+                )
+            })
+    }
+    #[cfg(windows)]
+    {
     let mut candidates = Vec::new();
     candidates.push(dir.join("warmup.exe"));
     if let Some(program_files) = std::env::var_os("ProgramFiles") {
@@ -211,6 +227,37 @@ pub(crate) fn warmup_exe_path() -> Result<std::path::PathBuf, String> {
                 dev_exe.display()
             )
         })
+    }
+}
+
+#[cfg(not(windows))]
+fn linux_warmup_candidates(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let mut candidates = vec![dir.join("warmup")];
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| home.as_ref().map(|home| home.join(".local/share")));
+    if let Some(data_home) = data_home {
+        candidates.push(data_home.join("warmup/warmup"));
+    }
+    if let Some(home) = &home {
+        candidates.push(home.join(".local/bin/warmup"));
+        candidates.push(home.join(".local/bin/warmup.AppImage"));
+    }
+    candidates.push(PathBuf::from("/usr/bin/warmup"));
+    candidates.push(PathBuf::from("/usr/local/bin/warmup"));
+    if let Some(path) = std::env::var_os("PATH") {
+        candidates.extend(std::env::split_paths(&path).map(|dir| dir.join("warmup")));
+    }
+    candidates
+}
+
+#[cfg(not(windows))]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(all(feature = "gamepad", windows))]
