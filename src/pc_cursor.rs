@@ -1076,16 +1076,10 @@ fn grim_png(geometry: Option<(i64, i64, i64, i64)>) -> Result<Vec<u8>, String> {
 
 #[cfg(target_os = "linux")]
 fn portal_png() -> Result<Vec<u8>, String> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::Builder::new()
-        .name("warmup-screenshot-portal".into())
-        .spawn(move || {
-            let _ = tx.send(portal_uri());
-        })
-        .map_err(|error| error.to_string())?;
-    let uri = rx
-        .recv_timeout(std::time::Duration::from_secs(30))
-        .map_err(|_| "no answer from the desktop portal".to_string())??;
+    let uri = zbus::block_on(futures_lite::future::or(portal_uri(), async {
+        async_io::Timer::after(std::time::Duration::from_secs(30)).await;
+        Err("no answer from the desktop portal".to_string())
+    }))?;
     let path = uri
         .strip_prefix("file://")
         .ok_or_else(|| format!("unexpected portal uri {uri}"))?;
@@ -1101,10 +1095,13 @@ fn portal_png() -> Result<Vec<u8>, String> {
 }
 
 #[cfg(target_os = "linux")]
-fn portal_uri() -> Result<String, String> {
+async fn portal_uri() -> Result<String, String> {
+    use futures_lite::StreamExt;
     use std::collections::HashMap;
     use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
-    let conn = zbus::blocking::Connection::session().map_err(|error| error.to_string())?;
+    let conn = zbus::Connection::session()
+        .await
+        .map_err(|error| error.to_string())?;
     let sender = conn
         .unique_name()
         .ok_or("no D-Bus name")?
@@ -1112,30 +1109,34 @@ fn portal_uri() -> Result<String, String> {
         .replace('.', "_");
     let token = format!("warmup_shot_{}", std::process::id());
     let request_path = format!("/org/freedesktop/portal/desktop/request/{sender}/{token}");
-    let request = zbus::blocking::Proxy::new(
+    let request = zbus::Proxy::new(
         &conn,
         "org.freedesktop.portal.Desktop",
         request_path.as_str(),
         "org.freedesktop.portal.Request",
     )
+    .await
     .map_err(|error| error.to_string())?;
     let mut responses = request
         .receive_signal("Response")
+        .await
         .map_err(|error| error.to_string())?;
-    let portal = zbus::blocking::Proxy::new(
+    let portal = zbus::Proxy::new(
         &conn,
         "org.freedesktop.portal.Desktop",
         "/org/freedesktop/portal/desktop",
         "org.freedesktop.portal.Screenshot",
     )
+    .await
     .map_err(|error| error.to_string())?;
     let mut options: HashMap<&str, Value> = HashMap::new();
     options.insert("handle_token", Value::from(token.as_str()));
     options.insert("interactive", Value::from(false));
     let _: OwnedObjectPath = portal
         .call("Screenshot", &("", options))
+        .await
         .map_err(|error| error.to_string())?;
-    let message = responses.next().ok_or("portal closed the request")?;
+    let message = responses.next().await.ok_or("portal closed the request")?;
     let (code, results): (u32, HashMap<String, OwnedValue>) = message
         .body()
         .deserialize()

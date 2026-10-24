@@ -4151,12 +4151,14 @@ dependencies = [
 name = "warmup-companion"
 version = "0.10.5"
 dependencies = [
+ "async-io",
  "cosmic-text",
  "cpal",
  "ctrlc",
  "enigo",
  "evdev",
  "fontdb 0.16.2",
+ "futures-lite",
  "ksni",
  "libc",
  "nix 0.31.3",
