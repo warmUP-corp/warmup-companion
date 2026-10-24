@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - On Linux with Omarchy, voice typing can use the desktop's own dictation. Choose System dictation (Omarchy) in the tray's Voice engine menu or in the Voice tab. R3, the keyboard's mic key and Ctrl+Alt+V then start and stop `omarchy-dictation` (or `voxtype` directly), which records and types the text itself. With voxtype, the glow and cloud show while it listens and transcribes, and whatever is playing pauses as with Parakeet. There is nothing to download, and the Microphone choice is hidden because the desktop's dictation picks its own input.
+- On Linux, the dictation cloud is rendered like on Windows: the same shader, at the same 160-pixel size, updated every 16 ms, in the keyboard accent colour, and scaled smoothly onto the mic key and the screen.
 - On Linux, when only Parakeet Redux is installed and no engine was chosen yet, the Voice tab and the tray show Redux as the engine in use, matching what dictation runs.
 - On Linux, choosing a microphone in the tray right after one was plugged in or removed selects the one you clicked. The tray no longer asks PulseAudio or PipeWire for the input list several times a second while an update downloads.
 - On Linux, dictation records from the microphone chosen in the tray or the Voice tab also on PipeWire systems without the PulseAudio ALSA plugin. If that microphone cannot be opened, dictation records from the default input and a notification says so, instead of switching silently.
