@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, the tray menu matches Windows: Show controller tips lists the controller shortcuts in a notification, the Keyboard menu has the Display choice (Auto, TV or Desk) and, on the TV layout, Show shortcut hint, and the Updates menu shows when updates were last checked.
 - On Linux, `warmup-companion install` works while the companion is running. It used to fail with "Text file busy"; the new binary now replaces the running one and the running service restarts on it.
 - On Linux, holding Share shows the same shortcut sheet as Windows, in the keyboard's own colours, and the TV layout shows the grouped TV sheet. On a TV, a short hint for the full shortcut list appears above the keys for the first three seconds while the suggestion bar is empty.
 - On Linux, the shortcut hint bar under the keys is drawn by the same code as on Windows, with the same shortcuts and controller glyphs, and it drops the middle shortcuts first when the keyboard is narrow.

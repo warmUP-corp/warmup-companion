@@ -22,6 +22,19 @@ const SETTLE: Duration = Duration::from_secs(3);
 
 static BUSY: AtomicBool = AtomicBool::new(false);
 static AVAILABLE: Mutex<Option<(String, String)>> = Mutex::new(None);
+static LAST_CHECKED: Mutex<Option<String>> = Mutex::new(None);
+
+pub(crate) fn last_checked() -> Option<String> {
+    LAST_CHECKED.lock().ok().and_then(|a| a.clone())
+}
+
+fn stamp_checked() {
+    let (_, _, _, hour, minute, _) = crate::time_util::local_now();
+    if let Ok(mut at) = LAST_CHECKED.lock() {
+        *at = Some(format!("today, {hour:02}:{minute:02}"));
+    }
+    crate::linux_tray::refresh();
+}
 
 pub(crate) fn available() -> Option<(String, String)> {
     AVAILABLE.lock().ok().and_then(|a| a.clone())
@@ -127,6 +140,7 @@ pub(crate) fn check() -> Result<Check, String> {
     let json: serde_json::Value =
         serde_json::from_str(&get_string(LATEST_URL)?).map_err(|e| format!("bad reply: {e}"))?;
     let version = tag_version(&json)?;
+    stamp_checked();
     if !is_newer(&version, CURRENT) {
         return Ok(Check::UpToDate(version));
     }

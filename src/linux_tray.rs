@@ -85,7 +85,7 @@ impl Tray for CompanionTray {
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let settings = crate::config::gamepad_settings();
         let paused = crate::gamepad_backend::userland_poll_paused();
-        let mut items = vec![
+        let items = vec![
             disabled("Warmup Companion"),
             disabled(BUILD_INFO),
             MenuItem::Separator,
@@ -94,50 +94,11 @@ impl Tray for CompanionTray {
                 toggle_bool("cursor_enabled", crate::config::gamepad_settings().cursor_enabled);
             }),
             action("Control Center…", |_| crate::win::controller_center::show()),
-            action("Show controller tips", |_| {
-                let _ = crate::linux_notify::notify(
-                    "Warmup Companion",
-                    "Controller tips are shown with the on-screen keyboard, which is not part of this Linux build.",
-                );
-            }),
+            action("Show controller tips", |_| show_controller_tips()),
             check("Sign-in controller hints", settings.signin_hints, |_| {
                 toggle_bool("signin_hints", crate::config::gamepad_settings().signin_hints);
             }),
-            submenu(
-                "Keyboard",
-                vec![
-                    check(
-                        "Compact size",
-                        crate::config::vk_bar_scale() < 1.0,
-                        |_| toggle_compact(),
-                    ),
-                    check(
-                        "Floating layout",
-                        crate::config::vk_layout_mode() == crate::config::VkLayoutMode::Floating,
-                        |_| toggle_vk_mode(),
-                    ),
-                    submenu(
-                        "Keyboard style",
-                        vec![
-                            check(
-                                "Normal",
-                                crate::config::vk_style() == crate::config::VkStyle::Normal,
-                                |_| set_style("normal"),
-                            ),
-                            check(
-                                "Mono",
-                                crate::config::vk_style() == crate::config::VkStyle::Mono,
-                                |_| set_style("mono"),
-                            ),
-                            check(
-                                "Modern",
-                                crate::config::vk_style() == crate::config::VkStyle::Modern,
-                                |_| set_style("modern"),
-                            ),
-                        ],
-                    ),
-                ],
-            ),
+            submenu("Keyboard", keyboard_items()),
             submenu(
                 "Game detection",
                 vec![
@@ -207,6 +168,11 @@ const CMD_EDIT_SETTINGS: usize = 18;
 const CMD_PRIVACY: usize = 19;
 const CMD_UNINSTALL: usize = 20;
 const CMD_EXIT: usize = 21;
+const CMD_TIPS: usize = 22;
+const CMD_SIDE_TIPS: usize = 23;
+const CMD_DISPLAY_AUTO: usize = 24;
+const CMD_DISPLAY_TV: usize = 25;
+const CMD_DISPLAY_DESK: usize = 26;
 
 fn menu_entries() -> Vec<Entry> {
     let gs = crate::config::gamepad_settings();
@@ -221,6 +187,61 @@ fn menu_entries() -> Vec<Entry> {
     };
     updates.push(Entry::Separator);
     updates.push(Entry::toggle("Check automatically", CMD_UPDATE_AUTO, gs.update_check));
+    if let Some(at) = crate::linux_update::last_checked() {
+        updates.push(Entry::command(format!("Last checked {at}"), 0).disabled(true));
+    }
+    let mut keyboard = vec![
+        Entry::toggle(
+            "Compact size",
+            CMD_COMPACT,
+            crate::config::vk_bar_scale() < 1.0,
+        ),
+        Entry::toggle(
+            "Floating layout",
+            CMD_FLOATING,
+            crate::config::vk_layout_mode() == crate::config::VkLayoutMode::Floating,
+        ),
+        Entry::submenu(
+            "Keyboard style",
+            vec![
+                Entry::radio(
+                    "Normal",
+                    CMD_STYLE_NORMAL,
+                    style == crate::config::VkStyle::Normal,
+                ),
+                Entry::radio("Mono", CMD_STYLE_MONO, style == crate::config::VkStyle::Mono),
+                Entry::radio(
+                    "Modern",
+                    CMD_STYLE_MODERN,
+                    style == crate::config::VkStyle::Modern,
+                ),
+            ],
+        ),
+    ];
+    if crate::win::vk_ui::vk_look().tv_layout() {
+        keyboard.push(Entry::toggle(
+            "Show shortcut hint",
+            CMD_SIDE_TIPS,
+            gs.vk_side_tips,
+        ));
+    }
+    let display = crate::config::vk_display();
+    keyboard.push(Entry::submenu(
+        "Display",
+        vec![
+            Entry::radio(
+                "Auto (detect)",
+                CMD_DISPLAY_AUTO,
+                display == crate::config::VkDisplay::Auto,
+            ),
+            Entry::radio("TV", CMD_DISPLAY_TV, display == crate::config::VkDisplay::Tv),
+            Entry::radio(
+                "Desk",
+                CMD_DISPLAY_DESK,
+                display == crate::config::VkDisplay::Desk,
+            ),
+        ],
+    ));
     vec![
         Entry::Header,
         Entry::Separator,
@@ -231,38 +252,9 @@ fn menu_entries() -> Vec<Entry> {
         ),
         Entry::toggle("Gamepad cursor", CMD_CURSOR, gs.cursor_enabled),
         Entry::command("Control Center…", CMD_CENTER).with_accel("Select+Start"),
+        Entry::command("Show controller tips", CMD_TIPS),
         Entry::toggle("Sign-in controller hints", CMD_SIGNIN_HINTS, gs.signin_hints),
-        Entry::submenu(
-            "Keyboard",
-            vec![
-                Entry::toggle(
-                    "Compact size",
-                    CMD_COMPACT,
-                    crate::config::vk_bar_scale() < 1.0,
-                ),
-                Entry::toggle(
-                    "Floating layout",
-                    CMD_FLOATING,
-                    crate::config::vk_layout_mode() == crate::config::VkLayoutMode::Floating,
-                ),
-                Entry::submenu(
-                    "Keyboard style",
-                    vec![
-                        Entry::radio(
-                            "Normal",
-                            CMD_STYLE_NORMAL,
-                            style == crate::config::VkStyle::Normal,
-                        ),
-                        Entry::radio("Mono", CMD_STYLE_MONO, style == crate::config::VkStyle::Mono),
-                        Entry::radio(
-                            "Modern",
-                            CMD_STYLE_MODERN,
-                            style == crate::config::VkStyle::Modern,
-                        ),
-                    ],
-                ),
-            ],
-        ),
+        Entry::submenu("Keyboard", keyboard),
         Entry::submenu(
             "Game detection",
             vec![
@@ -331,6 +323,11 @@ fn run_command(cmd: usize) {
         CMD_PRIVACY => show_privacy(),
         CMD_UNINSTALL => uninstall(),
         CMD_EXIT => crate::gamepad::request_stop(),
+        CMD_TIPS => show_controller_tips(),
+        CMD_SIDE_TIPS => toggle_bool("vk_side_tips", gs.vk_side_tips),
+        CMD_DISPLAY_AUTO => set_display("auto"),
+        CMD_DISPLAY_TV => set_display("tv"),
+        CMD_DISPLAY_DESK => set_display("desk"),
         _ => {}
     }
     refresh();
@@ -354,6 +351,64 @@ fn menu_spec(at: POINT) -> Spec {
     }
 }
 
+fn keyboard_items() -> Vec<MenuItem<CompanionTray>> {
+    let style = crate::config::vk_style();
+    let mut items = vec![
+        check("Compact size", crate::config::vk_bar_scale() < 1.0, |_| {
+            toggle_compact()
+        }),
+        check(
+            "Floating layout",
+            crate::config::vk_layout_mode() == crate::config::VkLayoutMode::Floating,
+            |_| toggle_vk_mode(),
+        ),
+        submenu(
+            "Keyboard style",
+            vec![
+                check("Normal", style == crate::config::VkStyle::Normal, |_| {
+                    set_style("normal")
+                }),
+                check("Mono", style == crate::config::VkStyle::Mono, |_| {
+                    set_style("mono")
+                }),
+                check("Modern", style == crate::config::VkStyle::Modern, |_| {
+                    set_style("modern")
+                }),
+            ],
+        ),
+    ];
+    if crate::win::vk_ui::vk_look().tv_layout() {
+        items.push(check(
+            "Show shortcut hint",
+            crate::config::gamepad_settings().vk_side_tips,
+            |_| {
+                toggle_bool(
+                    "vk_side_tips",
+                    crate::config::gamepad_settings().vk_side_tips,
+                )
+            },
+        ));
+    }
+    let display = crate::config::vk_display();
+    items.push(submenu(
+        "Display",
+        vec![
+            check(
+                "Auto (detect)",
+                display == crate::config::VkDisplay::Auto,
+                |_| set_display("auto"),
+            ),
+            check("TV", display == crate::config::VkDisplay::Tv, |_| {
+                set_display("tv")
+            }),
+            check("Desk", display == crate::config::VkDisplay::Desk, |_| {
+                set_display("desk")
+            }),
+        ],
+    ));
+    items
+}
+
 fn update_items(auto: bool) -> Vec<MenuItem<CompanionTray>> {
     let mut items = match crate::linux_update::available() {
         Some((version, page)) => vec![
@@ -372,6 +427,9 @@ fn update_items(auto: bool) -> Vec<MenuItem<CompanionTray>> {
     items.push(check("Check automatically", auto, |_| {
         toggle_bool("update_check", crate::config::gamepad_settings().update_check);
     }));
+    if let Some(at) = crate::linux_update::last_checked() {
+        items.push(disabled(&format!("Last checked {at}")));
+    }
     items
 }
 
@@ -455,6 +513,36 @@ fn set_style(style: &str) {
     if let Err(error) = crate::config::set_gamepad_setting("vk_style", style) {
         crate::install::log_line(&format!("tray: set vk_style failed: {error}"));
     }
+}
+
+fn set_display(display: &str) {
+    if let Err(error) = crate::config::set_gamepad_setting("vk_display", display) {
+        crate::install::log_line(&format!("tray: set vk_display failed: {error}"));
+    }
+}
+
+fn show_controller_tips() {
+    use crate::win::controller_tips::{cue, cue_count, TipToken};
+    let mut lines = Vec::new();
+    for index in 0..cue_count() {
+        let mut line = String::new();
+        let mut joined = true;
+        for token in cue(index) {
+            let (text, glue) = match token {
+                TipToken::Button(b) => (*b, false),
+                TipToken::Text(t) => (*t, false),
+                TipToken::Plus => ("+", true),
+                TipToken::Dot => ("\u{b7}", false),
+            };
+            if !line.is_empty() && !joined && !glue {
+                line.push(' ');
+            }
+            line.push_str(text);
+            joined = glue;
+        }
+        lines.push(line);
+    }
+    let _ = crate::linux_notify::notify("Controller tips", &lines.join("\n"));
 }
 
 fn open_path(path: &std::path::Path) {
