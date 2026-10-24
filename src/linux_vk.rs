@@ -723,6 +723,10 @@ impl Shell {
         if crate::vk_sheet::shown() && look.tv_layout() {
             return;
         }
+        let y = y - self.slide_hidden().0 * self.logical_h as f32;
+        if y < 0.0 {
+            return;
+        }
         let rows = crate::vk_nav::rows_snapshot();
         let (scale_w, ui) = self.key_scales(look, &rows);
         match draw::hit_test(self.logical_w as f32, self.logical_h as f32, scale_w, ui, &rows, look, x, y) {
@@ -1060,6 +1064,7 @@ struct Tips {
     frame_pending: bool,
     frame_at: std::time::Instant,
     scale: i32,
+    size: (u32, u32),
     gfx: Gfx,
     buffer: Option<Buffer>,
     controller_label: String,
@@ -1116,6 +1121,7 @@ impl Tips {
             frame_pending: false,
             frame_at: now,
             scale: 1,
+            size: (TIPS_W, TIPS_H),
             gfx: Gfx::new(1, 1)?,
             buffer: None,
             controller_label,
@@ -1187,7 +1193,8 @@ impl Tips {
             style: vk_style(),
         };
         let t = self.started.elapsed().as_secs_f32();
-        if !draw::paint_tips_pill(&mut self.gfx, &pill, TIPS_W as f32, TIPS_H as f32, self.scale as f32, t) {
+        let (width, height) = self.size;
+        if !draw::paint_tips_pill(&mut self.gfx, &pill, width as f32, height as f32, self.scale as f32, t) {
             return;
         }
         let pixels = draw::to_argb(&self.gfx.pixels());
@@ -1427,8 +1434,16 @@ impl CompositorHandler for Tips {
         _: &Connection,
         _: &QueueHandle<Self>,
         _: &wl_surface::WlSurface,
-        _: &wl_output::WlOutput,
+        output: &wl_output::WlOutput,
     ) {
+        let Some((screen_w, screen_h)) = self.output_state.info(output).and_then(|info| info.logical_size) else {
+            return;
+        };
+        let want = (TIPS_W.min(screen_w.max(1) as u32), TIPS_H.min(screen_h.max(1) as u32));
+        if want != self.size {
+            self.layer.set_size(want.0, want.1);
+            self.layer.commit();
+        }
     }
 
     fn surface_leave(
@@ -1463,9 +1478,12 @@ impl LayerShellHandler for Tips {
         _: &Connection,
         qh: &QueueHandle<Self>,
         _: &LayerSurface,
-        _: LayerSurfaceConfigure,
+        configure: LayerSurfaceConfigure,
         _: u32,
     ) {
+        if configure.new_size.0 > 0 && configure.new_size.1 > 0 {
+            self.size = configure.new_size;
+        }
         self.configured = true;
         if !self.frame_pending {
             self.draw(qh);
