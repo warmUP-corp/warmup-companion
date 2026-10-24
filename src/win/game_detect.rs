@@ -61,6 +61,12 @@ pub fn standalone_game_active_cached() -> bool {
     }
 }
 
+pub fn foreground_fullscreen_pid() -> Option<u32> {
+    let our_pid = std::process::id();
+    let exe_by_pid = pid_to_exe_map();
+    foreground_external_game_pid(our_pid, &exe_by_pid)
+}
+
 fn standalone_game_active() -> bool {
     let our_pid = std::process::id();
     let exe_by_pid = pid_to_exe_map();

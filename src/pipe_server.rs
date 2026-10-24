@@ -1002,6 +1002,24 @@ fn game_detection_revision() -> Option<u64> {
 }
 
 #[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
+fn set_running_games_owner(owner: Option<&TrackingOwner>) {
+    crate::playtime_tracker::set_running_games_owner(owner);
+}
+
+#[cfg(not(all(any(windows, target_os = "linux"), feature = "gamepad")))]
+fn set_running_games_owner(_owner: Option<&TrackingOwner>) {}
+
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
+fn current_running_games() -> Option<crate::protocol::RunningGamesPayload> {
+    crate::playtime_tracker::current_running_games()
+}
+
+#[cfg(not(all(any(windows, target_os = "linux"), feature = "gamepad")))]
+fn current_running_games() -> Option<crate::protocol::RunningGamesPayload> {
+    None
+}
+
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 fn apply_play_sessions_ack(
     owner: &TrackingOwner,
     payload: &crate::protocol::PlaySessionsAckPayload,

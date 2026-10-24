@@ -13,14 +13,24 @@ use crate::tracking_owner::TrackingOwner;
 use super::{
     apply_companion_settings, apply_config, apply_game_detection, apply_led, apply_library_watch,
     apply_mode, apply_parental_guard, apply_play_sessions_ack, apply_rumble, companion_snapshot,
-    current, current_axis, current_battery, current_pads, drain_buttons, drain_parental_blocked,
-    ensure_settings_watcher, game_detection_revision, set_native_vk_request, take_cursor_moved,
-    take_touchpad, SettingsSync, SETTINGS_GEN,
+    current, current_axis, current_battery, current_pads, current_running_games, drain_buttons,
+    drain_parental_blocked, ensure_settings_watcher, game_detection_revision,
+    set_native_vk_request, set_running_games_owner, take_cursor_moved, take_touchpad,
+    SettingsSync, SETTINGS_GEN,
 };
 
 const KEEPALIVE: Duration = Duration::from_secs(1);
 const CURSOR_HINT_INTERVAL: Duration = Duration::from_millis(100);
 const FRAME_LIMIT: usize = 64 * 1024;
+const RUNNING_GAMES_INTERVAL: Duration = Duration::from_secs(1);
+
+struct RunningGamesWatch;
+
+impl Drop for RunningGamesWatch {
+    fn drop(&mut self) {
+        set_running_games_owner(None);
+    }
+}
 
 pub(super) struct ClientIdentity {
     pub(super) owner: TrackingOwner,
@@ -215,6 +225,12 @@ pub(super) fn stream<R: Read, W: Write>(
     let mut last_battery: Option<BatteryPayload> = None;
     let mut last_pads: Option<Vec<PadBatteryPayload>> = None;
     let mut last_axis: Option<AxisPayload> = None;
+    let mut last_running: Option<crate::protocol::RunningGamesPayload> = None;
+    let mut last_running_write = Instant::now()
+        .checked_sub(RUNNING_GAMES_INTERVAL)
+        .unwrap_or_else(Instant::now);
+    set_running_games_owner(Some(owner));
+    let _running_games_watch = RunningGamesWatch;
     let mut last_conn_write = Instant::now()
         .checked_sub(KEEPALIVE)
         .unwrap_or_else(Instant::now);
@@ -253,6 +269,24 @@ pub(super) fn stream<R: Read, W: Write>(
                 .is_err()
             {
                 return;
+            }
+        }
+        if last_running_write.elapsed() >= RUNNING_GAMES_INTERVAL {
+            if let Some(running) = current_running_games() {
+                if last_running.as_ref() != Some(&running) {
+                    if session
+                        .write_frame(
+                            UpFrame::RunningGames(running.clone())
+                                .to_ndjson_line()
+                                .as_bytes(),
+                        )
+                        .is_err()
+                    {
+                        return;
+                    }
+                    last_running = Some(running);
+                    last_running_write = Instant::now();
+                }
             }
         }
         for blocked in drain_parental_blocked() {

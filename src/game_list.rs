@@ -253,7 +253,11 @@ fn build(list: &GameList) -> Index {
 }
 
 fn current() -> Option<Arc<Index>> {
-    LOADED.call_once(load_persisted);
+    LOADED.call_once(|| {
+        if !cfg!(test) {
+            load_persisted();
+        }
+    });
     INDEX.read().ok().and_then(|slot| slot.clone())
 }
 
@@ -464,4 +468,151 @@ pub(crate) fn accept_chunk(
     drop(slot);
     install(&done.list)?;
     Ok(ChunkOutcome::Installed(done.list.revision))
+}
+
+const GENERIC_EXE_STEMS: &[&str] = &[
+    "app",
+    "bootstrap",
+    "bootstrapper",
+    "client",
+    "crashpad_handler",
+    "game",
+    "gamelaunchhelper",
+    "install",
+    "launch",
+    "launcher",
+    "main",
+    "play",
+    "run",
+    "setup",
+    "start",
+    "update",
+    "updater",
+];
+
+pub(crate) fn is_generic_exe_stem(stem: &str) -> bool {
+    GENERIC_EXE_STEMS.contains(&stem)
+}
+
+#[cfg(windows)]
+pub(crate) fn exe_stem(exe_name: &str) -> String {
+    let lower = exe_name.to_ascii_lowercase();
+    lower
+        .strip_suffix(".exe")
+        .unwrap_or(lower.as_str())
+        .to_string()
+}
+
+#[cfg(not(windows))]
+pub(crate) fn exe_stem(exe_name: &str) -> String {
+    let stem = exe_name.split('.').next().unwrap_or(exe_name);
+    if stem.is_empty() {
+        exe_name.to_ascii_lowercase()
+    } else {
+        stem.to_ascii_lowercase()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessMatch {
+    pub pid: u32,
+    pub game_id: Option<String>,
+    pub exe_stem: String,
+    pub image_path: String,
+    pub steam_app_id: Option<String>,
+}
+
+pub(crate) fn match_processes(
+    processes: &[(u32, String, Option<String>)],
+    games: &[crate::protocol::LibraryWatchGameEntry],
+    steam_app_id: impl Fn(u32) -> Option<String>,
+) -> Vec<ProcessMatch> {
+    let indexed = has_index();
+    let mut out = Vec::new();
+    for (pid, exe_name, image_path) in processes {
+        let Some(image_path) = image_path.as_deref().filter(|path| !path.trim().is_empty()) else {
+            continue;
+        };
+        let stem = exe_stem(file_name(&normalize(exe_name)));
+        if stem.is_empty() || is_denylisted_exe(exe_name, Some(image_path)) {
+            continue;
+        }
+        let steam_id = is_steam_library_path(image_path)
+            .then(|| steam_app_id(*pid))
+            .flatten();
+        if steam_id
+            .as_deref()
+            .is_some_and(is_background_tool_steam_app)
+        {
+            continue;
+        }
+        let local = local_game_dir_for(image_path);
+        let known = !indexed
+            || is_detectable_image(image_path)
+            || steam_id.as_deref().is_some_and(is_listed_steam_app)
+            || local.is_some();
+        if !known {
+            continue;
+        }
+        let game_id = local.or_else(|| watch_owner(&stem, &normalize(image_path), games));
+        if game_id.is_none() && !indexed {
+            continue;
+        }
+        out.push(ProcessMatch {
+            pid: *pid,
+            game_id,
+            exe_stem: stem,
+            image_path: image_path.to_string(),
+            steam_app_id: steam_id,
+        });
+    }
+    out
+}
+
+pub(crate) fn watch_owner(
+    stem: &str,
+    normalized_image: &str,
+    games: &[crate::protocol::LibraryWatchGameEntry],
+) -> Option<String> {
+    let mut best: Option<(usize, &str)> = None;
+    let mut tie = false;
+    for game in games {
+        for prefix in game
+            .install_dir_prefixes
+            .iter()
+            .filter_map(|p| dir_prefix(p))
+        {
+            if !normalized_image.starts_with(prefix.as_str()) {
+                continue;
+            }
+            match best {
+                Some((len, id)) if prefix.len() == len => {
+                    if id != game.game_id {
+                        tie = true;
+                    }
+                }
+                Some((len, _)) if prefix.len() < len => {}
+                _ => {
+                    best = Some((prefix.len(), game.game_id.as_str()));
+                    tie = false;
+                }
+            }
+        }
+    }
+    if let Some((_, id)) = best {
+        return (!tie).then(|| id.to_string());
+    }
+    if is_generic_exe_stem(stem) {
+        return None;
+    }
+    let mut owners: Vec<&crate::protocol::LibraryWatchGameEntry> = games
+        .iter()
+        .filter(|game| game.exe_stems.iter().any(|s| s.eq_ignore_ascii_case(stem)))
+        .collect();
+    owners.sort_by(|a, b| a.game_id.cmp(&b.game_id));
+    owners.dedup_by(|a, b| a.game_id == b.game_id);
+    match owners.as_slice() {
+        [only] if only.install_dir_prefixes.is_empty() => Some(only.game_id.clone()),
+        _ => None,
+    }
 }

@@ -24,7 +24,6 @@ pub(crate) fn image_path(pid: u32) -> Option<String> {
 }
 
 #[cfg(windows)]
-#[allow(dead_code)]
 pub(crate) fn steam_running_app_id(pid: u32) -> Option<String> {
     use windows::core::PCWSTR;
     use windows::Win32::System::Registry::{
@@ -326,7 +325,6 @@ pub(crate) fn image_path(pid: u32) -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
-#[allow(dead_code)]
 pub(crate) fn steam_running_app_id(pid: u32) -> Option<String> {
     ["SteamAppId", "SteamGameId"].into_iter().find_map(|key| {
         proc_env(pid, key)

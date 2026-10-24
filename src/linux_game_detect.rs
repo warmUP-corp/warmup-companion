@@ -85,6 +85,12 @@ pub fn foreground_window() -> Option<(String, String, String)> {
     }
 }
 
+pub fn foreground_fullscreen_pid() -> Option<u32> {
+    foreground_window();
+    let surface = latest_surface()?;
+    (surface.pid != 0 && surface_is_standalone_game(&surface)).then_some(surface.pid)
+}
+
 pub fn standalone_game_active_cached() -> bool {
     let now = Instant::now();
     let mut slot = match cache().lock() {
