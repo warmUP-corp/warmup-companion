@@ -4149,7 +4149,7 @@ dependencies = [
 
 [[package]]
 name = "warmup-companion"
-version = "0.10.6"
+version = "0.11.0"
 dependencies = [
  "alsa",
  "async-io",

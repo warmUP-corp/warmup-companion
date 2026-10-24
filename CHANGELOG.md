@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.11.0
+
 - The companion now treats only known games as games, like warmUP. warmUP sends it its list of known games, and the companion stores it. Once it has the list, a fullscreen window only puts the controller to sleep when it belongs to a game on that list, a listed Steam game or a game you added by hand, and offline play time is only counted for those games. Until warmUP has sent a list, the companion behaves as before.
 - While warmUP is open, the companion tells it which known games are running and which of them is in the foreground fullscreen.
 - The companion ignores the same programs as warmUP when it looks for a fullscreen game: itself, ChatGPT, VS Code, Cursor, WebView2 apps, the Rockstar Games Launcher and its helpers, and Wallpaper Engine.
