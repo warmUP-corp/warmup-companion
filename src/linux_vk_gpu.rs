@@ -200,7 +200,7 @@ impl Presenter {
                 entry_point: Some("fs"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format,
+                    format: format.remove_srgb_suffix(),
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -426,7 +426,10 @@ impl Presenter {
                 },
             ],
         });
-        let view = target.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = target.texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(self.format.remove_srgb_suffix()),
+            ..Default::default()
+        });
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("keyboard") });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -484,7 +487,7 @@ impl Presenter {
             height,
             present_mode: self.present_mode,
             alpha_mode: self.alpha,
-            view_formats: vec![],
+            view_formats: if self.format.is_srgb() { vec![self.format.remove_srgb_suffix()] } else { vec![] },
             desired_maximum_frame_latency: 1,
         };
         let surface = &self.surface;

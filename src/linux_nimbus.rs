@@ -3,14 +3,14 @@ use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-const RT: u32 = 128;
+const RT: u32 = 160;
 const STEPS: i32 = 56;
 const LIGHT_STEPS: i32 = 4;
 const DENSITY_OCT: i32 = 4;
 const WHITE_LIFT: f32 = 0.35;
 const HUE_SPREAD: f32 = 0.6;
 const NIMBUS_BODY: f32 = 0.55;
-const FRAME: Duration = Duration::from_millis(33);
+const FRAME: Duration = Duration::from_millis(16);
 #[cfg(any(test, not(feature = "gamepad")))]
 const DEFAULT_ACCENT: u32 = 0x00ffd1a6;
 
