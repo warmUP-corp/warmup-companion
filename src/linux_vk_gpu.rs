@@ -5,11 +5,9 @@ use super::draw::{self, Frame, Glide};
 use crate::mono_ui::Gfx;
 
 pub struct Orb<'a> {
-    pub pixels: &'a [u8],
-    pub px: u32,
-    pub x: f32,
-    pub y: f32,
-    pub size: f32,
+    pub image: Option<(&'a [u8], u32)>,
+    pub ball: crate::mono_ui::Rect,
+    pub spot: draw::VoiceKey,
 }
 
 pub struct Presenter {
@@ -77,6 +75,10 @@ struct Uniforms {
     ring: [f32; 4],
     extra: [f32; 4],
     orb: [f32; 4],
+    clip: [f32; 4],
+    halo: [f32; 4],
+    halo_style: [f32; 4],
+    halo_color: [f32; 4],
 }
 
 impl Presenter {
@@ -321,9 +323,10 @@ impl Presenter {
             self.stamp = stamp;
             self.mode = mode;
         }
-        if let Some(orb) = orb {
-            if orb.px > 0 && orb.pixels.len() >= (orb.px * orb.px * 4) as usize {
-                self.orb = upload(&self.device, &self.queue, "keyboard-orb", orb.pixels, orb.px, orb.px);
+        let nimbus = orb.and_then(|orb| orb.image);
+        if let Some((pixels, px)) = nimbus {
+            if px > 0 && pixels.len() >= (px * px * 4) as usize {
+                self.orb = upload(&self.device, &self.queue, "keyboard-orb", pixels, px, px);
                 self.orb_live = true;
             }
         } else if self.orb_live {
@@ -352,8 +355,18 @@ impl Presenter {
         let show_key = if full { 0.0 } else { 1.0 };
         let orb_box = orb
             .filter(|_| self.orb_live)
-            .map(|orb| [orb.x, orb.y, orb.size, orb.size])
+            .map(|orb| [orb.ball.x, orb.ball.y, orb.ball.w, orb.ball.h])
             .unwrap_or([0.0, 0.0, 1.0, 1.0]);
+        let clip = orb
+            .map(|orb| [orb.spot.key.x, orb.spot.key.y, orb.spot.key.w, orb.spot.key.h])
+            .unwrap_or([0.0; 4]);
+        let halo = orb
+            .map(|orb| [orb.spot.halo.x, orb.spot.halo.y, orb.spot.halo.w, orb.spot.halo.h])
+            .unwrap_or([0.0, 0.0, 1.0, 1.0]);
+        let halo_style = orb
+            .map(|orb| [orb.spot.halo_radius, orb.spot.halo_w, 0.0, 0.0])
+            .unwrap_or([0.0; 4]);
+        let halo_color = orb.map(|orb| orb.spot.halo_rgba()).unwrap_or([0.0; 4]);
         let uniforms = Uniforms {
             tex: [width as f32, height as f32, 0.0, 0.0],
             key: [patch.dest_x, patch.dest_y, patch.width, patch.height],
@@ -361,6 +374,10 @@ impl Presenter {
             ring: patch.ring,
             extra: [patch.ring_w, patch.radius, show_key, press],
             orb: orb_box,
+            clip,
+            halo,
+            halo_style,
+            halo_color,
         };
         self.queue.write_buffer(&self.uniform, 0, bytes_of(&uniforms));
         let gpu_at = Instant::now();
@@ -616,6 +633,10 @@ struct Uniforms {
     ring: vec4<f32>,
     extra: vec4<f32>,
     orb: vec4<f32>,
+    clip: vec4<f32>,
+    halo: vec4<f32>,
+    halo_style: vec4<f32>,
+    halo_color: vec4<f32>,
 }
 @group(0) @binding(0) var base_tex: texture_2d<f32>;
 @group(0) @binding(1) var base_samp: sampler;
@@ -652,16 +673,25 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let key = textureSample(key_tex, key_samp, local / max(u.key.zw, vec2<f32>(1.0)));
         color = over(color, key);
     }
+    let orb_local = pos.xy - u.orb.xy;
+    let clip_local = pos.xy - u.clip.xy;
+    if (u.orb.z > 1.5 && all(orb_local >= vec2<f32>(0.0)) && all(orb_local < u.orb.zw)
+        && all(clip_local >= vec2<f32>(0.0)) && all(clip_local < u.clip.zw)) {
+        let orb = textureSample(orb_tex, orb_samp, orb_local / max(u.orb.zw, vec2<f32>(1.0)));
+        color = over(color, orb);
+    }
+    if (u.halo_color.a > 0.0) {
+        let halo_dist = sd_round(pos.xy - u.halo.xy, u.halo.zw, u.halo_style.x);
+        let halo_half = max(u.halo_style.y * 0.5, 0.5);
+        let halo_band = abs(halo_dist + halo_half) - halo_half;
+        let halo_a = 1.0 - smoothstep(0.0, 1.25, halo_band);
+        color = over(color, u.halo_color * halo_a);
+    }
     let dist = sd_round(pos.xy - u.body.xy, u.body.zw, u.extra.y);
     let half = max(u.extra.x * 0.5, 0.5);
     let band = abs(dist + half) - half;
     let ring_a = (1.0 - smoothstep(0.0, 1.25, band)) * u.ring.a;
     color = over(color, vec4<f32>(u.ring.rgb * ring_a, ring_a));
-    let orb_local = pos.xy - u.orb.xy;
-    if (u.orb.z > 1.5 && all(orb_local >= vec2<f32>(0.0)) && all(orb_local < u.orb.zw)) {
-        let orb = textureSample(orb_tex, orb_samp, orb_local / max(u.orb.zw, vec2<f32>(1.0)));
-        color = over(color, orb);
-    }
     return color;
 }
 "#;

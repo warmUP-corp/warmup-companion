@@ -59,13 +59,16 @@ pub fn keyboard_gone() -> bool {
 
 #[cfg(feature = "speech")]
 pub fn paint_voice_orb(
+    g: &mut Gfx,
     side: u32,
+    slot: f32,
     phase: u8,
     level: f32,
-    orb: &[u8],
-    orb_px: u32,
-) -> Option<tiny_skia::Pixmap> {
-    draw::paint_voice_orb(side, phase, level, orb, orb_px)
+    t: f32,
+    nimbus: Option<(&[u8], u32)>,
+    accent: u32,
+) -> bool {
+    draw::paint_voice_orb(g, side, slot, draw::Voice { phase, level, t }, nimbus, accent)
 }
 
 #[cfg(feature = "speech")]
@@ -75,18 +78,8 @@ pub fn voice_accent() -> u32 {
 }
 
 #[cfg(feature = "speech")]
-pub fn paint_voice_screen(
-    g: &mut Gfx,
-    width: u32,
-    height: u32,
-    phase: u8,
-    level: f32,
-    show_orb: bool,
-    orb: Option<&[u8]>,
-    orb_px: u32,
-    accent: u32,
-) -> bool {
-    draw::paint_voice_screen(g, width, height, phase, level, show_orb, orb, orb_px, accent)
+pub fn paint_voice_screen(g: &mut Gfx, width: u32, height: u32, phase: u8, accent: u32) -> bool {
+    draw::paint_voice_screen(g, width, height, phase, accent)
 }
 
 #[cfg(feature = "speech")]
@@ -317,6 +310,9 @@ struct Shell {
     opened_at: std::time::Instant,
     hint_shown: bool,
     voice_gen: u64,
+    voice_level: f32,
+    voice_level_at: Option<std::time::Instant>,
+    voice_started: Option<std::time::Instant>,
 }
 
 impl Shell {
@@ -377,6 +373,9 @@ impl Shell {
             opened_at: std::time::Instant::now(),
             hint_shown: false,
             voice_gen: 0,
+            voice_level: 0.0,
+            voice_level_at: None,
+            voice_started: None,
         };
         shell.apply_layout();
         Ok(shell)
@@ -503,6 +502,7 @@ impl Shell {
         let dark = crate::vk_theme::is_dark_theme();
         let theme = crate::config::keyboard_theme();
         let layout = draw::layout_scale(look, self.output_size().1, &rows);
+        let voice = self.voice_state();
         let frame = draw::Frame {
             logical_w: self.logical_w as f32,
             logical_h: self.logical_h as f32,
@@ -527,6 +527,7 @@ impl Shell {
             floating,
             sheet: crate::vk_sheet::shown(),
             sheet_hint: self.sheet_hint(look),
+            voice,
         };
         if self.logical_w == 0 || self.logical_h == 0 {
             return;
@@ -559,11 +560,9 @@ impl Shell {
             }
         }
         draw::paint_frame(&mut self.gfx, &frame, &mut self.glide);
-        #[cfg(feature = "speech")]
-        if crate::linux_speech::visual_active() {
-            if let Some((px, bytes)) = crate::linux_nimbus::latest_frame() {
-                draw::paint_voice_key(&mut self.gfx, &frame, &bytes, px);
-            }
+        if frame.voice.is_some() {
+            let nimbus = nimbus_frame();
+            draw::paint_voice_key(&mut self.gfx, &frame, nimbus.as_ref().map(|(px, bytes)| (bytes.as_slice(), *px)));
         }
         let pixels = draw::to_argb(&self.gfx.pixels());
         let buffer_w = self.gfx.width() as i32;
@@ -604,34 +603,24 @@ impl Shell {
             let surface = self.layer.wl_surface().id().as_ptr() as *mut std::ffi::c_void;
             self.gpu = Some(gpu::Presenter::open(self.display, surface)?);
         }
-        #[cfg(feature = "speech")]
-        let orb_hold = crate::linux_speech::visual_active().then(crate::linux_nimbus::latest_frame).flatten();
-        #[cfg(not(feature = "speech"))]
-        let orb_hold: Option<(u32, Vec<u8>)> = None;
-        let orb = orb_hold.as_ref().and_then(|(px, bytes)| {
-            let (x, y, mut size) = draw::voice_spot(frame)?;
-            #[cfg(feature = "speech")]
-            {
-                let swell = draw::voice_swell(crate::linux_speech::phase(), crate::linux_speech::level());
-                let cx = x + size * 0.5;
-                let cy = y + size * 0.5;
-                size *= swell;
-                return Some(gpu::Orb {
-                    pixels: bytes.as_slice(),
-                    px: *px,
-                    x: cx - size * 0.5,
-                    y: cy - size * 0.5,
-                    size,
-                });
-            }
-            #[cfg(not(feature = "speech"))]
-            Some(gpu::Orb {
-                pixels: bytes.as_slice(),
-                px: *px,
-                x,
-                y,
-                size,
-            })
+        let spot = draw::voice_key(frame);
+        let nimbus = spot.as_ref().and_then(|_| nimbus_frame());
+        let fallback = match (&spot, &nimbus) {
+            (Some(spot), None) => draw::paint_voice_fallback(&mut self.gfx, frame, spot),
+            _ => None,
+        };
+        let orb = spot.map(|spot| match (&nimbus, &fallback) {
+            (Some((px, bytes)), _) => gpu::Orb {
+                image: Some((bytes.as_slice(), *px)),
+                ball: spot.ball,
+                spot,
+            },
+            (None, Some((px, bytes, ball))) => gpu::Orb {
+                image: Some((bytes.as_slice(), *px)),
+                ball: *ball,
+                spot,
+            },
+            (None, None) => gpu::Orb { image: None, ball: spot.ball, spot },
         });
         self.queue_gpu_frame(qh);
         let presenter = self.gpu.as_mut().ok_or("keyboard gpu is gone")?;
@@ -639,6 +628,34 @@ impl Shell {
         self.frame_pending = true;
         self.dirty = self.glide.animating;
         Ok(())
+    }
+
+    fn voice_state(&mut self) -> Option<draw::Voice> {
+        #[cfg(feature = "speech")]
+        if crate::linux_speech::visual_active() {
+            let now = std::time::Instant::now();
+            let started = *self.voice_started.get_or_insert(now);
+            let target = crate::linux_speech::level();
+            let dt_ms = self
+                .voice_level_at
+                .map(|at| now.duration_since(at).as_secs_f32() * 1000.0)
+                .unwrap_or(0.0);
+            self.voice_level_at = Some(now);
+            self.voice_level = if dt_ms > 0.0 {
+                crate::vk_motion::smooth_level(self.voice_level, target, dt_ms)
+            } else {
+                target
+            };
+            return Some(draw::Voice {
+                phase: crate::linux_speech::phase(),
+                level: self.voice_level,
+                t: now.duration_since(started).as_secs_f32(),
+            });
+        }
+        self.voice_started = None;
+        self.voice_level_at = None;
+        self.voice_level = 0.0;
+        None
     }
 
     fn queue_gpu_frame(&self, qh: &QueueHandle<Self>) {
@@ -687,6 +704,17 @@ fn desired_size(output_w: f32, output_h: f32, look: crate::vk_paint::VkLook) -> 
     let rows = crate::vk_nav::rows_snapshot();
     let docked = matches!(vk_layout_mode(), VkLayoutMode::Docked);
     draw::card_size(output_w, output_h, docked, &rows, look)
+}
+
+fn nimbus_frame() -> Option<(u32, Vec<u8>)> {
+    #[cfg(feature = "speech")]
+    {
+        crate::linux_nimbus::latest_frame()
+    }
+    #[cfg(not(feature = "speech"))]
+    {
+        None
+    }
 }
 
 fn speech_ready() -> bool {

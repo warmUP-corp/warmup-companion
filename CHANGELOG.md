@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, the mic key during dictation looks like on Windows: the cloud is kept inside the key, the key gets an accent ring that brightens with your voice and pulses while transcribing, and the mic symbol is hidden behind the cloud. If the cloud is not ready yet, the key shows the same coloured orb as Windows.
 - On Linux, the floating keyboard sits on the bottom edge of the screen like on Windows, without a gap below it. On a TV, the keyboard is never taller than 45% of the screen.
 - On Linux, `warmup-companion install` works while the companion is running. It used to fail with "Text file busy"; the new binary now replaces the running one and the running service restarts on it.
 - On Linux, holding Share shows the same shortcut sheet as Windows, in the keyboard's own colours, and the TV layout shows the grouped TV sheet. On a TV, a short hint for the full shortcut list appears above the keys for the first three seconds while the suggestion bar is empty.
