@@ -35,6 +35,7 @@ pub fn run() -> Result<(), String> {
         session.close();
     }
     crate::linux_hotkeys::release();
+    crate::linux_speech::stop_engine();
     match &result {
         Ok(()) => crate::install::log_line("service gamepad loop returned"),
         Err(error) => crate::install::log_line(&format!("service gamepad loop failed: {error}")),
@@ -43,26 +44,8 @@ pub fn run() -> Result<(), String> {
 }
 
 fn install_stop_signals() {
-    let mut mask = nix::sys::signal::SigSet::empty();
-    mask.add(nix::sys::signal::Signal::SIGTERM);
-    mask.add(nix::sys::signal::Signal::SIGINT);
-    if let Err(error) = mask.thread_block() {
-        crate::install::log_line(&format!("could not block stop signals: {error}"));
-        return;
-    }
-    std::thread::Builder::new()
-        .name("warmup-signals".into())
-        .spawn(move || {
-            while let Ok(signal) = mask.wait() {
-                if matches!(
-                    signal,
-                    nix::sys::signal::Signal::SIGTERM | nix::sys::signal::Signal::SIGINT
-                ) {
-                    crate::install::log_line("service stop requested");
-                    crate::gamepad::request_stop();
-                    break;
-                }
-            }
-        })
-        .ok();
+    crate::linux_hotkeys::on_stop_signals("warmup-signals", || {
+        crate::install::log_line("service stop requested");
+        crate::gamepad::request_stop();
+    });
 }

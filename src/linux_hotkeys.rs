@@ -102,6 +102,7 @@ static GENERATION: AtomicU64 = AtomicU64::new(0);
 static CENTER_ACCEL: Mutex<Option<String>> = Mutex::new(None);
 static CENTER_SIGNAL: AtomicBool = AtomicBool::new(false);
 static VOICE_SIGNAL: AtomicBool = AtomicBool::new(false);
+static STOP_SIGNAL: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn center_accel() -> Option<String> {
     CENTER_ACCEL.lock().ok().and_then(|a| a.clone())
@@ -129,21 +130,34 @@ pub(crate) fn spawn() {
 }
 
 pub(crate) fn release_on_exit_signals() {
-    let mut mask = nix::sys::signal::SigSet::empty();
-    mask.add(nix::sys::signal::Signal::SIGTERM);
-    mask.add(nix::sys::signal::Signal::SIGINT);
-    if let Err(e) = mask.thread_block() {
-        log(&format!("could not block stop signals: {e}"));
+    on_stop_signals("warmup-exit-signals", || {
+        release();
+        #[cfg(feature = "speech")]
+        crate::linux_speech::stop_engine();
+        std::process::exit(0);
+    });
+}
+
+extern "C" fn on_stop_signal(_: libc::c_int) {
+    STOP_SIGNAL.store(true, Ordering::SeqCst);
+}
+
+pub(crate) fn on_stop_signals(name: &str, action: impl FnOnce() + Send + 'static) {
+    let handler = on_stop_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    let failed = unsafe {
+        libc::signal(libc::SIGTERM, handler) == libc::SIG_ERR
+            || libc::signal(libc::SIGINT, handler) == libc::SIG_ERR
+    };
+    if failed {
+        log("could not catch stop signals");
         return;
     }
-    let _ = std::thread::Builder::new()
-        .name("warmup-exit-signals".into())
-        .spawn(move || {
-            if mask.wait().is_ok() {
-                release();
-                std::process::exit(0);
-            }
-        });
+    let _ = std::thread::Builder::new().name(name.into()).spawn(move || {
+        while !STOP_SIGNAL.load(Ordering::SeqCst) {
+            std::thread::sleep(SIGNAL_POLL);
+        }
+        action();
+    });
 }
 
 pub(crate) fn release() {
