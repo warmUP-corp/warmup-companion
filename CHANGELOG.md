@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, a panic in the companion service is written to the service log, like on Windows, and is sent with crash reporting when that is turned on.
 - On Linux, `warmup-companion diagnostics` also packs the playtime watchlist, the unsent play sessions, the Kid Mode block list and the crash reports.
 - On Linux, when the companion service crashes on a memory fault, an abort, a bus error, an illegal instruction or a division fault, it writes a short crash report with a backtrace to `crash-report.txt` in its state folder before it dies. The next start writes the report to the log and, when crash reporting is turned on, sends it the same way Windows does. systemd-coredump still gets its core dump.
 - On Linux, Kid Mode blocks games started outside warmUP, like on Windows. A blocked game is asked to quit and is stopped 0.8 seconds later if it is still running, warmUP is told which game was stopped, and the companion refuses warmUP's request to shut it down while Kid Mode is blocking. The block list is kept on disk, so it still applies after a restart while warmUP is closed.
