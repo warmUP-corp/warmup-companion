@@ -90,6 +90,7 @@ pub struct Frame {
     pub sheet: bool,
     pub sheet_hint: bool,
     pub voice: Option<Voice>,
+    pub slide: f32,
 }
 
 pub struct Glide {
@@ -764,6 +765,50 @@ pub fn paint_base(g: &mut Gfx, frame: &Frame, glide: &mut Glide) {
     render_keyboard(g, frame, glide, false);
 }
 
+pub enum Hit {
+    Slot(usize),
+    Key(KeyPos, crate::vk_nav::KeyCell),
+}
+
+pub fn hit_test(
+    logical_w: f32,
+    logical_h: f32,
+    scale_w: f32,
+    ui: f32,
+    rows: &[KeyRow],
+    look: VkLook,
+    x: f32,
+    y: f32,
+) -> Option<Hit> {
+    let spec = spec_for(look);
+    let rects = vk_geom::key_rects(
+        logical_w,
+        (logical_h - legend_band_height(ui, look)).max(40.0),
+        scale_w,
+        rows,
+        crate::vk_paint::strip_band_height(ui, look),
+        spec.key_aspect,
+        spec.gap,
+        spec.design_kh,
+    );
+    let key_h = rects.first().map(|r| r.bottom - r.top)?;
+    if let Some(strip) = crate::vk_predict::strip(crate::vk_paint::strip_slots(look), look.style == VkStyle::Mono) {
+        let geom = crate::vk_paint::StripGeom::above(&rects, spec, key_h / spec.design_kh);
+        let slot = geom
+            .slot_rects(spec, &strip.visible)
+            .into_iter()
+            .find(|(_, r)| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+            .map(|(slot, _)| slot);
+        if let Some(slot) = slot {
+            return Some(Hit::Slot(slot));
+        }
+    }
+    rects
+        .iter()
+        .find(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+        .and_then(|r| rows.get(r.pos.row).and_then(|row| row.keys.get(r.pos.col)).cloned().map(|key| Hit::Key(r.pos, key)))
+}
+
 pub const ORB_FRAME_FILL: f32 = 0.94;
 
 #[derive(Clone, Copy)]
@@ -811,6 +856,9 @@ pub struct VoiceKey {
 }
 
 pub fn voice_key(frame: &Frame) -> Option<VoiceKey> {
+    if frame.sheet {
+        return None;
+    }
     let voice = frame.voice?;
     let (spec, _pal, rects, unit, scale, _radius, _key_h) = scene(frame);
     let rect = rects.iter().find(|rect| {
@@ -855,7 +903,7 @@ impl VoiceKey {
     }
 }
 
-pub fn paint_voice_key(g: &mut Gfx, frame: &Frame, nimbus: Option<(&[u8], u32)>) {
+pub fn paint_voice_key(g: &mut Gfx, frame: &Frame, glide: &Glide, nimbus: Option<(&[u8], u32)>) {
     let (Some(voice), Some(spot)) = (frame.voice, voice_key(frame)) else {
         return;
     };
@@ -876,6 +924,19 @@ pub fn paint_voice_key(g: &mut Gfx, frame: &Frame, nimbus: Option<(&[u8], u32)>)
         }
         g.pop_clip();
         g.ring(spot.halo, spot.halo_radius, spot.halo_w, spot.accent, spot.halo_alpha);
+    }
+    let (_, _, rects, unit, scale, _, key_h) = scene(frame);
+    let selected_voice = rects.iter().any(|r| {
+        r.pos == frame.sel
+            && frame
+                .rows
+                .get(r.pos.row)
+                .and_then(|row| row.keys.get(r.pos.col))
+                .is_some_and(|key| matches!(key.action, KeyAction::VoiceInput))
+    });
+    if selected_voice {
+        let ks = key_style(frame, unit, key_h, scale);
+        stroke_ring(g, glide, frame, &ks, scale);
     }
 }
 
@@ -993,26 +1054,35 @@ pub fn paint_voice_screen(g: &mut Gfx, width: u32, height: u32, voice: Voice, ac
     .is_ok()
 }
 
-pub fn paint_prompt_card(g: &mut Gfx, card: &crate::vk_paint::PromptCard, width: f32, height: f32, scale: f32, t: f32) -> bool {
+fn overlay_label_px(height: f32) -> f32 {
+    (height / 12.0).clamp(14.0, 48.0)
+}
+
+pub fn paint_tips_pill(g: &mut Gfx, pill: &crate::vk_paint::TipsPill, width: f32, height: f32, scale: f32, t: f32) -> bool {
     let scale = scale.max(1.0);
     g.begin((width * scale).round().max(1.0) as u32, (height * scale).round().max(1.0) as u32);
-    unsafe { g.transform(scale, 0.0, 0.0) };
     let canvas = crate::vk_paint::PromptCanvas {
         cw: width,
         ch: height,
         dpr: scale,
         t,
-        title_px: 35.0,
+        title_px: overlay_label_px(height),
         dip_scale: scale,
     };
-    let mut paint_art = |g: &mut Gfx, art: crate::vk_paint::ControllerArt, rect: crate::mono_ui::Rect, alpha: f32| {
-        let px = crate::vk_paint::CONTROLLER_ART_PX as f32;
-        let dest = crate::vk_paint::fit_rect(rect, px, px);
-        unsafe { g.draw_art(art.key(), art.png(), 384, 384, 0.0, dest, alpha, true) };
-    };
-    let painted = unsafe { crate::vk_paint::paint_prompt_card(g, card, &canvas, &mut paint_art) }.is_ok();
+    let painted = unsafe { crate::vk_paint::paint_tips(g, pill, &canvas) }.is_ok();
     unsafe { g.transform(1.0, 0.0, 0.0) };
     painted
+}
+
+pub fn slide_down(pixels: &mut [u8], width: u32, offset: u32) {
+    let row = width as usize * 4;
+    let rows = if row == 0 { 0 } else { pixels.len() / row };
+    let shift = (offset as usize).min(rows);
+    if shift == 0 {
+        return;
+    }
+    pixels.copy_within(0..(rows - shift) * row, shift * row);
+    pixels[..shift * row].fill(0);
 }
 
 pub fn to_argb(pixels: &[u8]) -> Vec<u8> {
@@ -1082,6 +1152,7 @@ mod tests {
             sheet: false,
             sheet_hint: false,
             voice: None,
+            slide: 0.0,
         };
         let mut glide = Glide::default();
         let started = std::time::Instant::now();
@@ -1146,6 +1217,7 @@ mod tests {
             sheet: true,
             sheet_hint: false,
             voice: None,
+            slide: 0.0,
         };
         paint_frame(&mut g, &frame, &mut Glide::default());
         assert!(g.pixels().chunks_exact(4).any(|px| px[0] != 0x1F || px[1] != 0x1F || px[2] != 0x1F));

@@ -2,7 +2,10 @@
 
 ## [Unreleased]
 
-- On Linux, the one-time "Press L3 for keyboard" hint is the same pill as on Windows, with the controller's L3 glyph, the keyboard theme colours and the Mono style's own look, instead of a plain dark box. The glow around the screen during dictation and the cloud beside it are drawn by the same code as on Windows.
+- On Linux, the controller tips from Windows appear: the first time a controller connects after an update, a pill at the bottom of the screen walks through the shortcuts (L3 keyboard, R3 dictation, screenshots, paste, screenshots in games) with your pad's own button glyphs, the same cue timing and the same fade between cues. It waits while the keyboard, dictation or a game is up. This replaces the one-time "press L3" box. `WARMUP_VK_PROMPT=0` turns it off, as on Windows.
+- On Linux, the on-screen keyboard slides up from the bottom edge when it opens and slides back down when it closes, with the same timing as Windows (180 ms in, 130 ms out).
+- On Linux, a mouse click or a tap on the on-screen keyboard presses that key, and a click on a suggestion types it, like on Windows. The keyboard still does not take keyboard focus.
+- On Linux, the glow around the screen during dictation and the cloud beside it are drawn by the same code as on Windows.
 - On Linux, the mic key during dictation looks like on Windows: the cloud is kept inside the key, the key gets an accent ring that brightens with your voice and pulses while transcribing, and the mic symbol is hidden behind the cloud. If the cloud is not ready yet, the key shows the same coloured orb as Windows.
 - On Linux, the floating keyboard sits on the bottom edge of the screen like on Windows, without a gap below it. On a TV, the keyboard is never taller than 45% of the screen.
 - On Linux, a panic in the companion service is written to the service log, like on Windows, and is sent with crash reporting when that is turned on.

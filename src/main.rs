@@ -91,6 +91,8 @@ mod win;
 #[cfg(not(windows))]
 #[path = "win_stub.rs"]
 mod win;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod prompt_state;
 
 #[cfg(feature = "gamepad")]
 mod warmup_launch;

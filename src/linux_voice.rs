@@ -231,7 +231,7 @@ impl Pill {
             return;
         }
         let gen = crate::linux_nimbus::frame_generation();
-        if self.orb_visible && self.shown_gen == gen {
+        if self.orb_visible && self.shown_gen == gen && crate::linux_nimbus::has_frame() {
             return;
         }
         self.draw_orb(qh);
