@@ -17,6 +17,8 @@ const SYNC_EVERY: Duration = Duration::from_secs(1);
 const BIND_CHECK_TICKS: u32 = 3;
 const RECONNECT_MIN: Duration = Duration::from_secs(1);
 const RECONNECT_MAX: Duration = Duration::from_secs(60);
+const SIGNAL_FALLBACK_AFTER: u32 = 5;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const SIGNAL_POLL: Duration = Duration::from_millis(100);
 const LABEL_PREFIX: &str = "warmUP Companion: ";
 
@@ -162,12 +164,12 @@ fn run() {
             .spawn(poll_signals);
     }
     let mut synced = false;
-    let mut first = true;
+    let mut failures: u32 = 0;
     let mut backoff = RECONNECT_MIN;
     loop {
         match Portal::open() {
             Ok(portal) => {
-                first = false;
+                failures = 0;
                 backoff = RECONNECT_MIN;
                 let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
                 if let Some(trigger) = portal.triggers.get(Hotkey::Center.id()) {
@@ -202,16 +204,17 @@ fn run() {
                 log("the global shortcuts portal went away, reconnecting");
                 std::thread::sleep(backoff);
             }
-            Err(e) if first => {
-                log(&format!("global shortcuts portal unavailable: {e}"));
-                if signals {
+            Err(e) => {
+                failures += 1;
+                if failures == SIGNAL_FALLBACK_AFTER && signals && !synced {
+                    log(&format!(
+                        "global shortcuts portal unavailable: {e}; binding the keys to signals"
+                    ));
                     for hotkey in Hotkey::ALL {
                         spawn_hypr_sync(hotkey, Target::Signal(hotkey.signal()));
                     }
+                    synced = true;
                 }
-                return;
-            }
-            Err(e) => {
                 log(&format!("global shortcuts portal: {e}; retrying in {}s", backoff.as_secs()));
                 std::thread::sleep(backoff);
                 backoff = (backoff * 2).min(RECONNECT_MAX);
@@ -384,9 +387,22 @@ fn request(
     let path = format!("{PORTAL_PATH}/request/{sender}/{token}");
     let request = Proxy::new(conn, DEST, path.as_str(), "org.freedesktop.portal.Request")
         .map_err(err)?;
-    let mut responses = request.receive_signal("Response").map_err(err)?;
+    let mut responses = zbus::block_on(request.inner().receive_signal("Response")).map_err(err)?;
     call().map_err(err)?;
-    let message = responses.next().ok_or("portal closed the request")?;
+    let message = zbus::block_on(futures_lite::future::or(
+        async {
+            futures_lite::StreamExt::next(&mut responses)
+                .await
+                .ok_or_else(|| "portal closed the request".to_string())
+        },
+        async {
+            async_io::Timer::after(REQUEST_TIMEOUT).await;
+            Err(format!(
+                "portal did not answer in {}s",
+                REQUEST_TIMEOUT.as_secs()
+            ))
+        },
+    ))?;
     let (code, results): (u32, HashMap<String, OwnedValue>) =
         message.body().deserialize().map_err(err)?;
     if code != 0 {
