@@ -1109,7 +1109,9 @@ fn foreground_info() -> (usize, String, String, String) {
     let Some((exe, class, title)) = crate::linux_game_detect::foreground_window() else {
         return (0, String::new(), String::new(), String::new());
     };
-    let base = if class.eq_ignore_ascii_case("dev.warmup.console") {
+    let base = if class.eq_ignore_ascii_case("dev.warmup.console")
+        || class.eq_ignore_ascii_case("warmup")
+    {
         "warmup".to_string()
     } else {
         exe.rsplit('/').next().unwrap_or(&exe).to_string()
@@ -1159,6 +1161,12 @@ pub(crate) fn foreground_exe() -> String {
 
 pub(crate) fn foreground_is_uac_consent() -> bool {
     foreground_exe().eq_ignore_ascii_case("consent.exe")
+}
+
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+pub(crate) fn foreground_is_warmup() -> bool {
+    let (_, exe, _, _) = foreground_info();
+    is_warmup_exe(&exe)
 }
 
 pub(crate) fn foreground_is_warmup_browser() -> bool {

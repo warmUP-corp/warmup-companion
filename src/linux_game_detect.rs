@@ -451,18 +451,15 @@ fn hypr_json(sock: &std::path::Path, cmd: &str) -> Result<serde_json::Value, Str
 }
 
 pub fn hypr_dispatch(lua: &str) -> bool {
-    let Some((command, _)) = hypr_runtime() else {
-        return false;
-    };
-    let mut stream = match UnixStream::connect(&command) {
-        Ok(stream) => stream,
-        Err(_) => return false,
-    };
+    hypr_dispatch_reply(lua).is_some_and(|reply| hypr_reply_ok(&reply))
+}
+
+fn hypr_dispatch_reply(command_text: &str) -> Option<String> {
+    let (command, _) = hypr_runtime()?;
+    let mut stream = UnixStream::connect(&command).ok()?;
     let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
-    let cmd = format!("dispatch {lua}");
-    if stream.write_all(cmd.as_bytes()).is_err() {
-        return false;
-    }
+    let cmd = format!("dispatch {command_text}");
+    stream.write_all(cmd.as_bytes()).ok()?;
     let mut buf = Vec::new();
     let mut tmp = [0u8; 1024];
     loop {
@@ -475,11 +472,49 @@ pub fn hypr_dispatch(lua: &str) -> bool {
             {
                 break;
             }
-            Err(_) => return false,
+            Err(_) => return None,
         }
     }
-    drop(stream);
-    hypr_reply_ok(&String::from_utf8_lossy(&buf))
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+static HYPR_LUA: Mutex<Option<(std::ffi::OsString, bool)>> = Mutex::new(None);
+
+pub fn hypr_run(lua: &str, legacy: &str) -> bool {
+    let instance = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").unwrap_or_default();
+    let cached = HYPR_LUA
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().filter(|(key, _)| *key == instance).map(|(_, lua)| *lua));
+    let remember = |uses_lua: bool| {
+        if let Ok(mut slot) = HYPR_LUA.lock() {
+            *slot = Some((instance.clone(), uses_lua));
+        }
+    };
+    let (ok, mode) = if cached == Some(false) {
+        (hypr_dispatch(legacy), "classic")
+    } else {
+        match hypr_dispatch_reply(lua) {
+            None => (false, "lua"),
+            Some(reply) if reply.trim().is_empty() => (true, "lua, no reply"),
+            Some(reply) if hypr_reply_ok(&reply) => {
+                remember(true);
+                (true, "lua")
+            }
+            Some(_) if cached.is_none() => {
+                let ok = hypr_dispatch(legacy);
+                if ok {
+                    remember(false);
+                }
+                (ok, "classic after lua was rejected")
+            }
+            Some(_) => (false, "lua"),
+        }
+    };
+    if std::env::var_os("WARMUP_DEBUG_LOG").is_some_and(|v| !v.is_empty() && v != "0") {
+        crate::install::log_line(&format!("hyprland profile dispatch: {legacy} ({mode}) ok={ok}"));
+    }
+    ok
 }
 
 fn hypr_reply_ok(text: &str) -> bool {

@@ -1004,10 +1004,19 @@ impl GamepadPoll {
                 && cursor_injection_enabled
                 && crate::config::gamepad_settings().cursor_enabled
             {
-                if let Some(chord) =
+                if let Some(action) =
                     crate::app_profiles::chord_for_foreground(change.button.as_str())
                 {
-                    cursor.tap_chord(chord);
+                    match action {
+                        crate::app_profiles::ProfileAction::Keys(chord) => cursor.tap_chord(chord),
+                        crate::app_profiles::ProfileAction::Hypr(command) => {
+                            let _ = std::thread::Builder::new()
+                                .name("hypr-profile".into())
+                                .spawn(move || {
+                                    crate::linux_game_detect::hypr_run(&command.lua, &command.legacy)
+                                });
+                        }
+                    }
                     self.backend.haptic_tick();
                     continue;
                 }

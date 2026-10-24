@@ -126,6 +126,54 @@ pub const BUILTINS: &[Builtin] = &[
     },
 ];
 
+#[cfg(target_os = "linux")]
+pub const HYPRLAND_ID: &str = "hyprland";
+
+#[cfg(target_os = "linux")]
+static HYPRLAND: Builtin = Builtin {
+    name: "Hyprland desktop",
+    exes: &[HYPRLAND_ID],
+    map: &[
+        ("LT", "hypr:workspace e-1"),
+        ("RT", "hypr:workspace e+1"),
+        ("Y", "hypr:togglespecialworkspace"),
+        ("X", "hypr:fullscreen 1"),
+    ],
+    presets: &[
+        ("Previous workspace", "hypr:workspace e-1"),
+        ("Next workspace", "hypr:workspace e+1"),
+        ("Back and forth", "hypr:workspace previous_per_monitor"),
+        ("Toggle special workspace", "hypr:togglespecialworkspace"),
+        ("Move window to previous workspace", "hypr:movetoworkspace e-1"),
+        ("Move window to next workspace", "hypr:movetoworkspace e+1"),
+        ("Fullscreen", "hypr:fullscreen 0"),
+        ("Maximize", "hypr:fullscreen 1"),
+        ("Toggle floating", "hypr:togglefloating"),
+        ("Close window", "hypr:killactive"),
+    ],
+};
+
+#[cfg(target_os = "linux")]
+fn builtins() -> impl Iterator<Item = &'static Builtin> {
+    BUILTINS.iter().chain(std::iter::once(&HYPRLAND))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn builtins() -> impl Iterator<Item = &'static Builtin> {
+    BUILTINS.iter()
+}
+
+#[cfg(target_os = "linux")]
+fn listed(builtin: &Builtin) -> bool {
+    !std::ptr::eq(builtin, &HYPRLAND)
+        || std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some_and(|v| !v.is_empty())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn listed(_builtin: &Builtin) -> bool {
+    true
+}
+
 pub const APP_PRESETS: &[(&str, &str)] = &[
     ("Copy", "ctrl+c"),
     ("Paste", "ctrl+v"),
@@ -226,8 +274,8 @@ impl Profile {
 }
 
 pub fn builtin_profiles() -> Vec<Profile> {
-    BUILTINS
-        .iter()
+    builtins()
+        .filter(|b| listed(b))
         .map(|b| {
             let mut p = Profile {
                 exes: b.exes.iter().map(|s| s.to_string()).collect(),
@@ -251,8 +299,7 @@ pub fn new_profile(exe: &str) -> Profile {
 }
 
 fn builtin_for(exe: &str) -> Option<&'static Builtin> {
-    BUILTINS
-        .iter()
+    builtins()
         .find(|b| b.exes.iter().any(|e| e.eq_ignore_ascii_case(exe)))
 }
 
@@ -287,6 +334,7 @@ fn is_off(value: &str) -> bool {
     )
 }
 
+#[cfg(any(windows, test))]
 pub fn chord_for(settings: &str, exe: &str, button: &str) -> Option<Vec<Key>> {
     if !BUTTONS.iter().any(|b| b.eq_ignore_ascii_case(button))
         || setting(settings, "app_profiles").is_some_and(is_off)
@@ -366,25 +414,102 @@ fn linux_alias(name: &str) -> Option<&'static str> {
 }
 
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
-pub fn chord_for_foreground(button: &str) -> Option<Vec<Key>> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProfileAction {
+    Keys(Vec<Key>),
+    Hypr(HyprCommand),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HyprCommand {
+    pub lua: String,
+    pub legacy: String,
+}
+
+#[cfg(target_os = "linux")]
+pub fn hypr_command(spec: &str) -> Option<HyprCommand> {
+    let rest = spec.trim().strip_prefix("hypr:")?.trim();
+    let (dispatcher, arg) = match rest.split_once(char::is_whitespace) {
+        Some((d, a)) => (d, a.trim()),
+        None => (rest, ""),
+    };
+    if !arg
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '+' | '-' | '_'))
+    {
+        return None;
+    }
+    let lua = match (dispatcher.to_ascii_lowercase().as_str(), arg) {
+        ("workspace", a) if !a.is_empty() => format!(r#"hl.dsp.focus({{ workspace = "{a}" }})"#),
+        ("movetoworkspace", a) if !a.is_empty() => {
+            format!(r#"hl.dsp.window.move({{ workspace = "{a}", follow = true }})"#)
+        }
+        ("togglespecialworkspace", "") => "hl.dsp.workspace.toggle_special()".to_string(),
+        ("togglespecialworkspace", a) => format!(r#"hl.dsp.workspace.toggle_special("{a}")"#),
+        ("fullscreen", "" | "0") => {
+            r#"hl.dsp.window.fullscreen({ mode = "fullscreen", action = "toggle" })"#.to_string()
+        }
+        ("fullscreen", "1") => {
+            r#"hl.dsp.window.fullscreen({ mode = "maximized", action = "toggle" })"#.to_string()
+        }
+        ("togglefloating", "") => r#"hl.dsp.window.float({ action = "toggle" })"#.to_string(),
+        ("killactive", "") => "hl.dsp.window.close()".to_string(),
+        _ => return None,
+    };
+    let legacy = if arg.is_empty() {
+        dispatcher.to_ascii_lowercase()
+    } else {
+        format!("{} {arg}", dispatcher.to_ascii_lowercase())
+    };
+    Some(HyprCommand { lua, legacy })
+}
+
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+fn action_for(settings: &str, exe: &str, button: &str) -> Option<ProfileAction> {
+    if !BUTTONS.iter().any(|b| b.eq_ignore_ascii_case(button))
+        || setting(settings, "app_profiles").is_some_and(is_off)
+        || setting(settings, &format!("profile.{exe}")).is_some_and(is_off)
+    {
+        return None;
+    }
+    let spec = setting(settings, &format!("profile.{exe}.{button}")).or(builtin(exe, button))?;
+    match hypr_command(spec) {
+        Some(command) => Some(ProfileAction::Hypr(command)),
+        None => parse_chord(spec).map(ProfileAction::Keys),
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+pub fn chord_for_foreground(button: &str) -> Option<ProfileAction> {
     let settings = crate::config::settings_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .unwrap_or_default();
-    let (exe, class_name) = crate::linux_game_detect::foreground_identity()?;
-    for id in profile_candidates(&exe, &class_name) {
-        if setting(&settings, &format!("profile.{id}.{button}"))
-            .is_some_and(|value| value.eq_ignore_ascii_case("none"))
-        {
-            return None;
-        }
-        if setting(&settings, &format!("profile.{id}")).is_some_and(is_off) {
-            return None;
-        }
-        if let Some(chord) = chord_for(&settings, &id, button) {
-            return Some(chord);
+    let hyprland = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some_and(|v| !v.is_empty());
+    let identity = crate::linux_game_detect::foreground_identity();
+    if let Some((exe, class_name)) = identity {
+        for id in profile_candidates(&exe, &class_name) {
+            if setting(&settings, &format!("profile.{id}.{button}"))
+                .is_some_and(|value| value.eq_ignore_ascii_case("none"))
+            {
+                return None;
+            }
+            if setting(&settings, &format!("profile.{id}")).is_some_and(is_off) {
+                break;
+            }
+            if let Some(action) = action_for(&settings, &id, button) {
+                return Some(action);
+            }
         }
     }
-    None
+    if !hyprland
+        || crate::pipe_server::launcher_foreground_nav()
+        || crate::gamepad_backend::standalone_game_active_now()
+        || crate::vk_nav::foreground_is_warmup()
+    {
+        return None;
+    }
+    action_for(&settings, HYPRLAND_ID, button)
 }
 
 fn split_key(key: &str) -> Option<(&str, Option<&str>)> {
@@ -417,7 +542,7 @@ pub fn load(settings: &str) -> (bool, Vec<Profile>) {
         p.enabled = !setting(settings, &format!("profile.{exe}")).is_some_and(is_off);
         for (i, b) in BUTTONS.iter().enumerate() {
             if let Some(v) = setting(settings, &format!("profile.{exe}.{b}")) {
-                p.map[i] = (!v.eq_ignore_ascii_case("none") && parse_chord(v).is_some())
+                p.map[i] = (!v.eq_ignore_ascii_case("none") && chord_valid(v))
                     .then(|| v.to_ascii_lowercase());
             }
         }
@@ -470,7 +595,7 @@ pub fn valid_setting(key: &str, value: &str) -> bool {
             value.to_ascii_lowercase().as_str(),
             "on" | "off" | "true" | "false" | "1" | "0" | "yes" | "no"
         ),
-        Some(_) => value.eq_ignore_ascii_case("none") || parse_chord(value).is_some(),
+        Some(_) => value.eq_ignore_ascii_case("none") || chord_valid(value),
     }
 }
 
@@ -491,10 +616,40 @@ pub fn key_label(name: &str) -> String {
 }
 
 pub fn keycaps(spec: &str) -> Vec<String> {
+    #[cfg(target_os = "linux")]
+    if hypr_command(spec).is_some() {
+        let label = HYPRLAND
+            .presets
+            .iter()
+            .find(|(_, c)| c.eq_ignore_ascii_case(spec.trim()))
+            .map(|(l, _)| l.to_string())
+            .or_else(|| {
+                let n = spec.trim().get(15..)?.trim();
+                (spec.trim().get(..15)?.eq_ignore_ascii_case("hypr:workspace ")
+                    && !n.is_empty()
+                    && n.chars().all(|c| c.is_ascii_digit()))
+                .then(|| format!("Workspace {n}"))
+            })
+            .unwrap_or_else(|| spec.trim().to_string());
+        return vec![label];
+    }
     spec.split('+').map(key_label).collect()
 }
 
+#[cfg(target_os = "linux")]
+fn chord_valid(spec: &str) -> bool {
+    parse_chord(spec).is_some() || hypr_command(spec).is_some()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn chord_valid(spec: &str) -> bool {
+    parse_chord(spec).is_some()
+}
+
 fn parse_chord(spec: &str) -> Option<Vec<Key>> {
+    if spec.trim().get(..5).is_some_and(|p| p.eq_ignore_ascii_case("hypr:")) {
+        return None;
+    }
     spec.split('+').map(parse_key).collect()
 }
 
