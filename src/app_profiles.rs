@@ -287,6 +287,7 @@ fn is_off(value: &str) -> bool {
     )
 }
 
+#[cfg(any(windows, test))]
 pub fn chord_for(settings: &str, exe: &str, button: &str) -> Option<Vec<Key>> {
     if !BUTTONS.iter().any(|b| b.eq_ignore_ascii_case(button))
         || setting(settings, "app_profiles").is_some_and(is_off)
@@ -366,7 +367,74 @@ fn linux_alias(name: &str) -> Option<&'static str> {
 }
 
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
-pub fn chord_for_foreground(button: &str) -> Option<Vec<Key>> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProfileAction {
+    Keys(Vec<Key>),
+    Hypr(HyprCommand),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HyprCommand {
+    pub lua: String,
+    pub legacy: String,
+}
+
+#[cfg(target_os = "linux")]
+pub fn hypr_command(spec: &str) -> Option<HyprCommand> {
+    let rest = spec.trim().strip_prefix("hypr:")?.trim();
+    let (dispatcher, arg) = match rest.split_once(char::is_whitespace) {
+        Some((d, a)) => (d, a.trim()),
+        None => (rest, ""),
+    };
+    if !arg
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '+' | '-' | '_'))
+    {
+        return None;
+    }
+    let lua = match (dispatcher.to_ascii_lowercase().as_str(), arg) {
+        ("workspace", a) if !a.is_empty() => format!(r#"hl.dsp.focus({{ workspace = "{a}" }})"#),
+        ("movetoworkspace", a) if !a.is_empty() => {
+            format!(r#"hl.dsp.window.move({{ workspace = "{a}", follow = true }})"#)
+        }
+        ("togglespecialworkspace", "") => "hl.dsp.workspace.toggle_special()".to_string(),
+        ("togglespecialworkspace", a) => format!(r#"hl.dsp.workspace.toggle_special("{a}")"#),
+        ("fullscreen", "" | "0") => {
+            r#"hl.dsp.window.fullscreen({ mode = "fullscreen", action = "toggle" })"#.to_string()
+        }
+        ("fullscreen", "1") => {
+            r#"hl.dsp.window.fullscreen({ mode = "maximized", action = "toggle" })"#.to_string()
+        }
+        ("togglefloating", "") => r#"hl.dsp.window.float({ action = "toggle" })"#.to_string(),
+        ("killactive", "") => "hl.dsp.window.close()".to_string(),
+        _ => return None,
+    };
+    let legacy = if arg.is_empty() {
+        dispatcher.to_ascii_lowercase()
+    } else {
+        format!("{} {arg}", dispatcher.to_ascii_lowercase())
+    };
+    Some(HyprCommand { lua, legacy })
+}
+
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+fn action_for(settings: &str, exe: &str, button: &str) -> Option<ProfileAction> {
+    if !BUTTONS.iter().any(|b| b.eq_ignore_ascii_case(button))
+        || setting(settings, "app_profiles").is_some_and(is_off)
+        || setting(settings, &format!("profile.{exe}")).is_some_and(is_off)
+    {
+        return None;
+    }
+    let spec = setting(settings, &format!("profile.{exe}.{button}")).or(builtin(exe, button))?;
+    match hypr_command(spec) {
+        Some(command) => Some(ProfileAction::Hypr(command)),
+        None => parse_chord(spec).map(ProfileAction::Keys),
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+pub fn chord_for_foreground(button: &str) -> Option<ProfileAction> {
     let settings = crate::config::settings_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .unwrap_or_default();
@@ -380,8 +448,8 @@ pub fn chord_for_foreground(button: &str) -> Option<Vec<Key>> {
         if setting(&settings, &format!("profile.{id}")).is_some_and(is_off) {
             return None;
         }
-        if let Some(chord) = chord_for(&settings, &id, button) {
-            return Some(chord);
+        if let Some(action) = action_for(&settings, &id, button) {
+            return Some(action);
         }
     }
     None
@@ -495,6 +563,9 @@ pub fn keycaps(spec: &str) -> Vec<String> {
 }
 
 fn parse_chord(spec: &str) -> Option<Vec<Key>> {
+    if spec.trim().get(..5).is_some_and(|p| p.eq_ignore_ascii_case("hypr:")) {
+        return None;
+    }
     spec.split('+').map(parse_key).collect()
 }
 

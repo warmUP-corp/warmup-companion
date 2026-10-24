@@ -482,6 +482,10 @@ pub fn hypr_dispatch(lua: &str) -> bool {
     hypr_reply_ok(&String::from_utf8_lossy(&buf))
 }
 
+pub fn hypr_run(lua: &str, legacy: &str) -> bool {
+    hypr_dispatch(lua) || hypr_dispatch(legacy)
+}
+
 fn hypr_reply_ok(text: &str) -> bool {
     let text = text.trim();
     if text.is_empty() {
