@@ -17,6 +17,8 @@ const BUILD_INFO: &str = concat!(
 static STARTED: AtomicBool = AtomicBool::new(false);
 static EXIT_ENDS_PROCESS: AtomicBool = AtomicBool::new(false);
 static HANDLE: Mutex<Option<ksni::Handle<CompanionTray>>> = Mutex::new(None);
+#[cfg(feature = "speech")]
+static MENU_MICS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 struct CompanionTray;
 
@@ -349,9 +351,14 @@ fn voice_entries(voice_on: bool) -> Vec<Entry> {
             CMD_MIC_DEFAULT,
             current.is_none(),
         )];
+        let mut names = Vec::new();
         for (i, mic) in crate::linux_speech::list_mics().into_iter().enumerate().take(32) {
             let on = current.as_deref() == Some(mic.name.as_str());
             mics.push(Entry::radio(mic.label, CMD_MIC_BASE + i, on));
+            names.push(mic.name);
+        }
+        if let Ok(mut shown) = MENU_MICS.lock() {
+            *shown = names;
         }
         entries.push(Entry::submenu("Microphone", mics));
         return entries;
@@ -419,8 +426,12 @@ fn run_command(cmd: usize) {
         CMD_MIC_DEFAULT => crate::linux_speech::set_mic_choice(""),
         #[cfg(feature = "speech")]
         cmd if (CMD_MIC_BASE..CMD_MIC_BASE + 32).contains(&cmd) => {
-            if let Some(mic) = crate::linux_speech::list_mics().get(cmd - CMD_MIC_BASE) {
-                crate::linux_speech::set_mic_choice(&mic.name);
+            let name = MENU_MICS
+                .lock()
+                .ok()
+                .and_then(|shown| shown.get(cmd - CMD_MIC_BASE).cloned());
+            if let Some(name) = name {
+                crate::linux_speech::set_mic_choice(&name);
             }
         }
         _ => {}

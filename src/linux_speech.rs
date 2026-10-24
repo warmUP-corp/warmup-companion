@@ -29,6 +29,7 @@ const REDUX_REPO: &str = "eschmidbauer/parakeet-redux-onnx";
 const REDUX_REV: &str = "1c285ba78d6f1880803f65355133a5ad3559a407";
 const REDUX_FILES: [&str; 3] = ["encoder-model.onnx", "decoder_joint-model.onnx", "vocab.txt"];
 const MODEL_IDS: [&str; 2] = ["parakeet", "parakeet-redux"];
+const MIC_CACHE_FOR: Duration = Duration::from_secs(2);
 const DOWNLOAD_POLL: Duration = Duration::from_millis(250);
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
@@ -93,6 +94,22 @@ pub fn set_mic_choice(name: &str) {
 }
 
 pub fn list_mics() -> Vec<Mic> {
+    static CACHE: Mutex<Option<(Instant, Vec<Mic>)>> = Mutex::new(None);
+    if let Ok(cache) = CACHE.lock() {
+        if let Some((at, mics)) = cache.as_ref() {
+            if at.elapsed() < MIC_CACHE_FOR {
+                return mics.clone();
+            }
+        }
+    }
+    let mics = query_mics();
+    if let Ok(mut cache) = CACHE.lock() {
+        *cache = Some((Instant::now(), mics.clone()));
+    }
+    mics
+}
+
+fn query_mics() -> Vec<Mic> {
     let Ok(output) = Command::new("pactl")
         .args(["-f", "json", "list", "sources"])
         .stdin(Stdio::null())

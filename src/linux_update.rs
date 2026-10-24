@@ -75,13 +75,21 @@ fn update_state(f: impl FnOnce(&mut Snapshot)) {
         Ok(mut s) => {
             let before = s.clone();
             f(&mut s);
-            *s != before
+            *s != before && !progress_only(&before, &s)
         }
         Err(_) => false,
     };
     if changed {
         crate::linux_tray::refresh();
     }
+}
+
+fn progress_only(before: &Snapshot, after: &Snapshot) -> bool {
+    matches!(
+        (&before.phase, &after.phase),
+        (Phase::Downloading { .. }, Phase::Downloading { .. })
+    ) && before.release == after.release
+        && before.last_checked == after.last_checked
 }
 
 fn set_phase(phase: Phase) {
