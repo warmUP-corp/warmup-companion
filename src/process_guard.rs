@@ -343,6 +343,11 @@ fn proc_identity(pid: u32) -> Option<(String, Option<String>)> {
             return Some((name, Some(image_path)));
         }
     }
+    if base.starts_with("ld-linux") {
+        if let Some(program) = loader_program(&proc_argv(pid)) {
+            return Some((path_basename(&program).to_string(), Some(program)));
+        }
+    }
     Some((base.to_string(), Some(exe)))
 }
 
@@ -369,10 +374,44 @@ fn is_windows_drive_path(arg: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
+fn proc_argv(pid: u32) -> Vec<String> {
+    std::fs::read(format!("/proc/{pid}/cmdline"))
+        .map(|raw| {
+            raw.split(|byte| *byte == 0)
+                .filter(|part| !part.is_empty())
+                .map(|part| String::from_utf8_lossy(part).into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
 fn proc_argv0(pid: u32) -> Option<String> {
-    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-    let first = raw.split(|byte| *byte == 0).next()?;
-    (!first.is_empty()).then(|| String::from_utf8_lossy(first).into_owned())
+    proc_argv(pid).into_iter().next()
+}
+
+#[cfg(target_os = "linux")]
+fn loader_program(argv: &[String]) -> Option<String> {
+    let mut args = argv.iter().skip(1);
+    while let Some(arg) = args.next() {
+        if matches!(
+            arg.as_str(),
+            "--library-path"
+                | "--preload"
+                | "--audit"
+                | "--argv0"
+                | "--glibc-hwcaps-prepend"
+                | "--glibc-hwcaps-mask"
+        ) {
+            args.next();
+            continue;
+        }
+        if arg.starts_with("--") {
+            continue;
+        }
+        return arg.starts_with('/').then(|| arg.clone());
+    }
+    None
 }
 
 #[cfg(target_os = "linux")]

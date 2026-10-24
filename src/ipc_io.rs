@@ -386,7 +386,7 @@ fn drain_inbound<R: Read, W: Write>(
 }
 
 fn handle_shut_down() {
-    #[cfg(all(windows, feature = "gamepad"))]
+    #[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
     {
         if crate::parental_guard::is_blocking_active() {
             crate::install::log_line("pipe shut_down refused: Kid Mode blocking is active");

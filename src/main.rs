@@ -106,9 +106,9 @@ mod hid_reader;
 mod library_watch;
 #[cfg(all(windows, feature = "gamepad"))]
 mod pad_decode;
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 mod parental_guard;
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 mod parental_store;
 #[cfg(feature = "gamepad")]
 mod app_profiles;
@@ -118,7 +118,6 @@ mod pc_cursor;
 mod touchpad_gestures;
 mod predict_dict;
 #[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
-#[cfg_attr(not(windows), allow(dead_code))]
 mod process_guard;
 #[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 mod playtime_store;

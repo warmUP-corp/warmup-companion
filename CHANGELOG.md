@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, Kid Mode blocks games started outside warmUP, like on Windows. A blocked game is asked to quit and is stopped 0.8 seconds later if it is still running, warmUP is told which game was stopped, and the companion refuses warmUP's request to shut it down while Kid Mode is blocking. The block list is kept on disk, so it still applies after a restart while warmUP is closed.
 - On Linux, games from your warmUP library that you play while warmUP is closed are counted, like on Windows. The companion checks running programs every two seconds, ends a session ten seconds after the game is gone, and hands the sessions to warmUP the next time it connects. A Wine or Proton game is recognised by its Windows program name.
 - On Linux, `warmup-companion install` works while the companion is running. It used to fail with "Text file busy"; the new binary now replaces the running one and the running service restarts on it.
 - On Linux, holding Share shows the same shortcut sheet as Windows, in the keyboard's own colours, and the TV layout shows the grouped TV sheet. On a TV, a short hint for the full shortcut list appears above the keys for the first three seconds while the suggestion bar is empty.

@@ -56,7 +56,7 @@ pub(crate) fn run_boot_gamepad_loop(
     // The companion owns the device; host the pipe so the warmUP desktop can read
     // connection state over IPC (#347).
     crate::pipe_server::spawn();
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     crate::parental_guard::spawn_guardian_loop();
     #[cfg(any(windows, target_os = "linux"))]
     crate::playtime_tracker::spawn_tracker_loop();

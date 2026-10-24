@@ -5,6 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+use crate::parental_guard;
 use crate::pipe_server::{self, TrackingOwner};
 use crate::playtime_store::{
     acknowledge_closed_sessions, closed_sessions_for_wire, finalize_open, finalize_owner_sessions,
@@ -83,7 +84,7 @@ fn tick_tracker() {
     let now = unix_now_secs();
     let our_pid = std::process::id();
     let processes: Vec<(u32, String, Option<String>)> =
-        crate::process_guard::snapshot_processes_for_owner(&owner)
+        parental_guard::snapshot_processes_for_owner(&owner)
             .into_iter()
             .filter(|(pid, _, _)| *pid != 0 && *pid != our_pid)
             .collect();
@@ -231,12 +232,22 @@ fn prefix_key(prefix: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(prefix.replace('/', "\\").to_ascii_lowercase())
 }
 
+#[cfg(windows)]
 fn exe_stem_lower(exe_name: &str) -> String {
     let lower = exe_name.to_ascii_lowercase();
     lower
         .strip_suffix(".exe")
         .unwrap_or(lower.as_str())
         .to_string()
+}
+
+#[cfg(not(windows))]
+fn exe_stem_lower(exe_name: &str) -> String {
+    exe_name
+        .split('.')
+        .next()
+        .unwrap_or(exe_name)
+        .to_ascii_lowercase()
 }
 
 #[cfg(test)]
