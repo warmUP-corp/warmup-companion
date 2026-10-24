@@ -269,6 +269,11 @@ fn keyboard_loop(wake: UnixStream) -> Result<(), String> {
     }
     if !wayland_dead && !shell.exit && shell.configured && (shell.gpu_presented || shell.buffer.is_some()) {
         wayland_dead = !slide_out(&mut shell, &mut queue, &qh);
+        if !wayland_dead && shell.reserved && shell.placed.is_some_and(|(docked, _, _, _)| !docked) {
+            shell.layer.set_exclusive_zone(0);
+            shell.layer.commit();
+            wayland_dead = queue.flush().is_err();
+        }
     }
     shell.gpu.take();
     if !wayland_dead {
@@ -277,10 +282,96 @@ fn keyboard_loop(wake: UnixStream) -> Result<(), String> {
         }
         let _ = queue.roundtrip(&mut shell);
     }
+    if let Some(shrunk) = shell.shrunk.take() {
+        restore_floating(&shrunk);
+    }
     drop(shell);
     drop(queue);
     let _ = conn.flush();
     Ok(())
+}
+
+struct Shrunk {
+    address: String,
+    at: (i64, i64),
+    size: (i64, i64),
+}
+
+fn hypr_query(what: &str) -> Option<serde_json::Value> {
+    std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")?;
+    let output = std::process::Command::new("hyprctl").args(["-j", what]).output().ok()?;
+    serde_json::from_slice(&output.stdout).ok()
+}
+
+fn json_pair(value: &serde_json::Value, key: &str) -> Option<(i64, i64)> {
+    let pair = value.get(key)?.as_array()?;
+    Some((pair.first()?.as_i64()?, pair.get(1)?.as_i64()?))
+}
+
+fn shrink_active_floating(band: i32) -> Option<Shrunk> {
+    let window = hypr_query("activewindow")?;
+    let floating = window.get("floating").and_then(|value| value.as_bool()) == Some(true);
+    let fullscreen = window
+        .get("fullscreen")
+        .map(|value| value.as_i64().unwrap_or(0) != 0 || value.as_bool() == Some(true))
+        .unwrap_or(false);
+    let hidden = window.get("hidden").and_then(|value| value.as_bool()) == Some(true);
+    if !floating || fullscreen || hidden {
+        return None;
+    }
+    let address = window.get("address")?.as_str()?.to_string();
+    let pid = window.get("pid").and_then(|value| value.as_i64()).unwrap_or(0);
+    let class = window.get("class").and_then(|value| value.as_str()).unwrap_or_default().to_string();
+    let title = window.get("title").and_then(|value| value.as_str()).unwrap_or_default().to_string();
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    if pid == std::process::id() as i64 || crate::vk_nav::is_warmup_launcher_window(&exe, &title) {
+        crate::install::log_line(&format!("reserved space: skipped '{class}' exe='{exe}' title='{title}'"));
+        return None;
+    }
+    let at = json_pair(&window, "at")?;
+    let size = json_pair(&window, "size")?;
+    let monitor_id = window.get("monitor").and_then(|value| value.as_i64())?;
+    let monitors = hypr_query("monitors")?;
+    let monitor = monitors
+        .as_array()?
+        .iter()
+        .find(|row| row.get("id").and_then(|value| value.as_i64()) == Some(monitor_id))?;
+    let scale = monitor.get("scale").and_then(|value| value.as_f64()).filter(|scale| *scale > 0.0).unwrap_or(1.0);
+    let rotated = monitor.get("transform").and_then(|value| value.as_i64()).is_some_and(|transform| transform % 2 == 1);
+    let pixels_h = monitor.get(if rotated { "width" } else { "height" })?.as_f64()?;
+    let top = monitor.get("y")?.as_i64()?;
+    let dock_top = top + (pixels_h / scale).round() as i64 - band as i64;
+    if at.1 + size.1 <= dock_top {
+        return None;
+    }
+    let new_h = (dock_top - at.1).max(120);
+    if !crate::linux_game_detect::hypr_dispatch(&format!(
+        "hl.dsp.window.resize({{ x = {}, y = {new_h}, window = \"address:{address}\" }})",
+        size.0
+    )) {
+        return None;
+    }
+    crate::linux_game_detect::hypr_dispatch(&format!(
+        "hl.dsp.window.move({{ x = {}, y = {}, window = \"address:{address}\" }})",
+        at.0, at.1
+    ));
+    crate::install::log_line(&format!("reserved space: shrank '{class}' to bottom={dock_top}"));
+    Some(Shrunk { address, at, size })
+}
+
+fn restore_floating(shrunk: &Shrunk) {
+    let window = format!("window = \"address:{}\"", shrunk.address);
+    crate::linux_game_detect::hypr_dispatch(&format!(
+        "hl.dsp.window.resize({{ x = {}, y = {}, {window} }})",
+        shrunk.size.0, shrunk.size.1
+    ));
+    crate::linux_game_detect::hypr_dispatch(&format!(
+        "hl.dsp.window.move({{ x = {}, y = {}, {window} }})",
+        shrunk.at.0, shrunk.at.1
+    ));
 }
 
 fn slide_out(shell: &mut Shell, queue: &mut wayland_client::EventQueue<Shell>, qh: &QueueHandle<Shell>) -> bool {
@@ -356,6 +447,8 @@ struct Shell {
     voice_started: Option<std::time::Instant>,
     slide: Option<(std::time::Instant, bool)>,
     slide_waiting: bool,
+    reserved: bool,
+    shrunk: Option<Shrunk>,
 }
 
 impl Shell {
@@ -425,6 +518,8 @@ impl Shell {
             voice_started: None,
             slide: None,
             slide_waiting: false,
+            reserved: false,
+            shrunk: None,
         };
         shell.apply_layout();
         Ok(shell)
@@ -450,7 +545,7 @@ impl Shell {
             self.layer.set_size(0, height);
         } else {
             self.layer.set_anchor(Anchor::BOTTOM);
-            self.layer.set_exclusive_zone(0);
+            self.layer.set_exclusive_zone(if self.reserved { height as i32 + margin } else { 0 });
             self.layer.set_margin(0, 0, margin, 0);
             self.layer.set_size(width, height);
         }
@@ -710,9 +805,27 @@ impl Shell {
         } else {
             if t >= 1.0 {
                 self.slide = None;
+                self.reserve_space();
             }
             (1.0 - eased, t < 1.0)
         }
+    }
+
+    fn reserve_space(&mut self) {
+        if self.reserved {
+            return;
+        }
+        self.reserved = true;
+        let band = match self.placed {
+            Some((false, _, height, margin)) => {
+                self.layer.set_exclusive_zone(height as i32 + margin);
+                self.layer.commit();
+                height as i32 + margin
+            }
+            Some((true, _, height, _)) => height as i32,
+            None => return,
+        };
+        self.shrunk = shrink_active_floating(band);
     }
 
     fn click(&mut self, surface: &wl_surface::WlSurface, x: f32, y: f32) {

@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, the floating keyboard keeps windows clear of it like on Windows. Once it has slid in, tiled windows are laid out above the card, and a focused floating window that reaches under it is made shorter so it ends at the card's top edge; both go back when the keyboard has slid out. In docked mode the focused floating window is shortened the same way. Moving floating windows needs Hyprland.
 - On Linux with Omarchy, voice typing can use the desktop's own dictation. Choose System dictation (Omarchy) in the tray's Voice engine menu or in the Voice tab. R3, the keyboard's mic key and Ctrl+Alt+V then start and stop `omarchy-dictation` (or `voxtype` directly), which records and types the text itself. With voxtype, the glow and cloud show while it listens and transcribes, and whatever is playing pauses as with Parakeet. There is nothing to download, and the Microphone choice is hidden because the desktop's dictation picks its own input.
 - On Linux, the dictation cloud is rendered like on Windows: the same shader, at the same 160-pixel size, updated every 16 ms, in the keyboard accent colour, and scaled smoothly onto the mic key and the screen.
 - On Linux, when only Parakeet Redux is installed and no engine was chosen yet, the Voice tab and the tray show Redux as the engine in use, matching what dictation runs.
