@@ -288,12 +288,58 @@ fn hypr_loop() {
             Err(_) => publish(None),
         }
         match UnixStream::connect(&events) {
-            Ok(stream) => read_hypr_events(stream, &command),
+            Ok(stream) => {
+                prime_overlays(&command);
+                read_hypr_events(stream, &command)
+            }
             Err(error) => {
                 crate::install::log_line(&format!("game detection: hyprland events: {error}"));
                 std::thread::sleep(Duration::from_secs(2));
             }
         }
+    }
+}
+
+const OVERLAY_NAMESPACES: [&str; 2] = ["omarchy-menu", "omarchy-dock-apps"];
+static OVERLAYS_OPEN: [std::sync::atomic::AtomicBool; 2] = [
+    std::sync::atomic::AtomicBool::new(false),
+    std::sync::atomic::AtomicBool::new(false),
+];
+
+pub fn omarchy_overlay_open() -> bool {
+    start();
+    OVERLAYS_OPEN
+        .iter()
+        .any(|open| open.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn set_overlay(namespace: &str, open: bool) {
+    if let Some(index) = OVERLAY_NAMESPACES.iter().position(|n| *n == namespace) {
+        OVERLAYS_OPEN[index].store(open, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn prime_overlays(command: &std::path::Path) {
+    let mut found = [false; 2];
+    if let Ok(layers) = hypr_json(command, "j/layers") {
+        let monitors = layers.as_object().into_iter().flat_map(|m| m.values());
+        for monitor in monitors {
+            let levels = monitor.get("levels").and_then(|l| l.as_object());
+            let layers = levels
+                .into_iter()
+                .flat_map(|l| l.values())
+                .filter_map(|l| l.as_array())
+                .flatten();
+            for layer in layers {
+                let namespace = layer.get("namespace").and_then(|n| n.as_str()).unwrap_or("");
+                if let Some(index) = OVERLAY_NAMESPACES.iter().position(|n| *n == namespace) {
+                    found[index] = true;
+                }
+            }
+        }
+    }
+    for (index, open) in found.into_iter().enumerate() {
+        OVERLAYS_OPEN[index].store(open, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -308,6 +354,11 @@ fn read_hypr_events(mut stream: UnixStream, command: &std::path::Path) {
                 pending.push_str(&String::from_utf8_lossy(&buf[..n]));
                 while let Some(index) = pending.find('\n') {
                     let line: String = pending.drain(..=index).collect();
+                    if let Some(namespace) = line.trim_end().strip_prefix("openlayer>>") {
+                        set_overlay(namespace, true);
+                    } else if let Some(namespace) = line.trim_end().strip_prefix("closelayer>>") {
+                        set_overlay(namespace, false);
+                    }
                     if line.starts_with("fullscreen>>") || line.starts_with("activewindow>>") {
                         match hypr_surface(command) {
                             Ok(surface) => publish(Some(surface)),

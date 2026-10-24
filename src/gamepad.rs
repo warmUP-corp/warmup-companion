@@ -999,6 +999,27 @@ impl GamepadPoll {
             #[cfg(target_os = "linux")]
             if change.pressed
                 && !self.view_down
+                && cursor_injection_enabled
+                && crate::linux_game_detect::omarchy_overlay_open()
+            {
+                let key = match change.button {
+                    Button::Up => Some(enigo::Key::UpArrow),
+                    Button::Down => Some(enigo::Key::DownArrow),
+                    Button::Left => Some(enigo::Key::LeftArrow),
+                    Button::Right => Some(enigo::Key::RightArrow),
+                    Button::A => Some(enigo::Key::Return),
+                    Button::B => Some(enigo::Key::Escape),
+                    _ => None,
+                };
+                if let Some(key) = key {
+                    cursor.tap_chord(vec![key]);
+                    self.backend.haptic_tick();
+                    continue;
+                }
+            }
+            #[cfg(target_os = "linux")]
+            if change.pressed
+                && !self.view_down
                 && !crate::pipe_server::native_vk_suppressed()
                 && !(self.shot_lb_down && self.shot_rb_down)
                 && cursor_injection_enabled
