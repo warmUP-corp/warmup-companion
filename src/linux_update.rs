@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+pub(crate) use crate::release_feed::CURRENT;
 use crate::release_feed::{
-    asset, download_url, is_newer, page_url, release_notes, sidecar_sha, tag_version, CURRENT,
-    LATEST_URL,
+    asset, download_url, is_newer, page_url, release_notes, sidecar_sha, tag_version, LATEST_URL,
 };
 
 const BIN_NAME: &str = "warmup-companion";
@@ -19,76 +19,207 @@ const FIRST_CHECK_DELAY: Duration = Duration::from_secs(15);
 const RETRY_AFTER: Duration = Duration::from_secs(10 * 60);
 const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 const SETTLE: Duration = Duration::from_secs(3);
+const MIN_VERIFY: Duration = Duration::from_millis(900);
+const POLL: Duration = Duration::from_millis(100);
 
-static BUSY: AtomicBool = AtomicBool::new(false);
-static AVAILABLE: Mutex<Option<(String, String)>> = Mutex::new(None);
-static LAST_CHECKED: Mutex<Option<String>> = Mutex::new(None);
-
-pub(crate) fn last_checked() -> Option<String> {
-    LAST_CHECKED.lock().ok().and_then(|a| a.clone())
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Phase {
+    Idle,
+    Checking,
+    Available,
+    Downloading { got: u64, total: u64 },
+    Verifying,
+    Installing,
+    UpToDate,
+    Failed(String),
 }
 
-fn stamp_checked() {
-    let (_, _, _, hour, minute, _) = crate::time_util::local_now();
-    if let Ok(mut at) = LAST_CHECKED.lock() {
-        *at = Some(format!("today, {hour:02}:{minute:02}"));
-    }
-    crate::linux_tray::refresh();
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Snapshot {
+    pub(crate) phase: Phase,
+    pub(crate) release: Option<Release>,
+    pub(crate) last_checked: Option<String>,
+}
+
+static STATE: Mutex<Snapshot> = Mutex::new(Snapshot {
+    phase: Phase::Idle,
+    release: None,
+    last_checked: None,
+});
+static BUSY: AtomicBool = AtomicBool::new(false);
+static CANCEL: AtomicBool = AtomicBool::new(false);
+static TRACKING: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn snapshot() -> Snapshot {
+    STATE.lock().map(|s| s.clone()).unwrap_or(Snapshot {
+        phase: Phase::Idle,
+        release: None,
+        last_checked: None,
+    })
 }
 
 pub(crate) fn available() -> Option<(String, String)> {
-    AVAILABLE.lock().ok().and_then(|a| a.clone())
+    let s = snapshot();
+    if matches!(s.phase, Phase::UpToDate | Phase::Checking) {
+        return None;
+    }
+    s.release.map(|r| (r.version, r.page))
 }
 
-fn set_available(release: Option<&Release>) {
-    let next = release.map(|r| (r.version.clone(), r.page.clone()));
-    let changed = match AVAILABLE.lock() {
-        Ok(mut a) if *a != next => {
-            *a = next;
-            true
+pub(crate) fn last_checked() -> Option<String> {
+    snapshot().last_checked
+}
+
+fn update_state(f: impl FnOnce(&mut Snapshot)) {
+    let changed = match STATE.lock() {
+        Ok(mut s) => {
+            let before = s.clone();
+            f(&mut s);
+            *s != before
         }
-        _ => false,
+        Err(_) => false,
     };
     if changed {
         crate::linux_tray::refresh();
     }
 }
 
-pub(crate) fn check_now() {
-    spawn("update-check-now", || match check() {
-        Ok(Check::Available(release)) => {
-            set_available(Some(&release));
-            notify(
-                &format!("warmUP companion v{} is available", release.version),
-                "Choose Install update in the tray menu to install it.",
-            );
-        }
-        Ok(Check::UpToDate(_)) => {
-            set_available(None);
-            notify(
-                "Up to date",
-                &format!("warmUP companion v{CURRENT} is the latest version."),
-            );
-        }
-        Ok(Check::NoLinuxBuild(version)) => {
-            notify(
-                "No Linux build",
-                &format!("v{version} has no Linux build yet."),
-            );
-        }
-        Err(e) => {
-            log(&format!("check failed: {e}"));
-            notify("Update check failed", &e);
+fn set_phase(phase: Phase) {
+    update_state(|s| s.phase = phase);
+}
+
+fn record(check: &Check) {
+    let (_, _, _, hour, minute, _) = crate::time_util::local_now();
+    update_state(|s| {
+        s.last_checked = Some(format!("today, {hour:02}:{minute:02}"));
+        match check {
+            Check::Available(release) => {
+                s.release = Some(release.clone());
+                s.phase = Phase::Available;
+            }
+            Check::UpToDate(_) | Check::NoLinuxBuild(_) => {
+                s.release = None;
+                s.phase = Phase::UpToDate;
+            }
         }
     });
 }
 
-#[derive(Clone, Debug)]
+pub(crate) fn open() {
+    match snapshot().phase {
+        Phase::Idle | Phase::UpToDate | Phase::Failed(_) => start_check(),
+        _ => {}
+    }
+    crate::win::update_window::show();
+}
+
+pub(crate) fn start_check() {
+    if BUSY.load(Ordering::SeqCst) {
+        return;
+    }
+    set_phase(Phase::Checking);
+    spawn("update-check-now", || match check() {
+        Ok(result) => {
+            if let Check::NoLinuxBuild(version) = &result {
+                log(&format!("v{version} has no Linux build"));
+            }
+            record(&result);
+        }
+        Err(e) => {
+            log(&format!("check failed: {e}"));
+            set_phase(Phase::Failed(e));
+        }
+    });
+}
+
+pub(crate) fn start_install() {
+    let Some(release) = snapshot().release else {
+        return start_check();
+    };
+    if BUSY.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    CANCEL.store(false, Ordering::SeqCst);
+    TRACKING.store(true, Ordering::SeqCst);
+    set_phase(Phase::Downloading {
+        got: 0,
+        total: release.size,
+    });
+    spawn("update-install", move || {
+        let version = release.version.clone();
+        let result = install(release, &Options::installed());
+        TRACKING.store(false, Ordering::SeqCst);
+        BUSY.store(false, Ordering::SeqCst);
+        match result {
+            Ok(Outcome::Installed {
+                restarted: false, ..
+            }) => {
+                notify(
+                    "Update installed",
+                    &format!("v{version} starts the next time the companion starts."),
+                );
+            }
+            Ok(_) => {}
+            Err(_) if CANCEL.swap(false, Ordering::SeqCst) => {
+                log("download cancelled");
+                set_phase(Phase::Available);
+            }
+            Err(e) => {
+                log(&format!("install v{version} failed: {e}"));
+                set_phase(Phase::Failed(e));
+            }
+        }
+    });
+}
+
+pub(crate) fn cancel() {
+    if matches!(snapshot().phase, Phase::Downloading { .. }) {
+        CANCEL.store(true, Ordering::SeqCst);
+    }
+}
+
+pub(crate) fn open_release_page() {
+    if let Some(page) = snapshot().release.map(|r| r.page) {
+        open_url(&page);
+    }
+}
+
+fn open_url(page: &str) {
+    if let Err(e) = Command::new("xdg-open").arg(page).spawn() {
+        log(&format!("open {page} failed: {e}"));
+    }
+}
+
+fn show_update_notification(version: String) {
+    spawn("update-notification", move || {
+        let action = crate::linux_notify::notify_with_actions(
+            &format!("Warmup Companion v{version} is available"),
+            "Install it now, or later from the tray under Updates.",
+            &[("default", "Open"), ("install", "Install"), ("later", "Later")],
+        );
+        match action.as_deref() {
+            Ok("install") => {
+                if matches!(snapshot().phase, Phase::Available) {
+                    start_install();
+                    crate::win::update_window::show();
+                } else {
+                    open();
+                }
+            }
+            Ok("default") => open(),
+            Ok(_) => {}
+            Err(e) => log(&format!("notification failed: {e}")),
+        }
+    });
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Release {
     pub(crate) version: String,
     pub(crate) notes: Vec<String>,
     pub(crate) page: String,
     pub(crate) size: u64,
+    pub(crate) sha: String,
     bin_url: String,
     sha_url: String,
 }
@@ -140,7 +271,6 @@ pub(crate) fn check() -> Result<Check, String> {
     let json: serde_json::Value =
         serde_json::from_str(&get_string(LATEST_URL)?).map_err(|e| format!("bad reply: {e}"))?;
     let version = tag_version(&json)?;
-    stamp_checked();
     if !is_newer(&version, CURRENT) {
         return Ok(Check::UpToDate(version));
     }
@@ -156,6 +286,7 @@ pub(crate) fn check() -> Result<Check, String> {
         size: bin["size"].as_u64().unwrap_or(0),
         bin_url: download_url(&bin).ok_or("Linux build URL is not on GitHub")?,
         sha_url: download_url(&sha).ok_or("checksum URL is not on GitHub")?,
+        sha: String::new(),
         version,
     }))
 }
@@ -174,41 +305,6 @@ pub(crate) fn update(options: &Options) -> Result<Outcome, String> {
     result
 }
 
-pub(crate) fn start_update() {
-    spawn("update-install", || match update(&Options::installed()) {
-        Ok(Outcome::NoLinuxBuild(version)) => {
-            notify(
-                "No Linux build",
-                &format!("v{version} has no Linux build yet."),
-            );
-        }
-        Ok(Outcome::Installed {
-            release,
-            restarted: false,
-        }) => {
-            set_available(None);
-            notify(
-                "Update installed",
-                &format!(
-                    "v{} starts the next time the companion starts.",
-                    release.version
-                ),
-            );
-        }
-        Ok(Outcome::UpToDate(_)) => {
-            notify(
-                "Up to date",
-                &format!("warmUP companion v{CURRENT} is the latest version."),
-            );
-        }
-        Ok(_) => {}
-        Err(e) => {
-            log(&format!("update failed: {e}"));
-            notify("Update failed", &e);
-        }
-    });
-}
-
 pub(crate) fn spawn_auto_check() {
     spawn("update-check", || {
         std::thread::sleep(FIRST_CHECK_DELAY);
@@ -216,15 +312,14 @@ pub(crate) fn spawn_auto_check() {
         loop {
             let mut wait = CHECK_EVERY;
             if crate::config::gamepad_settings().update_check && !BUSY.load(Ordering::SeqCst) {
-                match check() {
+                let result = check();
+                if let Ok(checked) = &result {
+                    record(checked);
+                }
+                match result {
                     Ok(Check::Available(release)) if release.version != notified => {
-                        set_available(Some(&release));
                         log(&format!("v{} available", release.version));
-                        let bin = crate::paths::install_dir().join(BIN_NAME);
-                        notify(
-                            &format!("warmUP companion v{} is available", release.version),
-                            &format!("Run {} update to install it.", bin.display()),
-                        );
+                        show_update_notification(release.version.clone());
                         notified = release.version;
                     }
                     Ok(Check::NoLinuxBuild(version)) => {
@@ -252,9 +347,21 @@ fn install(release: Release, options: &Options) -> Result<Outcome, String> {
         release.version,
         new.display()
     ));
-    if let Err(e) = verified_download(&release.bin_url, &new, &expected) {
-        let _ = fs::remove_file(&new);
-        return Err(e);
+    let actual = match verified_download(&release.bin_url, &new, &expected, release.size) {
+        Ok(actual) => actual,
+        Err(e) => {
+            let _ = fs::remove_file(&new);
+            return Err(e);
+        }
+    };
+    if TRACKING.load(Ordering::SeqCst) {
+        update_state(|s| {
+            if let Some(r) = s.release.as_mut() {
+                r.sha = actual;
+            }
+            s.phase = Phase::Installing;
+        });
+        std::thread::sleep(Duration::from_millis(800));
     }
     if options.dry_run {
         let _ = fs::remove_file(&new);
@@ -308,16 +415,25 @@ fn keep_previous(dir: &Path) -> Result<(), String> {
         .map_err(|e| format!("keep the current version as {}: {e}", old.display()))
 }
 
-fn verified_download(url: &str, path: &Path, expected: &str) -> Result<(), String> {
-    fetch_to(url, path)?;
+fn verified_download(url: &str, path: &Path, expected: &str, size: u64) -> Result<String, String> {
+    fetch_to(url, path, size)?;
+    let tracking = TRACKING.load(Ordering::SeqCst);
+    if tracking {
+        set_phase(Phase::Verifying);
+    }
+    let started = Instant::now();
     let actual = sha256_file(path)?;
+    if tracking {
+        std::thread::sleep(MIN_VERIFY.saturating_sub(started.elapsed()));
+    }
     if actual != expected {
         return Err(format!(
             "checksum mismatch\ngot      {actual}\nexpected {expected}"
         ));
     }
     fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-        .map_err(|e| format!("chmod {}: {e}", path.display()))
+        .map_err(|e| format!("chmod {}: {e}", path.display()))?;
+    Ok(actual)
 }
 
 fn restart(mode: Restart) -> Result<bool, String> {
@@ -374,10 +490,43 @@ fn get_string(url: &str) -> Result<String, String> {
     String::from_utf8(run_curl(command, url)?).map_err(|e| format!("{url}: {e}"))
 }
 
-fn fetch_to(url: &str, path: &Path) -> Result<(), String> {
+fn fetch_to(url: &str, path: &Path, size: u64) -> Result<(), String> {
     let mut command = curl();
-    command.args(["--max-time", "600", "-o"]).arg(path);
-    run_curl(command, url).map(|_| ())
+    command
+        .args(["--max-time", "600", "-o"])
+        .arg(path)
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("curl is needed to update: {e}"))?;
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| format!("curl: {e}"))? {
+            break status;
+        }
+        if CANCEL.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("cancelled".into());
+        }
+        if TRACKING.load(Ordering::SeqCst) {
+            let got = fs::metadata(path).map_or(0, |m| m.len());
+            set_phase(Phase::Downloading {
+                got,
+                total: size.max(got),
+            });
+        }
+        std::thread::sleep(POLL);
+    };
+    if !status.success() {
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let _ = std::io::Read::read_to_string(&mut pipe, &mut stderr);
+        }
+        return Err(format!("{url}: {}", stderr.trim()));
+    }
+    Ok(())
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {

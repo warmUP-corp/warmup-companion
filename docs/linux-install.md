@@ -41,7 +41,7 @@ warmup-companion update
 
 Releases do not carry a Linux build yet. Until they do, `update` says the release has no Linux build and changes nothing. To update before then, pull the source, build it again, and run `./target/release/warmup-companion install`. Installing over an existing install replaces the binary; run `systemctl --user restart warmup-companion` afterwards.
 
-While `update_check` is on in `settings.ini` (the default), the service checks shortly after it starts and once a day after that. When a newer release has a Linux build, it shows a notification with the full path of the installed program, since `~/.local/share/warmup-companion/bin` is usually not on `PATH`. Turn the check off with `warmup-companion settings set update_check false`.
+While `update_check` is on in `settings.ini` (the default), the service checks shortly after it starts and once a day after that. When a newer release has a Linux build, it shows a notification with Install and Later buttons, like on Windows. Install, or a click on the notification, opens the update window. The same window opens from the tray under Updates: it shows what is new, the download and checksum progress, and the Check automatically switch, and the controller drives it with the D-pad, A and B. Turn the check off with `warmup-companion settings set update_check false`.
 
 ## Session environment
 

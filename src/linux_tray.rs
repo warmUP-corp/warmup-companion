@@ -303,15 +303,8 @@ fn run_command(cmd: usize) {
         CMD_SLEEP_ON_GAME => toggle_bool("sleep_on_game", gs.sleep_on_game),
         CMD_AUTOSTOP_ON_GAME => toggle_bool("auto_stop_on_game", gs.auto_stop_on_game),
         CMD_VOICE => toggle_bool("voice_enabled", gs.voice_enabled),
-        CMD_UPDATE if crate::linux_update::available().is_some() => {
-            crate::linux_update::start_update()
-        }
-        CMD_UPDATE => crate::linux_update::check_now(),
-        CMD_UPDATE_NOTES => {
-            if let Some((_, page)) = crate::linux_update::available() {
-                let _ = std::process::Command::new("xdg-open").arg(page).spawn();
-            }
-        }
+        CMD_UPDATE => crate::linux_update::open(),
+        CMD_UPDATE_NOTES => crate::linux_update::open_release_page(),
         CMD_UPDATE_AUTO => toggle_bool("update_check", gs.update_check),
         CMD_OPEN_LOG => open_path(&crate::paths::log_file()),
         CMD_DIAGNOSTICS => run_diagnostics(),
@@ -411,16 +404,14 @@ fn keyboard_items() -> Vec<MenuItem<CompanionTray>> {
 
 fn update_items(auto: bool) -> Vec<MenuItem<CompanionTray>> {
     let mut items = match crate::linux_update::available() {
-        Some((version, page)) => vec![
+        Some((version, _)) => vec![
             action(&format!("Install update v{version}…"), |_| {
-                crate::linux_update::start_update()
+                crate::linux_update::open()
             }),
-            action("What's new", move |_| {
-                let _ = std::process::Command::new("xdg-open").arg(&page).spawn();
-            }),
+            action("What's new", |_| crate::linux_update::open_release_page()),
         ],
         None => vec![action("Check for updates", |_| {
-            crate::linux_update::check_now()
+            crate::linux_update::open()
         })],
     };
     items.push(MenuItem::Separator);

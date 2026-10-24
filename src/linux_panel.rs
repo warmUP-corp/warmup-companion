@@ -303,6 +303,7 @@ struct Host {
     pool: Option<SlotPool>,
     window: Option<Surface>,
     layer_size: (u32, u32),
+    window_size: (u32, u32),
     painted: Option<(i32, i32, u32, u32)>,
     viewport: Option<wp_viewport::WpViewport>,
     fractional: Option<wp_fractional_scale_v1::WpFractionalScaleV1>,
@@ -353,6 +354,7 @@ impl Host {
             pool: None,
             window: None,
             layer_size: (0, 0),
+            window_size: (0, 0),
             painted: None,
             viewport: None,
             fractional: None,
@@ -409,6 +411,7 @@ impl Host {
             window.set_app_id(self.spec.app_id);
             window.set_min_size(Some((w, h)));
             window.set_max_size(Some((w, h)));
+            self.window_size = (w, h);
             Surface::Window(window)
         };
         self.viewport = self
@@ -611,6 +614,11 @@ impl Host {
             None => surface.set_buffer_scale(s.round().max(1.0) as i32),
         }
         if let Surface::Window(win) = window {
+            if self.window_size != (w, h) {
+                win.set_min_size(Some((w, h)));
+                win.set_max_size(Some((w, h)));
+                self.window_size = (w, h);
+            }
             win.set_window_geometry(0, 0, w, h);
         }
         for r in [Some(rect), previous].into_iter().flatten() {

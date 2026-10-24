@@ -81,6 +81,15 @@ pub mod controller_center;
 #[path = "win/tray_menu.rs"]
 pub(crate) mod tray_menu;
 
+#[cfg(feature = "gamepad")]
+#[path = "win/update_window.rs"]
+pub(crate) mod update_window;
+
+#[cfg(feature = "gamepad")]
+pub(crate) mod vk_renderer {
+    pub(crate) use crate::vk_paint::is_playstation_label;
+}
+
 #[allow(dead_code)]
 #[path = "win/controller_tips.rs"]
 pub mod controller_tips;
