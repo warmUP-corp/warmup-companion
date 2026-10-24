@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, the built-in button presets for VLC, Spotify, the file manager (Dolphin, Nautilus, Thunar, Nemo) and Discord (also Vesktop and Legcord) work like on Windows, alongside the browser presets.
 - On Linux, `warmup-companion install` copies the controller database into the companion's data folder, from `WARMUP_GAMECONTROLLER_DB` or from the installed warmUP. The service no longer depends on the folder it was started from to find it.
 - On Linux with Hyprland, a touchpad swipe down moves to an empty workspace so the desktop shows, and a swipe up goes back to the workspace you came from. Before, both did nothing on Hyprland. KDE Plasma keeps its overview and show-desktop shortcuts.
 - On Linux, pasting into a terminal (Alacritty, kitty, foot, WezTerm, Ghostty, Konsole, GNOME Terminal, xterm) uses Ctrl+Shift+V. A copied picture or copied files are typed as quoted paths instead, like on Windows; a picture is saved under Pictures/Screenshots first, and a screenshot you just took is typed as its saved file.
