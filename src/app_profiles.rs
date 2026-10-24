@@ -534,7 +534,7 @@ pub fn load(settings: &str) -> (bool, Vec<Profile>) {
         p.enabled = !setting(settings, &format!("profile.{exe}")).is_some_and(is_off);
         for (i, b) in BUTTONS.iter().enumerate() {
             if let Some(v) = setting(settings, &format!("profile.{exe}.{b}")) {
-                p.map[i] = (!v.eq_ignore_ascii_case("none") && parse_chord(v).is_some())
+                p.map[i] = (!v.eq_ignore_ascii_case("none") && chord_valid(v))
                     .then(|| v.to_ascii_lowercase());
             }
         }
@@ -587,7 +587,7 @@ pub fn valid_setting(key: &str, value: &str) -> bool {
             value.to_ascii_lowercase().as_str(),
             "on" | "off" | "true" | "false" | "1" | "0" | "yes" | "no"
         ),
-        Some(_) => value.eq_ignore_ascii_case("none") || parse_chord(value).is_some(),
+        Some(_) => value.eq_ignore_ascii_case("none") || chord_valid(value),
     }
 }
 
@@ -608,7 +608,26 @@ pub fn key_label(name: &str) -> String {
 }
 
 pub fn keycaps(spec: &str) -> Vec<String> {
+    #[cfg(target_os = "linux")]
+    if hypr_command(spec).is_some() {
+        let label = HYPRLAND
+            .presets
+            .iter()
+            .find(|(_, c)| c.eq_ignore_ascii_case(spec.trim()))
+            .map_or_else(|| spec.trim().to_string(), |(l, _)| l.to_string());
+        return vec![label];
+    }
     spec.split('+').map(key_label).collect()
+}
+
+#[cfg(target_os = "linux")]
+fn chord_valid(spec: &str) -> bool {
+    parse_chord(spec).is_some() || hypr_command(spec).is_some()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn chord_valid(spec: &str) -> bool {
+    parse_chord(spec).is_some()
 }
 
 fn parse_chord(spec: &str) -> Option<Vec<Key>> {
