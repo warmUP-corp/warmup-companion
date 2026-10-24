@@ -17,6 +17,8 @@ const SYNC_EVERY: Duration = Duration::from_secs(1);
 const BIND_CHECK_TICKS: u32 = 3;
 const RECONNECT_MIN: Duration = Duration::from_secs(1);
 const RECONNECT_MAX: Duration = Duration::from_secs(60);
+const SIGNAL_FALLBACK_AFTER: u32 = 5;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const SIGNAL_POLL: Duration = Duration::from_millis(100);
 const LABEL_PREFIX: &str = "warmUP Companion: ";
 
@@ -162,12 +164,12 @@ fn run() {
             .spawn(poll_signals);
     }
     let mut synced = false;
-    let mut first = true;
+    let mut failures: u32 = 0;
     let mut backoff = RECONNECT_MIN;
     loop {
         match Portal::open() {
             Ok(portal) => {
-                first = false;
+                failures = 0;
                 backoff = RECONNECT_MIN;
                 let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
                 if let Some(trigger) = portal.triggers.get(Hotkey::Center.id()) {
@@ -202,16 +204,17 @@ fn run() {
                 log("the global shortcuts portal went away, reconnecting");
                 std::thread::sleep(backoff);
             }
-            Err(e) if first => {
-                log(&format!("global shortcuts portal unavailable: {e}"));
-                if signals {
+            Err(e) => {
+                failures += 1;
+                if failures == SIGNAL_FALLBACK_AFTER && signals && !synced {
+                    log(&format!(
+                        "global shortcuts portal unavailable: {e}; binding the keys to signals"
+                    ));
                     for hotkey in Hotkey::ALL {
                         spawn_hypr_sync(hotkey, Target::Signal(hotkey.signal()));
                     }
+                    synced = true;
                 }
-                return;
-            }
-            Err(e) => {
                 log(&format!("global shortcuts portal: {e}; retrying in {}s", backoff.as_secs()));
                 std::thread::sleep(backoff);
                 backoff = (backoff * 2).min(RECONNECT_MAX);
@@ -384,9 +387,22 @@ fn request(
     let path = format!("{PORTAL_PATH}/request/{sender}/{token}");
     let request = Proxy::new(conn, DEST, path.as_str(), "org.freedesktop.portal.Request")
         .map_err(err)?;
-    let mut responses = request.receive_signal("Response").map_err(err)?;
+    let mut responses = zbus::block_on(request.inner().receive_signal("Response")).map_err(err)?;
     call().map_err(err)?;
-    let message = responses.next().ok_or("portal closed the request")?;
+    let message = zbus::block_on(futures_lite::future::or(
+        async {
+            futures_lite::StreamExt::next(&mut responses)
+                .await
+                .ok_or_else(|| "portal closed the request".to_string())
+        },
+        async {
+            async_io::Timer::after(REQUEST_TIMEOUT).await;
+            Err(format!(
+                "portal did not answer in {}s",
+                REQUEST_TIMEOUT.as_secs()
+            ))
+        },
+    ))?;
     let (code, results): (u32, HashMap<String, OwnedValue>) =
         message.body().deserialize().map_err(err)?;
     if code != 0 {
@@ -481,17 +497,17 @@ fn combo_binds(hotkey: Hotkey) -> Option<ComboBinds> {
     };
     for bind in binds {
         let on_combo = bind["modmask"].as_u64() == Some(12)
-            && bind["submap"].as_str().unwrap_or_default().is_empty()
             && bind["key"]
                 .as_str()
                 .is_some_and(|k| k.eq_ignore_ascii_case(hotkey.hypr_key()));
         if !on_combo {
             continue;
         }
-        if bind["description"]
-            .as_str()
-            .unwrap_or_default()
-            .starts_with(LABEL_PREFIX)
+        if root_submap(&bind)
+            && bind["description"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with(LABEL_PREFIX)
         {
             combo.ours = true;
         } else {
@@ -501,35 +517,71 @@ fn combo_binds(hotkey: Hotkey) -> Option<ComboBinds> {
     Some(combo)
 }
 
-fn bound_by_other(hotkey: Hotkey) -> bool {
-    combo_binds(hotkey).is_some_and(|c| !c.others.is_empty())
+fn root_submap(bind: &serde_json::Value) -> bool {
+    bind["submap"].as_str().unwrap_or_default().is_empty()
 }
 
-fn legacy_bind_line(hotkey: Hotkey, bind: &serde_json::Value) -> Option<(String, String)> {
+fn active_in_root(bind: &serde_json::Value) -> bool {
+    root_submap(bind)
+        || bind["submap_universal"].as_bool() == Some(true)
+        || bind["submap_universal"].as_str() == Some("true")
+}
+
+fn bound_by_other(hotkey: Hotkey) -> bool {
+    combo_binds(hotkey).is_some_and(|c| c.others.iter().any(active_in_root))
+}
+
+struct LegacyBind {
+    submap: String,
+    keyword: String,
+    line: String,
+}
+
+fn legacy_bind_line(hotkey: Hotkey, bind: &serde_json::Value) -> Option<LegacyBind> {
     let dispatcher = bind["dispatcher"].as_str()?;
     if dispatcher == "__lua" {
         return None;
     }
     let flag = |key: &str, letter: char| bind[key].as_bool().unwrap_or(false).then_some(letter);
+    let universal = (bind["submap_universal"].as_bool() == Some(true)
+        || bind["submap_universal"].as_str() == Some("true"))
+    .then_some('u');
     let mut flags: String = [
         flag("locked", 'l'),
         flag("release", 'r'),
+        flag("longPress", 'o'),
         flag("repeat", 'e'),
         flag("non_consuming", 'n'),
         flag("mouse", 'm'),
+        flag("allow_input_capture", 'p'),
+        universal,
     ]
     .into_iter()
     .flatten()
     .collect();
+    let key = if bind["catch_all"].as_bool().unwrap_or(false) {
+        "catchall"
+    } else {
+        hotkey.hypr_key()
+    };
     let arg = bind["arg"].as_str().unwrap_or_default();
     let line = match bind["description"].as_str().filter(|d| !d.is_empty()) {
+        Some(description) if description.contains(',') => return None,
         Some(description) => {
             flags.push('d');
-            format!("CTRL ALT, {}, {description}, {dispatcher}, {arg}", hotkey.hypr_key())
+            format!("CTRL ALT, {key}, {description}, {dispatcher}, {arg}")
         }
-        None => format!("CTRL ALT, {}, {dispatcher}, {arg}", hotkey.hypr_key()),
+        None => format!("CTRL ALT, {key}, {dispatcher}, {arg}"),
     };
-    Some((format!("bind{flags}"), line))
+    let submap = bind["submap"].as_str().unwrap_or_default().to_string();
+    if !submap.is_empty() && (submap.contains(';') || line.contains(';')) {
+        return None;
+    }
+    Some(LegacyBind {
+        submap,
+        keyword: format!("bind{flags}"),
+        line,
+    })
 }
 
 fn hypr_bind(hotkey: Hotkey, target: &Target) -> bool {
@@ -575,7 +627,7 @@ fn hypr_unbind(hotkey: Hotkey) {
     if !combo.ours {
         return;
     }
-    let restore: Option<Vec<(String, String)>> = combo
+    let restore: Option<Vec<LegacyBind>> = combo
         .others
         .iter()
         .map(|bind| legacy_bind_line(hotkey, bind))
@@ -594,8 +646,16 @@ fn hypr_unbind(hotkey: Hotkey) {
             let _ = hyprctl(&["eval", &lua]);
         }
         Some(_) => {
-            for (keyword, line) in restore {
-                let _ = hyprctl(&["keyword", &keyword, &line]);
+            for bind in restore {
+                if bind.submap.is_empty() {
+                    let _ = hyprctl(&["keyword", &bind.keyword, &bind.line]);
+                } else {
+                    let batch = format!(
+                        "keyword submap {}; keyword {} {}; keyword submap reset",
+                        bind.submap, bind.keyword, bind.line
+                    );
+                    let _ = hyprctl(&["--batch", &batch]);
+                }
             }
         }
         None => {}

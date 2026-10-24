@@ -111,8 +111,50 @@ pub(super) fn center_items() -> Vec<Item> {
             },
         ));
         items.extend(voice_items());
+        if crate::linux_speech::system_available() {
+            items.push(captioned(
+                item(
+                    5,
+                    "System dictation (Omarchy)",
+                    Kind::VoiceModel {
+                        id: crate::linux_speech::SYSTEM_ENGINE,
+                    },
+                ),
+                "Built into the desktop",
+            ));
+        }
     }
     items
+}
+
+pub(super) fn voice_removable(id: &str) -> bool {
+    #[cfg(feature = "speech")]
+    {
+        id != crate::linux_speech::SYSTEM_ENGINE
+    }
+    #[cfg(not(feature = "speech"))]
+    {
+        let _ = id;
+        true
+    }
+}
+
+pub(super) fn hidden_item(it: &Item) -> bool {
+    #[cfg(feature = "speech")]
+    {
+        matches!(
+            it.kind,
+            Kind::Choice {
+                key: "voice_mic",
+                ..
+            }
+        ) && crate::linux_speech::engine() == crate::linux_speech::SYSTEM_ENGINE
+    }
+    #[cfg(not(feature = "speech"))]
+    {
+        let _ = it;
+        false
+    }
 }
 
 #[cfg(feature = "speech")]

@@ -724,11 +724,14 @@ mod repl_scroll {
 fn main() {
     #[cfg(target_os = "linux")]
     std::env::set_var("__NV_DISABLE_EXPLICIT_SYNC", "1");
+    #[cfg(all(target_os = "linux", feature = "gamepad"))]
+    if env::args().any(|a| a == "--controller-center") {
+        linux_hotkeys::release_on_exit_signals();
+    }
     let _sentry = sentry_telemetry::init();
     let args: Vec<String> = env::args().collect();
     #[cfg(all(target_os = "linux", feature = "gamepad"))]
     if args.iter().any(|a| a == "--controller-center") {
-        linux_hotkeys::release_on_exit_signals();
         linux_tray::exit_ends_process();
         linux_tray::spawn();
         win::controller_center::show();

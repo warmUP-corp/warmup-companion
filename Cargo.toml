@@ -108,7 +108,7 @@ windows = { version = "0.58", features = [
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
 libc = "0.2"
-nix = { version = "0.31", features = ["socket", "fs", "user", "poll"] }
+nix = { version = "0.31", features = ["socket", "fs", "user", "poll", "signal"] }
 xkbcommon = "0.8"
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 smithay-client-toolkit = "0.19"

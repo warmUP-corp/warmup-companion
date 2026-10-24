@@ -29,6 +29,13 @@ const REDUX_REPO: &str = "eschmidbauer/parakeet-redux-onnx";
 const REDUX_REV: &str = "1c285ba78d6f1880803f65355133a5ad3559a407";
 const REDUX_FILES: [&str; 3] = ["encoder-model.onnx", "decoder_joint-model.onnx", "vocab.txt"];
 const MODEL_IDS: [&str; 2] = ["parakeet", "parakeet-redux"];
+pub const SYSTEM_ENGINE: &str = "system";
+const SYSTEM_WRAPPER: &str = "omarchy-dictation";
+const SYSTEM_DAEMON: &str = "voxtype";
+const SYSTEM_POLL: Duration = Duration::from_millis(200);
+const SYSTEM_START_WAIT: Duration = Duration::from_secs(3);
+const MIC_OPEN_WAIT: Duration = Duration::from_secs(5);
+const MIC_STOP_WAIT: Duration = Duration::from_secs(1);
 const MIC_CACHE_FOR: Duration = Duration::from_secs(2);
 const DOWNLOAD_POLL: Duration = Duration::from_millis(250);
 
@@ -57,7 +64,18 @@ pub fn level() -> f32 {
 }
 
 pub fn available() -> bool {
+    if engine() == SYSTEM_ENGINE {
+        return system_available();
+    }
+    parakeet_ready()
+}
+
+fn parakeet_ready() -> bool {
     model_dir().is_some() && onnx_runtime().is_some()
+}
+
+pub fn any_engine() -> bool {
+    parakeet_ready() || system_available()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -150,14 +168,23 @@ struct MicStream {
 
 struct AlsaCapture {
     stop: std::sync::Arc<AtomicBool>,
+    done: std::sync::mpsc::Receiver<()>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for AlsaCapture {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        match self.done.recv_timeout(MIC_STOP_WAIT) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                crate::install::log_line("speech: the mic did not stop, leaving its thread behind");
+            }
+            _ => {
+                let _ = thread.join();
+            }
         }
     }
 }
@@ -219,11 +246,13 @@ fn open_alsa_capture(
     use alsa::pcm::{Access, Format, HwParams, PCM};
     let stop = std::sync::Arc::new(AtomicBool::new(false));
     let (tx, rx) = std::sync::mpsc::channel::<Result<u32, String>>();
+    let (running, done) = std::sync::mpsc::channel::<()>();
     let name = pcm_name.to_string();
     let flag = stop.clone();
     let thread = std::thread::Builder::new()
         .name("warmup-mic".into())
         .spawn(move || {
+            let _running = running;
             let opened = (|| -> Result<(PCM, u32), alsa::Error> {
                 let pcm = PCM::new(&name, alsa::Direction::Capture, false)?;
                 {
@@ -268,10 +297,11 @@ fn open_alsa_capture(
             }
         })
         .map_err(|error| error.to_string())?;
-    match rx.recv() {
+    match rx.recv_timeout(MIC_OPEN_WAIT) {
         Ok(Ok(rate)) => Ok((
             AlsaCapture {
                 stop,
+                done,
                 thread: Some(thread),
             },
             rate,
@@ -280,7 +310,14 @@ fn open_alsa_capture(
             let _ = thread.join();
             Err(error)
         }
-        Err(_) => {
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            stop.store(true, Ordering::SeqCst);
+            Err(format!(
+                "{pcm_name}: no answer in {}s",
+                MIC_OPEN_WAIT.as_secs()
+            ))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
             let _ = thread.join();
             Err(format!("{pcm_name}: capture thread ended"))
         }
@@ -364,7 +401,7 @@ pub fn engine() -> String {
     std::fs::read_to_string(engine_path())
         .ok()
         .map(|s| s.trim().to_string())
-        .filter(|s| MODEL_IDS.contains(&s.as_str()))
+        .filter(|s| MODEL_IDS.contains(&s.as_str()) || (s == SYSTEM_ENGINE && system_available()))
         .unwrap_or_else(|| {
             let redux_only = !has_model(&speech_dir().join("parakeet"))
                 && has_model(&speech_dir().join("parakeet-redux"));
@@ -378,10 +415,10 @@ pub fn engine() -> String {
 }
 
 pub fn set_engine(name: &str) {
-    let next = if name == "parakeet-redux" {
-        "parakeet-redux"
-    } else {
-        "parakeet"
+    let next = match name {
+        "parakeet-redux" => "parakeet-redux",
+        SYSTEM_ENGINE => SYSTEM_ENGINE,
+        _ => "parakeet",
     };
     let changed = engine() != next;
     if let Some(parent) = engine_path().parent() {
@@ -394,6 +431,9 @@ pub fn set_engine(name: &str) {
 }
 
 pub fn model_installed(id: &str) -> bool {
+    if id == SYSTEM_ENGINE {
+        return system_available();
+    }
     let dir = speech_dir().join(id);
     MODEL_IDS.contains(&id) && has_model(&dir) && runtime_for(&dir).is_some()
 }
@@ -404,6 +444,28 @@ pub fn parakeet_available() -> bool {
 
 pub fn redux_available() -> bool {
     model_installed("parakeet-redux")
+}
+
+pub fn bundled_parakeet() -> bool {
+    bundled_model().is_some_and(|dir| runtime_for(&dir).is_some())
+}
+
+fn bundled_model() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let bundled = PathBuf::from(home).join(".local/share/voxtype/models/parakeet-tdt-0.6b-v3-int8");
+    has_model(&bundled).then_some(bundled)
+}
+
+pub fn system_available() -> bool {
+    on_path(SYSTEM_WRAPPER).is_some() || on_path(SYSTEM_DAEMON).is_some()
+}
+
+fn on_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(name))
+            .find(|path| path.is_file())
+    })
 }
 
 pub fn download_model(id: &str, progress: impl Fn(u8)) -> Result<(), String> {
@@ -630,6 +692,10 @@ fn quit_server() {
 }
 
 pub fn toggle() {
+    if !running() && engine() == SYSTEM_ENGINE {
+        system_toggle();
+        return;
+    }
     if running() {
         crate::install::log_line("vk voice input: OFF (finishing — transcribe on stop)");
         request_stop();
@@ -695,6 +761,152 @@ fn start() -> Result<(), String> {
 
 fn set_phase(phase: u8) {
     PHASE.store(phase, Ordering::SeqCst);
+}
+
+static SYSTEM_WARNED: AtomicBool = AtomicBool::new(false);
+
+fn system_toggle() {
+    if !system_available() {
+        system_failed("System dictation is not installed.".into());
+        return;
+    }
+    if !system_tracked() {
+        crate::install::log_line("speech: system dictation toggled, its state is not visible");
+        if let Err(error) = system_command("toggle") {
+            system_failed(error);
+        }
+        return;
+    }
+    if RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    STOP.store(false, Ordering::SeqCst);
+    DISCARD.store(false, Ordering::SeqCst);
+    crate::install::log_line("vk voice input: ON (system dictation)");
+    let spawned = std::thread::Builder::new()
+        .name("warmup-system-dictation".into())
+        .spawn(|| {
+            if let Err(error) = follow_system_dictation() {
+                system_failed(error);
+            }
+            set_phase(0);
+            set_level(0.0);
+            RUNNING.store(false, Ordering::SeqCst);
+            crate::vk_nav::set_voice_input_active(false);
+        });
+    if let Err(error) = spawned {
+        RUNNING.store(false, Ordering::SeqCst);
+        system_failed(error.to_string());
+    }
+}
+
+fn system_failed(error: String) {
+    crate::install::log_line(&format!("system dictation: {error}"));
+    if !SYSTEM_WARNED.swap(true, Ordering::SeqCst) {
+        let _ = crate::linux_notify::notify("System dictation failed", &error);
+    }
+}
+
+fn follow_system_dictation() -> Result<(), String> {
+    let _media = MediaPause::hold();
+    system_command("toggle")?;
+    let started = Instant::now();
+    let mut seen = false;
+    let mut stop_sent = false;
+    loop {
+        if STOP.load(Ordering::SeqCst) && !stop_sent {
+            stop_sent = true;
+            if DISCARD.load(Ordering::SeqCst) {
+                voxtype(&["record", "cancel"])?;
+            } else {
+                system_command("stop")?;
+            }
+        }
+        match system_state().as_deref() {
+            Some("recording") => {
+                if !seen {
+                    crate::vk_nav::set_voice_input_active(true);
+                    crate::linux_nimbus::ensure_running();
+                    #[cfg(feature = "gamepad")]
+                    crate::linux_voice::show();
+                }
+                seen = true;
+                set_phase(1);
+            }
+            Some("transcribing") => {
+                seen = true;
+                set_phase(2);
+                crate::vk_nav::set_voice_input_active(false);
+            }
+            Some("stopped") | None => return Err("the voxtype daemon is not running".into()),
+            _ if seen => break,
+            _ if started.elapsed() > SYSTEM_START_WAIT => {
+                return Err("voxtype did not start recording".into());
+            }
+            _ => {}
+        }
+        std::thread::sleep(SYSTEM_POLL);
+    }
+    SYSTEM_WARNED.store(false, Ordering::SeqCst);
+    Ok(())
+}
+
+fn system_tracked() -> bool {
+    if on_path(SYSTEM_DAEMON).is_none() {
+        return false;
+    }
+    if on_path(SYSTEM_WRAPPER).is_none() {
+        return true;
+    }
+    Command::new("omarchy-default-dictation")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == SYSTEM_DAEMON)
+}
+
+fn system_state() -> Option<String> {
+    let output = Command::new(SYSTEM_DAEMON)
+        .arg("status")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn system_command(action: &str) -> Result<(), String> {
+    if on_path(SYSTEM_WRAPPER).is_some() {
+        run_quiet(Command::new(SYSTEM_WRAPPER).arg(action))
+    } else {
+        voxtype(&["record", action])
+    }
+}
+
+fn voxtype(args: &[&str]) -> Result<(), String> {
+    run_quiet(Command::new(SYSTEM_DAEMON).args(args))
+}
+
+fn run_quiet(command: &mut Command) -> Result<(), String> {
+    let program = command.get_program().to_string_lossy().into_owned();
+    let output = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output()
+        .map_err(|error| format!("{program}: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let reason = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(if reason.is_empty() {
+        format!("{program} failed ({})", output.status)
+    } else {
+        reason
+    })
 }
 
 struct MediaPause {
@@ -907,14 +1119,7 @@ fn model_dir() -> Option<PathBuf> {
     if has_model(&redux) {
         return Some(redux);
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        let bundled = PathBuf::from(home)
-            .join(".local/share/voxtype/models/parakeet-tdt-0.6b-v3-int8");
-        if has_model(&bundled) {
-            return Some(bundled);
-        }
-    }
-    None
+    bundled_model()
 }
 
 fn onnx_runtime() -> Option<PathBuf> {

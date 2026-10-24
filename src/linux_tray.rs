@@ -200,6 +200,10 @@ const CMD_ENGINE_PARAKEET: usize = 29;
 #[cfg(feature = "speech")]
 const CMD_ENGINE_REDUX: usize = 30;
 #[cfg(feature = "speech")]
+const CMD_ENGINE_SYSTEM: usize = 31;
+#[cfg(feature = "speech")]
+const SYSTEM_LABEL: &str = "System dictation (Omarchy)";
+#[cfg(feature = "speech")]
 const CMD_MIC_BASE: usize = 100;
 
 fn menu_entries() -> Vec<Entry> {
@@ -323,7 +327,7 @@ fn menu_entries() -> Vec<Entry> {
 
 fn voice_entries(voice_on: bool) -> Vec<Entry> {
     #[cfg(feature = "speech")]
-    if crate::linux_speech::available() {
+    if crate::linux_speech::any_engine() {
         let mut entries = Vec::new();
         let engine = crate::linux_speech::engine();
         let mut engines = vec![Entry::radio("Off", CMD_VOICE_OFF, !voice_on)];
@@ -341,8 +345,15 @@ fn voice_entries(voice_on: bool) -> Vec<Entry> {
                 voice_on && engine == "parakeet-redux",
             ));
         }
+        if crate::linux_speech::system_available() {
+            engines.push(Entry::radio(
+                SYSTEM_LABEL,
+                CMD_ENGINE_SYSTEM,
+                voice_on && engine == crate::linux_speech::SYSTEM_ENGINE,
+            ));
+        }
         entries.push(Entry::submenu("Voice engine", engines));
-        if !voice_on {
+        if !voice_on || engine == crate::linux_speech::SYSTEM_ENGINE {
             return entries;
         }
         let current = crate::linux_speech::mic_choice();
@@ -368,7 +379,8 @@ fn voice_entries(voice_on: bool) -> Vec<Entry> {
 
 #[cfg(feature = "speech")]
 fn show_parakeet() -> bool {
-    crate::linux_speech::parakeet_available() || !crate::linux_speech::redux_available()
+    crate::linux_speech::parakeet_available()
+        || (!crate::linux_speech::redux_available() && crate::linux_speech::bundled_parakeet())
 }
 
 #[cfg(feature = "speech")]
@@ -423,6 +435,8 @@ fn run_command(cmd: usize) {
         #[cfg(feature = "speech")]
         CMD_ENGINE_REDUX => use_engine("parakeet-redux"),
         #[cfg(feature = "speech")]
+        CMD_ENGINE_SYSTEM => use_engine(crate::linux_speech::SYSTEM_ENGINE),
+        #[cfg(feature = "speech")]
         CMD_MIC_DEFAULT => crate::linux_speech::set_mic_choice(""),
         #[cfg(feature = "speech")]
         cmd if (CMD_MIC_BASE..CMD_MIC_BASE + 32).contains(&cmd) => {
@@ -459,7 +473,7 @@ fn menu_spec(at: POINT) -> Spec {
 
 fn voice_items(voice_on: bool) -> Vec<MenuItem<CompanionTray>> {
     #[cfg(feature = "speech")]
-    if crate::linux_speech::available() {
+    if crate::linux_speech::any_engine() {
         let engine = crate::linux_speech::engine();
         let mut engines = vec![check("Off", !voice_on, |_| set_voice(false))];
         if show_parakeet() {
@@ -476,8 +490,15 @@ fn voice_items(voice_on: bool) -> Vec<MenuItem<CompanionTray>> {
                 |_| use_engine("parakeet-redux"),
             ));
         }
+        if crate::linux_speech::system_available() {
+            engines.push(check(
+                SYSTEM_LABEL,
+                voice_on && engine == crate::linux_speech::SYSTEM_ENGINE,
+                |_| use_engine(crate::linux_speech::SYSTEM_ENGINE),
+            ));
+        }
         let mut items = vec![submenu("Voice engine", engines)];
-        if !voice_on {
+        if !voice_on || engine == crate::linux_speech::SYSTEM_ENGINE {
             return items;
         }
         let current = crate::linux_speech::mic_choice();
