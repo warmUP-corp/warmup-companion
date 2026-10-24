@@ -3,13 +3,22 @@ use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-const RT: u32 = 72;
-const STEPS: i32 = 36;
-const LIGHT_STEPS: i32 = 3;
+const RT: u32 = 128;
+const STEPS: i32 = 56;
+const LIGHT_STEPS: i32 = 4;
 const DENSITY_OCT: i32 = 4;
 const WHITE_LIFT: f32 = 0.35;
+const HUE_SPREAD: f32 = 0.6;
+const NIMBUS_BODY: f32 = 0.55;
+const FRAME: Duration = Duration::from_millis(33);
+#[cfg(any(test, not(feature = "gamepad")))]
+const DEFAULT_ACCENT: u32 = 0x00ffd1a6;
 
-struct Params {
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NimbusCb {
+    res_x: f32,
+    res_y: f32,
     input: f32,
     output: f32,
     speed: f32,
@@ -31,17 +40,19 @@ struct Params {
     exposure: f32,
     alpha_gain: f32,
     swirl: f32,
-    light: [f32; 3],
-    shadow: [f32; 3],
+    _pad1: f32,
+    light: [f32; 4],
+    shadow: [f32; 4],
 }
 
-struct Animator {
-    noise: f32,
-    light: f32,
-    swirl: f32,
+struct Clock {
+    noise_phase: f32,
+    light_phase: f32,
+    swirl_phase: f32,
     age: f32,
+    level: f32,
+    level_at: Option<Instant>,
     last: Option<Instant>,
-    frame: Vec<u8>,
 }
 
 static LATEST: OnceLock<Mutex<Option<(u32, Vec<u8>)>>> = OnceLock::new();
@@ -55,37 +66,44 @@ pub fn ensure_running() {
     let _ = std::thread::Builder::new()
         .name("warmup-nimbus".into())
         .spawn(|| {
-            let mut anim = Animator::new();
+            let mut clock = Clock::new();
+            let mut cpu = vec![0u8; (RT * RT * 4) as usize];
             let mut gpu = Gpu::open();
             while crate::linux_speech::visual_active() {
-                let phase = crate::linux_speech::phase();
-                let level = crate::linux_speech::level();
-                let accent = [0.65, 0.82, 1.0];
                 let started = Instant::now();
+                let cb = clock.advance(
+                    started,
+                    crate::linux_speech::phase(),
+                    crate::linux_speech::level(),
+                    accent(),
+                );
                 let mut failed = false;
                 let rendered = match gpu.as_mut() {
-                    Some(gpu) => match gpu.tick(phase, level, accent) {
-                        Ok(frame) => frame.map(|pixels| (GPU_RT, pixels)),
+                    Some(gpu) => match gpu.tick(&cb) {
+                        Ok(frame) => frame,
                         Err(error) => {
                             crate::install::log_line(&format!("nimbus gpu: {error}"));
                             failed = true;
                             None
                         }
                     },
-                    None => Some((RT, anim.render(phase, level, accent))),
+                    None => {
+                        render_cpu(&cb, &mut cpu);
+                        Some(cpu.clone())
+                    }
                 };
                 if failed {
                     gpu = None;
                 }
-                if let Some((px, frame)) = rendered {
+                if let Some(frame) = rendered {
                     if let Ok(mut slot) = frame_slot().lock() {
-                        *slot = Some((px, frame));
+                        *slot = Some((RT, frame));
                     }
                     FRAME_GEN.fetch_add(1, Ordering::Relaxed);
                     #[cfg(feature = "gamepad")]
                     crate::linux_vk::request_repaint();
                 }
-                let rest = Duration::from_millis(33).saturating_sub(started.elapsed());
+                let rest = FRAME.saturating_sub(started.elapsed());
                 if !rest.is_zero() {
                     std::thread::sleep(rest);
                 }
@@ -98,6 +116,17 @@ pub fn ensure_running() {
             crate::linux_vk::request_repaint();
             ANIMATING.store(false, std::sync::atomic::Ordering::SeqCst);
         });
+}
+
+fn accent() -> u32 {
+    #[cfg(feature = "gamepad")]
+    {
+        crate::linux_vk::voice_accent()
+    }
+    #[cfg(not(feature = "gamepad"))]
+    {
+        DEFAULT_ACCENT
+    }
 }
 
 pub fn latest_frame() -> Option<(u32, Vec<u8>)> {
@@ -116,33 +145,49 @@ fn frame_slot() -> &'static Mutex<Option<(u32, Vec<u8>)>> {
     LATEST.get_or_init(|| Mutex::new(None))
 }
 
-impl Animator {
+impl Clock {
     fn new() -> Self {
         Self {
-            noise: 0.0,
-            light: 0.0,
-            swirl: 0.0,
+            noise_phase: 0.0,
+            light_phase: 0.0,
+            swirl_phase: 0.0,
             age: 0.0,
+            level: 0.0,
+            level_at: None,
             last: None,
-            frame: vec![0; (RT * RT * 4) as usize],
         }
     }
 
-    fn render(&mut self, phase: u8, level: f32, accent: [f32; 3]) -> Vec<u8> {
-        let now = Instant::now();
+    fn think_pulse(&self) -> f32 {
+        0.5 + 0.5 * (self.age * 2.4).sin()
+    }
+
+    fn smoothed_level(&mut self, target: f32, now: Instant) -> f32 {
+        let dt_ms = self
+            .level_at
+            .map(|t| now.duration_since(t).as_secs_f32() * 1000.0)
+            .unwrap_or(0.0);
+        self.level_at = Some(now);
+        self.level = if dt_ms > 0.0 {
+            crate::vk_motion::smooth_level(self.level, target, dt_ms)
+        } else {
+            target.clamp(0.0, 1.0)
+        };
+        self.level
+    }
+
+    fn advance(&mut self, now: Instant, phase: u8, raw_level: f32, accent: u32) -> NimbusCb {
+        let level_in = self.smoothed_level(raw_level, now);
         let dt = self
             .last
             .map(|t| now.saturating_duration_since(t).as_secs_f32().min(0.05))
-            .unwrap_or(1.0 / 30.0);
+            .unwrap_or(1.0 / 60.0);
         self.last = Some(now);
         self.age += dt;
-        let level = level.clamp(0.0, 1.0);
+        let level = if phase == 1 { level_in.clamp(0.0, 1.0) } else { 0.0 };
         let pulse = match phase {
-            2 => {
-                let think = 0.5 + 0.5 * (self.age * 2.4).sin();
-                think.clamp(0.0, 1.0)
-            }
-            1 => 0.5 + 0.5 * level,
+            1 => 0.5 + 0.5 * level_in.clamp(0.0, 1.0),
+            2 => self.think_pulse().clamp(0.0, 1.0),
             _ => 0.5,
         };
         let noise_rate = match phase {
@@ -150,163 +195,111 @@ impl Animator {
             2 => 0.4 + 0.22 * pulse,
             _ => 0.22,
         };
-        self.noise += dt * noise_rate;
-        self.light += dt * 0.08;
+        self.noise_phase += dt * noise_rate;
+        self.light_phase += dt * 0.08;
         let swirl_rate = match phase {
             1 => 0.15 + 0.4 * level,
             2 => 0.30,
             _ => 0.15,
         };
-        self.swirl = (self.swirl + dt * swirl_rate).rem_euclid(std::f32::consts::TAU);
-        let glow = pulse;
-        let params = Params {
-            input: 0.55,
-            output: pulse,
-            speed: self.noise,
-            cam_dist: 4.4,
-            focal: 1.8,
-            radius: 2.0,
-            scale: 1.15,
-            churn: glow,
-            threshold: 0.40 - 0.16 * glow,
-            edge_soft: 0.5,
-            density: 1.35 + 2.6 * glow,
-            absorb: 0.72,
-            shadow_absorb: 1.5,
-            shadow_lift: 0.7,
-            aniso: 0.4,
-            light_spin: self.light,
-            power: 0.8 + 0.45 * glow,
-            ambient: 0.06 + 0.08 * glow,
-            exposure: 0.50 + 0.20 * glow,
-            alpha_gain: 1.0,
-            swirl: self.swirl,
-            light: accent,
-            shadow: [accent[0] * 0.7, accent[1] * 0.7, accent[2] * 0.7],
-        };
-        render_into(&params, &mut self.frame);
-        self.frame.clone()
+        self.swirl_phase = (self.swirl_phase + dt * swirl_rate).rem_euclid(std::f32::consts::TAU);
+        nimbus_cb(pulse, self.noise_phase, self.light_phase, self.swirl_phase, accent)
     }
 }
 
-fn render_into(p: &Params, out: &mut [u8]) {
-    let res = RT as f32;
-    for y in 0..RT {
-        for x in 0..RT {
-            let (r, g, b, a) = pixel(p, x as f32 + 0.5, y as f32 + 0.5, res);
-            let i = ((y * RT + x) * 4) as usize;
-            let pa = a.clamp(0.0, 1.0);
-            out[i] = (r.clamp(0.0, 1.0) * pa * 255.0) as u8;
-            out[i + 1] = (g.clamp(0.0, 1.0) * pa * 255.0) as u8;
-            out[i + 2] = (b.clamp(0.0, 1.0) * pa * 255.0) as u8;
-            out[i + 3] = (pa * 255.0) as u8;
+fn nimbus_cb(pulse: f32, noise_phase: f32, light_phase: f32, swirl_phase: f32, accent: u32) -> NimbusCb {
+    let glow = pulse;
+    NimbusCb {
+        res_x: RT as f32,
+        res_y: RT as f32,
+        input: NIMBUS_BODY,
+        output: pulse,
+        speed: noise_phase,
+        cam_dist: 4.4,
+        focal: 1.8,
+        radius: 2.0,
+        scale: 1.15,
+        churn: glow,
+        threshold: 0.40 - 0.16 * glow,
+        edge_soft: 0.5,
+        density: 1.35 + 2.6 * glow,
+        absorb: 0.72,
+        shadow_absorb: 1.5,
+        shadow_lift: 0.7,
+        aniso: 0.4,
+        light_spin: light_phase,
+        power: 0.8 + 0.45 * glow,
+        ambient: 0.06 + 0.08 * glow,
+        exposure: 0.50 + 0.20 * glow,
+        alpha_gain: 1.0,
+        swirl: swirl_phase,
+        _pad1: 0.0,
+        light: theme_light(accent),
+        shadow: theme_shade(accent),
+    }
+}
+
+fn theme_light(accent: u32) -> [f32; 4] {
+    let rgb = boost_chroma(accent, 1.6);
+    [rgb[0], rgb[1], rgb[2], 1.0]
+}
+
+fn theme_shade(accent: u32) -> [f32; 4] {
+    let rgb = boost_chroma(accent, 1.25);
+    [rgb[0] * 0.7, rgb[1] * 0.7, rgb[2] * 0.7, 1.0]
+}
+
+fn boost_chroma(c: u32, sat: f32) -> [f32; 3] {
+    let r = chan(c, 0);
+    let g = chan(c, 8);
+    let b = chan(c, 16);
+    let max = r.max(g).max(b).max(1.0e-4);
+    let pull = |x: f32| (max + (x - max) * sat).clamp(0.0, 1.0);
+    [pull(r), pull(g), pull(b)]
+}
+
+fn chan(c: u32, shift: u32) -> f32 {
+    ((c >> shift) & 0xff) as f32 / 255.0
+}
+
+fn render_cpu(cb: &NimbusCb, out: &mut [u8]) {
+    let row = (RT * 4) as usize;
+    let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 8);
+    let rows_per = (RT as usize).div_ceil(workers);
+    std::thread::scope(|scope| {
+        for (chunk, band) in out.chunks_mut(rows_per * row).enumerate() {
+            scope.spawn(move || {
+                for (dy, line) in band.chunks_mut(row).enumerate() {
+                    let y = (chunk * rows_per + dy) as f32;
+                    for x in 0..RT as usize {
+                        let c = ps_main(cb, [x as f32 + 0.5, y + 0.5]);
+                        for k in 0..4 {
+                            line[x * 4 + k] = unorm8(c[k]);
+                        }
+                    }
+                }
+            });
         }
-    }
+    });
 }
 
-fn pixel(p: &Params, fx: f32, fy: f32, res: f32) -> (f32, f32, f32, f32) {
-    let fy = res - fy;
-    let uvx = (2.0 * fx - res) / res;
-    let uvy = (2.0 * fy - res) / res;
-    let ro = [0.0, 0.0, -p.cam_dist];
-    let rd = normalize([uvx, uvy, p.focal]);
-    let light_dir = normalize([
-        p.light_spin.cos() * 0.7,
-        0.45,
-        p.light_spin.sin() * 0.35 + 0.65,
-    ]);
-    let phase = phase_hg(dot(rd, light_dir), p.aniso);
-    let ray_dist = length(cross(rd, ro));
-    if ray_dist > p.radius + 0.08 {
-        return (0.0, 0.0, 0.0, 0.0);
-    }
-    let t_start = (p.cam_dist - p.radius).max(0.0);
-    let dt = (2.0 * p.radius) / STEPS as f32;
-    let mut transmit = 1.0f32;
-    let mut scattered = [0.0f32; 3];
-    let nimbus_power = p.power;
-    let nimbus_density = p.density * (1.0 + 0.35 * p.input);
-    for i in 0..STEPS {
-        let t = t_start + (i as f32 + 0.5) * dt;
-        let pos = add(ro, mul(rd, t));
-        let dn = density(p, pos, nimbus_density);
-        if dn > 0.001 {
-            let mut shadow = 1.0f32;
-            let lstep = p.radius / LIGHT_STEPS as f32;
-            for s in 1..=LIGHT_STEPS {
-                let lp = add(pos, mul(light_dir, (s as f32 - 0.5) * lstep));
-                shadow *= (-density(p, lp, nimbus_density) * lstep * p.shadow_absorb).exp();
-            }
-            let hue = 0.6 * (dot(pos, [0.8, 0.5, -0.3]) * 1.4 + p.swirl).sin();
-            let light = hue_rotate(p.light, hue);
-            let lit = lerp3(mul(p.shadow, p.shadow_lift), light, shadow);
-            let gain = transmit * dn * dt * phase * nimbus_power;
-            scattered = add(scattered, mul(lit, gain));
-            transmit *= (-dn * dt * p.absorb).exp();
-            if transmit < 0.01 {
-                break;
-            }
-        }
-    }
-    let body = 1.0 - transmit;
-    scattered = add(scattered, mul(p.light, body * p.ambient));
-    let cover = smoothstep(p.radius + 0.05, p.radius - 0.14, ray_dist);
-    let mut rgb = add(mul(p.shadow, cover), scattered);
-    rgb = mul(rgb, p.exposure);
-    let peak = rgb[0].max(rgb[1]).max(rgb[2]).max(0.0001);
-    let tone = tanh_f(peak);
-    let hue = mul(rgb, tone / peak);
-    let lifted = [
-        tanh_f(rgb[0]),
-        tanh_f(rgb[1]),
-        tanh_f(rgb[2]),
-    ];
-    let col = lerp3(hue, lifted, WHITE_LIFT * saturate(p.churn));
-    let alpha = saturate(cover * p.alpha_gain);
-    (col[0], col[1], col[2], alpha)
+fn unorm8(x: f32) -> u8 {
+    (saturate(x) * 255.0 + 0.5).floor() as u8
 }
 
-fn density(p: &Params, pos: [f32; 3], nimbus_density: f32) -> f32 {
-    let shell = 1.0 - length(pos) / p.radius;
-    if shell <= 0.0 {
-        return 0.0;
-    }
-    let voice = saturate(p.churn);
-    let pulse = saturate(p.output);
-    let amp = 0.55 + 0.3 * (p.speed * 2.2).sin() + 0.5 * voice + 0.95 * pulse;
-    let axis = normalize([0.35 * p.swirl.sin(), 1.0, 0.35 * p.swirl.cos()]);
-    let mut swirled = rotate_axis(pos, axis, p.swirl);
-    swirled = add(
-        swirled,
-        mul(
-            [
-                (p.swirl + 1.7).sin(),
-                (p.swirl * 2.0 + 0.4).cos(),
-                (p.swirl + 2.9).sin(),
-            ],
-            0.05,
-        ),
-    );
-    let mut q = mul(swirled, p.scale * (1.0 + 0.16 * voice + 0.5 * pulse));
-    let mut f = 1.0f32;
-    for _ in 0..DENSITY_OCT {
-        q = add(
-            q,
-            mul(
-                [
-                    (q[1] * f + p.speed).cos(),
-                    (q[2] * f + p.speed).cos(),
-                    (q[0] * f + p.speed).cos(),
-                ],
-                amp / f,
-            ),
-        );
-        f *= 1.8;
-    }
-    let n = (q[0].sin() + q[1].sin() + q[2].sin()) / 3.0 * 0.5 + 0.5;
-    let thresh = lerp(p.threshold, p.threshold * 0.45, pulse);
-    let clump = smoothstep(thresh, 1.0, n);
-    clump * shell.powf(p.edge_soft) * nimbus_density
+fn tanh3(x: [f32; 3]) -> [f32; 3] {
+    let t = |v: f32| {
+        let v = v.clamp(-10.0, 10.0);
+        let e = (2.0 * v).exp();
+        (e - 1.0) / (e + 1.0)
+    };
+    [t(x[0]), t(x[1]), t(x[2])]
+}
+
+fn hue_rotate(c: [f32; 3], a: f32) -> [f32; 3] {
+    let k = [0.57735, 0.57735, 0.57735];
+    let ca = a.cos();
+    add(add(mul(c, ca), mul(cross(k, c), a.sin())), mul(k, dot(k, c) * (1.0 - ca)))
 }
 
 fn phase_hg(c: f32, g: f32) -> f32 {
@@ -314,32 +307,112 @@ fn phase_hg(c: f32, g: f32) -> f32 {
     (1.0 - g2) / (1.0 + g2 - 2.0 * g * c).max(0.0001).powf(1.5)
 }
 
-fn rotate_axis(pos: [f32; 3], axis: [f32; 3], angle: f32) -> [f32; 3] {
+fn rotate_axis(p: [f32; 3], axis: [f32; 3], angle: f32) -> [f32; 3] {
     let s = angle.sin();
     let c = angle.cos();
-    add(
-        add(mul(pos, c), mul(cross(axis, pos), s)),
-        mul(axis, dot(axis, pos) * (1.0 - c)),
-    )
+    add(add(mul(p, c), mul(cross(axis, p), s)), mul(axis, dot(axis, p) * (1.0 - c)))
 }
 
-fn hue_rotate(color: [f32; 3], angle: f32) -> [f32; 3] {
-    let k = [0.57735, 0.57735, 0.57735];
-    let ca = angle.cos();
-    add(
-        add(mul(color, ca), mul(cross(k, color), angle.sin())),
-        mul(k, dot(k, color) * (1.0 - ca)),
-    )
+fn density(u: &NimbusCb, p: [f32; 3], nimbus_density: f32) -> f32 {
+    let shell = 1.0 - length(p) / u.radius;
+    if shell <= 0.0 {
+        return 0.0;
+    }
+    let voice = saturate(u.churn);
+    let pulse = saturate(u.output);
+    let self_fold = 0.55 + 0.3 * (u.speed * 2.2).sin();
+    let amp = self_fold + 0.5 * voice + 0.95 * pulse;
+    let axis = normalize([0.35 * u.swirl.sin(), 1.0, 0.35 * u.swirl.cos()]);
+    let mut swirled = rotate_axis(p, axis, u.swirl);
+    swirled = add(
+        swirled,
+        mul(
+            [(u.swirl + 1.7).sin(), (u.swirl * 2.0 + 0.4).cos(), (u.swirl + 2.9).sin()],
+            0.05,
+        ),
+    );
+    let mut q = mul(swirled, u.scale * (1.0 + 0.16 * voice + 0.5 * pulse));
+    let mut f = 1.0f32;
+    for _ in 0..DENSITY_OCT {
+        q = add(
+            q,
+            mul(
+                [(q[1] * f + u.speed).cos(), (q[2] * f + u.speed).cos(), (q[0] * f + u.speed).cos()],
+                amp / f,
+            ),
+        );
+        f *= 1.8;
+    }
+    let n = (q[0].sin() + q[1].sin() + q[2].sin()) / 3.0 * 0.5 + 0.5;
+    let thresh = lerp(u.threshold, u.threshold * 0.45, pulse);
+    let clump = smoothstep(thresh, 1.0, n);
+    clump * shell.powf(u.edge_soft) * nimbus_density
 }
 
-fn tanh_f(x: f32) -> f32 {
-    let x = x.clamp(-10.0, 10.0);
-    let e = (2.0 * x).exp();
-    (e - 1.0) / (e + 1.0)
+fn nimbus_render(u: &NimbusCb, frag: [f32; 2], nimbus_power: f32, nimbus_density: f32) -> [f32; 4] {
+    let res = [u.res_x, u.res_y];
+    let fy = res[1] - frag[1];
+    let m = res[0].min(res[1]);
+    let uv = [(2.0 * frag[0] - res[0]) / m, (2.0 * fy - res[1]) / m];
+    let ro = [0.0, 0.0, -u.cam_dist];
+    let rd = normalize([uv[0], uv[1], u.focal]);
+    let l = normalize([u.light_spin.cos() * 0.7, 0.45, u.light_spin.sin() * 0.35 + 0.65]);
+    let phase = phase_hg(dot(rd, l), u.aniso);
+    let t_start = (u.cam_dist - u.radius).max(0.0);
+    let dt = (2.0 * u.radius) / STEPS as f32;
+    let mut transmit = 1.0f32;
+    let mut scattered = [0.0f32; 3];
+    let ray_dist = length(cross(rd, ro));
+    if ray_dist < u.radius {
+        for i in 0..STEPS {
+            let t = t_start + (i as f32 + 0.5) * dt;
+            let p = add(ro, mul(rd, t));
+            let dn = density(u, p, nimbus_density);
+            if dn > 0.001 {
+                let mut shadow = 1.0f32;
+                let lstep = u.radius / LIGHT_STEPS as f32;
+                for s in 1..=LIGHT_STEPS {
+                    let lp = add(p, mul(l, (s as f32 - 0.5) * lstep));
+                    shadow *= (-density(u, lp, nimbus_density) * lstep * u.shadow_absorb).exp();
+                }
+                let hue = HUE_SPREAD * (dot(p, [0.8, 0.5, -0.3]) * 1.4 + u.swirl).sin();
+                let light = saturate3(hue_rotate([u.light[0], u.light[1], u.light[2]], hue));
+                let shade = [u.shadow[0], u.shadow[1], u.shadow[2]];
+                let lit = lerp3(mul(shade, u.shadow_lift), light, shadow);
+                scattered = add(scattered, mul(lit, transmit * dn * dt * phase * nimbus_power));
+                transmit *= (-dn * dt * u.absorb).exp();
+                if transmit < 0.01 {
+                    break;
+                }
+            }
+        }
+    }
+    let body = 1.0 - transmit;
+    scattered = add(scattered, mul([u.light[0], u.light[1], u.light[2]], body * u.ambient));
+    let rad = u.radius;
+    let cover = smoothstep(rad + 0.05, rad - 0.14, ray_dist);
+    let rgb = add(mul([u.shadow[0], u.shadow[1], u.shadow[2]], cover), scattered);
+    [rgb[0], rgb[1], rgb[2], cover]
+}
+
+fn ps_main(u: &NimbusCb, pos: [f32; 2]) -> [f32; 4] {
+    let nimbus_power = u.power;
+    let nimbus_density = u.density * (1.0 + 0.35 * u.input);
+    let acc = nimbus_render(u, pos, nimbus_power, nimbus_density);
+    let raw = mul([acc[0], acc[1], acc[2]], u.exposure);
+    let peak = raw[0].max(raw[1]).max(raw[2].max(0.0001));
+    let hue = mul(raw, tanh3([peak, peak, peak])[0] / peak);
+    let col = lerp3(hue, tanh3(raw), WHITE_LIFT * saturate(u.churn));
+    let a = saturate(acc[3] * u.alpha_gain);
+    [col[0], col[1], col[2], a]
 }
 
 fn saturate(x: f32) -> f32 {
     x.clamp(0.0, 1.0)
+}
+
+fn saturate3(c: [f32; 3]) -> [f32; 3] {
+    [saturate(c[0]), saturate(c[1]), saturate(c[2])]
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -364,11 +437,7 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
 }
 
 fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
 
 fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -380,11 +449,8 @@ fn mul(a: [f32; 3], s: f32) -> [f32; 3] {
 }
 
 fn normalize(p: [f32; 3]) -> [f32; 3] {
-    let len = length(p).max(1.0e-6);
-    mul(p, 1.0 / len)
+    mul(p, 1.0 / length(p))
 }
-
-const GPU_RT: u32 = 128;
 
 struct ReadSlot {
     buffer: wgpu::Buffer,
@@ -405,11 +471,6 @@ struct Gpu {
     slots: [ReadSlot; 2],
     inflight: Option<Inflight>,
     write: usize,
-    noise: f32,
-    light: f32,
-    swirl: f32,
-    age: f32,
-    last: Option<Instant>,
 }
 
 impl Gpu {
@@ -455,7 +516,7 @@ impl Gpu {
         });
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("nimbus-params"),
-            size: std::mem::size_of::<GpuParams>() as u64,
+            size: std::mem::size_of::<NimbusCb>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -513,8 +574,8 @@ impl Gpu {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("nimbus"),
             size: wgpu::Extent3d {
-                width: GPU_RT,
-                height: GPU_RT,
+                width: RT,
+                height: RT,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -525,11 +586,11 @@ impl Gpu {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let row = align256(GPU_RT * 4);
+        let row = align256(RT * 4);
         let read_buffer = |device: &wgpu::Device| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("nimbus-read"),
-                size: row as u64 * GPU_RT as u64,
+                size: row as u64 * RT as u64,
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
             })
@@ -546,27 +607,23 @@ impl Gpu {
             slots,
             inflight: None,
             write: 0,
-            noise: 0.0,
-            light: 0.0,
-            swirl: 0.0,
-            age: 0.0,
-            last: None,
         })
     }
 
-    fn tick(&mut self, phase: u8, level: f32, accent: [f32; 3]) -> Result<Option<Vec<u8>>, String> {
+    fn tick(&mut self, cb: &NimbusCb) -> Result<Option<Vec<u8>>, String> {
         self.device.poll(wgpu::Maintain::Poll);
         let ready = self.collect()?;
         if self.inflight.is_none() {
-            self.submit(phase, level, accent)?;
+            self.submit(cb)?;
         }
         Ok(ready)
     }
 
-    fn render(&mut self, phase: u8, level: f32, accent: [f32; 3]) -> Result<Vec<u8>, String> {
+    #[cfg(test)]
+    fn render(&mut self, cb: &NimbusCb) -> Result<Vec<u8>, String> {
         let started = Instant::now();
         loop {
-            if let Some(frame) = self.tick(phase, level, accent)? {
+            if let Some(frame) = self.tick(cb)? {
                 return Ok(frame);
             }
             if started.elapsed() > Duration::from_millis(800) {
@@ -597,35 +654,8 @@ impl Gpu {
         }
     }
 
-    fn submit(&mut self, phase: u8, level: f32, accent: [f32; 3]) -> Result<(), String> {
-        let now = Instant::now();
-        let dt = self
-            .last
-            .map(|t| now.saturating_duration_since(t).as_secs_f32().min(0.05))
-            .unwrap_or(1.0 / 30.0);
-        self.last = Some(now);
-        self.age += dt;
-        let level = level.clamp(0.0, 1.0);
-        let pulse = match phase {
-            2 => (0.5 + 0.5 * (self.age * 2.4).sin()).clamp(0.0, 1.0),
-            1 => 0.5 + 0.5 * level,
-            _ => 0.5,
-        };
-        let noise_rate = match phase {
-            1 => 0.22 + 0.2 * level,
-            2 => 0.4 + 0.22 * pulse,
-            _ => 0.22,
-        };
-        self.noise += dt * noise_rate;
-        self.light += dt * 0.08;
-        let swirl_rate = match phase {
-            1 => 0.15 + 0.4 * level,
-            2 => 0.30,
-            _ => 0.15,
-        };
-        self.swirl = (self.swirl + dt * swirl_rate).rem_euclid(std::f32::consts::TAU);
-        let params = GpuParams::from_mood(pulse, self.noise, self.light, self.swirl, accent);
-        self.queue.write_buffer(&self.params, 0, bytemuck_bytes(&params));
+    fn submit(&mut self, cb: &NimbusCb) -> Result<(), String> {
+        self.queue.write_buffer(&self.params, 0, cb_bytes(cb));
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &self.pipeline.get_bind_group_layout(0),
@@ -656,7 +686,7 @@ impl Gpu {
         }
         let index = self.write;
         self.write ^= 1;
-        let row = align256(GPU_RT * 4);
+        let row = align256(RT * 4);
         encoder.copy_texture_to_buffer(
             self.texture.as_image_copy(),
             wgpu::ImageCopyBuffer {
@@ -664,12 +694,12 @@ impl Gpu {
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
                     bytes_per_row: Some(row),
-                    rows_per_image: Some(GPU_RT),
+                    rows_per_image: Some(RT),
                 },
             },
             wgpu::Extent3d {
-                width: GPU_RT,
-                height: GPU_RT,
+                width: RT,
+                height: RT,
                 depth_or_array_layers: 1,
             },
         );
@@ -684,13 +714,13 @@ impl Gpu {
 }
 
 fn copy_slot(buffer: &wgpu::Buffer) -> Vec<u8> {
-    let row = align256(GPU_RT * 4);
+    let row = align256(RT * 4);
     let mapped = buffer.slice(..).get_mapped_range();
-    let mut packed = vec![0u8; (GPU_RT * GPU_RT * 4) as usize];
-    for y in 0..GPU_RT {
+    let mut packed = vec![0u8; (RT * RT * 4) as usize];
+    for y in 0..RT {
         let src = (y * row) as usize;
-        let dst = (y * GPU_RT * 4) as usize;
-        packed[dst..dst + (GPU_RT * 4) as usize].copy_from_slice(&mapped[src..src + (GPU_RT * 4) as usize]);
+        let dst = (y * RT * 4) as usize;
+        packed[dst..dst + (RT * 4) as usize].copy_from_slice(&mapped[src..src + (RT * 4) as usize]);
     }
     packed
 }
@@ -699,103 +729,168 @@ fn align256(value: u32) -> u32 {
     (value + 255) & !255
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct GpuParams {
-    a: [f32; 4],
-    b: [f32; 4],
-    c: [f32; 4],
-    d: [f32; 4],
-    e: [f32; 4],
-    f: [f32; 4],
-    light: [f32; 4],
-    shadow: [f32; 4],
-}
-
-impl GpuParams {
-    fn from_mood(pulse: f32, speed: f32, light_spin: f32, swirl: f32, accent: [f32; 3]) -> Self {
-        let glow = pulse;
-        Self {
-            a: [GPU_RT as f32, GPU_RT as f32, 0.55, pulse],
-            b: [speed, 4.4, 1.8, 2.0],
-            c: [1.15, glow, 0.40 - 0.16 * glow, 0.5],
-            d: [1.35 + 2.6 * glow, 0.72, 1.5, 0.7],
-            e: [0.4, light_spin, 0.8 + 0.45 * glow, 0.06 + 0.08 * glow],
-            f: [0.50 + 0.20 * glow, 1.0, swirl, 0.0],
-            light: [accent[0], accent[1], accent[2], 1.0],
-            shadow: [accent[0] * 0.7, accent[1] * 0.7, accent[2] * 0.7, 1.0],
-        }
-    }
-}
-
-fn bytemuck_bytes(params: &GpuParams) -> &[u8] {
+fn cb_bytes(cb: &NimbusCb) -> &[u8] {
     unsafe {
         std::slice::from_raw_parts(
-            (params as *const GpuParams) as *const u8,
-            std::mem::size_of::<GpuParams>(),
+            (cb as *const NimbusCb) as *const u8,
+            std::mem::size_of::<NimbusCb>(),
         )
     }
 }
 
 const SHADER: &str = r#"
-struct Params {
-    a: vec4<f32>,
-    b: vec4<f32>,
-    c: vec4<f32>,
-    d: vec4<f32>,
-    e: vec4<f32>,
-    f: vec4<f32>,
-    light: vec4<f32>,
-    shadow: vec4<f32>,
+struct Nimbus {
+    uResX: f32,
+    uResY: f32,
+    uInput: f32,
+    uOutput: f32,
+    uP_speed: f32,
+    uP_camDist: f32,
+    uP_focal: f32,
+    uP_radius: f32,
+    uP_scale: f32,
+    uP_churn: f32,
+    uP_threshold: f32,
+    uP_edgeSoft: f32,
+    uP_density: f32,
+    uP_absorb: f32,
+    uP_shadowAbsorb: f32,
+    uP_shadowLift: f32,
+    uP_aniso: f32,
+    uP_lightSpin: f32,
+    uP_power: f32,
+    uP_ambient: f32,
+    uP_exposure: f32,
+    uP_alphaGain: f32,
+    uP_swirl: f32,
+    _pad1: f32,
+    uC_light: vec4<f32>,
+    uC_shadow: vec4<f32>,
 }
-@group(0) @binding(0) var<uniform> u: Params;
+@group(0) @binding(0) var<uniform> u: Nimbus;
 
-fn saturate(x: f32) -> f32 { return clamp(x, 0.0, 1.0); }
-fn lerp(a: f32, b: f32, t: f32) -> f32 { return a + (b - a) * t; }
-fn lerp3(a: vec3<f32>, b: vec3<f32>, t: f32) -> vec3<f32> { return mix(a, b, t); }
-fn smoothstep3(e0: f32, e1: f32, x: f32) -> f32 {
-    let t = saturate((x - e0) / (e1 - e0));
+const STEPS: i32 = 56;
+const LIGHT_STEPS: i32 = 4;
+const DENSITY_OCT: i32 = 4;
+const WHITE_LIFT: f32 = 0.35;
+const HUE_SPREAD: f32 = 0.6;
+
+fn saturate1(x: f32) -> f32 {
+    return clamp(x, 0.0, 1.0);
+}
+
+fn saturate3(x: vec3<f32>) -> vec3<f32> {
+    return clamp(x, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+fn smoothstep1(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = saturate1((x - e0) / (e1 - e0));
     return t * t * (3.0 - 2.0 * t);
 }
-fn tanh1(x: f32) -> f32 {
-    let c = clamp(x, -10.0, 10.0);
-    let e = exp(2.0 * c);
+
+fn tanh3(xin: vec3<f32>) -> vec3<f32> {
+    let x = clamp(xin, vec3<f32>(-10.0), vec3<f32>(10.0));
+    let e = exp(2.0 * x);
     return (e - 1.0) / (e + 1.0);
 }
+
+fn hueRotate(c: vec3<f32>, a: f32) -> vec3<f32> {
+    let k = vec3<f32>(0.57735, 0.57735, 0.57735);
+    let ca = cos(a);
+    return c * ca + cross(k, c) * sin(a) + k * dot(k, c) * (1.0 - ca);
+}
+
 fn phaseHG(c: f32, g: f32) -> f32 {
     let g2 = g * g;
     return (1.0 - g2) / pow(max(1.0 + g2 - 2.0 * g * c, 0.0001), 1.5);
 }
+
 fn rotateAxis(p: vec3<f32>, axis: vec3<f32>, angle: f32) -> vec3<f32> {
     let s = sin(angle);
     let c = cos(angle);
     return p * c + cross(axis, p) * s + axis * dot(axis, p) * (1.0 - c);
 }
-fn hueRotate(col: vec3<f32>, ang: f32) -> vec3<f32> {
-    let k = vec3<f32>(0.57735, 0.57735, 0.57735);
-    let ca = cos(ang);
-    return col * ca + cross(k, col) * sin(ang) + k * dot(k, col) * (1.0 - ca);
-}
+
 fn density(p: vec3<f32>, nimbusDensity: f32) -> f32 {
-    let radius = u.b.w;
-    let shell = 1.0 - length(p) / radius;
-    if (shell <= 0.0) { return 0.0; }
-    let voice = saturate(u.c.y);
-    let pulse = saturate(u.a.w);
-    let amp = 0.55 + 0.3 * sin(u.b.x * 2.2) + 0.5 * voice + 0.95 * pulse;
-    let axis = normalize(vec3<f32>(0.35 * sin(u.f.z), 1.0, 0.35 * cos(u.f.z)));
-    var swirled = rotateAxis(p, axis, u.f.z);
-    swirled = swirled + vec3<f32>(sin(u.f.z + 1.7), cos(u.f.z * 2.0 + 0.4), sin(u.f.z + 2.9)) * 0.05;
-    var q = swirled * (u.c.x * (1.0 + 0.16 * voice + 0.5 * pulse));
-    var freq = 1.0;
-    for (var k = 0; k < 4; k = k + 1) {
-        q = q + cos(q.yzx * freq + vec3<f32>(u.b.x)) * amp / freq;
-        freq = freq * 1.8;
+    let shell = 1.0 - length(p) / u.uP_radius;
+    if (shell <= 0.0) {
+        return 0.0;
     }
+
+    let voice = saturate1(u.uP_churn);
+    let pulse = saturate1(u.uOutput);
+    let selfFold = 0.55 + 0.3 * sin(u.uP_speed * 2.2);
+    let amp = selfFold + 0.5 * voice + 0.95 * pulse;
+    let axis = normalize(vec3<f32>(0.35 * sin(u.uP_swirl), 1.0, 0.35 * cos(u.uP_swirl)));
+    var swirled = rotateAxis(p, axis, u.uP_swirl);
+    swirled += vec3<f32>(
+        sin(u.uP_swirl + 1.7),
+        cos(u.uP_swirl * 2.0 + 0.4),
+        sin(u.uP_swirl + 2.9)
+    ) * 0.05;
+    var q = swirled * (u.uP_scale * (1.0 + 0.16 * voice + 0.5 * pulse));
+    var f = 1.0;
+    for (var k = 0; k < DENSITY_OCT; k++) {
+        q += cos(q.yzx * f + u.uP_speed) * amp / f;
+        f *= 1.8;
+    }
+
     let n = (sin(q.x) + sin(q.y) + sin(q.z)) / 3.0 * 0.5 + 0.5;
-    let thresh = lerp(u.c.z, u.c.z * 0.45, pulse);
-    let clump = smoothstep3(thresh, 1.0, n);
-    return clump * pow(shell, u.c.w) * nimbusDensity;
+    let thresh = mix(u.uP_threshold, u.uP_threshold * 0.45, pulse);
+    let clump = smoothstep1(thresh, 1.0, n);
+    return clump * pow(shell, u.uP_edgeSoft) * nimbusDensity;
+}
+
+fn nimbusRender(fragIn: vec2<f32>, nimbusPower: f32, nimbusDensity: f32) -> vec4<f32> {
+    let uRes = vec2<f32>(u.uResX, u.uResY);
+    let fragCoord = vec2<f32>(fragIn.x, uRes.y - fragIn.y);
+    let uv = (2.0 * fragCoord - uRes) / min(uRes.x, uRes.y);
+    let ro = vec3<f32>(0.0, 0.0, -u.uP_camDist);
+    let rd = normalize(vec3<f32>(uv, u.uP_focal));
+
+    let L = normalize(vec3<f32>(
+        cos(u.uP_lightSpin) * 0.7,
+        0.45,
+        sin(u.uP_lightSpin) * 0.35 + 0.65
+    ));
+    let phase = phaseHG(dot(rd, L), u.uP_aniso);
+
+    let tStart = max(u.uP_camDist - u.uP_radius, 0.0);
+    let dt = (2.0 * u.uP_radius) / f32(STEPS);
+
+    var T = 1.0;
+    var scattered = vec3<f32>(0.0, 0.0, 0.0);
+
+    for (var i = 0; i < STEPS; i++) {
+        let t = tStart + (f32(i) + 0.5) * dt;
+        let p = ro + rd * t;
+        let dn = density(p, nimbusDensity);
+        if (dn > 0.001) {
+            var shadow = 1.0;
+            let lstep = u.uP_radius / f32(LIGHT_STEPS);
+            for (var s = 1; s <= LIGHT_STEPS; s++) {
+                let lp = p + L * (f32(s) - 0.5) * lstep;
+                shadow *= exp(-density(lp, nimbusDensity) * lstep * u.uP_shadowAbsorb);
+            }
+            let hue = HUE_SPREAD * sin(dot(p, vec3<f32>(0.8, 0.5, -0.3)) * 1.4 + u.uP_swirl);
+            let light = saturate3(hueRotate(u.uC_light.rgb, hue));
+            let lit = mix(u.uC_shadow.rgb * u.uP_shadowLift, light, shadow);
+            scattered += T * dn * dt * lit * phase * nimbusPower;
+            T *= exp(-dn * dt * u.uP_absorb);
+            if (T < 0.01) {
+                break;
+            }
+        }
+    }
+
+    let body = 1.0 - T;
+    scattered += u.uC_light.rgb * body * u.uP_ambient;
+
+    let rayDist = length(cross(rd, ro));
+    let rad = u.uP_radius;
+    let cover = smoothstep1(rad + 0.05, rad - 0.14, rayDist);
+    let rgb = u.uC_shadow.rgb * cover + scattered;
+    return vec4<f32>(rgb, cover);
 }
 
 @vertex
@@ -806,52 +901,16 @@ fn vs(@builtin(vertex_index) id: u32) -> @builtin(position) vec4<f32> {
 
 @fragment
 fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let res = vec2<f32>(u.a.x, u.a.y);
-    let frag = vec2<f32>(pos.x, res.y - pos.y);
-    let uv = (2.0 * frag - res) / min(res.x, res.y);
-    let ro = vec3<f32>(0.0, 0.0, -u.b.y);
-    let rd = normalize(vec3<f32>(uv, u.b.z));
-    let L = normalize(vec3<f32>(cos(u.e.y) * 0.7, 0.45, sin(u.e.y) * 0.35 + 0.65));
-    let phase = phaseHG(dot(rd, L), u.e.x);
-    let rayDist = length(cross(rd, ro));
-    let rad = u.b.w;
-    if (rayDist > rad + 0.08) { return vec4<f32>(0.0); }
-    let tStart = max(u.b.y - rad, 0.0);
-    let dt = (2.0 * rad) / 48.0;
-    var T = 1.0;
-    var scattered = vec3<f32>(0.0);
-    let nimbusPower = u.e.z;
-    let nimbusDensity = u.d.x * (1.0 + 0.35 * u.a.z);
-    for (var i = 0; i < 48; i = i + 1) {
-        let t = tStart + (f32(i) + 0.5) * dt;
-        let p = ro + rd * t;
-        let dn = density(p, nimbusDensity);
-        if (dn > 0.001) {
-            var shadow = 1.0;
-            let lstep = rad / 4.0;
-            for (var s = 1; s <= 4; s = s + 1) {
-                let lp = p + L * (f32(s) - 0.5) * lstep;
-                shadow = shadow * exp(-density(lp, nimbusDensity) * lstep * u.d.z);
-            }
-            let hue = 0.6 * sin(dot(p, vec3<f32>(0.8, 0.5, -0.3)) * 1.4 + u.f.z);
-            let light = saturate3(hueRotate(u.light.rgb, hue));
-            let lit = lerp3(u.shadow.rgb * u.d.w, light, shadow);
-            scattered = scattered + T * dn * dt * lit * phase * nimbusPower;
-            T = T * exp(-dn * dt * u.d.y);
-            if (T < 0.01) { break; }
-        }
-    }
-    let body = 1.0 - T;
-    scattered = scattered + u.light.rgb * body * u.e.w;
-    let cover = smoothstep3(rad + 0.05, rad - 0.14, rayDist);
-    var rgb = u.shadow.rgb * cover + scattered;
-    rgb = rgb * u.f.x;
-    let peak = max(max(rgb.r, rgb.g), max(rgb.b, 0.0001));
-    let huev = rgb / peak * tanh1(peak);
-    let col = lerp3(huev, vec3<f32>(tanh1(rgb.r), tanh1(rgb.g), tanh1(rgb.b)), 0.35 * saturate(u.c.y));
-    return vec4<f32>(col, saturate(cover * u.f.y));
+    let nimbusPower = u.uP_power;
+    let nimbusDensity = u.uP_density * (1.0 + 0.35 * u.uInput);
+    let acc = nimbusRender(pos.xy, nimbusPower, nimbusDensity);
+    let raw = acc.rgb * u.uP_exposure;
+    let peak = max(max(raw.r, raw.g), max(raw.b, 0.0001));
+    let hue = raw / peak * tanh3(vec3<f32>(peak, peak, peak)).x;
+    let col = mix(hue, tanh3(raw), WHITE_LIFT * saturate1(u.uP_churn));
+    let a = saturate1(acc.a * u.uP_alphaGain);
+    return vec4<f32>(col, a);
 }
-fn saturate3(c: vec3<f32>) -> vec3<f32> { return clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)); }
 "#;
 
 #[cfg(test)]
@@ -864,14 +923,14 @@ mod tests {
             return;
         };
         let started = Instant::now();
-        let frame = gpu.render(1, 0.7, [0.65, 0.82, 1.0]).expect("frame");
+        let frame = gpu.render(&nimbus_cb(0.85, 0.3, 0.1, 0.4, DEFAULT_ACCENT)).expect("frame");
         let elapsed = started.elapsed();
         let lit = frame.chunks_exact(4).filter(|px| px[3] > 8).count();
         assert!(lit > 40, "lit pixels {lit}");
         assert!(elapsed.as_millis() < 500, "gpu frame took {elapsed:?}");
         let started = Instant::now();
         for _ in 0..12 {
-            gpu.tick(1, 0.4, [0.65, 0.82, 1.0]).expect("tick");
+            gpu.tick(&nimbus_cb(0.7, 0.3, 0.1, 0.4, DEFAULT_ACCENT)).expect("tick");
         }
         let burst = started.elapsed();
         assert!(burst.as_millis() < 80, "nimbus ticks stalled the GPU for {burst:?}");
@@ -879,9 +938,10 @@ mod tests {
 
     #[test]
     fn one_frame_has_a_cloud() {
-        let mut anim = Animator::new();
+        let mut frame = vec![0u8; (RT * RT * 4) as usize];
+        let cb = Clock::new().advance(Instant::now(), 1, 0.6, DEFAULT_ACCENT);
         let started = Instant::now();
-        let frame = anim.render(1, 0.6, [0.65, 0.82, 1.0]);
+        render_cpu(&cb, &mut frame);
         let elapsed = started.elapsed();
         let lit = frame.chunks_exact(4).filter(|px| px[3] > 8).count();
         assert!(lit > 40, "lit pixels {lit}");
