@@ -154,6 +154,13 @@ pub(crate) fn release() {
 }
 
 fn run() {
+    let signals = hyprland() && service_main();
+    if signals {
+        install_signal_handlers();
+        let _ = std::thread::Builder::new()
+            .name("warmup-hotkey-signals".into())
+            .spawn(poll_signals);
+    }
     let mut synced = false;
     let mut first = true;
     let mut backoff = RECONNECT_MIN;
@@ -175,6 +182,9 @@ fn run() {
                         if let Some(name) = names.get(hotkey.id()) {
                             spawn_hypr_sync(hotkey, Target::Global(name.clone()));
                             synced = true;
+                        } else if signals {
+                            spawn_hypr_sync(hotkey, Target::Signal(hotkey.signal()));
+                            synced = true;
                         }
                     }
                 }
@@ -194,12 +204,10 @@ fn run() {
             }
             Err(e) if first => {
                 log(&format!("global shortcuts portal unavailable: {e}"));
-                if hyprland() && service_main() {
-                    install_signal_handlers();
+                if signals {
                     for hotkey in Hotkey::ALL {
                         spawn_hypr_sync(hotkey, Target::Signal(hotkey.signal()));
                     }
-                    poll_signals();
                 }
                 return;
             }
