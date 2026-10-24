@@ -187,6 +187,9 @@ const CRASH_SIGNALS: [libc::c_int; 5] = [
 ];
 
 #[cfg(target_os = "linux")]
+static CRASH_TID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+#[cfg(target_os = "linux")]
 static REPORT_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
 #[cfg(target_os = "linux")]
@@ -375,6 +378,21 @@ extern "C" fn signal_handler(
     info: *mut libc::siginfo_t,
     _context: *mut libc::c_void,
 ) {
+    let tid = unsafe { libc::gettid() };
+    let sent = info.is_null() || unsafe { (*info).si_code } <= 0;
+    if let Err(owner) = CRASH_TID.compare_exchange(0, tid, Ordering::SeqCst, Ordering::SeqCst) {
+        if owner != tid {
+            loop {
+                unsafe { libc::pause() };
+            }
+        }
+        unsafe { libc::signal(signal, libc::SIG_DFL) };
+        if sent {
+            unsafe { libc::raise(signal) };
+        }
+        return;
+    }
+    unsafe { libc::alarm(5) };
     if !HANDLING.swap(true, Ordering::SeqCst) {
         write_summary(libc::STDERR_FILENO, signal, info);
         let fd = REPORT_FD.swap(-1, Ordering::SeqCst);
@@ -399,14 +417,17 @@ extern "C" fn signal_handler(
             }
         }
     }
-    let sent = info.is_null() || unsafe { (*info).si_code } <= 0;
+    restore_previous_action(signal);
     if sent {
         unsafe {
             libc::signal(signal, libc::SIG_DFL);
             libc::raise(signal);
         }
-        return;
     }
+}
+
+#[cfg(target_os = "linux")]
+fn restore_previous_action(signal: libc::c_int) {
     let index = CRASH_SIGNALS.iter().position(|candidate| *candidate == signal);
     match (index, PREVIOUS_ACTIONS.get()) {
         (Some(index), Some(previous)) => unsafe {

@@ -288,6 +288,9 @@ fn snapshot_processes_filtered(
                 continue;
             }
         }
+        if !proc_is_live(pid) {
+            continue;
+        }
         if let Some((name, image_path)) = proc_identity(pid) {
             out.push((pid, name, image_path));
         }
@@ -317,6 +320,20 @@ fn proc_start_ticks(pid: u32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let after_comm = &stat[stat.rfind(')')? + 1..];
     after_comm.split_whitespace().nth(19)?.parse().ok()
+}
+
+#[cfg(target_os = "linux")]
+fn proc_is_live(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    let Some(close) = stat.rfind(')') else {
+        return false;
+    };
+    !matches!(
+        stat[close + 1..].split_whitespace().next(),
+        None | Some("Z") | Some("X") | Some("x")
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -440,11 +457,14 @@ fn resolve_wine_path(pid: u32, windows_path: &str) -> Option<String> {
 
 #[cfg(target_os = "linux")]
 pub(crate) fn terminate_blocked_process(pid: u32) -> bool {
+    if !proc_is_live(pid) {
+        return false;
+    }
     let Some(started) = proc_start_ticks(pid) else {
         return false;
     };
     if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } != 0 {
-        return false;
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
     }
     let _ = std::thread::Builder::new()
         .name("warmup-terminate-pid".into())

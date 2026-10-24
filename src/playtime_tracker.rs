@@ -243,11 +243,12 @@ fn exe_stem_lower(exe_name: &str) -> String {
 
 #[cfg(not(windows))]
 fn exe_stem_lower(exe_name: &str) -> String {
-    exe_name
-        .split('.')
-        .next()
-        .unwrap_or(exe_name)
-        .to_ascii_lowercase()
+    let stem = exe_name.split('.').next().unwrap_or(exe_name);
+    if stem.is_empty() {
+        exe_name.to_ascii_lowercase()
+    } else {
+        stem.to_ascii_lowercase()
+    }
 }
 
 #[cfg(test)]
