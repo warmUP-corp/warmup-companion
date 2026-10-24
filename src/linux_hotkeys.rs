@@ -112,6 +112,11 @@ pub(crate) fn spawn() {
     if STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
+    if !service_main() && service_active() {
+        log("the service holds the global shortcuts");
+        STARTED.store(false, Ordering::SeqCst);
+        return;
+    }
     let _ = std::thread::Builder::new()
         .name("warmup-hotkeys".into())
         .spawn(run);
@@ -310,6 +315,13 @@ fn service_main() -> bool {
         .ok()
         .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok())
         == Some(std::process::id())
+}
+
+fn service_active() -> bool {
+    Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", UNIT_NAME])
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 fn hyprland() -> bool {

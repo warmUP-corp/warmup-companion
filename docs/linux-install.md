@@ -105,7 +105,7 @@ The running service adds a StatusNotifierItem. Left-click it for the companion m
 
 Ctrl+Alt+C opens and closes Control Center and Ctrl+Alt+V starts or stops voice typing, like on Windows. The companion registers both through the desktop's global shortcuts portal (`org.freedesktop.portal.GlobalShortcuts`), so KDE Plasma lists them in its shortcut settings, where they can be changed. xdg-desktop-portal-hyprland registers them without a key, so on Hyprland the companion also binds Ctrl+Alt+C and Ctrl+Alt+V to them with `hyprctl` while it runs. A combo you already bound yourself is left alone. Ctrl+Alt+V is bound only while voice typing is on. For the portal the companion writes a hidden `warmup-companion.desktop` entry to `~/.local/share/applications`. Without the portal, the Hyprland binds signal the systemd service directly. The tray shows Ctrl+Alt+C next to Control Center when the shortcut is active.
 
-`warmup-companion settings` reads and writes `$XDG_CONFIG_HOME/warmup-companion/settings.ini`. `warmup-companion --controller-center` opens Control Center on its own, without the controller. `warmup-companion diagnostics` writes a tarball under `$XDG_STATE_HOME/warmup-companion/diagnostics/`.
+`warmup-companion settings` reads and writes `$XDG_CONFIG_HOME/warmup-companion/settings.ini`. `warmup-companion --controller-center` opens Control Center on its own, without the controller. Like on Windows, it adds its own tray icon and keeps running after the window closes, so the tray can open it again; stop it with Ctrl+C. `warmup-companion diagnostics` writes a tarball under `$XDG_STATE_HOME/warmup-companion/diagnostics/`.
 
 ## Hyprland-only features
 
