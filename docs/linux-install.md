@@ -28,6 +28,26 @@ systemctl --user status warmup-companion
 
 Stop it with `warmup-companion stop`. Remove the unit and the installed binary with `warmup-companion uninstall`. Settings, the log, and the socket directory are left in place.
 
+## Finding warmUP
+
+The Guide (PS) button opens warmUP when it is closed, unless *Guide / PS opens warmUP when closed* is off in Control Center. The View + LB + X shortcut opens it too. From the service, warmUP starts through `systemd-run --user` in its own unit, so restarting the companion does not close it. The companion looks for the launcher in this order and uses the first executable file it finds:
+
+1. `WARMUP_EXE`, if set.
+2. The path written in `$XDG_DATA_HOME/warmup-companion/warmup-exe.path` by `install-dev`.
+3. `warmup` next to the installed companion binary.
+4. `$XDG_DATA_HOME/warmup/warmup`.
+5. `~/.local/bin/warmup`, then `~/.local/bin/warmup.AppImage` (where the warmUP Linux guide puts the AppImage).
+6. `/usr/bin/warmup` (the `.deb` and `.rpm` packages), then `/usr/local/bin/warmup`.
+7. A `warmup` on `PATH`.
+
+To point the companion at a warmUP you built from source, install it in DEV mode:
+
+```sh
+./target/release/warmup-companion install-dev ~/Projects/warmUP/apps/desktop/src-tauri/target/debug/warmup
+```
+
+That installs like `install` and also writes the path to `warmup-exe.path`. The target must be a file named `warmup` or a warmUP AppImage. A plain `install` or `uninstall` removes the DEV path again.
+
 ## Update
 
 ```sh
@@ -64,7 +84,10 @@ If either variable is missing, the service logs the reason and exits. `verify` a
 | Kid Mode block list | `$XDG_STATE_HOME/warmup-companion/parental-guard.json` |
 | Crash report | `$XDG_STATE_HOME/warmup-companion/crash-report.txt`, `crash-report.last.txt` once read |
 | Installed binary | `$XDG_DATA_HOME/warmup-companion/bin/warmup-companion` |
+| Controller database | `$XDG_DATA_HOME/warmup-companion/gamecontrollerdb.txt` |
 | Input socket | `$XDG_RUNTIME_DIR/warmup/input.sock` |
+
+`install` copies the SDL controller database from `WARMUP_GAMECONTROLLER_DB`, or else from the warmUP launcher it finds (its `resources/gamecontrollerdb.txt`, or `/usr/lib/warmUP/resources/` for the `.deb` and `.rpm`). Without it, the companion uses the controller mappings built into SDL.
 
 The socket directory is mode `0700` and the socket is mode `0600`. The companion accepts a client only when that client's user id matches its own. The desktop connects to this socket with the same protocol version 6 frames the Windows build uses on its named pipe.
 
@@ -114,12 +137,30 @@ When warmUP asks the companion to shut down while Kid Mode is blocking, the comp
 
 `warmup-companion settings` reads and writes `$XDG_CONFIG_HOME/warmup-companion/settings.ini`. `warmup-companion --controller-center` opens Control Center on its own, without the controller. `warmup-companion diagnostics` writes a tarball under `$XDG_STATE_HOME/warmup-companion/diagnostics/`. It holds the unit status, the journal, the service log, device and Hyprland details, the watchlist, the unsent play sessions, the Kid Mode block list and both crash reports.
 
+## Screenshots
+
+LB + RB + RT takes a screenshot of every screen, and LB + RB + LT takes one of the focused window. While a game has the controller, holding View + LB takes a screenshot of every screen. Each one is copied to the clipboard, saved as `Screenshot <date> <time>.png` (`... window.png` for a window) in `Screenshots` under your Pictures folder (`XDG_PICTURES_DIR`, usually `~/Pictures`), and announced with a notification that opens the file.
+
+The companion captures with `grim` and copies with `wl-copy`:
+
+```sh
+sudo pacman -S grim wl-clipboard        # Arch / Omarchy
+sudo apt install grim wl-clipboard      # Debian / Ubuntu
+sudo dnf install grim wl-clipboard      # Fedora
+```
+
+The focused window is found through Hyprland. On other desktops, or when `grim` cannot capture (KDE Plasma), the companion asks the desktop's screenshot portal instead. The portal always captures the whole screen and may ask for permission the first time.
+
+## Paste into a terminal
+
+View + Y and the keyboard's paste key send Ctrl+Shift+V when the focused window is a terminal (Alacritty, kitty, foot, WezTerm, Ghostty, Konsole, GNOME Terminal), and Ctrl+V everywhere else. When the clipboard holds a picture or copied files instead of text, the terminal gets their quoted paths typed in; a picture is saved to Pictures/Screenshots first. This reads the clipboard with `wl-paste` from `wl-clipboard`. The focused window is known on Hyprland and on compositors with `zwlr_foreign_toplevel_management_v1`.
+
 ## Hyprland-only features
 
 These v0.10 features read Hyprland's IPC socket, so they work only on Hyprland:
 
-- **Per-app button shortcuts.** The focused app comes from Hyprland's active window. On KDE Plasma and other desktops no app is ever focused for the companion, so buttons keep their default actions.
-- **Workspace swipes.** A sideways touchpad swipe moves to the previous or next workspace on Hyprland. Swipe up and down do nothing there. On KDE Plasma, swipes send Plasma's shortcuts instead (Ctrl+Meta+Left/Right, Meta+W, Meta+D). Other desktops ignore swipes.
+- **Per-app button shortcuts.** The focused app comes from Hyprland's active window. The built-in presets match the Linux apps too: VLC, Spotify, Dolphin, Nautilus, Thunar and Nemo as File Explorer, and Discord, Vesktop and Legcord as Discord. A setting saved for the Windows name (for example `profile.explorer.exe.B`) applies to them as well. On KDE Plasma and other desktops no app is ever focused for the companion, so buttons keep their default actions.
+- **Workspace swipes.** A sideways touchpad swipe moves to the previous or next workspace on Hyprland. Hyprland has no task view or show-desktop of its own, so swipe down moves to an empty workspace on the current screen, which shows the desktop, and swipe up goes back to the workspace you were on before on that screen. Swipe down does nothing when the current workspace is already empty. On KDE Plasma, swipes send Plasma's shortcuts instead (Ctrl+Meta+Left/Right, Meta+W, Meta+D). Other desktops ignore swipes.
 - **Pause input while a game is running.** See below.
 
 On Hyprland, "Pause input while a game is running" sleeps the pad while the focused window is fullscreen, or a floating window covers the monitor, unless that program is a browser, launcher, or shell. KDE Plasma's KWin does not advertise `zwlr_foreign_toplevel_management_v1`, so the same switch does not see games there.

@@ -66,6 +66,7 @@ struct DetectionCache {
 struct Surface {
     exe: String,
     class_name: String,
+    title: String,
     pid: u32,
     our_pid: u32,
     fullscreen: bool,
@@ -109,6 +110,10 @@ pub fn start() {
 }
 
 pub fn foreground_identity() -> Option<(String, String)> {
+    foreground_window().map(|(exe, class_name, _)| (exe, class_name))
+}
+
+pub fn foreground_window() -> Option<(String, String, String)> {
     start();
     if latest_surface().is_none()
         && !FOREGROUND_PRIMED.swap(true, std::sync::atomic::Ordering::SeqCst)
@@ -123,7 +128,7 @@ pub fn foreground_identity() -> Option<(String, String)> {
     if surface.exe.is_empty() && surface.class_name.is_empty() {
         None
     } else {
-        Some((surface.exe, surface.class_name))
+        Some((surface.exe, surface.class_name, surface.title))
     }
 }
 
@@ -340,12 +345,14 @@ fn hypr_surface(command: &std::path::Path) -> Result<Surface, String> {
         .unwrap_or(serde_json::Value::Null);
     let pid = window.get("pid").and_then(|value| value.as_u64()).unwrap_or(0) as u32;
     let class_name = json_string(&window, "class");
+    let title = json_string(&window, "title");
     let exe = exe_for_pid(pid).unwrap_or_else(|| class_name.clone());
     let (x, y) = json_pair(&window, "at");
     let (w, h) = json_pair(&window, "size");
     Ok(Surface {
         exe,
         class_name,
+        title,
         pid,
         our_pid: std::process::id(),
         fullscreen: window
@@ -372,6 +379,46 @@ fn hypr_surface(command: &std::path::Path) -> Result<Surface, String> {
             .and_then(|value| value.as_i64())
             .unwrap_or(0),
     })
+}
+
+pub fn active_window_geometry() -> Option<(i64, i64, i64, i64)> {
+    let (command, _) = hypr_runtime()?;
+    let window = hypr_json(&command, "j/activewindow").ok()?;
+    let (x, y) = json_pair(&window, "at");
+    let (w, h) = json_pair(&window, "size");
+    (w > 0 && h > 0).then_some((x, y, w, h))
+}
+
+pub fn active_workspace_windows() -> Option<i64> {
+    let (command, _) = hypr_runtime()?;
+    let workspace = hypr_json(&command, "j/activeworkspace").ok()?;
+    workspace.get("windows").and_then(|value| value.as_i64())
+}
+
+pub fn focused_output_logical_size() -> Option<(f32, f32)> {
+    let (command, _) = hypr_runtime()?;
+    let monitors = hypr_json(&command, "j/monitors").ok()?;
+    let rows = monitors.as_array()?;
+    let monitor = rows
+        .iter()
+        .find(|row| row.get("focused").and_then(|value| value.as_bool()) == Some(true))
+        .or_else(|| rows.first())?;
+    let width = monitor.get("width")?.as_f64()?;
+    let height = monitor.get("height")?.as_f64()?;
+    let scale = monitor
+        .get("scale")
+        .and_then(|value| value.as_f64())
+        .filter(|scale| *scale > 0.0)
+        .unwrap_or(1.0);
+    let rotated = monitor
+        .get("transform")
+        .and_then(|value| value.as_i64())
+        .is_some_and(|transform| transform % 2 == 1);
+    let (width, height) = if rotated { (height, width) } else { (width, height) };
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    Some(((width / scale) as f32, (height / scale) as f32))
 }
 
 fn hypr_json(sock: &std::path::Path, cmd: &str) -> Result<serde_json::Value, String> {
@@ -489,6 +536,7 @@ mod wlr {
 
     struct Toplevel {
         app_id: String,
+        title: String,
         activated: bool,
         fullscreen: bool,
     }
@@ -539,6 +587,7 @@ mod wlr {
         publish(Some(Surface {
             exe: top.app_id.clone(),
             class_name: top.app_id.clone(),
+            title: top.title.clone(),
             pid: 0,
             our_pid: std::process::id(),
             fullscreen: top.fullscreen,
@@ -568,6 +617,7 @@ mod wlr {
                     toplevel.id().protocol_id(),
                     Toplevel {
                         app_id: String::new(),
+                        title: String::new(),
                         activated: false,
                         fullscreen: false,
                     },
@@ -596,6 +646,9 @@ mod wlr {
             match event {
                 zwlr_foreign_toplevel_handle_v1::Event::AppId { app_id } => {
                     top.app_id = app_id;
+                }
+                zwlr_foreign_toplevel_handle_v1::Event::Title { title } => {
+                    top.title = title;
                 }
                 zwlr_foreign_toplevel_handle_v1::Event::State { state: bits } => {
                     let fullscreen = bits.chunks_exact(4).any(|chunk| {
@@ -656,6 +709,7 @@ mod tests {
         Surface {
             exe: "game".into(),
             class_name: "game".into(),
+            title: String::new(),
             pid: 50,
             our_pid: 1,
             fullscreen,

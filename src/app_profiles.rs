@@ -311,7 +311,7 @@ pub fn profile_candidates(exe: &str, class_name: &str) -> Vec<String> {
     let mut ids = Vec::new();
     push_profile_id(&mut ids, exe);
     push_profile_id(&mut ids, class_name);
-    let aliases: Vec<&str> = ids.iter().filter_map(|id| browser_alias(id)).collect();
+    let aliases: Vec<&str> = ids.iter().filter_map(|id| linux_alias(id)).collect();
     for alias in aliases {
         push_profile_id(&mut ids, alias);
     }
@@ -329,7 +329,7 @@ fn push_profile_id(ids: &mut Vec<String>, raw: &str) {
 }
 
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
-fn browser_alias(name: &str) -> Option<&'static str> {
+fn linux_alias(name: &str) -> Option<&'static str> {
     let trimmed = name.trim();
     let base = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed).trim();
     let stem = base
@@ -353,6 +353,14 @@ fn browser_alias(name: &str) -> Option<&'static str> {
         "brave" | "brave-browser" => "brave.exe",
         "opera" | "opera-stable" => "opera.exe",
         "vivaldi" | "vivaldi-bin" | "vivaldi-stable" => "vivaldi.exe",
+        "vlc" | "org.videolan.vlc" => "vlc.exe",
+        "spotify" | "com.spotify.client" => "spotify.exe",
+        "dolphin" | "org.kde.dolphin" | "thunar" | "nautilus" | "org.gnome.nautilus" | "nemo" => {
+            "explorer.exe"
+        }
+        "discord" | "com.discordapp.discord" | "vesktop" | "dev.vencord.vesktop" | "legcord" => {
+            "discord.exe"
+        }
         _ => return None,
     })
 }

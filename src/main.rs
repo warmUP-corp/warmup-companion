@@ -64,7 +64,7 @@ mod linux_update;
 mod debug_state;
 mod predict_ngram;
 mod vk_commit;
-#[cfg(windows)]
+#[cfg(any(windows, all(target_os = "linux", feature = "gamepad")))]
 mod image_paste;
 mod vk_geom;
 mod vk_key;
