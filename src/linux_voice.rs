@@ -192,7 +192,8 @@ impl Pill {
             return;
         }
         let accent = crate::linux_vk::voice_accent();
-        if !crate::linux_vk::paint_voice_screen(&mut self.gfx, width, height, phase, accent) {
+        let t = self.started.get_or_insert_with(Instant::now).elapsed().as_secs_f32();
+        if !crate::linux_vk::paint_voice_screen(&mut self.gfx, width, height, phase, t, accent) {
             return;
         }
         let pixels = crate::linux_vk::draw_argb(&self.gfx.pixels());

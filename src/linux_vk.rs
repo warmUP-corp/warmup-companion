@@ -39,6 +39,12 @@ static KEYBOARD_OPEN: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_GONE: AtomicBool = AtomicBool::new(false);
 static OUTPUT_IS_TV: AtomicBool = AtomicBool::new(false);
 const SHEET_HINT_FOR: Duration = Duration::from_secs(3);
+const PROMPT_W: u32 = 720;
+const PROMPT_H: u32 = 420;
+const PROMPT_MARGIN_BOTTOM: i32 = 72;
+const PROMPT_BG: u32 = 0x00141414;
+const PROMPT_BORDER: u32 = 0x00997b4c;
+const PROMPT_TEXT: u32 = 0x00FFFFFF;
 
 pub fn look() -> crate::vk_paint::VkLook {
     let tv = match crate::config::vk_display() {
@@ -78,8 +84,8 @@ pub fn voice_accent() -> u32 {
 }
 
 #[cfg(feature = "speech")]
-pub fn paint_voice_screen(g: &mut Gfx, width: u32, height: u32, phase: u8, accent: u32) -> bool {
-    draw::paint_voice_screen(g, width, height, phase, accent)
+pub fn paint_voice_screen(g: &mut Gfx, width: u32, height: u32, phase: u8, t: f32, accent: u32) -> bool {
+    draw::paint_voice_screen(g, width, height, draw::Voice { phase, level: 0.0, t }, accent)
 }
 
 #[cfg(feature = "speech")]
@@ -805,9 +811,12 @@ impl Prompt {
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         layer.set_anchor(Anchor::BOTTOM);
         layer.set_exclusive_zone(0);
-        layer.set_margin(0, 0, 28, 0);
-        layer.set_size(520, 72);
-        let pool = SlotPool::new(520 * 72 * 4 * 4, &shm).map_err(|error| error.to_string())?;
+        layer.set_margin(0, 0, PROMPT_MARGIN_BOTTOM, 0);
+        layer.set_size(PROMPT_W, PROMPT_H);
+        if let Ok(region) = smithay_client_toolkit::compositor::Region::new(&compositor) {
+            layer.wl_surface().set_input_region(Some(region.wl_region()));
+        }
+        let pool = SlotPool::new((PROMPT_W * PROMPT_H * 4 * 4) as usize, &shm).map_err(|error| error.to_string())?;
         Ok(Self {
             registry_state: RegistryState::new(globals),
             output_state: OutputState::new(globals, qh),
@@ -822,7 +831,28 @@ impl Prompt {
     }
 
     fn draw(&mut self, qh: &QueueHandle<Self>) {
-        draw::paint_prompt(&mut self.gfx, "Press L3 to open the keyboard", 1.0);
+        let theme = crate::config::keyboard_theme();
+        let bg = theme.bg.unwrap_or(PROMPT_BG);
+        let border = theme.border.or(theme.accent).unwrap_or(PROMPT_BORDER);
+        let text = theme.text.unwrap_or(PROMPT_TEXT);
+        let controller_label = if ps5_pad() { "DualSense Wireless Controller" } else { "Xbox Wireless Controller" };
+        let card = crate::vk_paint::PromptCard {
+            bg,
+            border,
+            text_color: text,
+            pill_border: border,
+            pill_text: text,
+            prefix: "Press ",
+            suffix: " for keyboard",
+            show_l3: true,
+            title: "",
+            controller_label,
+            card_t: 0.0,
+            style: vk_style(),
+        };
+        if !draw::paint_prompt_card(&mut self.gfx, &card, PROMPT_W as f32, PROMPT_H as f32, 1.0, 0.0) {
+            return;
+        }
         let pixels = draw::to_argb(&self.gfx.pixels());
         let buffer_w = self.gfx.width() as i32;
         let buffer_h = self.gfx.height() as i32;

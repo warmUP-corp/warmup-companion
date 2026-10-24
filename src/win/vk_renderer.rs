@@ -9,19 +9,19 @@ use windows::Foundation::Numerics::Matrix3x2;
 use windows::Win32::Foundation::{BOOL, HWND, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
-    D2D1_FILL_MODE_ALTERNATE, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_POINT_2F, D2D_RECT_F,
+    D2D1_FILL_MODE_ALTERNATE, D2D1_PIXEL_FORMAT, D2D_POINT_2F, D2D_RECT_F,
     D2D_SIZE_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory, ID2D1Factory1,
-    ID2D1RenderTarget, ID2D1Resource, ID2D1SolidColorBrush,
+    ID2D1Resource, ID2D1SolidColorBrush,
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL,
     D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET,
     D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
-    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAMMA_2_2,
+    D2D1_DRAW_TEXT_OPTIONS_NONE,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED,
     D2D1_INTERPOLATION_MODE_LINEAR,
-    D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT, D2D1_SWEEP_DIRECTION_CLOCKWISE,
+    D2D1_ROUNDED_RECT, D2D1_SWEEP_DIRECTION_CLOCKWISE,
     D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
 };
 use windows::Win32::Graphics::Direct3D::{
@@ -128,14 +128,6 @@ fn colorref_alpha(c: u32, alpha: f32) -> D2D1_COLOR_F {
     col
 }
 
-fn lerp_rect(a: D2D_RECT_F, b: D2D_RECT_F, t: f32) -> D2D_RECT_F {
-    D2D_RECT_F {
-        left: lerp(a.left, b.left, t),
-        top: lerp(a.top, b.top, t),
-        right: lerp(a.right, b.right, t),
-        bottom: lerp(a.bottom, b.bottom, t),
-    }
-}
 
 fn configure_d2d_quality(ctx: &ID2D1DeviceContext) {
     // Default D2D text path can look aliased on our DXGI composition target.
@@ -291,47 +283,8 @@ fn tip_item(token: TipToken, family: ControllerIconFamily) -> Option<TipItem> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum ControllerArt {
-    DualSense,
-    XboxOne,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct ControllerArtCacheKey {
     art: ControllerArt,
-}
-
-impl ControllerArt {
-    fn from_label(label: &str) -> Option<Self> {
-        let l = label.to_ascii_lowercase();
-        if l.contains("dualsense")
-            || l.contains("dualshock")
-            || l.contains("playstation")
-            || l.contains("ps5")
-            || l.contains("ps4")
-            // Winlogon reads PlayStation pads via the direct-HID path ("HID slot N").
-            || l.contains("hid slot")
-            || l.contains("sony")
-            || l == "wireless controller"
-        {
-            Some(Self::DualSense)
-        } else if l.contains("xbox") || l.contains("xinput") {
-            Some(Self::XboxOne)
-        } else {
-            None
-        }
-    }
-
-    fn png(self) -> &'static [u8] {
-        match self {
-            Self::DualSense => {
-                include_bytes!("../../assets/controller-models/dualsense-controller.png")
-            }
-            Self::XboxOne => {
-                include_bytes!("../../assets/controller-models/xbox-one-controller.png")
-            }
-        }
-    }
 }
 
 /// Longest edge (px) the cached controller bitmap is prefiltered down to. The
@@ -954,33 +907,6 @@ impl VkRenderer {
         Ok(())
     }
 
-    unsafe fn draw_controller_art_alpha(
-        &mut self,
-        art: ControllerArt,
-        rect: D2D_RECT_F,
-        opacity: f32,
-    ) -> Result<(), String> {
-        self.ensure_controller_art(art)?;
-        let key = ControllerArtCacheKey { art };
-        let (bitmap, width, height) = self
-            .controller_art_cache
-            .get(&key)
-            .ok_or_else(|| format!("missing controller art cache {art:?}"))?;
-        let (bitmap, width, height) = (bitmap.clone(), *width, *height);
-        let g = &mut self.gfx;
-        let dest = crate::vk_paint::fit_rect(
-            crate::mono_ui::Rect {
-                x: rect.left,
-                y: rect.top,
-                w: rect.right - rect.left,
-                h: rect.bottom - rect.top,
-            },
-            width as f32,
-            height as f32,
-        );
-        g.draw_bitmap(&bitmap, dest, opacity.clamp(0.0, 1.0), true);
-        Ok(())
-    }
 
     /// Advance the mic-level envelope toward `target` for this frame.
     fn smoothed_level(&mut self, target: f32, now: Instant) -> f32 {
@@ -997,23 +923,6 @@ impl VkRenderer {
         self.level
     }
 
-    unsafe fn draw_voice_orb(
-        &mut self,
-        accent: u32,
-        level: f32,
-        transcribing: bool,
-        cx: f32,
-        cy: f32,
-        unit: f32,
-        alpha_scale: f32,
-    ) -> Result<(), String> {
-        let t = self.prompt_started.elapsed().as_secs_f32();
-        let g = &mut self.gfx;
-        crate::vk_paint::paint_voice_orb(
-            g, accent, level, transcribing, cx, cy, unit, alpha_scale, t,
-        );
-        Ok(())
-    }
 
     pub unsafe fn present_clear(&mut self) -> Result<(), String> {
         self.d2d_context.BeginDraw();
@@ -1161,18 +1070,17 @@ impl VkRenderer {
                 right: cw - FLOATING_PANEL_INSET,
                 bottom: ch - FLOATING_PANEL_INSET,
             };
-            let bg_brush = solid_brush(&self.d2d_context, colorref(pal.bg))?;
-            let panel_border = solid_brush(
-                &self.d2d_context,
-                colorref_alpha(pal.panel_stroke, pal.panel_stroke_alpha),
-            )?;
-            self.d2d_context
-                .FillRoundedRectangle(&rounded(panel, radius), &bg_brush);
-            self.d2d_context.DrawRoundedRectangle(
-                &rounded(deflate(panel, 0.5), (radius - 0.5).max(0.0)),
-                &panel_border,
+            crate::vk_paint::paint_floating_panel(
+                &mut self.gfx,
+                crate::mono_ui::Rect {
+                    x: panel.left,
+                    y: panel.top,
+                    w: panel.right - panel.left,
+                    h: panel.bottom - panel.top,
+                },
+                radius,
                 1.0,
-                None,
+                pal,
             );
             self.d2d_context.PushAxisAlignedClip(
                 &panel,
@@ -1719,57 +1627,24 @@ impl VkRenderer {
     /// The window never moves or resizes during the morph; everything is laid
     /// out in canvas pixels so nothing drifts while the panel grows upward.
     pub unsafe fn draw_prompt_card(&mut self, p: &PromptCard) -> Result<(), String> {
-        let PromptCard {
-            bg,
-            border,
-            text_color,
-            pill_border,
-            pill_text,
-            prefix,
-            suffix,
-            show_l3,
-            title,
-            controller_label,
-            card_t,
-            style: _,
-        } = *p;
-        if let Some(spec) = prompt_spec(p.style) {
-            return self.draw_prompt_card_spec(p, spec);
-        }
         let (cw, ch) = self.dip_canvas();
-        let card_t = card_t.clamp(0.0, 1.0);
-        // Pill text leaves first, then the panel grows, then title + art arrive:
-        // the two text layers never sit on top of each other.
-        let prompt_alpha = 1.0 - (card_t / 0.3).clamp(0.0, 1.0);
-        let content_alpha = ((card_t - 0.35) / 0.65).clamp(0.0, 1.0);
-        let content_alpha = content_alpha * content_alpha * (3.0 - 2.0 * content_alpha);
-        // Frame colours cross from the pill's (possibly muted) set to the card's.
-        let border = colorref_mix(border, pill_border, 1.0 - card_t);
-        let identity = Matrix3x2 {
-            M11: 1.0,
-            M12: 0.0,
-            M21: 0.0,
-            M22: 1.0,
-            M31: 0.0,
-            M32: 0.0,
+        let art = match ControllerArt::from_label(p.controller_label) {
+            Some(art) => {
+                self.ensure_controller_art(art)?;
+                self.controller_art_cache
+                    .get(&ControllerArtCacheKey { art })
+                    .map(|(bitmap, w, h)| (bitmap.clone(), *w, *h))
+            }
+            None => None,
         };
-
-        let t = self.prompt_started.elapsed().as_secs_f32();
-        let pulse = (t * lerp(0.33, 0.72, card_t)).fract();
-        let pulse_alpha = (1.0 - pulse).powi(2);
-        // The idle pill breathes very slightly about its own centre; the card holds still.
-        let breathe = ((t * std::f32::consts::TAU * 0.33).sin() * 0.5 + 0.5) * 0.015;
-        let scale = 1.0 - (0.015 - breathe) * prompt_alpha;
-        let pill_cy = ch - PROMPT_PILL_H * 0.5;
-        self.set_transform(&Matrix3x2 {
-            M11: scale,
-            M12: 0.0,
-            M21: 0.0,
-            M22: scale,
-            M31: cw * 0.5 * (1.0 - scale),
-            M32: pill_cy * (1.0 - scale),
-        });
-
+        let canvas = crate::vk_paint::PromptCanvas {
+            cw,
+            ch,
+            dpr: 1.0,
+            t: self.prompt_started.elapsed().as_secs_f32(),
+            title_px: self.text_format.GetFontSize(),
+            dip_scale: self.dip_scale,
+        };
         self.d2d_context.BeginDraw();
         self.d2d_context.Clear(Some(&D2D1_COLOR_F {
             r: 0.0,
@@ -1777,194 +1652,14 @@ impl VkRenderer {
             b: 0.0,
             a: 0.0,
         }));
-
-        // Pill: bottom band minus a hairline for the antialiased stroke.
-        let pill = D2D_RECT_F {
-            left: 4.0,
-            top: ch - PROMPT_PILL_H + 4.0,
-            right: cw - 4.0,
-            bottom: ch - 4.0,
-        };
-        // Card: narrow panel hugging the art, bottom edge shared with the pill so
-        // the morph grows upward; the controller name floats above it.
-        let card_w = (cw * 0.55).min(cw - 8.0);
-        let card_top = ch * 0.21;
-        let card = D2D_RECT_F {
-            left: (cw - card_w) * 0.5,
-            top: card_top,
-            right: (cw + card_w) * 0.5,
-            bottom: ch - 8.0,
-        };
-        let panel = lerp_rect(pill, card, card_t);
-        let radius = PROMPT_PILL_H * 0.5 - 2.0;
-        let rounded = D2D1_ROUNDED_RECT {
-            rect: panel,
-            radiusX: radius,
-            radiusY: radius,
-        };
-        let glow = colorref_mix(0x00FFFFFF, border, lerp(0.38, 0.45, card_t));
-        let bg_brush = solid_brush(
-            &self.d2d_context,
-            colorref_alpha(bg, lerp(1.0, 0.94, card_t)),
-        )?;
-        let halo_brush = solid_brush(
-            &self.d2d_context,
-            colorref_alpha(glow, lerp(0.30, 0.22, card_t) * pulse_alpha),
-        )?;
-        let border_brush = solid_brush(
-            &self.d2d_context,
-            colorref_alpha(glow, lerp(1.0, 0.84, card_t)),
-        )?;
-        self.d2d_context.FillRoundedRectangle(&rounded, &bg_brush);
-        self.d2d_context.DrawRoundedRectangle(
-            &rounded,
-            &halo_brush,
-            2.0 + lerp(8.0, 12.0, card_t) * pulse,
-            None,
-        );
-        self.d2d_context.DrawRoundedRectangle(
-            &rounded,
-            &border_brush,
-            lerp(1.5, 1.2, card_t),
-            None,
-        );
-
-        if prompt_alpha > 0.01 {
-            let _ = self
-                .prompt_format
-                .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-            let _ = self
-                .prompt_format
-                .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            let chip = (PROMPT_PILL_H * 0.70).clamp(26.0, 96.0);
-            let gap = 12.0;
-            let w_prefix = self.measure_text(prefix, &self.prompt_format);
-            let w_suffix = self.measure_text(suffix, &self.prompt_format);
-            let total = if show_l3 {
-                w_prefix + gap + chip + gap + w_suffix
-            } else {
-                w_prefix
-            };
-            let mut x = ((cw - total) * 0.5).max(0.0);
-            let band_top = ch - PROMPT_PILL_H;
-            let text_brush =
-                solid_brush(&self.d2d_context, colorref_alpha(pill_text, prompt_alpha))?;
-            let pre: Vec<u16> = prefix.encode_utf16().collect();
-            self.d2d_context.DrawText(
-                &pre,
-                &self.prompt_format,
-                &D2D_RECT_F {
-                    left: x,
-                    top: band_top,
-                    right: x + w_prefix,
-                    bottom: ch,
-                },
-                &text_brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
-            if show_l3 {
-                x += w_prefix + gap;
-                let chip_rect = D2D_RECT_F {
-                    left: x,
-                    top: pill_cy - chip * 0.5,
-                    right: x + chip,
-                    bottom: pill_cy + chip * 0.5,
-                };
-                let icon = ControllerIconFamily::from_label(controller_label).l3_icon();
-                self.draw_svg_icon_alpha(icon, chip_rect, pill_text, prompt_alpha)?;
-                x += chip + gap;
+        let mut paint_art = |g: &mut Gfx, _: ControllerArt, rect: crate::mono_ui::Rect, alpha: f32| {
+            if let Some((bitmap, w, h)) = &art {
+                let dest = crate::vk_paint::fit_rect(rect, *w as f32, *h as f32);
+                g.draw_bitmap(bitmap, dest, alpha.clamp(0.0, 1.0), true);
             }
-            if !suffix.is_empty() {
-                let suf: Vec<u16> = suffix.encode_utf16().collect();
-                self.d2d_context.DrawText(
-                    &suf,
-                    &self.prompt_format,
-                    &D2D_RECT_F {
-                        left: x,
-                        top: band_top,
-                        right: x + w_suffix,
-                        bottom: ch,
-                    },
-                    &text_brush,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    DWRITE_MEASURING_MODE_NATURAL,
-                );
-            }
-        }
-
-        if content_alpha > 0.01 {
-            let _ = self
-                .text_format
-                .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-            let _ = self
-                .text_format
-                .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            // Single line above the card; the shared format wraps by default and
-            // the short band would clip all but the first word.
-            let _ = self
-                .text_format
-                .SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-            let title_w: Vec<u16> = title.encode_utf16().collect();
-            let text_brush =
-                solid_brush(&self.d2d_context, colorref_alpha(text_color, content_alpha))?;
-            // Name rises into place from just below its resting slot.
-            let name_rise = 10.0 * (1.0 - content_alpha);
-            self.d2d_context.DrawText(
-                &title_w,
-                &self.text_format,
-                &D2D_RECT_F {
-                    left: 0.0,
-                    top: 16.0 + name_rise,
-                    right: cw,
-                    bottom: card_top - 12.0 + name_rise,
-                },
-                &text_brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
-            let _ = self.text_format.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
-
-            let image_cx = cw * 0.5;
-            let image_cy = (card.top + card.bottom) * 0.5;
-            let image_scale = 0.90 + 0.10 * content_alpha;
-            let ring_brush = solid_brush(
-                &self.d2d_context,
-                colorref_alpha(glow, 0.20 * content_alpha * pulse_alpha),
-            )?;
-            let ring_hw = 148.0 * image_scale + 20.0 * pulse;
-            let ring_hh = 120.0 * image_scale + 20.0 * pulse;
-            self.d2d_context.DrawRoundedRectangle(
-                &D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F {
-                        left: image_cx - ring_hw,
-                        top: image_cy - ring_hh,
-                        right: image_cx + ring_hw,
-                        bottom: image_cy + ring_hh,
-                    },
-                    radiusX: 104.0 * image_scale + 20.0 * pulse,
-                    radiusY: 104.0 * image_scale + 20.0 * pulse,
-                },
-                &ring_brush,
-                2.0,
-                None,
-            );
-            let img_hw = 124.0 * image_scale;
-            let img_hh = 108.0 * image_scale;
-            let image_rect = D2D_RECT_F {
-                left: image_cx - img_hw,
-                top: image_cy - img_hh,
-                right: image_cx + img_hw,
-                bottom: image_cy + img_hh,
-            };
-            if let Some(art) = ControllerArt::from_label(controller_label) {
-                self.draw_controller_art_alpha(art, image_rect, content_alpha)?;
-            } else {
-                self.draw_svg_icon_alpha(VkIcon::Gamepad, image_rect, text_color, content_alpha)?;
-            }
-        }
-
-        self.set_transform(&identity);
+        };
+        crate::vk_paint::paint_prompt_card(&mut self.gfx, p, &canvas, &mut paint_art)?;
+        self.set_transform(&IDENTITY);
         self.d2d_context
             .EndDraw(None, None)
             .map_err(|e| format!("EndDraw: {e}"))?;
@@ -2307,261 +2002,6 @@ impl VkRenderer {
         )
     }
 
-    unsafe fn draw_prompt_card_spec(
-        &mut self,
-        p: &PromptCard,
-        spec: &PromptSpec,
-    ) -> Result<(), String> {
-        let fonts = self.ensure_prompt_fonts(spec)?;
-        let (cw, ch) = self.dip_canvas();
-        let card_t = p.card_t.clamp(0.0, 1.0);
-        let prompt_alpha = 1.0 - (card_t / 0.3).clamp(0.0, 1.0);
-        let content_alpha = ((card_t - 0.35) / 0.65).clamp(0.0, 1.0);
-        let content_alpha = content_alpha * content_alpha * (3.0 - 2.0 * content_alpha);
-        let t = self.prompt_started.elapsed().as_secs_f32();
-        let breathe = ((t * std::f32::consts::TAU * 0.33).sin() * 0.5 + 0.5) * 0.015;
-        let scale = 1.0 - (0.015 - breathe) * prompt_alpha;
-        let white = 0x00FFFFFF;
-
-        let (items, pill_text, pill_text_alpha, stroke_alpha) = if p.show_l3 {
-            let chip = ControllerIconFamily::from_label(p.controller_label).l3_icon();
-            (
-                vec![
-                    (None, p.prefix.trim(), 0.0),
-                    (Some(chip), "", spec.chip_px),
-                    (None, p.suffix.trim(), 0.0),
-                ],
-                white,
-                1.0,
-                spec.ready_stroke_alpha,
-            )
-        } else {
-            (
-                vec![
-                    (Some(VkIcon::Gamepad), "", spec.gamepad_px),
-                    (None, spec.no_pad_label, 0.0),
-                ],
-                spec.dim_text,
-                spec.dim_alpha,
-                spec.no_pad_stroke_alpha,
-            )
-        };
-        let items: Vec<(Option<VkIcon>, &str, f32)> = items
-            .into_iter()
-            .filter(|(icon, text, _)| icon.is_some() || !text.is_empty())
-            .map(|(icon, text, w)| match icon {
-                Some(_) => (icon, text, w),
-                None => (icon, text, self.measure_text(text, &fonts.label)),
-            })
-            .collect();
-        let content_w = items.iter().map(|i| i.2).sum::<f32>()
-            + spec.pill_gap * items.len().saturating_sub(1) as f32;
-        let pill_w = (content_w + spec.pill_pad_x * 2.0).min(cw - 8.0);
-        let pill_bottom = ch - spec.pill_bottom;
-        let pill = D2D_RECT_F {
-            left: (cw - pill_w) * 0.5,
-            top: pill_bottom - spec.pill_h,
-            right: (cw + pill_w) * 0.5,
-            bottom: pill_bottom,
-        };
-        let pill_cy = pill_bottom - spec.pill_h * 0.5;
-        let card_bottom = ch - spec.card_bottom;
-        let card_w = spec.card_w.min(cw - 8.0);
-        let card = D2D_RECT_F {
-            left: (cw - card_w) * 0.5,
-            top: (card_bottom - spec.card_h).max(0.0),
-            right: (cw + card_w) * 0.5,
-            bottom: card_bottom,
-        };
-        let panel = lerp_rect(pill, card, card_t);
-        let shape = rounded(panel, spec.radius);
-        let (pdy, pblur, palpha) = spec.pill_shadow;
-        let (cdy, cblur, calpha) = spec.card_shadow;
-        let shadow = (
-            lerp(pdy, cdy, card_t),
-            lerp(pblur, cblur, card_t),
-            lerp(palpha, calpha, card_t),
-        );
-        let fill = colorref_alpha(
-            colorref_mix(spec.card_fill, spec.pill_fill, card_t),
-            lerp(spec.pill_fill_alpha, spec.card_fill_alpha, card_t),
-        );
-        let stroke = colorref_alpha(white, lerp(stroke_alpha, spec.card_stroke_alpha, card_t));
-
-        self
-            .set_transform(&scale_about(scale, cw * 0.5, pill_cy));
-        self.d2d_context.BeginDraw();
-        self.d2d_context.Clear(Some(&D2D1_COLOR_F {
-            r: 0.0,
-            g: 0.0,
-            b: 0.0,
-            a: 0.0,
-        }));
-        self.draw_outer_shadow(&shape, shadow)?;
-        let fill_brush = solid_brush(&self.d2d_context, fill)?;
-        self.d2d_context.FillRoundedRectangle(&shape, &fill_brush);
-        let stroke_brush = solid_brush(&self.d2d_context, stroke)?;
-        self.d2d_context.DrawRoundedRectangle(
-            &rounded(deflate(panel, 0.5), spec.radius - 0.5),
-            &stroke_brush,
-            1.0,
-            None,
-        );
-
-        if prompt_alpha > 0.01 {
-            let text_brush = solid_brush(
-                &self.d2d_context,
-                colorref_alpha(pill_text, pill_text_alpha * prompt_alpha),
-            )?;
-            let mut x = (cw - content_w) * 0.5;
-            for (icon, text, w) in items {
-                let slot = D2D_RECT_F {
-                    left: x,
-                    top: pill.top,
-                    right: x + w,
-                    bottom: pill.bottom,
-                };
-                match icon {
-                    Some(icon) => {
-                        let opacity = if icon.is_controller_tip() {
-                            prompt_alpha
-                        } else {
-                            pill_text_alpha * prompt_alpha
-                        };
-                        self.draw_svg_icon_sized(icon, slot, pill_text, opacity, w)?;
-                    }
-                    None => self.d2d_context.DrawText(
-                        &wide(text),
-                        &fonts.label,
-                        &slot,
-                        &text_brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        DWRITE_MEASURING_MODE_NATURAL,
-                    ),
-                }
-                x += w + spec.pill_gap;
-            }
-        }
-
-        if content_alpha > 0.01 {
-            let rise = 10.0 * (1.0 - content_alpha);
-            let title_top = card.top + spec.card_pad_y;
-            let title_brush = solid_brush(&self.d2d_context, colorref_alpha(white, content_alpha))?;
-            self.d2d_context.DrawText(
-                &wide(p.title),
-                &fonts.title,
-                &D2D_RECT_F {
-                    left: card.left,
-                    top: title_top + rise,
-                    right: card.right,
-                    bottom: title_top + spec.title_h + rise,
-                },
-                &title_brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
-
-            let stage_top = title_top + spec.title_h + spec.card_gap;
-            let stage_cy = stage_top + spec.stage_h * 0.5;
-            let stops = [
-                D2D1_GRADIENT_STOP {
-                    position: 0.0,
-                    color: colorref_alpha(white, spec.stage_glow_alpha),
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 1.0,
-                    color: colorref_alpha(white, 0.0),
-                },
-            ];
-            let collection = ID2D1RenderTarget::CreateGradientStopCollection(
-                &self.d2d_context,
-                &stops,
-                D2D1_GAMMA_2_2,
-                D2D1_EXTEND_MODE_CLAMP,
-            )
-            .map_err(|e| format!("stage gradient: {e}"))?;
-            let center = D2D_POINT_2F {
-                x: cw * 0.5,
-                y: stage_cy,
-            };
-            let glow = self
-                .d2d_context
-                .CreateRadialGradientBrush(
-                    &D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES {
-                        center,
-                        gradientOriginOffset: D2D_POINT_2F { x: 0.0, y: 0.0 },
-                        radiusX: spec.stage_w * 0.5,
-                        radiusY: spec.stage_h * 0.5,
-                    },
-                    None,
-                    &collection,
-                )
-                .map_err(|e| format!("stage brush: {e}"))?;
-            glow.SetOpacity(content_alpha);
-            self.d2d_context.FillEllipse(
-                &D2D1_ELLIPSE {
-                    point: center,
-                    radiusX: spec.stage_w * 0.5,
-                    radiusY: spec.stage_h * 0.5,
-                },
-                &glow,
-            );
-
-            let image_scale = 0.90 + 0.10 * content_alpha;
-            let art_rect = D2D_RECT_F {
-                left: center.x - spec.art_w * 0.5 * image_scale,
-                top: stage_cy - spec.art_h * 0.5 * image_scale,
-                right: center.x + spec.art_w * 0.5 * image_scale,
-                bottom: stage_cy + spec.art_h * 0.5 * image_scale,
-            };
-            if let Some(art) = ControllerArt::from_label(p.controller_label) {
-                self.draw_controller_art_alpha(art, art_rect, content_alpha)?;
-            } else {
-                self.draw_svg_icon_alpha(VkIcon::Gamepad, art_rect, white, content_alpha)?;
-            }
-
-            let status_top = stage_top + spec.stage_h + spec.card_gap;
-            let status_w = self.measure_text(spec.status_label, &fonts.status);
-            let row_w = spec.check_px + spec.status_gap + status_w;
-            let x = (cw - row_w) * 0.5;
-            let row = |left: f32, w: f32| D2D_RECT_F {
-                left,
-                top: status_top,
-                right: left + w,
-                bottom: status_top + spec.status_h,
-            };
-            self.draw_svg_icon_sized(
-                VkIcon::Check,
-                row(x, spec.check_px),
-                white,
-                content_alpha,
-                spec.check_px,
-            )?;
-            let status_brush = solid_brush(
-                &self.d2d_context,
-                colorref_alpha(spec.dim_text, spec.dim_alpha * content_alpha),
-            )?;
-            self.d2d_context.DrawText(
-                &wide(spec.status_label),
-                &fonts.status,
-                &row(x + spec.check_px + spec.status_gap, status_w),
-                &status_brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
-        }
-
-        self.set_transform(&IDENTITY);
-        self.d2d_context
-            .EndDraw(None, None)
-            .map_err(|e| format!("EndDraw: {e}"))?;
-        self.swapchain
-            .Present(1, DXGI_PRESENT(0))
-            .ok()
-            .map_err(|e| format!("Present: {e}"))?;
-        Ok(())
-    }
-
     /// Compile (once) and draw the cloud into its bitmap.
     fn prepare_nimbus(&mut self, now: Instant, mood: NimbusMood, accent: u32) {
         if self.nimbus_failed {
@@ -2591,8 +2031,6 @@ impl VkRenderer {
         }
     }
 
-    /// Blit the latest cloud. False when the shader never came up, so the caller
-    /// can fall back to the ellipse orb.
     fn think_pulse(&self) -> f32 {
         self.nimbus
             .as_ref()
@@ -2600,34 +2038,6 @@ impl VkRenderer {
             .unwrap_or(0.0)
     }
 
-    fn draw_nimbus_at(&self, dest: &D2D_RECT_F, opacity: f32) -> bool {
-        let Some(orb) = self.nimbus.as_ref() else {
-            return false;
-        };
-        if opacity <= 0.01 {
-            return true;
-        }
-        unsafe {
-            self.d2d_context.DrawBitmap(
-                orb.bitmap(),
-                Some(dest),
-                opacity.clamp(0.0, 1.0),
-                D2D1_INTERPOLATION_MODE_LINEAR,
-                None,
-                None,
-            );
-        }
-        true
-    }
-
-    /// Glow sitting on the screen edge. The outside of the band is the screen
-    /// rectangle, so the corner wedges are filled. Only the inner edge has a
-    /// small radius.
-    unsafe fn draw_display_border(&mut self, accent: u32, alpha: f32) -> Result<(), String> {
-        let (cw, ch) = self.dip_canvas();
-        let g = &mut self.gfx;
-        crate::vk_paint::paint_display_border(g, cw, ch, accent, alpha)
-    }
 
     /// Dictation pill for the keyboard-closed case: the audio-reactive orb on the
     /// left, a phase title beside it, and — while listening — the controller's
@@ -2672,32 +2082,43 @@ impl VkRenderer {
                 a: 0.0,
             }));
             self.set_transform(&IDENTITY);
-            let border_alpha = if matches!(phase, VoicePhase::Transcribing) {
-                let t = self.prompt_started.elapsed().as_secs_f32();
-                let pulse = 0.5 + 0.5 * (t * 2.4).sin();
-                alpha * (0.8 + 0.7 * pulse)
-            } else {
-                alpha
-            };
-            self.draw_display_border(accent, border_alpha.min(1.0))?;
-            if show_orb {
-                let slot = scale_about_center(
-                    nimbus_slot(cw, ch),
-                    ORB_FRAME_FILL * orb_scale(phase, level, self.think_pulse()),
-                );
-                if !self.draw_nimbus_at(&slot, alpha) {
-                    let unit = ((slot.right - slot.left) * 0.42).max(1.0);
-                    self.draw_voice_orb(
-                        accent,
-                        0.0,
-                        true,
-                        (slot.left + slot.right) * 0.5,
-                        (slot.top + slot.bottom) * 0.5,
-                        unit,
-                        alpha,
-                    )?;
+            let t = self.prompt_started.elapsed().as_secs_f32();
+            let orb_fill =
+                show_orb.then(|| ORB_FRAME_FILL * orb_scale(phase, level, self.think_pulse()));
+            let nimbus = self.nimbus.as_ref();
+            let ctx = &self.d2d_context;
+            let mut paint_nimbus = |_: &mut Gfx, slot: crate::mono_ui::Rect, opacity: f32| {
+                let Some(orb) = nimbus else {
+                    return false;
+                };
+                if opacity > 0.01 {
+                    ctx.DrawBitmap(
+                        orb.bitmap(),
+                        Some(&D2D_RECT_F {
+                            left: slot.x,
+                            top: slot.y,
+                            right: slot.x + slot.w,
+                            bottom: slot.y + slot.h,
+                        }),
+                        opacity.clamp(0.0, 1.0),
+                        D2D1_INTERPOLATION_MODE_LINEAR,
+                        None,
+                        None,
+                    );
                 }
-            }
+                true
+            };
+            crate::vk_paint::paint_voice_screen(
+                &mut self.gfx,
+                cw,
+                ch,
+                accent,
+                alpha,
+                matches!(phase, VoicePhase::Transcribing),
+                t,
+                orb_fill,
+                &mut paint_nimbus,
+            )?;
             self.d2d_context
                 .EndDraw(None, None)
                 .map_err(|e| format!("EndDraw: {e}"))?;
@@ -2710,28 +2131,8 @@ impl VkRenderer {
     }
 }
 
-/// Height of the "Press [L3]" pill band at the bottom of the prompt canvas.
-pub const PROMPT_PILL_H: f32 = 116.0;
-
-/// Inputs for [`VkRenderer::draw_prompt_card`].
-#[derive(Clone, Copy)]
-pub struct PromptCard<'a> {
-    pub bg: u32,
-    /// Card border / glow and title colour (always the full theme colours).
-    pub border: u32,
-    pub text_color: u32,
-    /// Pill border / text; the muted "no pad" look passes dimmed colours here.
-    pub pill_border: u32,
-    pub pill_text: u32,
-    pub prefix: &'a str,
-    pub suffix: &'a str,
-    pub show_l3: bool,
-    pub title: &'a str,
-    pub controller_label: &'a str,
-    /// 0 = prompt pill, 1 = connection card.
-    pub card_t: f32,
-    pub style: VkStyle,
-}
+pub(crate) use crate::vk_paint::ControllerArt;
+pub use crate::vk_paint::{PromptCard, PROMPT_PILL_H};
 
 #[derive(Clone, Copy)]
 pub struct TipsPill<'a> {
@@ -2844,18 +2245,6 @@ fn orb_scale(phase: VoicePhase, level: f32, think_pulse: f32) -> f32 {
     drive_scale(mood_drive(&nimbus_mood(phase, level), think_pulse))
 }
 
-fn scale_about_center(rect: D2D_RECT_F, scale: f32) -> D2D_RECT_F {
-    let cx = (rect.left + rect.right) * 0.5;
-    let cy = (rect.top + rect.bottom) * 0.5;
-    let hw = (rect.right - rect.left) * 0.5 * scale;
-    let hh = (rect.bottom - rect.top) * 0.5 * scale;
-    D2D_RECT_F {
-        left: cx - hw,
-        top: cy - hh,
-        right: cx + hw,
-        bottom: cy + hh,
-    }
-}
 
 fn square_about(cx: f32, cy: f32, side: f32) -> D2D_RECT_F {
     let h = side * 0.5;
@@ -2870,17 +2259,14 @@ fn square_about(cx: f32, cy: f32, side: f32) -> D2D_RECT_F {
 /// Square for the transcription cloud: right edge, vertically centred. The
 /// cloud fills this square, so 96px at 1080p matches the old pill indicator
 /// instead of the 240px first cut.
+#[cfg(test)]
 fn nimbus_slot(cw: f32, ch: f32) -> D2D_RECT_F {
-    let scale = (ch / 1080.0).clamp(0.85, 2.0);
-    let size = (96.0 * scale).min(cw.min(ch) * 0.9).max(1.0);
-    let margin = (48.0 * scale).min((cw - size).max(0.0));
-    let left = (cw - margin - size).max(0.0);
-    let top = ((ch - size) * 0.5).max(0.0);
+    let r = crate::vk_paint::voice_slot(cw, ch);
     D2D_RECT_F {
-        left,
-        top,
-        right: left + size,
-        bottom: top + size,
+        left: r.x,
+        top: r.y,
+        right: r.x + r.w,
+        bottom: r.y + r.h,
     }
 }
 

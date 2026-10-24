@@ -1,7 +1,5 @@
 use std::time::Instant;
 
-use cosmic_text::Weight;
-use crate::mono_ui::Align;
 use tiny_skia::Pixmap;
 
 use crate::config::{KeyboardTheme, VkStyle};
@@ -65,8 +63,6 @@ struct Rgb {
 struct Pal {
     bg: Rgb,
     sel_ring: Rgb,
-    panel_stroke: Rgb,
-    panel_stroke_alpha: f32,
 }
 
 pub struct Frame {
@@ -255,18 +251,15 @@ fn render_keyboard(
         let y = FLOATING_PANEL_INSET * scale;
         let w = (frame.logical_w - 2.0 * FLOATING_PANEL_INSET) * scale;
         let h = (frame.logical_h - 2.0 * FLOATING_PANEL_INSET) * scale;
-        round_rect(g, x, y, w, h, panel_r * scale, pal.bg, 255);
-        stroke_rect(
-            g,
-            x + 0.5 * scale,
-            y + 0.5 * scale,
-            (w - scale).max(1.0),
-            (h - scale).max(1.0),
-            (panel_r - 0.5).max(0.0) * scale,
-            pal.panel_stroke,
-            (pal.panel_stroke_alpha * 255.0) as u8,
-            scale.max(1.0),
-        );
+        unsafe {
+            crate::vk_paint::paint_floating_panel(
+                g,
+                crate::mono_ui::Rect { x, y, w, h },
+                panel_r * scale,
+                scale.max(1.0),
+                &frame.pal,
+            );
+        }
         Some((x, y, w, h, panel_r * scale))
     } else {
         fill(g, pal.bg, 255);
@@ -664,8 +657,6 @@ fn palette(frame: &Frame) -> Pal {
     Pal {
         bg: from_colorref(v.bg),
         sel_ring: from_colorref(v.sel_ring),
-        panel_stroke: from_colorref(v.panel_stroke),
-        panel_stroke_alpha: v.panel_stroke_alpha,
     }
 }
 
@@ -673,9 +664,6 @@ pub fn themed_palette(look: VkLook, dark: bool, theme: &KeyboardTheme) -> crate:
     crate::vk_theme::themed_palette(crate::vk_paint::style_palette(look.style, dark), look.style, *theme)
 }
 
-fn rgb(v: u32) -> Rgb {
-    Rgb { r: ((v >> 16) & 0xff) as u8, g: ((v >> 8) & 0xff) as u8, b: (v & 0xff) as u8 }
-}
 
 fn from_colorref(color: u32) -> Rgb {
     Rgb { r: (color & 0xff) as u8, g: ((color >> 8) & 0xff) as u8, b: ((color >> 16) & 0xff) as u8 }
@@ -705,12 +693,6 @@ fn round_rect(g: &mut Gfx, x: f32, y: f32, w: f32, h: f32, radius: f32, color: R
     unsafe { g.fill(device(x, y, w, h), radius, cref(color), alpha as f32 / 255.0) };
 }
 
-fn stroke_rect(g: &mut Gfx, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Rgb, alpha: u8, width: f32) {
-    let width = width.max(1.0);
-    let half = width * 0.5;
-    let outer = device(x - half, y - half, w + width, h + width);
-    unsafe { g.ring(outer, radius + half, width, cref(color), alpha as f32 / 255.0) };
-}
 
 
 fn clip_round(g: &mut Gfx, x: f32, y: f32, w: f32, h: f32, radius: f32) {
@@ -758,52 +740,8 @@ fn clear_span(data: &mut [u8], width: i32, py: i32, from: i32, to: i32) {
     }
 }
 
-fn text(
-    g: &mut Gfx,
-    value: &str,
-    band: (f32, f32, f32, f32),
-    px: f32,
-    weight: Weight,
-    color: Rgb,
-    alpha: u8,
-    scale: f32,
-    family: &[&str],
-) {
-    text_aligned(g, value, band, px, weight, color, alpha, scale, Align::Center, family);
-}
 
 
-fn text_aligned(
-    g: &mut Gfx,
-    value: &str,
-    band: (f32, f32, f32, f32),
-    px: f32,
-    weight: Weight,
-    color: Rgb,
-    alpha: u8,
-    scale: f32,
-    align: Align,
-    family: &[&str],
-) {
-    if value.is_empty() || px < 4.0 {
-        return;
-    }
-    let r = device(band.0 * scale, band.1 * scale, (band.2 - band.0) * scale, (band.3 - band.1) * scale);
-    unsafe {
-        g.text_full(
-            value,
-            r,
-            px,
-            weight.0 as i32,
-            family,
-            cref(color),
-            alpha as f32 / 255.0,
-            align,
-            crate::mono_ui::VAlign::Center,
-            false,
-        )
-    };
-}
 
 
 pub struct KeyPatch {
@@ -1020,51 +958,61 @@ pub fn paint_voice_orb(
         return false;
     }
     g.begin(side, side);
-    let ball = slot * ORB_FRAME_FILL * voice.orb_scale();
     let c = side as f32 * 0.5;
-    let dst = crate::mono_ui::Rect {
-        x: c - ball * 0.5,
-        y: c - ball * 0.5,
-        w: ball,
-        h: ball,
+    let room = crate::mono_ui::Rect {
+        x: c - slot * 0.5,
+        y: c - slot * 0.5,
+        w: slot,
+        h: slot,
     };
-    if !draw_nimbus(g, nimbus, dst, 1.0) {
-        unsafe {
-            crate::vk_paint::paint_voice_orb(g, accent, 0.0, true, c, c, (ball * 0.42).max(1.0), 1.0, voice.t);
-        }
-    }
+    let ball = crate::vk_paint::scale_rect_about_center(room, ORB_FRAME_FILL * voice.orb_scale());
+    let mut paint_nimbus = |g: &mut Gfx, dst: crate::mono_ui::Rect, alpha: f32| draw_nimbus(g, nimbus, dst, alpha);
+    unsafe { crate::vk_paint::paint_voice_cloud(g, ball, accent, 1.0, voice.t, &mut paint_nimbus) };
     true
 }
 
-pub fn paint_voice_screen(
-    g: &mut Gfx,
-    width: u32,
-    height: u32,
-    phase: u8,
-    accent: u32,
-) -> bool {
+pub fn paint_voice_screen(g: &mut Gfx, width: u32, height: u32, voice: Voice, accent: u32) -> bool {
     if width == 0 || height == 0 {
         return false;
     }
     g.begin(width, height);
-    let border_alpha = if phase == 2 {
-        let t = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs_f32())
-            .unwrap_or(0.0);
-        let pulse = 0.5 + 0.5 * (t * 2.4).sin();
-        0.8 + 0.7 * pulse
-    } else {
-        1.0
+    let mut no_cloud = |_: &mut Gfx, _: crate::mono_ui::Rect, _: f32| false;
+    unsafe {
+        crate::vk_paint::paint_voice_screen(
+            g,
+            width as f32,
+            height as f32,
+            accent,
+            1.0,
+            voice.transcribing(),
+            voice.t,
+            None,
+            &mut no_cloud,
+        )
+    }
+    .is_ok()
+}
+
+pub fn paint_prompt_card(g: &mut Gfx, card: &crate::vk_paint::PromptCard, width: f32, height: f32, scale: f32, t: f32) -> bool {
+    let scale = scale.max(1.0);
+    g.begin((width * scale).round().max(1.0) as u32, (height * scale).round().max(1.0) as u32);
+    unsafe { g.transform(scale, 0.0, 0.0) };
+    let canvas = crate::vk_paint::PromptCanvas {
+        cw: width,
+        ch: height,
+        dpr: scale,
+        t,
+        title_px: 35.0,
+        dip_scale: scale,
     };
-    if unsafe {
-        crate::vk_paint::paint_display_border(g, width as f32, height as f32, accent, border_alpha.min(1.0))
-    }
-    .is_err()
-    {
-        return false;
-    }
-    true
+    let mut paint_art = |g: &mut Gfx, art: crate::vk_paint::ControllerArt, rect: crate::mono_ui::Rect, alpha: f32| {
+        let px = crate::vk_paint::CONTROLLER_ART_PX as f32;
+        let dest = crate::vk_paint::fit_rect(rect, px, px);
+        unsafe { g.draw_art(art.key(), art.png(), 384, 384, 0.0, dest, alpha, true) };
+    };
+    let painted = unsafe { crate::vk_paint::paint_prompt_card(g, card, &canvas, &mut paint_art) }.is_ok();
+    unsafe { g.transform(1.0, 0.0, 0.0) };
+    painted
 }
 
 pub fn to_argb(pixels: &[u8]) -> Vec<u8> {
@@ -1078,14 +1026,6 @@ pub fn to_argb(pixels: &[u8]) -> Vec<u8> {
     out
 }
 
-pub fn paint_prompt(g: &mut Gfx, text_value: &str, scale: f32) {
-    let scale = scale.max(1.0);
-    let logical_w = 520.0;
-    let logical_h = 72.0;
-    g.begin((logical_w * scale) as u32, (logical_h * scale) as u32);
-    fill(g, rgb(0x15161C), 235);
-    text(g, text_value, (16.0, 16.0, logical_w - 16.0, logical_h - 16.0), 22.0 * scale, Weight::MEDIUM, rgb(0xFFFFFF), 255, 1.0, &["Noto Sans"]);
-}
 
 #[cfg(test)]
 mod tests {
@@ -1106,7 +1046,7 @@ mod tests {
     #[test]
     fn voice_screen_is_a_border_with_a_cloud() {
         let mut g = Gfx::new(1, 1).expect("gfx");
-        assert!(super::paint_voice_screen(&mut g, 800, 480, 1, 0xA6D1FF));
+        assert!(super::paint_voice_screen(&mut g, 800, 480, super::Voice { phase: 1, level: 0.0, t: 0.0 }, 0xA6D1FF));
         assert_eq!((g.width(), g.height()), (800, 480));
         let edge = g.pixels()[3];
         let centre = g.pixels()[((240 * 800 + 400) * 4 + 3) as usize];
