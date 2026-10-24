@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- The companion now treats only known games as games, like warmUP. warmUP sends it its list of known games, and the companion stores it. Once it has the list, a fullscreen window only puts the controller to sleep when it belongs to a game on that list, a listed Steam game or a game you added by hand, and offline play time is only counted for those games. Until warmUP has sent a list, the companion behaves as before.
+- While warmUP is open, the companion tells it which known games are running and which of them is in the foreground fullscreen.
+- The companion ignores the same programs as warmUP when it looks for a fullscreen game: itself, ChatGPT, VS Code, Cursor, WebView2 apps, the Rockstar Games Launcher and its helpers, and Wallpaper Engine.
+- On Linux, a Proton game shows up under its Windows program name, so per-app button profiles and game detection see `GTA5.exe` instead of the Wine loader.
 - On Linux with Omarchy, the controller drives the Omarchy menu and the app launcher while one of them is open: the D-pad moves, A selects and B closes. Afterwards the buttons go back to their desktop actions.
 - On Linux with Hyprland and Omarchy, Y opens the Omarchy menu from the controller, and the Hyprland desktop presets offer the Omarchy menu and the app launcher. The special workspace is still in the picker for Y.
 - On Linux with Hyprland, a maximized window no longer counts as a fullscreen game. Maximizing a window with X, or switching to a workspace with a maximized window, used to put the controller to sleep when "Pause input while a game is running" was on.
