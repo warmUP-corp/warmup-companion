@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::vk_nav::{self, KeyAction, KeyCell};
+use crate::vk_nav::{self, KeyCell};
 
 use windows::core::w;
 use windows::Win32::Foundation::{CloseHandle, HMODULE, HWND, LPARAM, LRESULT, WPARAM};
@@ -78,100 +78,10 @@ static LAST_REFLOW_HWND: AtomicIsize = AtomicIsize::new(0);
 
 /// Class background brush colour (dark default; per-paint theme overrides it).
 const BG_FILL: u32 = 0x001f1f1f;
-const MONO_ACCENT_TONE: f32 = 0.7;
-const MODERN_ACTION_TONE: f32 = 0.08;
-const MODERN_ENTER_TONE: f32 = 0.14;
-const MODERN_MOD_TONE: f32 = 0.2;
-const MODERN_DIM_TONE: f32 = 0.8;
 
-pub(crate) fn vk_palette(dark: bool, style: crate::config::VkStyle) -> VkPalette {
-    themed_palette(
-        vk_renderer::style_palette(style, dark),
-        style,
-        crate::config::keyboard_theme(),
-    )
-}
-
-pub(crate) fn themed_palette(
-    mut pal: VkPalette,
-    style: crate::config::VkStyle,
-    theme: crate::config::KeyboardTheme,
-) -> VkPalette {
-    if style == crate::config::VkStyle::Modern {
-        return modern_themed_palette(pal, theme);
-    }
-    if style == crate::config::VkStyle::Mono {
-        if let Some(v) = theme.accent {
-            pal.accent = vk_renderer::mix_color(v, pal.key, MONO_ACCENT_TONE);
-            pal.sel_ring = v;
-        }
-        if let Some(v) = theme.sel_text {
-            pal.sel_text = v;
-        }
-        return pal;
-    }
-    if let Some(v) = theme.bg {
-        pal.bg = v;
-    }
-    if let Some(v) = theme.key {
-        pal.key = v;
-        pal.key_action = vk_renderer::mix_color(0x000000, v, 0.26);
-        pal.chip_sel = vk_renderer::mix_color(0xFFFFFF, v, 0.10);
-    }
-    if let Some(v) = theme.accent {
-        pal.accent = v;
-        pal.sel_ring = vk_renderer::mix_color(0xFFFFFF, v, 0.5);
-    }
-    if let Some(v) = theme.text {
-        pal.text = v;
-        pal.text_dim = v;
-    }
-    if let Some(v) = theme.sel_text {
-        pal.sel_text = v;
-    }
-    if let Some(v) = theme.border {
-        pal.border = v;
-        pal.panel_stroke = v;
-        pal.panel_stroke_alpha = 1.0;
-    }
-    pal
-}
-
-fn modern_themed_palette(mut pal: VkPalette, theme: crate::config::KeyboardTheme) -> VkPalette {
-    use vk_renderer::mix_color;
-    if let Some(v) = theme.bg {
-        pal.bg = v;
-    }
-    if let Some(v) = theme.text {
-        pal.text = v;
-        pal.enter_text = v;
-        pal.text_dim = mix_color(v, pal.bg, MODERN_DIM_TONE);
-    }
-    if let Some(v) = theme.sel_text {
-        pal.sel_text = v;
-    }
-    if let Some(v) = theme.accent {
-        pal.accent = v;
-        pal.sel_ring = v;
-        pal.chip_sel = v;
-    }
-    if let Some(v) = theme.key {
-        pal.key = v;
-        pal.key_action = mix_color(pal.text, v, MODERN_ACTION_TONE);
-    }
-    if theme.key.is_some() || theme.accent.is_some() {
-        if let Some(tint) = theme.accent.or(pal.mod_tint.map(|(_, bar)| bar)) {
-            pal.key_enter = mix_color(tint, pal.key, MODERN_ENTER_TONE);
-            pal.mod_tint = Some((mix_color(tint, pal.key, MODERN_MOD_TONE), tint));
-        }
-    }
-    if let Some(v) = theme.border {
-        pal.border = v;
-        pal.panel_stroke = v;
-        pal.panel_stroke_alpha = 1.0;
-    }
-    pal
-}
+pub(crate) use crate::vk_theme::vk_palette;
+#[cfg(test)]
+use crate::vk_theme::themed_palette;
 
 /// Dark flag, read live from the OS theme.
 /// `HKCU\...\Themes\Personalize\AppsUseLightTheme` (0 = dark). Defaults to dark.
@@ -196,36 +106,7 @@ pub(crate) fn is_dark_theme() -> bool {
     }
 }
 
-/// Glyph + font face for a key. Special keys use equivalent Unicode symbols,
-/// which Segoe UI Symbol covers reliably.
-/// Returns `(text, is_symbol_font)`.
-fn key_glyph(key: &KeyCell) -> (String, bool) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE;
-    match &key.action {
-        KeyAction::Shift => (key.label.clone(), false),
-        KeyAction::VoiceInput => (String::new(), false),
-        KeyAction::Vk(vk) if *vk == VK_SPACE => (String::new(), false),
-        _ => (key.label.clone(), false),
-    }
-}
-
-fn key_hint(key: &KeyCell) -> Option<&'static str> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_RETURN, VK_SPACE};
-    match &key.action {
-        // Badges mirror the web VK's controller hints
-        // (`getIntegratedBadge` / `gamepad::handle_vk_open_button`). Select engages
-        // the suggestion strip, not Tab, so the Tab key carries no badge.
-        KeyAction::Vk(vk) if *vk == VK_BACK => Some("B"),
-        KeyAction::Vk(vk) if *vk == VK_RETURN => Some("START"),
-        KeyAction::Vk(vk) if *vk == VK_SPACE => Some("Y"),
-        KeyAction::Shift => Some("RT"),
-        KeyAction::Symbols => Some("LT"),
-        KeyAction::PredictPrev => Some("LB"),
-        KeyAction::PredictNext => Some("RB"),
-        KeyAction::VoiceInput => Some("R3"),
-        _ => None,
-    }
-}
+use crate::vk_paint::{key_glyph, key_hint};
 
 #[derive(Clone, Copy, Debug)]
 pub enum VkAttach {
@@ -864,36 +745,20 @@ unsafe fn target_monitor_rect() -> windows::Win32::Foundation::RECT {
     super::monitor::active_monitor_rect()
 }
 
-const TV_MAX_HEIGHT_FRAC: f32 = 0.45;
-
 unsafe fn ui_scale() -> f32 {
     let look = vk_look();
     let mut dpi = target_monitor_dpi_scale();
     if look.tv_layout() {
         let m = target_monitor_rect();
-        dpi = tv_capped_dpi(dpi, m.bottom - m.top, &vk_nav::rows_snapshot(), look);
+        dpi = crate::vk_geom::tv_capped_dpi(
+            dpi,
+            m.bottom - m.top,
+            &vk_nav::rows_snapshot(),
+            look,
+            key_scale(1.0, 1.0),
+        );
     }
     key_scale(dpi, crate::config::vk_bar_scale())
-}
-
-fn tv_capped_dpi(
-    dpi: f32,
-    full_h: i32,
-    rows: &[vk_nav::KeyRow],
-    look: vk_renderer::VkLook,
-) -> f32 {
-    let s1 = key_scale(1.0, 1.0);
-    let h1 = vk_renderer::dock_height_for_full_keys(
-        vk_renderer::REF_MON_W * s1,
-        rows,
-        vk_renderer::strip_band_height(s1, look),
-        look,
-    );
-    if h1 > 0.0 {
-        dpi.min(TV_MAX_HEIGHT_FRAC * full_h.max(1) as f32 / h1)
-    } else {
-        dpi
-    }
 }
 
 unsafe fn top_inset() -> f32 {

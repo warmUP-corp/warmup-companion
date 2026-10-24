@@ -3,8 +3,6 @@ pub mod controller_center;
 #[cfg(feature = "gamepad")]
 pub(crate) mod installer_ui;
 #[cfg(feature = "gamepad")]
-mod mono_ui;
-#[cfg(feature = "gamepad")]
 pub(crate) mod tray_menu;
 #[cfg(feature = "gamepad")]
 pub(crate) mod update_window;
@@ -24,7 +22,7 @@ pub mod surface;
 pub mod toast;
 pub mod vk_layouts;
 mod vk_log;
-mod vk_renderer;
+pub(crate) mod vk_renderer;
 pub mod vk_ui;
 pub mod xbox_vk;
 

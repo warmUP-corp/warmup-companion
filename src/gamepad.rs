@@ -35,6 +35,10 @@ const HAPTIC_ALERT_MS: u32 = 45;
 /// move, chip cycle) — short and faint so fast typing reads as texture, not buzz.
 const HAPTIC_TICK_MS: u32 = 8;
 
+fn warmup_browser_foreground(button: Button) -> bool {
+    matches!(button, Button::L3 | Button::R3) && crate::vk_nav::foreground_is_warmup_browser()
+}
+
 /// Desktop text-entry shortcuts belong to the companion, not the launcher's dock/topbar.
 fn companion_owns_stick_click(
     button: Button,
@@ -591,7 +595,9 @@ impl GamepadPoll {
 
     #[cfg(not(windows))]
     pub fn open_service() -> Result<Self, String> {
-        Err("XInput service backend requires Windows".to_string())
+        let backend = SdlThreadBackend::open()?;
+        service_log("gamepad backend: SDL3");
+        Ok(Self::new(Backend::Sdl(Box::new(backend))))
     }
 
     fn new(backend: Backend) -> Self {
@@ -661,6 +667,8 @@ impl GamepadPoll {
             crate::vk_nav::reset_selection();
             crate::win::logon_focus::clear_cache();
         }
+        #[cfg(not(windows))]
+        crate::vk_sheet::set_shown(false);
     }
 
     pub fn on_vk_opened(&mut self) {
@@ -728,9 +736,9 @@ impl GamepadPoll {
         }
 
         // Desktop `native_vk` request (open/close the companion keyboard via IPC).
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         let center_open = crate::win::controller_center::owns_pad();
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         let center_open = false;
         if let Some(open) = crate::pipe_server::take_native_vk_request() {
             if let Some(action) = native_vk_request_action(open, vk_open, center_open) {
@@ -768,11 +776,21 @@ impl GamepadPoll {
             };
             crate::debug_state::set_gamepad(self.backend.is_connected(), name, input);
         }
+        #[cfg(target_os = "linux")]
+        {
+            let name = self.backend.controller_label();
+            let input = if center_open {
+                self.backend.live_input_summary()
+            } else {
+                String::new()
+            };
+            crate::debug_state::set_gamepad(self.backend.is_connected(), name, input);
+        }
 
         for c in &changes {
             track_down(&mut self.pad_down, *c);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         let changes = {
             let chord_allowed = !game_owns_input
                 && (center_open || !crate::pipe_server::launcher_foreground_nav())
@@ -805,6 +823,7 @@ impl GamepadPoll {
                 crate::pipe_server::publish_battery(bat.percent, bat.charging, bat.wired);
                 crate::pipe_server::publish_usb(bat.usb);
                 crate::pipe_server::publish_pads(&self.backend.pads());
+                #[cfg(windows)]
                 crate::win::shortcut_sheet::set_shown(false);
                 return Ok(center_vk_actions(vk_open));
             }
@@ -835,24 +854,29 @@ impl GamepadPoll {
                 service_log("native kbd: closing warmUP VK, sign-in yielded to Windows keyboard");
                 return Ok(vec![VkLoopAction::Close]);
             }
-            #[cfg(windows)]
             {
                 if !self.backend.is_connected() {
                     self.pad_down.clear();
                     self.stick_nav = None;
                     crate::vk_nav::release_holds();
-                } else if Self::service_signin_desktop() {
+                }
+                #[cfg(windows)]
+                if self.backend.is_connected() && Self::service_signin_desktop() {
                     crate::vk_nav::cancel_key_repeat();
                 }
                 self.sync_stick_nav(lx, ly);
-                if crate::win::vk_ui::tick_dpad_hold(Instant::now()) {
-                    // Held d-pad move or held-key auto-repeat fired — ratchet tick.
+                let now = Instant::now();
+                #[cfg(windows)]
+                let ticked = crate::win::vk_ui::tick_dpad_hold(now);
+                #[cfg(not(windows))]
+                let ticked = crate::vk_nav::tick_dpad_hold(now) | crate::vk_nav::tick_key_repeat(now);
+                if ticked {
                     self.backend.haptic_tick();
-                    crate::win::vk_ui::request_repaint();
+                    crate::vk_nav::request_ui_repaint();
                 }
-                if crate::vk_nav::tick_modifier_hold(Instant::now()) {
+                if crate::vk_nav::tick_modifier_hold(now) {
                     self.backend.haptic_alert();
-                    crate::win::vk_ui::request_repaint();
+                    crate::vk_nav::request_ui_repaint();
                 }
             }
             let mut edges = Vec::new();
@@ -864,9 +888,11 @@ impl GamepadPoll {
                     edges.push(edge);
                 }
             }
-            #[cfg(windows)]
             if self.view_sheet.tick(Instant::now()) {
+                #[cfg(windows)]
                 crate::win::shortcut_sheet::set_shown(true);
+                #[cfg(not(windows))]
+                crate::vk_sheet::set_shown(true);
             }
             return Ok(edges);
         }
@@ -911,7 +937,6 @@ impl GamepadPoll {
             crate::gamepad_backend::poll_mode_is_sleep() && !Self::service_signin_desktop();
         #[cfg(not(windows))]
         let sleeping = crate::gamepad_backend::poll_mode_is_sleep();
-        #[cfg(windows)]
         {
             let chord = sleeping
                 && self.shot_select_down
@@ -971,13 +996,58 @@ impl GamepadPoll {
                     continue;
                 }
             }
+            #[cfg(target_os = "linux")]
+            if change.pressed
+                && !self.view_down
+                && cursor_injection_enabled
+                && crate::linux_game_detect::omarchy_overlay_open()
+            {
+                let key = match change.button {
+                    Button::Up => Some(enigo::Key::UpArrow),
+                    Button::Down => Some(enigo::Key::DownArrow),
+                    Button::Left => Some(enigo::Key::LeftArrow),
+                    Button::Right => Some(enigo::Key::RightArrow),
+                    Button::A => Some(enigo::Key::Return),
+                    Button::B => Some(enigo::Key::Escape),
+                    _ => None,
+                };
+                if let Some(key) = key {
+                    cursor.tap_chord(vec![key]);
+                    self.backend.haptic_tick();
+                    continue;
+                }
+            }
+            #[cfg(target_os = "linux")]
+            if change.pressed
+                && !self.view_down
+                && !crate::pipe_server::native_vk_suppressed()
+                && !(self.shot_lb_down && self.shot_rb_down)
+                && cursor_injection_enabled
+                && crate::config::gamepad_settings().cursor_enabled
+            {
+                if let Some(action) =
+                    crate::app_profiles::chord_for_foreground(change.button.as_str())
+                {
+                    match action {
+                        crate::app_profiles::ProfileAction::Keys(chord) => cursor.tap_chord(chord),
+                        crate::app_profiles::ProfileAction::Hypr(command) => {
+                            let _ = std::thread::Builder::new()
+                                .name("hypr-profile".into())
+                                .spawn(move || {
+                                    crate::linux_game_detect::hypr_run(&command.lua, &command.legacy)
+                                });
+                        }
+                    }
+                    self.backend.haptic_tick();
+                    continue;
+                }
+            }
             let view_action = view_chord_step(&mut self.view_down, &mut self.view_chorded, change);
             // Use one mode snapshot for forwarding and local handling. Sending L3 to warmUP
             // while also opening the native VK lets a delayed launcher event open/focus its dock
             // over the user's browser. Keep desktop VK/voice shortcuts local, just as in Browser.
             let native_vk_suppressed = crate::pipe_server::native_vk_suppressed();
-            let warmup_browser_foreground = matches!(change.button, Button::L3 | Button::R3)
-                && crate::vk_nav::foreground_is_warmup_browser();
+            let warmup_browser_foreground = warmup_browser_foreground(change.button);
             if !companion_owns_stick_click(
                 change.button,
                 native_vk_suppressed,
@@ -985,7 +1055,6 @@ impl GamepadPoll {
             ) {
                 crate::pipe_server::publish_button(change.button.as_str(), change.pressed);
             }
-            #[cfg(windows)]
             if is_guide_launch(
                 change,
                 crate::pipe_server::desktop_connected(),
@@ -1002,8 +1071,7 @@ impl GamepadPoll {
             }
             // R3 starts dictation even with the VK closed, so voice typing into the
             // focused app is a single click — no need to open the keyboard first.
-            // When voice typing is off the click does nothing.
-            #[cfg(windows)]
+            #[cfg(any(windows, all(target_os = "linux", feature = "speech")))]
             if change.button == Button::R3 && change.pressed && !native_vk_suppressed {
                 if crate::config::voice_enabled() {
                     crate::vk_nav::start_voice_input();
@@ -1011,7 +1079,6 @@ impl GamepadPoll {
                 }
                 continue;
             }
-            #[cfg(windows)]
             if matches!(change.button, Button::Lt | Button::Rt) && !Self::service_signin_desktop() {
                 let chord_held = self.shot_lb_down && self.shot_rb_down;
                 if chord_held && change.pressed {
@@ -1081,7 +1148,6 @@ impl GamepadPoll {
                     self.backend.haptic_confirm();
                 }
             }
-            #[cfg(windows)]
             if view_action == ViewChordAction::Paste {
                 let skip = native_vk_suppressed || Self::service_signin_desktop();
                 crate::install::log_line(&format!(
@@ -1106,7 +1172,6 @@ impl GamepadPoll {
                     // Distinct, softer feedback: the chord registered, but warmUP
                     // isn't installed, so we don't fake the launch buzz.
                     self.backend.haptic_tick();
-                    #[cfg(windows)]
                     crate::install::log_line("launch hotkey ignored: warmUP is not installed");
                 }
             }
@@ -1329,10 +1394,13 @@ impl GamepadPoll {
         crate::config::service_mode() && Self::input_desktop_is_winlogon()
     }
 
-    #[cfg(windows)]
+    #[cfg(not(windows))]
+    fn service_signin_desktop() -> bool {
+        false
+    }
+
     fn handle_vk_open_button(&mut self, change: &ButtonChange) -> Option<VkLoopAction> {
         use crate::vk_nav;
-        use crate::win::vk_ui;
 
         if change.button != VK_BUTTON
             && self
@@ -1405,7 +1473,7 @@ impl GamepadPoll {
                 if vk_nav::dpad_pressed(change.button) {
                     self.backend.haptic_tick();
                 }
-                vk_ui::request_repaint();
+                vk_nav::request_ui_repaint();
                 None
             }
             (Button::Up | Button::Down | Button::Left | Button::Right, false) => {
@@ -1423,7 +1491,7 @@ impl GamepadPoll {
                     vk_nav::repeat_pressed(vk_nav::RepeatKey::Activate);
                     self.backend.haptic_tick();
                 }
-                vk_ui::request_repaint();
+                vk_nav::request_ui_repaint();
                 None
             }
             (Button::A | Button::Touchpad, false) => {
@@ -1439,7 +1507,7 @@ impl GamepadPoll {
                     vk_nav::backspace();
                     vk_nav::repeat_pressed(vk_nav::RepeatKey::Backspace);
                     self.backend.haptic_tick();
-                    vk_ui::request_repaint();
+                    vk_nav::request_ui_repaint();
                 }
                 None
             }
@@ -1468,7 +1536,7 @@ impl GamepadPoll {
                     vk_nav::space();
                     vk_nav::repeat_pressed(vk_nav::RepeatKey::Space);
                     self.backend.haptic_tick();
-                    vk_ui::request_repaint();
+                    vk_nav::request_ui_repaint();
                 }
                 None
             }
@@ -1490,17 +1558,20 @@ impl GamepadPoll {
                     .view_sheet
                     .release(Instant::now(), self.vk_select_chord_used);
                 if release.hide_sheet {
+                    #[cfg(windows)]
                     crate::win::shortcut_sheet::set_shown(false);
+                    #[cfg(not(windows))]
+                    crate::vk_sheet::set_shown(false);
                 }
                 if release.tap {
                     // Web SELECT: jump into the suggestion strip when populated.
                     if crate::vk_predict::strip_engaged() {
                         crate::vk_predict::disengage();
                         self.backend.haptic_tick();
-                        vk_ui::request_repaint();
+                        vk_nav::request_ui_repaint();
                     } else if crate::vk_predict::engage() {
                         self.backend.haptic_tick();
-                        vk_ui::request_repaint();
+                        vk_nav::request_ui_repaint();
                     }
                 }
                 self.vk_select_chord_used = false;
@@ -1513,7 +1584,7 @@ impl GamepadPoll {
                         vk_nav::flash_shoulder(false);
                         if crate::vk_predict::cycle_prev() {
                             self.backend.haptic_tick();
-                            vk_ui::request_repaint();
+                            vk_nav::request_ui_repaint();
                         }
                     }
                     vk_nav::ShoulderNav::CaretWord => {
@@ -1542,7 +1613,7 @@ impl GamepadPoll {
                         vk_nav::flash_shoulder(true);
                         if crate::vk_predict::cycle_next() {
                             self.backend.haptic_tick();
-                            vk_ui::request_repaint();
+                            vk_nav::request_ui_repaint();
                         }
                     }
                     vk_nav::ShoulderNav::CaretWord => {
@@ -1588,7 +1659,7 @@ impl GamepadPoll {
                 if crate::config::voice_enabled() {
                     vk_nav::start_voice_input();
                     vk_nav::flash_voice();
-                    vk_ui::request_repaint();
+                    vk_nav::request_ui_repaint();
                     self.backend.haptic_alert();
                 }
                 None
@@ -1604,16 +1675,8 @@ impl GamepadPoll {
         }
     }
 
-    #[cfg(not(windows))]
-    fn handle_vk_open_button(&mut self, _change: &ButtonChange) -> Option<VkLoopAction> {
-        None
-    }
-
-    /// Left stick → grid focus with the same hold-repeat path as the D-pad (`FUN_00464d00`).
-    #[cfg(windows)]
     fn sync_stick_nav(&mut self, lx: f32, ly: f32) {
         use crate::vk_nav;
-        use crate::win::vk_ui;
 
         const THRESH: f32 = 0.55;
         let dir = if lx.abs().max(ly.abs()) < THRESH {
@@ -1634,7 +1697,7 @@ impl GamepadPoll {
                 if vk_nav::dpad_pressed(d) {
                     self.backend.haptic_tick();
                 }
-                vk_ui::request_repaint();
+                vk_nav::request_ui_repaint();
             }
             (Some(old), None) => vk_nav::dpad_released(old),
             (Some(old), Some(d)) if old != d => {
@@ -1642,7 +1705,7 @@ impl GamepadPoll {
                 if vk_nav::dpad_pressed(d) {
                     self.backend.haptic_tick();
                 }
-                vk_ui::request_repaint();
+                vk_nav::request_ui_repaint();
             }
             _ => {}
         }
@@ -1760,7 +1823,6 @@ where
 #[cfg(windows)]
 static NATIVE_VK_SKIP_LOGGED: AtomicBool = AtomicBool::new(false);
 
-#[cfg(windows)]
 fn service_log(msg: &str) {
     if crate::config::service_mode() {
         crate::install::log_line(msg);
@@ -1784,16 +1846,12 @@ where
         }
         #[cfg(not(windows))]
         {
-            return GamepadPoll::open_service();
+            GamepadPoll::open_service()?
         }
     } else {
         GamepadPoll::open_desktop()?
     };
 
-    #[cfg(windows)]
-    if service_mode {
-        service_log(&format!("gamepad ready: {}", poll.controller_label()));
-    }
     if use_ctrlc {
         install_ctrlc_handler()?;
     } else {
@@ -1803,7 +1861,14 @@ where
     #[cfg(all(windows, feature = "vk-panels"))]
     crate::clipboard_history::start();
     let mut cursor = if service_mode {
-        PcCursor::new_service()
+        #[cfg(windows)]
+        {
+            PcCursor::new_service()
+        }
+        #[cfg(not(windows))]
+        {
+            PcCursor::new()?
+        }
     } else {
         PcCursor::new()?
     };
@@ -1841,7 +1906,10 @@ where
         );
         println!("Ctrl+C to stop.");
     } else {
-        #[cfg(windows)]
+        service_log(&format!(
+            "gamepad ready: {}",
+            poll.controller_label()
+        ));
         service_log(&format!(
             "gamepad loop running ({}; L3=toggle VK)",
             poll.controller_label()
@@ -1860,6 +1928,11 @@ where
         if now >= next_voice_check {
             next_voice_check = now + Duration::from_secs(1);
             crate::win::speech_input::enforce_voice_enabled();
+        }
+        #[cfg(all(target_os = "linux", feature = "speech"))]
+        if now >= next_voice_check {
+            next_voice_check = now + Duration::from_secs(1);
+            crate::linux_speech::enforce_voice_enabled();
         }
 
         // Publish the current controller connection state to the pipe server (#347).
@@ -1907,7 +1980,6 @@ where
             }
             Err(e) => {
                 if service_mode {
-                    #[cfg(windows)]
                     service_log(&format!("gamepad poll error (continuing): {e}"));
                 } else {
                     return Err(e);
@@ -1955,7 +2027,6 @@ where
             interruptible_sleep(interval - elapsed);
         }
     }
-    #[cfg(windows)]
     if service_mode {
         service_log("gamepad loop exited (stop flag)");
     }

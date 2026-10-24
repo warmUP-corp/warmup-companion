@@ -10,12 +10,6 @@ pub fn service_mode() -> bool {
     std::env::var_os("WARMUP_VK_SERVICE").is_some_and(|v| v != "0")
 }
 
-#[cfg(feature = "gamepad")]
-const USERLAND_POLL_FILE: &str = "userland-poll.mode";
-#[cfg(feature = "gamepad")]
-const SETTINGS_FILE: &str = "settings.ini";
-#[cfg(feature = "gamepad")]
-const RUNTIME_STATUS_FILE: &str = "runtime-status.ini";
 #[cfg(all(windows, not(feature = "gamepad")))]
 const PROMPT_USERLAND_DEBUG_FILE: &str = r"C:\ProgramData\WarmupVk\prompt-userland-debug.enabled";
 
@@ -245,7 +239,7 @@ pub fn prompt_userland_debug() -> bool {
 
 #[cfg(not(windows))]
 pub fn prompt_overlay_enabled() -> bool {
-    false
+    !std::env::var_os("WARMUP_VK_PROMPT").is_some_and(|value| value == "0")
 }
 
 #[cfg(not(windows))]
@@ -284,17 +278,13 @@ pub fn set_prompt_userland_debug(_enabled: bool) -> Result<(), String> {
 
 #[cfg(feature = "gamepad")]
 pub fn runtime_status_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("LOCALAPPDATA").map(|base| {
-        std::path::PathBuf::from(base)
-            .join("WarmupVk")
-            .join(RUNTIME_STATUS_FILE)
-    })
+    crate::paths::runtime_status_file()
 }
 
 #[cfg(feature = "gamepad")]
 pub fn write_userland_poll_paused(paused: bool) -> Result<(), String> {
     let path = runtime_status_path()
-        .ok_or_else(|| "LOCALAPPDATA is not set; cannot write runtime status".to_string())?;
+        .ok_or_else(|| "runtime status path is unavailable".to_string())?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create runtime status dir: {e}"))?;
     }
@@ -336,7 +326,10 @@ fn gamepad_settings_uncached() -> GamepadSettings {
     let raw = std::env::var("WARMUP_VK_USERLAND_POLL_MODE")
         .ok()
         .or_else(|| userland_gamepad_poll_mode_path().and_then(|p| std::fs::read_to_string(p).ok()))
-        .or_else(|| std::fs::read_to_string(r"C:\ProgramData\WarmupVk\userland-poll.mode").ok());
+        .or_else(|| {
+            crate::paths::program_data_userland_poll_file()
+                .and_then(|path| std::fs::read_to_string(path).ok())
+        });
     if raw.is_some() {
         settings.userland_poll_mode = parse_userland_gamepad_poll_mode(raw.as_deref());
     }
@@ -575,11 +568,7 @@ pub fn parse_userland_gamepad_poll_mode(raw: Option<&str>) -> warmup_gamepad::Po
 
 #[cfg(feature = "gamepad")]
 pub fn userland_gamepad_poll_mode_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("LOCALAPPDATA").map(|base| {
-        std::path::PathBuf::from(base)
-            .join("WarmupVk")
-            .join(USERLAND_POLL_FILE)
-    })
+    crate::paths::userland_poll_mode_file()
 }
 
 #[cfg(feature = "gamepad")]
@@ -601,18 +590,7 @@ pub fn settings_path() -> Option<std::path::PathBuf> {
     // pointing at systemprofile — so theme/cursor pushes never met the reader.
     // The installer grants Users read/write on this one file (the dir stays locked
     // to SYSTEM+Admins), so the tray and desktop app can still read/edit it.
-    #[cfg(windows)]
-    {
-        Some(std::path::PathBuf::from(r"C:\ProgramData\WarmupVk").join(SETTINGS_FILE))
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::var_os("LOCALAPPDATA").map(|base| {
-            std::path::PathBuf::from(base)
-                .join("WarmupVk")
-                .join(SETTINGS_FILE)
-        })
-    }
+    crate::paths::settings_file()
 }
 
 /// Commented `settings.ini` template. Each value line is commented and free of
@@ -735,7 +713,7 @@ const KEEP_ON_RESET: &[&str] = &[
 
 #[cfg(feature = "gamepad")]
 pub fn settings_backup_name(y: u16, mo: u16, d: u16, h: u16, mi: u16, sec: u16) -> String {
-    format!("{SETTINGS_FILE}.bak-{y:04}{mo:02}{d:02}-{h:02}{mi:02}{sec:02}")
+    format!("settings.ini.bak-{y:04}{mo:02}{d:02}-{h:02}{mi:02}{sec:02}")
 }
 
 #[cfg(feature = "gamepad")]
@@ -801,7 +779,13 @@ fn backup_name_now() -> String {
     settings_backup_name(t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond)
 }
 
-#[cfg(all(feature = "gamepad", windows))]
+#[cfg(all(feature = "gamepad", target_os = "linux"))]
+fn backup_name_now() -> String {
+    let (y, mo, d, h, mi, sec) = crate::time_util::local_now();
+    settings_backup_name(y, mo, d, h, mi, sec)
+}
+
+#[cfg(all(feature = "gamepad", any(windows, target_os = "linux")))]
 pub fn backup_settings() -> Result<std::path::PathBuf, String> {
     let path = settings_path().ok_or_else(|| "settings path unavailable".to_string())?;
     let current = std::fs::read_to_string(&path).unwrap_or_default();
@@ -817,7 +801,7 @@ pub fn export_settings_to(path: &std::path::Path) -> Result<(), String> {
     std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
-#[cfg(all(feature = "gamepad", windows))]
+#[cfg(all(feature = "gamepad", any(windows, target_os = "linux")))]
 pub fn reset_settings_to_shipped() -> Result<std::path::PathBuf, String> {
     let path = settings_path().ok_or_else(|| "settings path unavailable".to_string())?;
     let current = std::fs::read_to_string(&path).unwrap_or_default();
@@ -874,7 +858,7 @@ pub fn replace_profile_settings(lines: &[(String, String)]) -> Result<(), String
 pub fn set_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
     validate_gamepad_setting(key, value)?;
     let path = settings_path()
-        .ok_or_else(|| "LOCALAPPDATA is not set; cannot write settings".to_string())?;
+        .ok_or_else(|| "settings path is unavailable".to_string())?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create settings dir: {e}"))?;
     }
@@ -891,6 +875,10 @@ pub fn set_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
     #[cfg(windows)]
     if key == "voice_enabled" {
         crate::win::speech_input::enforce_voice_enabled();
+    }
+    #[cfg(all(target_os = "linux", feature = "speech"))]
+    if key == "voice_enabled" {
+        crate::linux_speech::enforce_voice_enabled();
     }
     Ok(())
 }

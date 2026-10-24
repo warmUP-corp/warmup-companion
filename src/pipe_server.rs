@@ -18,6 +18,9 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, Once, OnceLock};
 
+#[path = "ipc_io.rs"]
+mod ipc_io;
+
 /// Cursor mode (A → OS left-click). `false` = focus/D-pad mode (buttons only). Default true;
 /// the connected desktop pushes the real value via `config` frames (#349).
 static CLICKS_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -34,9 +37,11 @@ static BROWSER_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// True while a warmUP desktop client has completed the pipe handshake.
 static DESKTOP_CONNECTED: AtomicBool = AtomicBool::new(false);
 
-pub use crate::device_commands::drain_device_commands;
+#[cfg(windows)]
+pub(crate) use crate::tracking_owner::tracking_owner_from_process;
+pub(crate) use crate::tracking_owner::TrackingOwner;
 pub(crate) use crate::led_engine::apply_led;
-pub(crate) use crate::tracking_owner::{tracking_owner_from_process, TrackingOwner};
+pub use crate::device_commands::drain_device_commands;
 
 /// Coalesced visual-cursor hint accumulated since the last send: `(dx, dy, dirty)`.
 static CURSOR_ACC: OnceLock<Mutex<(f64, f64, bool)>> = OnceLock::new();
@@ -474,18 +479,48 @@ fn companion_snapshot() -> (ConfigPayload, CompanionSettingsPayload) {
     (config, settings)
 }
 
-#[cfg(windows)]
 static SETTINGS_GEN: AtomicU64 = AtomicU64::new(0);
-#[cfg(windows)]
+
 static SETTINGS_WATCHER: Once = Once::new();
 
-#[cfg(windows)]
 fn ensure_settings_watcher() {
     SETTINGS_WATCHER.call_once(|| {
         let _ = std::thread::Builder::new()
             .name("warmup-settings-watch".into())
             .spawn(settings_watch_loop);
     });
+}
+
+#[cfg(not(windows))]
+fn settings_watch_loop() {
+    use std::time::SystemTime;
+    type FileStamp = Option<(SystemTime, u64)>;
+    let file_stamp = |path: &std::path::Path| -> FileStamp {
+        let meta = std::fs::metadata(path).ok()?;
+        Some((meta.modified().ok()?, meta.len()))
+    };
+    let tracked: Vec<std::path::PathBuf> = [
+        crate::config::settings_path(),
+        crate::config::runtime_status_path(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let mut stamps: Vec<FileStamp> = tracked.iter().map(|p| file_stamp(p)).collect();
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let mut changed = false;
+        for (path, prev) in tracked.iter().zip(stamps.iter_mut()) {
+            let next = file_stamp(path);
+            if next != *prev {
+                *prev = next;
+                changed = true;
+            }
+        }
+        if changed {
+            SETTINGS_GEN.fetch_add(1, Ordering::Release);
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -789,7 +824,7 @@ fn parental_blocked_queue() -> &'static Mutex<VecDeque<ParentalBlockedPayload>> 
 }
 
 /// Queue a Kid Mode block notification for the connected warmUP desktop client.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub fn publish_parental_blocked(payload: ParentalBlockedPayload) {
     if let Ok(mut q) = parental_blocked_queue().lock() {
         while q.len() >= PARENTAL_BLOCKED_QUEUE_CAP {
@@ -799,7 +834,7 @@ pub fn publish_parental_blocked(payload: ParentalBlockedPayload) {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn publish_parental_blocked(_payload: ParentalBlockedPayload) {}
 
 fn last_guide() -> &'static Mutex<Option<bool>> {
@@ -816,6 +851,19 @@ fn disconnected() -> ConnectionPayload {
 
 /// Map the active backend's controller label to a connection snapshot and store it.
 /// `"none"` (the `GamepadPoll` sentinel) or an empty label means no controller.
+pub fn connection_name() -> String {
+    state()
+        .lock()
+        .map(|snap| {
+            if snap.connected {
+                snap.controller_name.clone()
+            } else {
+                "none".to_string()
+            }
+        })
+        .unwrap_or_else(|_| "none".to_string())
+}
+
 pub fn publish_from_label(label: &str) {
     let next = label_to_payload(label);
     if let Ok(mut g) = state().lock() {
@@ -904,7 +952,7 @@ fn drain_parental_blocked() -> Vec<ParentalBlockedPayload> {
         .unwrap_or_default()
 }
 
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 fn apply_library_watch(owner: &TrackingOwner, payload: &crate::protocol::LibraryWatchPayload) {
     if let Err(error) = crate::library_watch::apply_watch(owner, payload) {
         crate::install::log_line(&format!(
@@ -913,18 +961,73 @@ fn apply_library_watch(owner: &TrackingOwner, payload: &crate::protocol::Library
     }
 }
 
-#[cfg(all(windows, not(feature = "gamepad")))]
+#[cfg(not(all(any(windows, target_os = "linux"), feature = "gamepad")))]
 fn apply_library_watch(_owner: &TrackingOwner, _payload: &crate::protocol::LibraryWatchPayload) {}
 
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 fn apply_parental_guard(payload: &ParentalGuardPayload) {
     crate::parental_guard::apply_guard(payload);
 }
 
-#[cfg(all(windows, not(feature = "gamepad")))]
+#[cfg(not(all(any(windows, target_os = "linux"), feature = "gamepad")))]
 fn apply_parental_guard(_payload: &ParentalGuardPayload) {}
 
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(any(windows, target_os = "linux"))]
+fn apply_game_detection(payload: &crate::protocol::GameDetectionPayload) {
+    match crate::game_list::accept_chunk(payload) {
+        Ok(crate::game_list::ChunkOutcome::Installed(revision)) => {
+            crate::install::log_line(&format!("game detection list revision {revision} applied"));
+        }
+        Ok(crate::game_list::ChunkOutcome::Pending) => {}
+        Err(error) => crate::install::log_line(&format!(
+            "game detection chunk {}/{} of revision {} rejected: {error:?}",
+            payload.chunk + 1,
+            payload.chunks,
+            payload.revision
+        )),
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn apply_game_detection(_payload: &crate::protocol::GameDetectionPayload) {}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn reset_game_detection() {
+    crate::game_list::reset_assembly();
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn reset_game_detection() {}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn game_detection_revision() -> Option<u64> {
+    crate::game_list::revision()
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn game_detection_revision() -> Option<u64> {
+    None
+}
+
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
+fn set_running_games_owner(owner: Option<&TrackingOwner>) {
+    crate::playtime_tracker::set_running_games_owner(owner);
+}
+
+#[cfg(not(all(any(windows, target_os = "linux"), feature = "gamepad")))]
+fn set_running_games_owner(_owner: Option<&TrackingOwner>) {}
+
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
+fn current_running_games() -> Option<crate::protocol::RunningGamesPayload> {
+    crate::playtime_tracker::current_running_games()
+}
+
+#[cfg(not(all(any(windows, target_os = "linux"), feature = "gamepad")))]
+fn current_running_games() -> Option<crate::protocol::RunningGamesPayload> {
+    None
+}
+
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 fn apply_play_sessions_ack(
     owner: &TrackingOwner,
     payload: &crate::protocol::PlaySessionsAckPayload,
@@ -933,7 +1036,7 @@ fn apply_play_sessions_ack(
     crate::playtime_tracker::apply_play_sessions_ack(owner, payload, issued)
 }
 
-#[cfg(all(windows, not(feature = "gamepad")))]
+#[cfg(not(all(any(windows, target_os = "linux"), feature = "gamepad")))]
 fn apply_play_sessions_ack(
     _owner: &TrackingOwner,
     _payload: &crate::protocol::PlaySessionsAckPayload,
@@ -968,36 +1071,29 @@ fn parental_security_log_writable(path: &std::path::Path) -> bool {
     path.is_file()
 }
 
-/// Start the pipe server on its own thread. No-op on non-Windows (there the desktop
-/// owns input in-process, so there is no companion to serve).
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub fn spawn() {
     std::thread::Builder::new()
-        .name("warmup-pipe-server".into())
-        .spawn(server::serve_forever)
+        .name("warmup-input-server".into())
+        .spawn(|| {
+            #[cfg(windows)]
+            server::serve_forever();
+            #[cfg(target_os = "linux")]
+            ipc_io::serve_unix();
+        })
         .ok();
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn spawn() {}
 
 #[cfg(windows)]
 mod server {
     use super::{
-        apply_companion_settings, apply_config, apply_led, apply_library_watch, apply_mode,
-        apply_parental_guard, apply_play_sessions_ack, apply_rumble, clear_desktop_mode,
-        companion_snapshot, current, current_axis, current_battery, current_pads, drain_buttons,
-        drain_parental_blocked, ensure_settings_watcher, inbound_frame_ready, reset_button_stream,
-        set_native_vk_request, take_cursor_moved, take_touchpad, tracking_owner_from_process,
-        SettingsSync, TrackingOwner, DESKTOP_CONNECTED, SETTINGS_GEN,
+        clear_desktop_mode, reset_button_stream, tracking_owner_from_process, DESKTOP_CONNECTED,
     };
-    use crate::protocol::{
-        is_supported_protocol_version, AxisPayload, BatteryPayload, ConnectionPayload, DownFrame,
-        Hello, PadBatteryPayload, PadsPayload, UpFrame, PROTOCOL_VERSION,
-    };
-    use std::collections::HashSet;
     use std::sync::atomic::Ordering;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
         CloseHandle, GetLastError, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
@@ -1017,16 +1113,6 @@ mod server {
     const PIPE_NAME: &str = r"\\.\pipe\warmup-input";
     /// SYSTEM full control; the interactive user (the desktop's account) gets read+write.
     const SDDL: &str = "D:(A;;GA;;;SY)(A;;GRGW;;;IU)";
-    /// Re-send the current snapshot at least this often so a dropped idle client is noticed
-    /// (the write fails) and the server loops back to accept a new one.
-    const KEEPALIVE: Duration = Duration::from_secs(1);
-    /// Throttle for outbound `cursor_moved` hints (the OS cursor already moved; this just
-    /// keeps the webview's visual cursor in sync).
-    const CURSOR_HINT_INTERVAL: Duration = Duration::from_millis(100);
-
-    struct ClientIdentity {
-        owner: TrackingOwner,
-    }
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -1102,9 +1188,7 @@ mod server {
         Some((sa, psd))
     }
 
-    /// Handle one client connection start-to-finish, then disconnect the pipe instance.
     fn serve_one(pipe: HANDLE) {
-        // Block until a client connects. ERROR_PIPE_CONNECTED (client beat us to it) is fine.
         let _ = unsafe { ConnectNamedPipe(pipe, None) };
         let Some(identity) = client_identity(pipe) else {
             unsafe {
@@ -1113,10 +1197,10 @@ mod server {
             return;
         };
         DESKTOP_CONNECTED.store(true, Ordering::Relaxed);
-        if let Ok((issued_session_ids, sync)) = handshake(pipe, &identity) {
-            // Drop edges queued before this client connected (stale to it).
+        let mut session = super::ipc_io::Session::new(PipeRead { pipe }, PipeWrite { pipe });
+        if let Ok((issued_session_ids, sync)) = super::ipc_io::handshake(&mut session, &identity) {
             reset_button_stream();
-            stream(pipe, &identity.owner, issued_session_ids, sync);
+            super::ipc_io::stream(&mut session, &identity.owner, issued_session_ids, sync);
         }
         DESKTOP_CONNECTED.store(false, Ordering::Relaxed);
         clear_desktop_mode();
@@ -1125,7 +1209,7 @@ mod server {
         }
     }
 
-    fn client_identity(pipe: HANDLE) -> Option<ClientIdentity> {
+    fn client_identity(pipe: HANDLE) -> Option<super::ipc_io::ClientIdentity> {
         let mut pid = 0u32;
         if unsafe { GetNamedPipeClientProcessId(pipe, &mut pid) }.is_err() {
             return None;
@@ -1143,320 +1227,63 @@ mod server {
                 "pipe client rejected: process has no interactive non-System owner",
             );
         }
-        owner.map(|owner| ClientIdentity { owner })
+        owner.map(|owner| super::ipc_io::ClientIdentity { owner })
     }
 
-    /// Read the client `hello`, reject unsupported versions, reply with the negotiated version.
-    fn handshake(
+    struct PipeRead {
         pipe: HANDLE,
-        identity: &ClientIdentity,
-    ) -> std::io::Result<(HashSet<String>, SettingsSync)> {
-        let line = read_line(pipe)?;
-        let protocol_version;
-        match DownFrame::parse_line(line.trim_end()) {
-            Ok(DownFrame::Hello(h)) if is_supported_protocol_version(h.protocol_version) => {
-                protocol_version = h.protocol_version;
-                if let Some(mode) = h.mode {
-                    apply_mode(&mode);
-                }
-                if let Some(guard) = h.parental_guard {
-                    apply_parental_guard(&guard);
-                }
-                if let Some(watch) = h.library_watch {
-                    apply_library_watch(&identity.owner, &watch);
-                }
-            }
-            Ok(DownFrame::Hello(h)) => {
-                return Err(io_err(&format!(
-                    "hello rejected: client protocol_version={}, companion expects {PROTOCOL_VERSION}",
-                    h.protocol_version
-                )));
-            }
-            _ => return Err(io_err("hello rejected: missing or invalid hello frame")),
-        }
-        let (config_snapshot, settings_snapshot) = companion_snapshot();
-        let mut sync = SettingsSync::new(settings_snapshot.clone());
-        sync.config_reference = Some(config_snapshot.clone());
-        let reply = UpFrame::Hello(Hello {
-            protocol_version,
-            config: serde_json::to_value(config_snapshot).ok(),
-            mode: None,
-            companion_settings: Some(settings_snapshot),
-            parental_guard: None,
-            library_watch: None,
-        });
-        write_all(pipe, reply.to_ndjson_line().as_bytes())?;
-        #[cfg(feature = "gamepad")]
-        {
-            crate::playtime_tracker::on_desktop_connected(&identity.owner);
-            if protocol_version == PROTOCOL_VERSION {
-                return flush_play_sessions(pipe, &identity.owner).map(|issued| (issued, sync));
-            }
-        }
-        Ok((HashSet::new(), sync))
     }
 
-    /// Push any closed offline sessions to warmUP immediately after handshake.
-    fn flush_play_sessions(
-        pipe: HANDLE,
-        owner: &TrackingOwner,
-    ) -> std::io::Result<HashSet<String>> {
-        let payload = crate::playtime_tracker::take_closed_sessions_for_flush(owner);
-        if payload.sessions.is_empty() {
-            return Ok(HashSet::new());
-        }
-        let issued = payload
-            .sessions
-            .iter()
-            .map(|session| session.external_id.clone())
-            .collect();
-        write_all(
-            pipe,
-            UpFrame::PlaySessions(payload).to_ndjson_line().as_bytes(),
-        )?;
-        Ok(issued)
-    }
-
-    /// Full-duplex session: drain inbound `config` (non-blocking), and write button edges
-    /// (low latency), `cursor_moved` hints (throttled), and connection snapshots (on change
-    /// plus a keepalive so a dropped idle client is noticed via the write error).
-    fn stream(
-        pipe: HANDLE,
-        owner: &TrackingOwner,
-        mut issued_session_ids: HashSet<String>,
-        mut sync: SettingsSync,
-    ) {
-        let mut last: Option<ConnectionPayload> = None;
-        let mut last_battery: Option<BatteryPayload> = None;
-        let mut last_pads: Option<Vec<PadBatteryPayload>> = None;
-        let mut last_axis: Option<AxisPayload> = None;
-        let mut last_conn_write = Instant::now()
-            .checked_sub(KEEPALIVE)
-            .unwrap_or_else(Instant::now);
-        let mut last_cursor_write = Instant::now();
-        ensure_settings_watcher();
-        let mut seen = SETTINGS_GEN.load(Ordering::Acquire);
-        let mut last_input = Instant::now()
-            .checked_sub(Duration::from_secs(2))
-            .unwrap_or_else(Instant::now);
-        loop {
-            let gen = SETTINGS_GEN.load(Ordering::Acquire);
-            if gen != seen {
-                seen = gen;
-                crate::config::invalidate_gamepad_settings_cache();
-                let (config, settings) = companion_snapshot();
-                if let Some(changed) = sync.absorb_snapshot(&config, &settings) {
-                    crate::install::log_line("pipe settings_changed sent");
-                    if write_all(
-                        pipe,
-                        UpFrame::SettingsChanged(changed).to_ndjson_line().as_bytes(),
-                    )
-                    .is_err()
-                    {
-                        return;
-                    }
-                }
+    impl std::io::Read for PipeRead {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
             }
-            if drain_inbound_config(pipe, owner, &mut issued_session_ids, &mut sync).is_err() {
-                return;
+            let mut avail = 0u32;
+            unsafe { PeekNamedPipe(self.pipe, None, 0, None, Some(&mut avail), None) }
+                .map_err(to_io)?;
+            if avail == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "pipe empty",
+                ));
             }
-            for edge in drain_buttons() {
-                last_input = Instant::now();
-                if write_all(pipe, UpFrame::Button(edge).to_ndjson_line().as_bytes()).is_err() {
-                    return; // client gone — return to accept a new one
-                }
-            }
-            for blocked in drain_parental_blocked() {
-                if write_all(
-                    pipe,
-                    UpFrame::ParentalBlocked(blocked)
-                        .to_ndjson_line()
-                        .as_bytes(),
-                )
-                .is_err()
-                {
-                    return;
-                }
-            }
-            // Battery — send only when it changes (low-rate; no keepalive needed).
-            let battery = current_battery();
-            if battery.is_some() && battery != last_battery {
-                if let Some(b) = battery {
-                    if write_all(pipe, UpFrame::Battery(b).to_ndjson_line().as_bytes()).is_err() {
-                        return;
-                    }
-                    last_battery = Some(b);
-                }
-            }
-            // Every connected pad with its battery — sent when the list or a level changes.
-            let pads = current_pads();
-            if last_pads.as_ref() != Some(&pads) {
-                let frame = UpFrame::Pads(PadsPayload { pads: pads.clone() });
-                if write_all(pipe, frame.to_ndjson_line().as_bytes()).is_err() {
-                    return;
-                }
-                last_pads = Some(pads);
-            }
-            if last_cursor_write.elapsed() >= CURSOR_HINT_INTERVAL {
-                if let Some(hint) = take_cursor_moved() {
-                    last_input = Instant::now();
-                    if write_all(pipe, UpFrame::CursorMoved(hint).to_ndjson_line().as_bytes())
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
-                // Touchpad shares the cursor throttle (both are ≈100 ms visual hints).
-                let axis = current_axis();
-                if axis.is_some() && axis != last_axis {
-                    if let Some(a) = axis {
-                        last_input = Instant::now();
-                        if write_all(pipe, UpFrame::Axis(a).to_ndjson_line().as_bytes()).is_err() {
-                            return;
-                        }
-                        last_axis = Some(a);
-                    }
-                }
-                if let Some(tp) = take_touchpad() {
-                    last_input = Instant::now();
-                    if write_all(pipe, UpFrame::Touchpad(tp).to_ndjson_line().as_bytes()).is_err() {
-                        return;
-                    }
-                }
-                last_cursor_write = Instant::now();
-            }
-            let cur = current();
-            // A (re)connected pad usually reports the same level as before, so the change check
-            // alone would keep the battery from going out again; the desktop reset its copy on
-            // disconnect and would sit at "unknown" until the level moved.
-            if last.as_ref() != Some(&cur) {
-                last_battery = None;
-                last_pads = None;
-            }
-            if last.as_ref() != Some(&cur) || last_conn_write.elapsed() >= KEEPALIVE {
-                if write_all(
-                    pipe,
-                    UpFrame::Connection(cur.clone()).to_ndjson_line().as_bytes(),
-                )
-                .is_err()
-                {
-                    return;
-                }
-                last = Some(cur);
-                last_conn_write = Instant::now();
-            }
-            let idle = if last_input.elapsed() < Duration::from_secs(1) {
-                Duration::from_millis(5)
-            } else {
-                Duration::from_millis(50)
-            };
-            std::thread::sleep(idle);
-        }
-    }
-
-    fn drain_inbound_config(
-        pipe: HANDLE,
-        owner: &TrackingOwner,
-        issued_session_ids: &mut HashSet<String>,
-        sync: &mut SettingsSync,
-    ) -> std::io::Result<()> {
-        while peek_has_newline(pipe)? {
-            let line = read_line(pipe)?;
-            let trimmed = line.trim_end();
-            if trimmed.is_empty() {
-                continue;
-            }
-            match DownFrame::parse_line(trimmed) {
-                Ok(DownFrame::Config(p)) => apply_config(sync, &p),
-                Ok(DownFrame::Mode(p)) => apply_mode(&p),
-                Ok(DownFrame::Rumble(p)) => apply_rumble(&p),
-                Ok(DownFrame::Led(p)) => apply_led(&p),
-                Ok(DownFrame::CompanionSettings(p)) => apply_companion_settings(sync, &p),
-                Ok(DownFrame::NativeVk(p)) => set_native_vk_request(&p),
-                Ok(DownFrame::ParentalGuard(p)) => apply_parental_guard(&p),
-                Ok(DownFrame::LibraryWatch(p)) => apply_library_watch(owner, &p),
-                Ok(DownFrame::PlaySessionsAck(p)) => {
-                    let removed = apply_play_sessions_ack(owner, &p, issued_session_ids);
-                    if removed != 0 {
-                        issued_session_ids
-                            .retain(|external_id| !p.external_ids.contains(external_id));
-                    }
-                }
-                Ok(DownFrame::ShutDown(_)) => handle_shut_down(),
-                Err(e) => {
-                    crate::install::log_line(&format!("pipe inbound frame parse error: {e}"));
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
-
-    /// Read once a newline is visible or the frame exceeds the peek buffer; the latter must
-    /// be drained so a large frame cannot permanently hide its newline.
-    fn peek_has_newline(pipe: HANDLE) -> std::io::Result<bool> {
-        let mut buf = [0u8; 4096];
-        let mut read = 0u32;
-        let mut avail = 0u32;
-        unsafe {
-            PeekNamedPipe(
-                pipe,
-                Some(buf.as_mut_ptr() as *mut core::ffi::c_void),
-                buf.len() as u32,
-                Some(&mut read),
-                Some(&mut avail),
-                None,
-            )
-        }
-        .map_err(to_io)?;
-        Ok(inbound_frame_ready(&buf[..read as usize], avail))
-    }
-
-    fn read_line(pipe: HANDLE) -> std::io::Result<String> {
-        let mut out: Vec<u8> = Vec::with_capacity(256);
-        let mut byte = [0u8; 1];
-        loop {
             let mut read = 0u32;
-            unsafe { ReadFile(pipe, Some(&mut byte), Some(&mut read), None) }.map_err(to_io)?;
+            let take = buf.len().min(avail as usize);
+            unsafe { ReadFile(self.pipe, Some(&mut buf[..take]), Some(&mut read), None) }
+                .map_err(to_io)?;
             if read == 0 {
-                break; // EOF
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "pipe closed",
+                ));
             }
-            if byte[0] == b'\n' {
-                break;
-            }
-            out.push(byte[0]);
-            if out.len() > 64 * 1024 {
-                return Err(io_err("hello line too long"));
-            }
+            Ok(read as usize)
         }
-        String::from_utf8(out).map_err(|_| io_err("hello not valid UTF-8"))
     }
 
-    fn handle_shut_down() {
-        #[cfg(feature = "gamepad")]
-        {
-            if crate::parental_guard::is_blocking_active() {
-                crate::install::log_line("pipe shut_down refused: Kid Mode blocking is active");
-                crate::parental_guard::log_refused_shutdown();
-                return;
-            }
-        }
-        crate::install::request_service_stop();
-        #[cfg(feature = "gamepad")]
-        crate::gamepad::request_stop();
+    struct PipeWrite {
+        pipe: HANDLE,
     }
 
-    fn write_all(pipe: HANDLE, mut buf: &[u8]) -> std::io::Result<()> {
-        while !buf.is_empty() {
+    impl std::io::Write for PipeWrite {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
             let mut written = 0u32;
-            unsafe { WriteFile(pipe, Some(buf), Some(&mut written), None) }.map_err(to_io)?;
+            unsafe { WriteFile(self.pipe, Some(buf), Some(&mut written), None) }.map_err(to_io)?;
             if written == 0 {
                 return Err(io_err("pipe write returned 0 bytes"));
             }
-            buf = &buf[written as usize..];
+            Ok(written as usize)
         }
-        Ok(())
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
+
 }
 
 #[cfg(test)]

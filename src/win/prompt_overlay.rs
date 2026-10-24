@@ -8,7 +8,6 @@
 //! WinEvent reattach hooks: it is static and simply toggles visibility as the
 //! loop thread reports state via [`tick`].
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -27,15 +26,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
-use super::controller_tips::{self, Gate, TipsState};
+use super::controller_tips;
 use super::desktop;
 use super::desktop_window::{self, DesktopApp, DesktopWindowThread};
 use super::vk_renderer::{self, VkRenderer};
+use crate::prompt_state::*;
 
 const WINDOW_CLASS: windows::core::PCWSTR = w!("WarmupPromptOverlayWindow");
 
 /// One canvas for the prompt pill AND the connection card: the pill sits in the
-/// bottom `vk_renderer::PROMPT_PILL_H` band and the card grows upward out of it,
+/// bottom `vk_paint::PROMPT_PILL_H` band and the card grows upward out of it,
 /// so the morph never moves or resizes the window (that is what made it drift).
 const PANEL_W: i32 = 720;
 const PANEL_H: i32 = 420;
@@ -52,13 +52,6 @@ const TIPS_H: i32 = 180;
 const REPAINT_TIMER_ID: usize = 12;
 /// ~60 fps so the reactive voice glow animates smoothly.
 const REPAINT_TIMER_MS: u32 = 16;
-const TICK_INTERVAL: Duration = Duration::from_millis(250);
-const CONNECTED_VISUAL_DURATION: Duration = Duration::from_millis(2400);
-const MORPH_DURATION: Duration = Duration::from_millis(420);
-/// Userland debug replays the Winlogon connect sequence on a loop so the morph
-/// can be watched on the normal desktop: no pad → card → ready prompt.
-const DEBUG_REPLAY_PERIOD: Duration = Duration::from_millis(6500);
-const DEBUG_REPLAY_CONNECT_AT: Duration = Duration::from_millis(1500);
 
 const PROMPT_PREFIX: &str = "Press ";
 const PROMPT_SUFFIX: &str = " for keyboard";
@@ -72,20 +65,11 @@ const DEFAULT_TEXT: u32 = 0x00FFFFFF;
 struct PromptOverlayController {
     thread: Option<DesktopWindowThread>,
     thread_kind: Option<PromptThreadKind>,
-    last_tick: Instant,
     last_visual: Option<PromptVisual>,
-    last_connected: bool,
-    connected_visual_until: Option<Instant>,
-    connected_card_shown: bool,
-    debug_epoch: Instant,
-    tips: TipsState,
+    state: PromptState,
 }
 
-static TIPS_REPLAY: AtomicBool = AtomicBool::new(false);
-
-pub fn request_controller_tips() {
-    TIPS_REPLAY.store(true, Ordering::SeqCst);
-}
+pub use crate::prompt_state::request_controller_tips;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PromptThreadKind {
@@ -114,95 +98,25 @@ impl Default for PromptOverlayController {
         Self {
             thread: None,
             thread_kind: None,
-            last_tick: crate::time_util::stale(TICK_INTERVAL),
             last_visual: None,
-            last_connected: false,
-            connected_visual_until: None,
-            connected_card_shown: false,
-            debug_epoch: Instant::now(),
-            tips: TipsState::default(),
+            state: PromptState::default(),
         }
     }
 }
 
-/// Visual for the userland debug replay at `elapsed` since the loop started.
-fn debug_replay_visual(elapsed: Duration) -> PromptVisual {
-    let phase = Duration::from_nanos((elapsed.as_nanos() % DEBUG_REPLAY_PERIOD.as_nanos()) as u64);
-    if phase < DEBUG_REPLAY_CONNECT_AT {
-        PromptVisual::NoPad
-    } else if phase < DEBUG_REPLAY_CONNECT_AT + CONNECTED_VISUAL_DURATION {
-        PromptVisual::Connected
-    } else {
-        PromptVisual::Ready
-    }
+trait PromptVisualWin: Sized {
+    fn as_lparam(self) -> LPARAM;
+    fn from_lparam(lparam: LPARAM) -> Self;
+    fn voice_phase(self) -> Option<vk_renderer::VoicePhase>;
 }
 
-impl PromptOverlayController {
-    fn update_connected_visual(&mut self, connected: bool, now: Instant) {
-        if connected && !self.last_connected && !self.connected_card_shown {
-            self.connected_visual_until = Some(now + CONNECTED_VISUAL_DURATION);
-            self.connected_card_shown = true;
-        } else if !connected {
-            self.connected_visual_until = None;
-        }
-        self.last_connected = connected;
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PromptVisual {
-    Ready,
-    NoPad,
-    Connected,
-    /// Mic is open. Same fullscreen frame as transcription; the cloud uses the
-    /// speaking state.
-    Listening,
-    /// Recording stopped. Same frame; the cloud uses the thinking state.
-    Transcribing,
-    /// Keyboard is open during any voice phase: the same fullscreen border, and
-    /// the cloud stays on the mic key at the same size.
-    VoiceBorder,
-    /// Voice helper launched but the mic isn't capturing yet.
-    Starting,
-    Tips(u8),
-}
-
-const TIPS_LPARAM_BASE: isize = 100;
-
-impl PromptVisual {
+impl PromptVisualWin for PromptVisual {
     fn as_lparam(self) -> LPARAM {
-        LPARAM(match self {
-            PromptVisual::Ready => 1,
-            PromptVisual::NoPad => 2,
-            PromptVisual::Connected => 3,
-            PromptVisual::Listening => 4,
-            PromptVisual::Transcribing => 5,
-            PromptVisual::Starting => 6,
-            PromptVisual::VoiceBorder => 7,
-            PromptVisual::Tips(i) => TIPS_LPARAM_BASE + i as isize,
-        })
+        LPARAM(self.code())
     }
 
     fn from_lparam(lparam: LPARAM) -> Self {
-        match lparam.0 {
-            2 => PromptVisual::NoPad,
-            3 => PromptVisual::Connected,
-            4 => PromptVisual::Listening,
-            5 => PromptVisual::Transcribing,
-            6 => PromptVisual::Starting,
-            7 => PromptVisual::VoiceBorder,
-            n if (TIPS_LPARAM_BASE..TIPS_LPARAM_BASE + 256).contains(&n) => {
-                PromptVisual::Tips((n - TIPS_LPARAM_BASE) as u8)
-            }
-            _ => PromptVisual::Ready,
-        }
-    }
-
-    fn tip_index(self) -> Option<usize> {
-        match self {
-            PromptVisual::Tips(i) => Some(i as usize),
-            _ => None,
-        }
+        PromptVisual::from_code(lparam.0)
     }
 
     fn voice_phase(self) -> Option<vk_renderer::VoicePhase> {
@@ -213,15 +127,6 @@ impl PromptVisual {
             }
             PromptVisual::Transcribing => Some(vk_renderer::VoicePhase::Transcribing),
             _ => None,
-        }
-    }
-
-    /// Helper phase string (`speech_input::voice_ui_phase`) -> pill visual.
-    fn from_voice_phase(phase: &str) -> Self {
-        match phase {
-            "transcribing" => PromptVisual::Transcribing,
-            "starting" => PromptVisual::Starting,
-            _ => PromptVisual::Listening,
         }
     }
 }
@@ -291,17 +196,8 @@ fn active_tips_morph(now: Instant) -> Option<(usize, f32)> {
     })
 }
 
-fn visual_is_tips(visual: PromptVisual) -> bool {
-    visual.tip_index().is_some()
-}
 
-fn click_through(visual: PromptVisual) -> bool {
-    fullscreen_border(visual) || visual_is_tips(visual)
-}
 
-fn userland_only(visual: PromptVisual) -> bool {
-    visual_is_voice(visual) || visual_is_tips(visual)
-}
 
 /// `(alpha, scale, label_alpha)` for the dictation pill at `now`: entrance
 /// fade/scale, times the exit fade once one has started, plus the phase-label fade.
@@ -324,15 +220,7 @@ fn voice_transition(now: Instant) -> (f32, f32, f32) {
     (alpha, scale, label_alpha)
 }
 
-fn visual_is_voice(visual: PromptVisual) -> bool {
-    visual.voice_phase().is_some()
-}
 
-/// Starting -> Listening -> Transcribing all live in the one dictation pill: keep
-/// the window and swap the title, instead of tearing the pill down and back up.
-fn same_voice_pill(from: PromptVisual, to: PromptVisual) -> bool {
-    visual_is_voice(from) && visual_is_voice(to)
-}
 
 fn thread_kind_for_visual(visual: PromptVisual) -> PromptThreadKind {
     if visual_is_voice(visual) {
@@ -344,22 +232,8 @@ fn thread_kind_for_visual(visual: PromptVisual) -> PromptThreadKind {
     }
 }
 
-fn can_morph_between(from: PromptVisual, to: PromptVisual) -> bool {
-    from != to
-        && !visual_is_voice(from)
-        && !visual_is_voice(to)
-        && (matches!(from, PromptVisual::Connected) || matches!(to, PromptVisual::Connected))
-}
 
-fn raw_morph_progress(start: Instant, now: Instant) -> f32 {
-    (now.saturating_duration_since(start).as_secs_f32() / MORPH_DURATION.as_secs_f32())
-        .clamp(0.0, 1.0)
-}
 
-fn eased_morph_progress(start: Instant, now: Instant) -> f32 {
-    let t = raw_morph_progress(start, now);
-    t * t * (3.0 - 2.0 * t)
-}
 
 fn active_visual_morph(now: Instant) -> Option<(PromptVisual, PromptVisual, f32)> {
     VISUAL_MORPH.with(|state| {
@@ -374,9 +248,6 @@ fn active_visual_morph(now: Instant) -> Option<(PromptVisual, PromptVisual, f32)
     })
 }
 
-fn fullscreen_border(visual: PromptVisual) -> bool {
-    visual_is_voice(visual)
-}
 
 /// Where the overlay sits, relative to a monitor origin. Transcription covers
 /// that monitor so the border can run along its edges; everything else stays a small panel.
@@ -449,16 +320,6 @@ unsafe fn place_overlay(hwnd: HWND, visual: PromptVisual, show: bool) {
     let _ = SetWindowPos(hwnd, HWND_TOPMOST, rect.x, rect.y, rect.w, rect.h, flags);
 }
 
-/// Talking and transcription share one fullscreen frame. With the keyboard open
-/// the cloud stays on the mic key, so the overlay is only the border.
-fn voice_overlay_visual(phase: Option<&str>, vk_open: bool) -> Option<PromptVisual> {
-    let phase = phase?;
-    if vk_open {
-        Some(PromptVisual::VoiceBorder)
-    } else {
-        Some(PromptVisual::from_voice_phase(phase))
-    }
-}
 
 static CONTROLLER: OnceLock<Mutex<PromptOverlayController>> = OnceLock::new();
 
@@ -473,11 +334,9 @@ pub fn tick(vk_open: bool) {
     let Ok(mut c) = controller.lock() else {
         return;
     };
-    if c.last_tick.elapsed() < TICK_INTERVAL {
+    let Some(now) = c.state.tick_due() else {
         return;
-    }
-    let now = Instant::now();
-    c.last_tick = now;
+    };
 
     let userland_debug = crate::config::prompt_userland_debug();
     let input_name = desktop::input_desktop_name().ok();
@@ -490,37 +349,23 @@ pub fn tick(vk_open: bool) {
         && !super::native_keyboard::yield_logon_to_native()
         && unsafe { GetSystemMetrics(SM_SHUTTINGDOWN) } == 0;
     let connected = crate::debug_state::snapshot().connected;
-    c.update_connected_visual(connected, now);
-    let connected_intro_active = c.connected_visual_until.is_some_and(|until| now < until);
-    // Voice dictation takes priority on ANY desktop. While the VK is open its
-    // mic key shows listening/starting, so the pill yields — transcription
-    // still takes the screen, because that's the full-display border.
     let voice = crate::win::speech_input::voice_ui_phase();
-    let tip = step_tips(
-        &mut c.tips,
-        now,
+    let inputs = TickInputs {
         connected,
-        default_desktop,
         vk_open,
-        voice.is_some(),
-    );
-    let visual = if voice.is_some() {
-        voice_overlay_visual(voice.as_deref(), vk_open)
-    } else if userland_debug {
-        Some(debug_replay_visual(now.duration_since(c.debug_epoch)))
-    } else if on_winlogon {
-        if vk_open || !crate::config::gamepad_settings().signin_hints {
-            None
-        } else if connected_intro_active {
-            Some(PromptVisual::Connected)
-        } else if connected {
-            Some(PromptVisual::Ready)
-        } else {
-            Some(PromptVisual::NoPad)
-        }
-    } else {
-        tip.map(|i| PromptVisual::Tips(i as u8))
+        voice: voice.as_deref(),
+        default_desktop,
+        on_winlogon,
+        userland_debug,
     };
+    let visual = c.state.visual(
+        now,
+        &inputs,
+        || crate::config::gamepad_settings().signin_hints,
+        || crate::pipe_server::game_active() || super::game_detect::standalone_game_active_cached(),
+        std::path::Path::new(controller_tips::STATE_FILE),
+        &service_log,
+    );
 
     let desired_thread_kind = visual.map(thread_kind_for_visual);
     if c.thread.is_some() && desired_thread_kind.is_some() && c.thread_kind != desired_thread_kind {
@@ -577,45 +422,6 @@ pub fn tick(vk_open: bool) {
     c.last_visual = visual;
 }
 
-fn step_tips(
-    tips: &mut TipsState,
-    now: Instant,
-    connected: bool,
-    default_desktop: bool,
-    vk_open: bool,
-    voice: bool,
-) -> Option<usize> {
-    if TIPS_REPLAY.swap(false, Ordering::SeqCst) {
-        tips.request_replay();
-    }
-    let calm = default_desktop && !vk_open && !voice && !tips.idle(connected);
-    let game = calm
-        && (crate::pipe_server::game_active()
-            || super::game_detect::standalone_game_active_cached());
-    let gate = Gate {
-        default_desktop,
-        vk_open,
-        voice,
-        game,
-    };
-    let path = std::path::Path::new(controller_tips::STATE_FILE);
-    let current = env!("CARGO_PKG_VERSION");
-    let step = tips.step(now, connected, gate, || {
-        controller_tips::should_show(
-            controller_tips::read_stored_version(path).as_deref(),
-            current,
-        )
-    });
-    if step.started {
-        service_log("prompt ui: controller tips started");
-        if let Err(e) = controller_tips::write_stored_version(path, current) {
-            service_log(&format!(
-                "prompt ui: controller tips state write failed: {e}"
-            ));
-        }
-    }
-    step.cue
-}
 
 fn ui_show(visual: PromptVisual) {
     let previous = VISUAL_STATE.with(|state| state.get());
@@ -848,26 +654,6 @@ unsafe extern "system" fn prompt_wndproc(
     }
 }
 
-/// User-facing title for the connection card. Prefers the real device name;
-/// backend slot labels ("XInput slot 0", "HID slot 0") aren't presentable, so
-/// they collapse to a controller family instead. Keep the keyword families in
-/// sync with `ControllerArt::from_label` so the title and artwork agree.
-fn connected_card_title(label: &str) -> String {
-    let l = label.trim();
-    let low = l.to_ascii_lowercase();
-    if l.is_empty() || low == "none" {
-        "Controller".to_string()
-    } else if low.contains("slot") {
-        // Winlogon reads PlayStation pads via direct HID and XInput pads via XUSB.
-        if low.contains("hid") {
-            "PlayStation Controller".to_string()
-        } else {
-            "Xbox Controller".to_string()
-        }
-    } else {
-        l.to_string()
-    }
-}
 
 /// Render the pill through the shared D3D11/D2D/DComp renderer. Colors follow the
 /// keyboard theme so the prompt matches the VK card; the L3 chip keeps its own.
@@ -928,7 +714,6 @@ fn render_prompt(hwnd: HWND) {
                         let (alpha, scale, label_alpha) = voice_transition(now);
                         r.draw_voice(&vk_renderer::VoicePill {
                             bg,
-                            border,
                             accent,
                             text,
                             level: crate::win::speech_input::voice_level(),
@@ -997,14 +782,14 @@ mod tests {
         let mut controller = PromptOverlayController::default();
         let now = Instant::now();
 
-        controller.update_connected_visual(true, now);
-        assert!(controller.connected_visual_until.is_some());
+        controller.state.update_connected_visual(true, now);
+        assert!(controller.state.connected_visual_until.is_some());
 
-        controller.update_connected_visual(false, now + CONNECTED_VISUAL_DURATION);
-        assert!(controller.connected_visual_until.is_none());
+        controller.state.update_connected_visual(false, now + CONNECTED_VISUAL_DURATION);
+        assert!(controller.state.connected_visual_until.is_none());
 
-        controller.update_connected_visual(true, now + CONNECTED_VISUAL_DURATION * 2);
-        assert!(controller.connected_visual_until.is_none());
+        controller.state.update_connected_visual(true, now + CONNECTED_VISUAL_DURATION * 2);
+        assert!(controller.state.connected_visual_until.is_none());
     }
 
     #[test]

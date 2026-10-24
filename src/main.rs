@@ -1,4 +1,5 @@
 mod config;
+mod paths;
 /// Cursor/scroll golden-fixture loader (#346). Pure serde; used by tests and the
 /// math-parity slice (#349). Unused in the normal binary build for now.
 #[allow(dead_code)]
@@ -9,6 +10,8 @@ mod cli;
 mod device_commands;
 mod led_engine;
 mod tracking_owner;
+#[cfg(any(windows, target_os = "linux"))]
+mod game_list;
 /// Companion IPC wire frames (#347). Pure serde; used by the pipe server and tests.
 #[allow(dead_code)]
 mod protocol;
@@ -23,40 +26,77 @@ mod vk_gate;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod vk_motion;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 mod crash;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 mod install;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod mono_ui;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod vk_paint;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod vk_theme;
+#[cfg(all(target_os = "linux", feature = "service"))]
+mod linux_service;
 #[cfg(all(windows, feature = "service"))]
 mod service;
 #[cfg(all(windows, feature = "service"))]
 mod service_worker;
 #[cfg(all(windows, feature = "gamepad"))]
 mod tray;
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+mod linux_tray;
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+mod linux_hotkeys;
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+mod linux_notify;
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+mod linux_panel;
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+mod linux_diag;
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+mod linux_game_detect;
 #[cfg(all(windows, feature = "gamepad"))]
 mod updater;
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
+mod release_feed;
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+mod linux_update;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
+#[cfg_attr(not(windows), allow(dead_code))]
 mod debug_state;
-#[cfg(windows)]
 mod predict_ngram;
-#[cfg(windows)]
 mod vk_commit;
-#[cfg(windows)]
+#[cfg(any(windows, all(target_os = "linux", feature = "gamepad")))]
 mod image_paste;
+mod vk_geom;
+mod vk_key;
 #[cfg(all(windows, feature = "vk-panels"))]
 mod clipboard_history;
 #[cfg(all(windows, feature = "vk-panels"))]
 mod emoji_data;
-#[cfg(windows)]
 mod vk_nav;
-#[cfg(windows)]
 mod vk_predict;
+#[cfg(feature = "gamepad")]
+mod vk_sheet;
+#[cfg(target_os = "linux")]
+mod linux_type;
+#[cfg(all(target_os = "linux", feature = "speech"))]
+mod linux_nimbus;
+#[cfg(all(target_os = "linux", feature = "speech"))]
+mod linux_speech;
+#[cfg(all(target_os = "linux", feature = "speech", feature = "gamepad"))]
+mod linux_voice;
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
+mod linux_vk;
 #[cfg(windows)]
 mod win;
 #[cfg(not(windows))]
 #[path = "win_stub.rs"]
 mod win;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod prompt_state;
 
 #[cfg(feature = "gamepad")]
 mod warmup_launch;
@@ -68,13 +108,13 @@ mod gamepad_backend;
 mod hid_gamepad;
 #[cfg(all(windows, feature = "gamepad"))]
 mod hid_reader;
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 mod library_watch;
 #[cfg(all(windows, feature = "gamepad"))]
 mod pad_decode;
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 mod parental_guard;
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 mod parental_store;
 #[cfg(feature = "gamepad")]
 mod app_profiles;
@@ -82,13 +122,12 @@ mod app_profiles;
 mod pc_cursor;
 #[cfg(feature = "gamepad")]
 mod touchpad_gestures;
-#[cfg(windows)]
 mod predict_dict;
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 mod process_guard;
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 mod playtime_store;
-#[cfg(all(windows, feature = "gamepad"))]
+#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 mod playtime_tracker;
 #[cfg(all(windows, feature = "gamepad"))]
 mod xinput_backend;
@@ -403,7 +442,6 @@ impl App {
         self.modal_block_bit_4 = false;
         self.xbox_window_desktop = None;
         self.spiral_window_desktop = None;
-        #[cfg(windows)]
         crate::vk_nav::reset_selection();
         if let Some(session) = self.vk_session.take() {
             let kind = session.describe();
@@ -432,7 +470,6 @@ impl App {
                     let kind = session.describe();
                     self.vk_open_latch = true;
                     self.log(&format!("VK shown: {kind}"));
-                    #[cfg(windows)]
                     crate::vk_nav::reset_selection();
                     self.vk_session = Some(session);
                 }
@@ -440,10 +477,29 @@ impl App {
                     self.action_latch = false;
                     self.modal_block_bit_4 = false;
                     self.log(&format!("VK failed: {e}"));
-                    #[cfg(windows)]
                     if crate::config::service_mode() {
                         install::log_line(&format!("VK failed: {e}"));
                     }
+                }
+            }
+        } else if cfg!(target_os = "linux") {
+            let attach = match attach {
+                vk_gate::GateAttach::Input => win::VkAttach::Input,
+                vk_gate::GateAttach::Current => win::VkAttach::Current,
+            };
+            match win::VkSession::open(attach) {
+                Ok(session) => {
+                    let kind = session.describe();
+                    self.vk_open_latch = true;
+                    self.log(&format!("VK shown: {kind}"));
+                    crate::vk_nav::reset_selection();
+                    self.vk_session = Some(session);
+                }
+                Err(e) => {
+                    self.action_latch = false;
+                    self.modal_block_bit_4 = false;
+                    self.log(&format!("VK failed: {e}"));
+                    crate::install::log_line(&format!("VK failed: {e}"));
                 }
             }
         } else {
@@ -668,12 +724,29 @@ mod repl_scroll {
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    std::env::set_var("__NV_DISABLE_EXPLICIT_SYNC", "1");
+    #[cfg(all(target_os = "linux", feature = "gamepad"))]
+    if env::args().any(|a| a == "--controller-center") {
+        linux_hotkeys::release_on_exit_signals();
+    }
     let _sentry = sentry_telemetry::init();
     let args: Vec<String> = env::args().collect();
-    #[cfg(windows)]
+    #[cfg(all(target_os = "linux", feature = "gamepad"))]
+    if args.iter().any(|a| a == "--controller-center") {
+        linux_tray::exit_ends_process();
+        linux_tray::spawn();
+        win::controller_center::show();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+    }
+    #[cfg(any(windows, target_os = "linux"))]
     cli::dispatch_install_or_service(&args);
     #[cfg(all(windows, feature = "gamepad"))]
     tray::spawn();
+    #[cfg(all(target_os = "linux", feature = "gamepad"))]
+    linux_tray::spawn();
     // Dev aid: open the Controller Center directly (no service, no tray click).
     #[cfg(all(windows, feature = "gamepad"))]
     if args.iter().any(|a| a == "--controller-center") {
@@ -686,7 +759,13 @@ fn main() {
     let use_real_win32 = args.iter().any(|a| a == "--real")
         || env::var_os("WARMUP_REAL_VK").is_some_and(|v| v != "0");
     if args.iter().any(|a| a == "--gamepad") {
-        #[cfg(feature = "gamepad")]
+        #[cfg(all(target_os = "linux", feature = "gamepad"))]
+        {
+            let result = warmup_launch::run_gamepad_mode();
+            linux_hotkeys::release();
+            return result;
+        }
+        #[cfg(all(not(target_os = "linux"), feature = "gamepad"))]
         {
             return warmup_launch::run_gamepad_mode();
         }

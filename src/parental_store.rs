@@ -1,19 +1,24 @@
 //! Persist Kid Mode guard config under ProgramData.
 
-#![cfg(windows)]
+#![cfg(any(windows, target_os = "linux"))]
 
 use crate::protocol::ParentalGuardPayload;
 
-const GUARD_FILE: &str = r"C:\ProgramData\WarmupVk\parental-guard.json";
+fn guard_file() -> std::path::PathBuf {
+    crate::paths::parental_guard_file()
+}
 
 pub(crate) fn load() -> Option<ParentalGuardPayload> {
-    let raw = std::fs::read_to_string(GUARD_FILE).ok()?;
+    let raw = std::fs::read_to_string(guard_file()).ok()?;
     serde_json::from_str(&raw).ok()
 }
 
 pub(crate) fn save(payload: &ParentalGuardPayload) {
     if let Ok(json) = serde_json::to_string(payload) {
-        let _ = std::fs::create_dir_all(r"C:\ProgramData\WarmupVk");
-        let _ = std::fs::write(GUARD_FILE, json);
+        let path = guard_file();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, json);
     }
 }

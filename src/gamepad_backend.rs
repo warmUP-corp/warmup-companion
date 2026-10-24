@@ -80,9 +80,14 @@ fn effective_userland_poll_mode() -> PollMode {
     let any_game = raw_game_active || detected_game_active;
     if any_game && !VOICE_GAME_SEEN.swap(any_game, Ordering::SeqCst) {
         crate::install::log_line("game started; unloading voice engine");
+        #[cfg(windows)]
         let _ = std::thread::Builder::new()
             .name("voice-unload".into())
             .spawn(crate::win::speech_input::unload_engine);
+        #[cfg(all(target_os = "linux", feature = "speech"))]
+        let _ = std::thread::Builder::new()
+            .name("voice-unload".into())
+            .spawn(crate::linux_speech::unload_engine);
     } else if !any_game {
         VOICE_GAME_SEEN.store(false, Ordering::SeqCst);
     }
@@ -179,7 +184,12 @@ pub fn standalone_game_active_now() -> bool {
     crate::win::game_detect::standalone_game_active_cached()
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub fn standalone_game_active_now() -> bool {
+    crate::linux_game_detect::standalone_game_active_cached()
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn standalone_game_active_now() -> bool {
     false
 }
@@ -254,6 +264,17 @@ impl SdlBackend {
         if connected_change {
             // Re-arm gyro on the freshly opened pad (or clear if it went away).
             self.gyro_enabled = self.input.enable_gyro();
+            #[cfg(target_os = "linux")]
+            log_device_change(
+                &self
+                    .input
+                    .active_controller_name()
+                    .unwrap_or_else(|| "none".to_string()),
+            );
+            #[cfg(target_os = "linux")]
+            if self.input.active_controller_name().is_some() {
+                crate::led_engine::reapply_led();
+            }
         }
         if mode != PollMode::Full {
             self.touchpad = TouchpadFrame::default();
@@ -446,6 +467,14 @@ fn sdl_thread_main(
 
     let mut input = match GamepadInput::new(&db) {
         Ok(i) => {
+            let name = i
+                .active_controller_name()
+                .unwrap_or_else(|| "none".to_string());
+            if let Ok(mut label) = shared.label.lock() {
+                *label = name.clone();
+            }
+            #[cfg(target_os = "linux")]
+            log_device_change(&name);
             let _ = tx.send(Ok(()));
             i
         }
@@ -463,8 +492,18 @@ fn sdl_thread_main(
         if connected_change {
             // Pad connected/disconnected: re-arm gyro on the new device.
             gyro_enabled = input.enable_gyro();
+            #[cfg(target_os = "linux")]
+            log_device_change(
+                &input
+                    .active_controller_name()
+                    .unwrap_or_else(|| "none".to_string()),
+            );
         }
         let pad_present = input.active_controller_name().is_some();
+        #[cfg(target_os = "linux")]
+        if connected_change && pad_present {
+            crate::led_engine::reapply_led();
+        }
         let changes = input.detect_button_changes();
         if !changes.is_empty() {
             if let Ok(mut q) = shared.changes.lock() {
@@ -683,15 +722,16 @@ impl Drop for SdlThreadBackend {
 }
 
 pub fn mapping_db_path() -> PathBuf {
-    if let Ok(p) = std::env::var("WARMUP_GAMECONTROLLER_DB") {
-        return PathBuf::from(p);
+    crate::paths::mapping_db_file()
+}
+
+#[cfg(target_os = "linux")]
+fn log_device_change(name: &str) {
+    if name == "none" {
+        crate::install::log_line(
+            "gamepad device change: none (Steam Input may have grabbed the pad; not reclaiming)",
+        );
+    } else {
+        crate::install::log_line(&format!("gamepad device change: {name}"));
     }
-    #[cfg(windows)]
-    {
-        let installed = PathBuf::from(r"C:\ProgramData\WarmupVk\gamecontrollerdb.txt");
-        if installed.is_file() {
-            return installed;
-        }
-    }
-    PathBuf::from("gamecontrollerdb.txt")
 }

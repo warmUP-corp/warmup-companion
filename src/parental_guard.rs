@@ -3,7 +3,7 @@
 //! warmUP pushes a [`ParentalGuardPayload`] over IPC; this module holds the
 //! in-memory policy and polls running processes while Kid Mode is active.
 
-#![cfg(windows)]
+#![cfg(any(windows, target_os = "linux"))]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
@@ -61,7 +61,7 @@ pub fn is_blocking_active() -> bool {
 }
 
 pub fn log_refused_shutdown() {
-    let path = std::path::Path::new(r"C:\ProgramData\WarmupVk\parental-security.log");
+    let path = security_log_path();
     if !path.is_file() {
         return;
     }
@@ -72,10 +72,20 @@ pub fn log_refused_shutdown() {
     let line = format!(
         "{{\"kind\":\"shut-down-refused\",\"detail\":\"Kid Mode blocking is active\",\"ts\":{ts}}}\n"
     );
-    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&path) {
         use std::io::Write;
         let _ = f.write_all(line.as_bytes());
     }
+}
+
+#[cfg(windows)]
+fn security_log_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(r"C:\ProgramData\WarmupVk\parental-security.log")
+}
+
+#[cfg(not(windows))]
+fn security_log_path() -> std::path::PathBuf {
+    crate::paths::state_dir().join("parental-security.log")
 }
 
 /// Re-export process snapshots so existing callers keep compiling.
@@ -142,15 +152,23 @@ fn maybe_notify_blocked(stem: &str, pid: u32) {
 
 fn path_blocked_by_install_dir(path: &str, blocked_dirs: &[String]) -> bool {
     let lower = path.replace('/', "\\").to_ascii_lowercase();
-    blocked_dirs.iter().any(|prefix| lower.starts_with(prefix))
+    blocked_dirs
+        .iter()
+        .any(|prefix| lower.starts_with(prefix_key(prefix).as_ref()))
+}
+
+#[cfg(windows)]
+fn prefix_key(prefix: &str) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Borrowed(prefix)
+}
+
+#[cfg(not(windows))]
+fn prefix_key(prefix: &str) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Owned(prefix.replace('/', "\\").to_ascii_lowercase())
 }
 
 fn exe_stem_lower(exe_name: &str) -> String {
-    let lower = exe_name.to_ascii_lowercase();
-    lower
-        .strip_suffix(".exe")
-        .unwrap_or(lower.as_str())
-        .to_string()
+    crate::game_list::exe_stem(exe_name)
 }
 
 fn is_protected_process(exe_name: &str, image_path: Option<&str>) -> bool {
@@ -190,6 +208,10 @@ fn is_protected_process(exe_name: &str, image_path: Option<&str>) -> bool {
     ) {
         return true;
     }
+    #[cfg(target_os = "linux")]
+    if is_protected_linux_stem(&stem) {
+        return true;
+    }
     if let Some(path) = image_path {
         let lower = path.replace('/', "\\").to_ascii_lowercase();
         if lower.contains("\\windows\\system32\\")
@@ -202,11 +224,37 @@ fn is_protected_process(exe_name: &str, image_path: Option<&str>) -> bool {
     false
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn is_protected_linux_stem(stem: &str) -> bool {
+    matches!(
+        stem,
+        "systemd"
+            | "hyprland"
+            | "xwayland"
+            | "kwin_wayland"
+            | "plasmashell"
+            | "gnome-shell"
+            | "steamwebhelper"
+            | "reaper"
+            | "srt-bwrap"
+            | "pv-adverb"
+            | "pressure-vessel-wrap"
+            | "bwrap"
+            | "wineserver"
+            | "winedevice"
+            | "plugplay"
+            | "rpcss"
+            | "heroic"
+            | "lutris"
+            | "flatpak"
+    )
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn spawn_guardian_loop() {}
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn apply_guard(_payload: &ParentalGuardPayload) {}
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn load_persisted_guard() {}
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn publish_blocked(_payload: ParentalBlockedPayload) {}
