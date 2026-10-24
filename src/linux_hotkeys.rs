@@ -122,6 +122,24 @@ pub(crate) fn spawn() {
         .spawn(run);
 }
 
+pub(crate) fn release_on_exit_signals() {
+    let mut mask = nix::sys::signal::SigSet::empty();
+    mask.add(nix::sys::signal::Signal::SIGTERM);
+    mask.add(nix::sys::signal::Signal::SIGINT);
+    if let Err(e) = mask.thread_block() {
+        log(&format!("could not block stop signals: {e}"));
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("warmup-exit-signals".into())
+        .spawn(move || {
+            if mask.wait().is_ok() {
+                release();
+                std::process::exit(0);
+            }
+        });
+}
+
 pub(crate) fn release() {
     if !STARTED.load(Ordering::SeqCst) || !hyprland() {
         return;

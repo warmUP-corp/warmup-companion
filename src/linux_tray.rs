@@ -15,6 +15,7 @@ const BUILD_INFO: &str = concat!(
 );
 
 static STARTED: AtomicBool = AtomicBool::new(false);
+static EXIT_ENDS_PROCESS: AtomicBool = AtomicBool::new(false);
 static HANDLE: Mutex<Option<ksni::Handle<CompanionTray>>> = Mutex::new(None);
 
 struct CompanionTray;
@@ -36,6 +37,18 @@ pub fn spawn() {
                 crate::install::log_line(&format!("tray stopped: {error}"));
             }
         });
+}
+
+pub(crate) fn exit_ends_process() {
+    EXIT_ENDS_PROCESS.store(true, Ordering::SeqCst);
+}
+
+fn exit() {
+    if EXIT_ENDS_PROCESS.load(Ordering::SeqCst) {
+        crate::linux_hotkeys::release();
+        std::process::exit(0);
+    }
+    crate::gamepad::request_stop();
 }
 
 pub(crate) fn refresh() {
@@ -145,7 +158,7 @@ impl Tray for CompanionTray {
             MenuItem::Separator,
             action("Uninstall", |_| uninstall()),
             MenuItem::Separator,
-            action("Exit", |_| crate::gamepad::request_stop()),
+            action("Exit", |_| exit()),
         ]);
         items
     }
@@ -391,7 +404,7 @@ fn run_command(cmd: usize) {
         }
         CMD_PRIVACY => show_privacy(),
         CMD_UNINSTALL => uninstall(),
-        CMD_EXIT => crate::gamepad::request_stop(),
+        CMD_EXIT => exit(),
         CMD_TIPS => show_controller_tips(),
         CMD_SIDE_TIPS => toggle_bool("vk_side_tips", gs.vk_side_tips),
         CMD_DISPLAY_AUTO => set_display("auto"),
