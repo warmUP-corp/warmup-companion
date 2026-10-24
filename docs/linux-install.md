@@ -30,7 +30,7 @@ Stop it with `warmup-companion stop`. Remove the unit and the installed binary w
 
 ## Finding warmUP
 
-The View + LB + X shortcut opens warmUP. The companion looks for the launcher in this order and uses the first executable file it finds:
+The Guide (PS) button opens warmUP when it is closed, unless *Guide / PS opens warmUP when closed* is off in Control Center. The View + LB + X shortcut opens it too. From the service, warmUP starts through `systemd-run --user` in its own unit, so restarting the companion does not close it. The companion looks for the launcher in this order and uses the first executable file it finds:
 
 1. `WARMUP_EXE`, if set.
 2. The path written in `$XDG_DATA_HOME/warmup-companion/warmup-exe.path` by `install-dev`.

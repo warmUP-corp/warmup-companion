@@ -355,9 +355,36 @@ fn spawn_warmup_as_active_user(exe: &std::path::Path) -> std::io::Result<()> {
 
 #[cfg(all(feature = "gamepad", not(windows)))]
 fn spawn_warmup(exe: &std::path::Path) -> std::io::Result<()> {
+    if crate::config::service_mode() {
+        let mut cmd = std::process::Command::new("systemd-run");
+        cmd.args(["--user", "--collect", "--quiet"]);
+        if let Some(parent) = exe.parent() {
+            cmd.arg(format!("--working-directory={}", parent.display()));
+        }
+        cmd.arg("--").arg(exe);
+        match cmd.status() {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => crate::install::log_line(&format!(
+                "systemd-run for warmUP exited with {status}; starting it directly"
+            )),
+            Err(error) => crate::install::log_line(&format!(
+                "systemd-run for warmUP failed: {error}; starting it directly"
+            )),
+        }
+    }
     let mut cmd = std::process::Command::new(exe);
     if let Some(parent) = exe.parent() {
         cmd.current_dir(parent);
     }
-    cmd.spawn().map(|_| ())
+    cmd.env_remove("WARMUP_VK_SERVICE")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = cmd.spawn()?;
+    let _ = std::thread::Builder::new()
+        .name("warmup-launch-reap".into())
+        .spawn(move || {
+            let _ = child.wait();
+        });
+    Ok(())
 }

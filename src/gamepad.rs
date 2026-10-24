@@ -1026,7 +1026,6 @@ impl GamepadPoll {
             ) {
                 crate::pipe_server::publish_button(change.button.as_str(), change.pressed);
             }
-            #[cfg(windows)]
             if is_guide_launch(
                 change,
                 crate::pipe_server::desktop_connected(),
@@ -1145,7 +1144,6 @@ impl GamepadPoll {
                     // Distinct, softer feedback: the chord registered, but warmUP
                     // isn't installed, so we don't fake the launch buzz.
                     self.backend.haptic_tick();
-                    #[cfg(windows)]
                     crate::install::log_line("launch hotkey ignored: warmUP is not installed");
                 }
             }
