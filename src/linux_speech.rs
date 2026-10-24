@@ -365,7 +365,16 @@ pub fn engine() -> String {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| MODEL_IDS.contains(&s.as_str()))
-        .unwrap_or_else(|| "parakeet".to_string())
+        .unwrap_or_else(|| {
+            let redux_only = !has_model(&speech_dir().join("parakeet"))
+                && has_model(&speech_dir().join("parakeet-redux"));
+            if redux_only {
+                "parakeet-redux"
+            } else {
+                "parakeet"
+            }
+            .to_string()
+        })
 }
 
 pub fn set_engine(name: &str) {
