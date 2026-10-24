@@ -9,52 +9,7 @@ const EXTERNAL_FULLSCREEN_AXIS_PERCENT: i64 = 85;
 const EXTERNAL_FULLSCREEN_OVERLAP_PERCENT: i64 = 72;
 const DETECT_INTERVAL: Duration = Duration::from_millis(500);
 
-const EXTERNAL_GAME_EXE_DENYLIST: &[&str] = &[
-    "applicationframehost.exe",
-    "arc.exe",
-    "brave.exe",
-    "chrome.exe",
-    "chromium.exe",
-    "ctfmon.exe",
-    "duckduckgo.exe",
-    "dllhost.exe",
-    "dwm.exe",
-    "explorer.exe",
-    "firefox.exe",
-    "lockapp.exe",
-    "msedge.exe",
-    "opera.exe",
-    "perplexity.exe",
-    "runtimebroker.exe",
-    "searchhost.exe",
-    "searchapp.exe",
-    "shellhost.exe",
-    "shellexperiencehost.exe",
-    "startmenuexperiencehost.exe",
-    "steamwebhelper.exe",
-    "systemsettings.exe",
-    "textinputhost.exe",
-    "webviewhost.exe",
-    "widgets.exe",
-    "windowsterminal.exe",
-    "wt.exe",
-    "steam.exe",
-    "epicgameslauncher.exe",
-    "galaxyclient.exe",
-    "gog galaxy.exe",
-    "goggalaxy.exe",
-    "eadesktop.exe",
-    "origin.exe",
-    "ubisoftconnect.exe",
-    "upc.exe",
-    "uplay.exe",
-    "battle.net.exe",
-    "amazon games.exe",
-    "nile.exe",
-    "xboxpcapp.exe",
-    "gamingservices.exe",
-    "warmup.exe",
-];
+const EXTERNAL_GAME_EXE_DENYLIST: &[&str] = crate::game_list::BUILTIN_DENYLIST_EXES;
 
 #[derive(Clone, Copy)]
 struct DetectionCache {
@@ -184,6 +139,12 @@ fn surface_is_standalone_game(surface: &Surface) -> bool {
     if is_denied(&surface.exe) || is_denied(&surface.class_name) {
         return false;
     }
+    let exe_file = format!("{}.exe", basename(&surface.exe));
+    if crate::game_list::AMBIGUOUS_STORE_CLIENT_EXES.contains(&exe_file.as_str())
+        && crate::game_list::is_store_client_path(&surface.exe)
+    {
+        return false;
+    }
     if surface.fullscreen {
         return true;
     }
@@ -207,13 +168,16 @@ fn is_denied(name: &str) -> bool {
     if base.is_empty() {
         return false;
     }
-    EXTERNAL_GAME_EXE_DENYLIST.iter().any(|entry| {
-        let stem = deny_stem(entry);
-        base == stem
-            || base
-                .split(|ch: char| ch == '.' || ch == ' ')
-                .any(|part| part == stem)
-    })
+    EXTERNAL_GAME_EXE_DENYLIST
+        .iter()
+        .chain(crate::game_list::BUILTIN_BACKGROUND_TOOL_STEMS)
+        .any(|entry| {
+            let stem = deny_stem(entry);
+            base == stem
+                || base
+                    .split(|ch: char| ch == '.' || ch == ' ')
+                    .any(|part| part == stem)
+        })
 }
 
 fn basename(name: &str) -> String {
@@ -838,7 +802,7 @@ mod tests {
         assert!(is_denied("/usr/bin/steam"));
         assert!(is_denied("com.google.Chrome"));
         assert!(is_denied("warmup"));
-        assert!(!is_denied("warmup-companion"));
+        assert!(!is_denied("warmup-tools"));
         assert!(!is_denied("Celeste"));
     }
 }

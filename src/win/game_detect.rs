@@ -27,53 +27,8 @@ const EXTERNAL_FULLSCREEN_AXIS_PERCENT: i64 = 85;
 const EXTERNAL_FULLSCREEN_OVERLAP_PERCENT: i64 = 72;
 const DETECT_INTERVAL: Duration = Duration::from_millis(500);
 
-const EXTERNAL_GAME_EXE_DENYLIST: &[&str] = &[
-    "applicationframehost.exe",
-    "arc.exe",
-    "brave.exe",
-    "chrome.exe",
-    "chromium.exe",
-    "ctfmon.exe",
-    "duckduckgo.exe",
-    "dllhost.exe",
-    "dwm.exe",
-    "explorer.exe",
-    "firefox.exe",
-    "lockapp.exe",
-    "msedge.exe",
-    "opera.exe",
-    "perplexity.exe",
-    "runtimebroker.exe",
-    "searchhost.exe",
-    "searchapp.exe",
-    "shellhost.exe",
-    "shellexperiencehost.exe",
-    "startmenuexperiencehost.exe",
-    "steamwebhelper.exe",
-    "systemsettings.exe",
-    "textinputhost.exe",
-    "webviewhost.exe",
-    "widgets.exe",
-    "windowsterminal.exe",
-    "wt.exe",
-    "steam.exe",
-    "epicgameslauncher.exe",
-    "galaxyclient.exe",
-    "gog galaxy.exe",
-    "goggalaxy.exe",
-    "eadesktop.exe",
-    "origin.exe",
-    "ubisoftconnect.exe",
-    "upc.exe",
-    "uplay.exe",
-    "battle.net.exe",
-    "amazon games.exe",
-    "nile.exe",
-    "xboxpcapp.exe",
-    "gamingservices.exe",
-    // warmUP itself is fullscreen; never treat the launcher as an external game to sleep on.
-    "warmup.exe",
-];
+#[cfg(test)]
+const EXTERNAL_GAME_EXE_DENYLIST: &[&str] = crate::game_list::BUILTIN_DENYLIST_EXES;
 
 #[derive(Clone, Copy)]
 struct DetectionCache {
@@ -156,7 +111,34 @@ fn is_pid_exe_denylisted(pid: u32, exe_by_pid: &HashMap<u32, String>) -> bool {
         return false;
     };
     let base = exe_base_name_lower(full);
-    EXTERNAL_GAME_EXE_DENYLIST.contains(&base.as_str())
+    if crate::game_list::AMBIGUOUS_STORE_CLIENT_EXES.contains(&base.as_str()) {
+        return full_image_path(pid)
+            .is_some_and(|path| crate::game_list::is_store_client_path(&path));
+    }
+    crate::game_list::is_denylisted_exe(&base, None)
+}
+
+fn full_image_path(pid: u32) -> Option<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = vec![0u16; 1024];
+        let mut size = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut size,
+        )
+        .is_ok();
+        let _ = CloseHandle(handle);
+        ok.then(|| String::from_utf16_lossy(&buf[..size as usize]))
+    }
 }
 
 fn foreground_external_game_pid(our_pid: u32, exe_by_pid: &HashMap<u32, String>) -> Option<u32> {
