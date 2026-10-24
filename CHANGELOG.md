@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux with Hyprland and Omarchy, Y opens the Omarchy menu from the controller, and the Hyprland desktop presets offer the Omarchy menu and the app launcher. The special workspace is still in the picker for Y.
 - On Linux with Hyprland, a maximized window no longer counts as a fullscreen game. Maximizing a window with X, or switching to a workspace with a maximized window, used to put the controller to sleep when "Pause input while a game is running" was on.
 - On Linux, the floating keyboard keeps windows clear of it like on Windows. Once it has slid in, tiled windows are laid out above the card, and a focused floating window that reaches under it is made shorter so it ends at the card's top edge; both go back when the keyboard has slid out. In docked mode the focused floating window is shortened the same way. Moving floating windows needs Hyprland.
 - On Linux with Omarchy, voice typing can use the desktop's own dictation. Choose System dictation (Omarchy) in the tray's Voice engine menu or in the Voice tab. R3, the keyboard's mic key and Ctrl+Alt+V then start and stop `omarchy-dictation` (or `voxtype` directly), which records and types the text itself. With voxtype, the glow and cloud show while it listens and transcribes, and whatever is playing pauses as with Parakeet. There is nothing to download, and the Microphone choice is hidden because the desktop's dictation picks its own input.

@@ -136,16 +136,16 @@ static HYPRLAND: Builtin = Builtin {
     map: &[
         ("LT", "hypr:workspace e-1"),
         ("RT", "hypr:workspace e+1"),
-        ("Y", "hypr:togglespecialworkspace"),
+        ("Y", "hypr:exec omarchy-menu"),
         ("X", "hypr:fullscreen 1"),
     ],
     presets: &[
+        ("Omarchy menu", "hypr:exec omarchy-menu"),
+        ("App launcher", "hypr:exec omarchy-apps"),
         ("Previous workspace", "hypr:workspace e-1"),
         ("Next workspace", "hypr:workspace e+1"),
         ("Back and forth", "hypr:workspace previous_per_monitor"),
         ("Toggle special workspace", "hypr:togglespecialworkspace"),
-        ("Move window to previous workspace", "hypr:movetoworkspace e-1"),
-        ("Move window to next workspace", "hypr:movetoworkspace e+1"),
         ("Fullscreen", "hypr:fullscreen 0"),
         ("Maximize", "hypr:fullscreen 1"),
         ("Toggle floating", "hypr:togglefloating"),
@@ -428,6 +428,12 @@ pub struct HyprCommand {
 }
 
 #[cfg(target_os = "linux")]
+const OMARCHY_COMMANDS: &[(&str, &str)] = &[
+    ("omarchy-menu", "omarchy-menu toggle root"),
+    ("omarchy-apps", "omarchy-shell omarchy.dock apps"),
+];
+
+#[cfg(target_os = "linux")]
 pub fn hypr_command(spec: &str) -> Option<HyprCommand> {
     let rest = spec.trim().strip_prefix("hypr:")?.trim();
     let (dispatcher, arg) = match rest.split_once(char::is_whitespace) {
@@ -455,6 +461,16 @@ pub fn hypr_command(spec: &str) -> Option<HyprCommand> {
         }
         ("togglefloating", "") => r#"hl.dsp.window.float({ action = "toggle" })"#.to_string(),
         ("killactive", "") => "hl.dsp.window.close()".to_string(),
+        ("exec", name) => {
+            let command = OMARCHY_COMMANDS
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                .map(|(_, c)| *c)?;
+            return Some(HyprCommand {
+                lua: format!(r#"hl.dsp.exec_cmd("{command}")"#),
+                legacy: format!("exec {command}"),
+            });
+        }
         _ => return None,
     };
     let legacy = if arg.is_empty() {
