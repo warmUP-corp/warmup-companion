@@ -211,11 +211,13 @@ fn keyboard_loop(wake: UnixStream) -> Result<(), String> {
         if shell.configured {
             let gen = crate::linux_nimbus::frame_generation();
             let active = crate::linux_speech::visual_active();
-            if active && gen != shell.voice_gen {
+            if active && (gen != shell.voice_gen || !shell.voice_on || !crate::linux_nimbus::has_frame()) {
                 shell.voice_gen = gen;
+                shell.voice_on = true;
                 shell.dirty = true;
-            } else if !active && shell.voice_gen != 0 {
+            } else if !active && shell.voice_on {
                 shell.voice_gen = 0;
+                shell.voice_on = false;
                 shell.dirty = true;
             }
         }
@@ -348,6 +350,7 @@ struct Shell {
     opened_at: std::time::Instant,
     hint_shown: bool,
     voice_gen: u64,
+    voice_on: bool,
     voice_level: f32,
     voice_level_at: Option<std::time::Instant>,
     voice_started: Option<std::time::Instant>,
@@ -416,6 +419,7 @@ impl Shell {
             opened_at: std::time::Instant::now(),
             hint_shown: false,
             voice_gen: 0,
+            voice_on: false,
             voice_level: 0.0,
             voice_level_at: None,
             voice_started: None,
@@ -614,7 +618,7 @@ impl Shell {
         draw::paint_frame(&mut self.gfx, &frame, &mut self.glide);
         if frame.voice.is_some() {
             let nimbus = nimbus_frame();
-            draw::paint_voice_key(&mut self.gfx, &frame, nimbus.as_ref().map(|(px, bytes)| (bytes.as_slice(), *px)));
+            draw::paint_voice_key(&mut self.gfx, &frame, &self.glide, nimbus.as_ref().map(|(px, bytes)| (bytes.as_slice(), *px)));
         }
         let mut pixels = draw::to_argb(&self.gfx.pixels());
         let buffer_w = self.gfx.width() as i32;

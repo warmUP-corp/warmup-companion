@@ -856,6 +856,9 @@ pub struct VoiceKey {
 }
 
 pub fn voice_key(frame: &Frame) -> Option<VoiceKey> {
+    if frame.sheet {
+        return None;
+    }
     let voice = frame.voice?;
     let (spec, _pal, rects, unit, scale, _radius, _key_h) = scene(frame);
     let rect = rects.iter().find(|rect| {
@@ -900,7 +903,7 @@ impl VoiceKey {
     }
 }
 
-pub fn paint_voice_key(g: &mut Gfx, frame: &Frame, nimbus: Option<(&[u8], u32)>) {
+pub fn paint_voice_key(g: &mut Gfx, frame: &Frame, glide: &Glide, nimbus: Option<(&[u8], u32)>) {
     let (Some(voice), Some(spot)) = (frame.voice, voice_key(frame)) else {
         return;
     };
@@ -921,6 +924,19 @@ pub fn paint_voice_key(g: &mut Gfx, frame: &Frame, nimbus: Option<(&[u8], u32)>)
         }
         g.pop_clip();
         g.ring(spot.halo, spot.halo_radius, spot.halo_w, spot.accent, spot.halo_alpha);
+    }
+    let (_, _, rects, unit, scale, _, key_h) = scene(frame);
+    let selected_voice = rects.iter().any(|r| {
+        r.pos == frame.sel
+            && frame
+                .rows
+                .get(r.pos.row)
+                .and_then(|row| row.keys.get(r.pos.col))
+                .is_some_and(|key| matches!(key.action, KeyAction::VoiceInput))
+    });
+    if selected_voice {
+        let ks = key_style(frame, unit, key_h, scale);
+        stroke_ring(g, glide, frame, &ks, scale);
     }
 }
 
