@@ -41,6 +41,89 @@ pub fn available() -> bool {
     model_dir().is_some() && onnx_runtime().is_some()
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mic {
+    pub name: String,
+    pub label: String,
+}
+
+pub fn speech_dir() -> PathBuf {
+    crate::paths::data_dir().join("speech")
+}
+
+fn mic_choice_path() -> PathBuf {
+    speech_dir().join("mic.txt")
+}
+
+pub fn mic_choice() -> Option<String> {
+    std::fs::read_to_string(mic_choice_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+pub fn set_mic_choice(name: &str) {
+    let path = mic_choice_path();
+    if name.trim().is_empty() {
+        let _ = std::fs::remove_file(&path);
+    } else {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, name.trim());
+    }
+}
+
+pub fn list_mics() -> Vec<Mic> {
+    let Ok(output) = Command::new("pactl")
+        .args(["-f", "json", "list", "sources"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let Ok(serde_json::Value::Array(sources)) = serde_json::from_slice(&output.stdout) else {
+        return Vec::new();
+    };
+    sources
+        .iter()
+        .filter(|source| {
+            source["properties"]["media.class"]
+                .as_str()
+                .is_some_and(|class| class.starts_with("Audio/Source"))
+        })
+        .filter_map(|source| {
+            let name = source["name"].as_str()?.to_string();
+            let label = source["description"]
+                .as_str()
+                .map(|d| d.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|d| !d.is_empty())
+                .unwrap_or_else(|| name.clone());
+            Some(Mic { name, label })
+        })
+        .collect()
+}
+
+fn pick_device(host: &cpal::Host) -> Option<cpal::Device> {
+    if let Some(want) = mic_choice().filter(|want| list_mics().iter().any(|m| &m.name == want)) {
+        let pulse = host
+            .input_devices()
+            .ok()
+            .and_then(|mut devices| devices.find(|d| d.name().is_ok_and(|n| n == "pulse")));
+        if let Some(device) = pulse {
+            std::env::set_var("PULSE_SOURCE", &want);
+            crate::install::log_line(&format!("speech: source = {want}"));
+            return Some(device);
+        }
+    }
+    std::env::remove_var("PULSE_SOURCE");
+    host.default_input_device()
+}
+
 pub fn request_stop() {
     STOP.store(true, Ordering::SeqCst);
 }
@@ -292,9 +375,7 @@ fn record_and_type() -> Result<(), String> {
     let _media = MediaPause::hold();
     ensure_server()?;
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or_else(|| "no microphone is available".to_string())?;
+    let device = pick_device(&host).ok_or_else(|| "no microphone is available".to_string())?;
     crate::install::log_line(&format!(
         "speech: mic = {}",
         device.name().unwrap_or_else(|_| "<unknown>".into())

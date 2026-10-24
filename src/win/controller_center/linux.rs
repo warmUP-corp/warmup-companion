@@ -89,11 +89,93 @@ pub(super) fn hide() {
     }
 }
 
+const MIC_OPTIONS: usize = 4;
+const MIC_LABEL_CHARS: usize = 17;
+
 pub(super) fn center_items() -> Vec<Item> {
-    items()
+    let mut items: Vec<Item> = items()
         .into_iter()
         .filter(|it| !matches!(it.kind, Kind::Check { key: "run_mode", .. }))
-        .collect()
+        .collect();
+    #[cfg(feature = "speech")]
+    {
+        items.push(item(
+            5,
+            "Microphone",
+            Kind::Choice {
+                key: "voice_mic",
+                options: mic_options(),
+            },
+        ));
+    }
+    items
+}
+
+#[cfg(feature = "speech")]
+fn mic_options() -> &'static [(&'static str, &'static str)] {
+    static OPTIONS: Mutex<Vec<(Vec<crate::linux_speech::Mic>, &'static [(&'static str, &'static str)])>> =
+        Mutex::new(Vec::new());
+    let mut mics = crate::linux_speech::list_mics();
+    if let Some(chosen) = crate::linux_speech::mic_choice() {
+        if let Some(i) = mics.iter().position(|m| m.name == chosen) {
+            let mic = mics.remove(i);
+            mics.insert(0, mic);
+        }
+    }
+    mics.truncate(MIC_OPTIONS - 1);
+    let Ok(mut cache) = OPTIONS.lock() else {
+        return &[("Default", "")];
+    };
+    if let Some((_, options)) = cache.iter().find(|(known, _)| *known == mics) {
+        return options;
+    }
+    let mut options: Vec<(&'static str, &'static str)> = vec![("Default", "")];
+    let firsts: Vec<String> = mics.iter().map(|m| short_label(&m.label, false)).collect();
+    for (i, mic) in mics.iter().enumerate() {
+        let clash = firsts.iter().filter(|f| **f == firsts[i]).count() > 1;
+        let label = short_label(&mic.label, clash);
+        options.push((
+            Box::leak(label.into_boxed_str()),
+            Box::leak(mic.name.clone().into_boxed_str()),
+        ));
+    }
+    let options: &'static [(&'static str, &'static str)] = Box::leak(options.into_boxed_slice());
+    cache.push((mics, options));
+    options
+}
+
+#[cfg(feature = "speech")]
+fn short_label(label: &str, with_tail: bool) -> String {
+    let base = label.split(" (").next().unwrap_or(label);
+    let words: Vec<&str> = base.split_whitespace().collect();
+    let mut short = words.first().copied().unwrap_or(label).to_string();
+    if with_tail && words.len() > 1 {
+        let tail = words[words.len().saturating_sub(2).max(1)..].join(" ");
+        short = format!("{short} {tail}");
+    }
+    if short.chars().count() <= MIC_LABEL_CHARS {
+        return short;
+    }
+    let cut: String = short.chars().take(MIC_LABEL_CHARS - 1).collect();
+    format!("{}\u{2026}", cut.trim_end())
+}
+
+pub(super) fn mic_value() -> String {
+    #[cfg(feature = "speech")]
+    {
+        crate::linux_speech::mic_choice().unwrap_or_default()
+    }
+    #[cfg(not(feature = "speech"))]
+    {
+        String::new()
+    }
+}
+
+pub(super) fn set_mic(name: &str) {
+    #[cfg(feature = "speech")]
+    crate::linux_speech::set_mic_choice(name);
+    #[cfg(not(feature = "speech"))]
+    let _ = name;
 }
 
 pub(super) fn close_window(_ui: &Ui) {}

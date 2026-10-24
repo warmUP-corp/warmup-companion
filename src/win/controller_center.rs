@@ -59,7 +59,7 @@ const RED: u32 = 0x003A45FF;
 const REPEAT_DELAY: Duration = Duration::from_millis(400);
 const REPEAT_EVERY: Duration = Duration::from_millis(90);
 
-#[cfg(windows)]
+#[cfg(any(windows, feature = "speech"))]
 const TABS: [(&str, Icon); 6] = [
     ("General", Icon::Settings),
     ("Mouse", Icon::Mouse),
@@ -68,7 +68,7 @@ const TABS: [(&str, Icon); 6] = [
     ("Apps", Icon::AppWindow),
     ("Voice", Icon::Mic),
 ];
-#[cfg(not(windows))]
+#[cfg(not(any(windows, feature = "speech")))]
 const TABS: [(&str, Icon); 5] = [
     ("General", Icon::Settings),
     ("Mouse", Icon::Mouse),
@@ -787,6 +787,10 @@ fn current(item: &Item) -> (bool, i32) {
         Kind::PausePoll => (crate::gamepad_backend::userland_poll_paused(), 0),
         Kind::Vocabulary => (crate::config::vocabulary().coding, 0),
         Kind::Choice { key, .. } => {
+            #[cfg(not(windows))]
+            if *key == "voice_mic" {
+                return (false, choice_index(&item.kind, &mic_value()));
+            }
             let value = match *key {
                 "vk_style" => vk_style_name(crate::config::vk_style()),
                 "vk_display" => vk_display_name(crate::config::vk_display()),
@@ -1254,6 +1258,11 @@ fn style_card_art(i: usize) -> (crate::config::VkStyle, &'static MiniLayout) {
 }
 
 fn set(key: &str, value: &str) {
+    #[cfg(not(windows))]
+    if key == "voice_mic" {
+        set_mic(value);
+        return;
+    }
     if let Err(e) = crate::config::set_gamepad_setting(key, value) {
         crate::install::log_line(&format!("control center: set {key}={value}: {e}"));
     }

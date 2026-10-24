@@ -86,7 +86,7 @@ impl Tray for CompanionTray {
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let settings = crate::config::gamepad_settings();
         let paused = crate::gamepad_backend::userland_poll_paused();
-        let items = vec![
+        let mut items = vec![
             disabled("Warmup Companion"),
             disabled(BUILD_INFO),
             MenuItem::Separator,
@@ -125,6 +125,12 @@ impl Tray for CompanionTray {
                     ),
                 ],
             ),
+            check("Voice typing", settings.voice_enabled, |_| {
+                toggle_bool("voice_enabled", crate::config::gamepad_settings().voice_enabled);
+            }),
+        ];
+        items.extend(mic_items(settings.voice_enabled));
+        items.extend([
             submenu("Updates", update_items(settings.update_check)),
             submenu(
                 "Diagnostics",
@@ -143,7 +149,7 @@ impl Tray for CompanionTray {
             action("Uninstall", |_| uninstall()),
             MenuItem::Separator,
             action("Exit", |_| crate::gamepad::request_stop()),
-        ];
+        ]);
         items
     }
 }
@@ -174,6 +180,8 @@ const CMD_SIDE_TIPS: usize = 23;
 const CMD_DISPLAY_AUTO: usize = 24;
 const CMD_DISPLAY_TV: usize = 25;
 const CMD_DISPLAY_DESK: usize = 26;
+const CMD_MIC_DEFAULT: usize = 27;
+const CMD_MIC_BASE: usize = 100;
 
 fn menu_entries() -> Vec<Entry> {
     let gs = crate::config::gamepad_settings();
@@ -243,7 +251,7 @@ fn menu_entries() -> Vec<Entry> {
             ),
         ],
     ));
-    vec![
+    let mut root = vec![
         Entry::Header,
         Entry::Separator,
         Entry::toggle(
@@ -273,7 +281,9 @@ fn menu_entries() -> Vec<Entry> {
                 ),
             ],
         ),
-        Entry::toggle("Voice typing", CMD_VOICE, gs.voice_enabled),
+    ];
+    root.extend(voice_entries(gs.voice_enabled));
+    root.extend([
         Entry::submenu("Updates", updates).with_dot(available.is_some()),
         Entry::submenu(
             "Diagnostics",
@@ -288,7 +298,27 @@ fn menu_entries() -> Vec<Entry> {
         Entry::command("Uninstall Warmup Companion…", CMD_UNINSTALL),
         Entry::Separator,
         Entry::command("Exit", CMD_EXIT),
-    ]
+    ]);
+    root
+}
+
+fn voice_entries(voice_on: bool) -> Vec<Entry> {
+    let mut entries = vec![Entry::toggle("Voice typing", CMD_VOICE, voice_on)];
+    #[cfg(feature = "speech")]
+    if voice_on && crate::linux_speech::available() {
+        let current = crate::linux_speech::mic_choice();
+        let mut mics = vec![Entry::radio(
+            "Default (system)",
+            CMD_MIC_DEFAULT,
+            current.is_none(),
+        )];
+        for (i, mic) in crate::linux_speech::list_mics().into_iter().enumerate().take(32) {
+            let on = current.as_deref() == Some(mic.name.as_str());
+            mics.push(Entry::radio(mic.label, CMD_MIC_BASE + i, on));
+        }
+        entries.push(Entry::submenu("Microphone", mics));
+    }
+    entries
 }
 
 fn run_command(cmd: usize) {
@@ -324,6 +354,14 @@ fn run_command(cmd: usize) {
         CMD_DISPLAY_AUTO => set_display("auto"),
         CMD_DISPLAY_TV => set_display("tv"),
         CMD_DISPLAY_DESK => set_display("desk"),
+        #[cfg(feature = "speech")]
+        CMD_MIC_DEFAULT => crate::linux_speech::set_mic_choice(""),
+        #[cfg(feature = "speech")]
+        cmd if (CMD_MIC_BASE..CMD_MIC_BASE + 32).contains(&cmd) => {
+            if let Some(mic) = crate::linux_speech::list_mics().get(cmd - CMD_MIC_BASE) {
+                crate::linux_speech::set_mic_choice(&mic.name);
+            }
+        }
         _ => {}
     }
     refresh();
@@ -345,6 +383,26 @@ fn menu_spec(at: POINT) -> Spec {
         refresh: None,
         on_close: None,
     }
+}
+
+fn mic_items(voice_on: bool) -> Vec<MenuItem<CompanionTray>> {
+    #[cfg(feature = "speech")]
+    if voice_on && crate::linux_speech::available() {
+        let current = crate::linux_speech::mic_choice();
+        let mut mics = vec![check("Default (system)", current.is_none(), |_| {
+            crate::linux_speech::set_mic_choice("")
+        })];
+        for mic in crate::linux_speech::list_mics().into_iter().take(32) {
+            let on = current.as_deref() == Some(mic.name.as_str());
+            let name = mic.name.clone();
+            mics.push(check(&mic.label, on, move |_| {
+                crate::linux_speech::set_mic_choice(&name)
+            }));
+        }
+        return vec![submenu("Microphone", mics)];
+    }
+    let _ = voice_on;
+    Vec::new()
 }
 
 fn keyboard_items() -> Vec<MenuItem<CompanionTray>> {
