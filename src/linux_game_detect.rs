@@ -389,6 +389,12 @@ pub fn active_window_geometry() -> Option<(i64, i64, i64, i64)> {
     (w > 0 && h > 0).then_some((x, y, w, h))
 }
 
+pub fn active_workspace_windows() -> Option<i64> {
+    let (command, _) = hypr_runtime()?;
+    let workspace = hypr_json(&command, "j/activeworkspace").ok()?;
+    workspace.get("windows").and_then(|value| value.as_i64())
+}
+
 pub fn focused_output_logical_size() -> Option<(f32, f32)> {
     let (command, _) = hypr_runtime()?;
     let monitors = hypr_json(&command, "j/monitors").ok()?;

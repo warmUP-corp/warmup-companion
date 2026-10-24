@@ -981,12 +981,19 @@ fn apply_swipe(
         let lua = match swipe {
             Swipe::Left => r#"hl.dsp.focus({ workspace = "e-1" })"#,
             Swipe::Right => r#"hl.dsp.focus({ workspace = "e+1" })"#,
-            Swipe::Up => r#"hl.dsp.focus({ workspace = "previous" })"#,
+            Swipe::Up => r#"hl.dsp.focus({ workspace = "previous_per_monitor" })"#,
             Swipe::Down => r#"hl.dsp.focus({ workspace = "emptym" })"#,
         };
         let _ = std::thread::Builder::new()
             .name("hypr-swipe".into())
-            .spawn(move || crate::linux_game_detect::hypr_dispatch(lua));
+            .spawn(move || {
+                if swipe == Swipe::Down
+                    && crate::linux_game_detect::active_workspace_windows() == Some(0)
+                {
+                    return;
+                }
+                crate::linux_game_detect::hypr_dispatch(lua);
+            });
         return;
     }
     let kde = std::env::var("XDG_CURRENT_DESKTOP")
