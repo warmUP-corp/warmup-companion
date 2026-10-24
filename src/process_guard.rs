@@ -18,6 +18,62 @@ pub(crate) fn snapshot_processes_for_owner(
 }
 
 #[cfg(windows)]
+#[allow(dead_code)]
+pub(crate) fn image_path(pid: u32) -> Option<String> {
+    full_process_image_path(pid)
+}
+
+#[cfg(windows)]
+#[allow(dead_code)]
+pub(crate) fn steam_running_app_id(pid: u32) -> Option<String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Registry::{
+        RegGetValueW, HKEY, HKEY_CURRENT_USER, HKEY_USERS, RRF_RT_REG_DWORD,
+    };
+
+    fn read(root: HKEY, subkey: &str) -> Option<u32> {
+        let subkey: Vec<u16> = subkey.encode_utf16().chain(std::iter::once(0)).collect();
+        let name: Vec<u16> = "RunningAppID"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut value = 0u32;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        let res = unsafe {
+            RegGetValueW(
+                root,
+                PCWSTR(subkey.as_ptr()),
+                PCWSTR(name.as_ptr()),
+                RRF_RT_REG_DWORD,
+                None,
+                Some(&mut value as *mut u32 as *mut core::ffi::c_void),
+                Some(&mut size),
+            )
+        };
+        res.is_ok().then_some(value)
+    }
+
+    let owner_sid = process_owner_sid(pid);
+    let value = owner_sid
+        .and_then(|sid| read(HKEY_USERS, &format!(r"{sid}\Software\Valve\Steam")))
+        .or_else(|| read(HKEY_CURRENT_USER, r"Software\Valve\Steam"))?;
+    (value != 0).then(|| value.to_string())
+}
+
+#[cfg(windows)]
+fn process_owner_sid(pid: u32) -> Option<String> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let owner = crate::tracking_owner::tracking_owner_from_process(handle, pid);
+        let _ = CloseHandle(handle);
+        owner.map(|owner| owner.user_sid)
+    }
+}
+
+#[cfg(windows)]
 fn snapshot_processes_filtered(
     owner_filter: Option<&TrackingOwner>,
 ) -> Vec<(u32, String, Option<String>)> {
@@ -258,6 +314,25 @@ fn largest_visible_hwnd(pid: u32) -> Option<windows::Win32::Foundation::HWND> {
         let _ = EnumWindows(Some(cb), LPARAM(&mut ctx as *mut _ as _));
     }
     ctx.best
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+pub(crate) fn image_path(pid: u32) -> Option<String> {
+    if !proc_is_live(pid) {
+        return None;
+    }
+    proc_identity(pid).and_then(|(_, path)| path)
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+pub(crate) fn steam_running_app_id(pid: u32) -> Option<String> {
+    ["SteamAppId", "SteamGameId"].into_iter().find_map(|key| {
+        proc_env(pid, key)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty() && value != "0")
+    })
 }
 
 #[cfg(target_os = "linux")]
