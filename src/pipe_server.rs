@@ -972,6 +972,35 @@ fn apply_parental_guard(payload: &ParentalGuardPayload) {
 #[cfg(not(all(any(windows, target_os = "linux"), feature = "gamepad")))]
 fn apply_parental_guard(_payload: &ParentalGuardPayload) {}
 
+#[cfg(any(windows, target_os = "linux"))]
+fn apply_game_detection(payload: &crate::protocol::GameDetectionPayload) {
+    match crate::game_list::accept_chunk(payload) {
+        Ok(crate::game_list::ChunkOutcome::Installed(revision)) => {
+            crate::install::log_line(&format!("game detection list revision {revision} applied"));
+        }
+        Ok(crate::game_list::ChunkOutcome::Pending) => {}
+        Err(error) => crate::install::log_line(&format!(
+            "game detection chunk {}/{} of revision {} rejected: {error:?}",
+            payload.chunk + 1,
+            payload.chunks,
+            payload.revision
+        )),
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn apply_game_detection(_payload: &crate::protocol::GameDetectionPayload) {}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn game_detection_revision() -> Option<u64> {
+    crate::game_list::revision()
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn game_detection_revision() -> Option<u64> {
+    None
+}
+
 #[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 fn apply_play_sessions_ack(
     owner: &TrackingOwner,

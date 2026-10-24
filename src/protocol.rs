@@ -68,6 +68,8 @@ pub struct Hello {
     pub parental_guard: Option<ParentalGuardPayload>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_watch: Option<LibraryWatchPayload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_detection_revision: Option<u64>,
 }
 
 /// Kid Mode system-wide blocking rules for the companion guardian loop.
@@ -137,6 +139,41 @@ pub struct PlaySessionsPayload {
 #[serde(rename_all = "camelCase")]
 pub struct PlaySessionsAckPayload {
     pub external_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameDetectionPayload {
+    pub revision: u64,
+    pub chunk: u32,
+    pub chunks: u32,
+    #[serde(default)]
+    pub patterns: Vec<String>,
+    #[serde(default)]
+    pub steam_app_ids: Vec<String>,
+    #[serde(default)]
+    pub local_game_dirs: Vec<LocalGameDir>,
+    #[serde(default)]
+    pub denylist_exes: Vec<String>,
+    #[serde(default)]
+    pub background_tool_stems: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunningGame {
+    pub game_id: Option<String>,
+    pub pid: u32,
+    pub exe_stem: String,
+    pub image_path: String,
+    pub steam_app_id: Option<String>,
+    pub fullscreen: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RunningGamesPayload {
+    pub games: Vec<RunningGame>,
 }
 
 /// `connection` frame payload — authoritative controller connection snapshot.
@@ -373,6 +410,7 @@ pub enum UpFrame {
     ParentalBlocked(ParentalBlockedPayload),
     PlaySessions(PlaySessionsPayload),
     SettingsChanged(SettingsChangedPayload),
+    RunningGames(RunningGamesPayload),
     /// A frame whose `type` this slice does not know (added by a later slice).
     /// Never serialized; produced only by [`UpFrame::parse_line`].
     #[serde(skip)]
@@ -394,6 +432,7 @@ pub enum DownFrame {
     LibraryWatch(LibraryWatchPayload),
     PlaySessionsAck(PlaySessionsAckPayload),
     ShutDown(ShutDownPayload),
+    GameDetection(GameDetectionPayload),
     #[serde(skip)]
     Unknown,
 }
@@ -422,7 +461,8 @@ impl UpFrame {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
             "hello" | "connection" | "button" | "cursor_moved" | "axis" | "battery" | "pads"
-            | "touchpad" | "parental_blocked" | "play_sessions" | "settings_changed" => {
+            | "touchpad" | "parental_blocked" | "play_sessions" | "settings_changed"
+            | "running_games" => {
                 serde_json::from_str(line)
             }
             _ => Ok(Self::Unknown),
@@ -440,6 +480,14 @@ impl DownFrame {
             "hello" | "config" | "mode" | "rumble" | "led" | "companion_settings" | "native_vk"
             | "parental_guard" | "library_watch" | "play_sessions_ack" | "shut_down" => {
                 serde_json::from_str(line)
+            }
+            "game_detection" => {
+                let value: serde_json::Value = serde_json::from_str(line)?;
+                match value.get("payload") {
+                    Some(payload) => serde_json::from_value(payload.clone()),
+                    None => serde_json::from_value(value),
+                }
+                .map(Self::GameDetection)
             }
             _ => Ok(Self::Unknown),
         }
@@ -698,6 +746,7 @@ mod tests {
             }),
             parental_guard: None,
             library_watch: None,
+            game_detection_revision: None,
         });
         let line = hello.to_ndjson_line();
         let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
@@ -741,6 +790,7 @@ mod tests {
             companion_settings: Some(settings.clone()),
             parental_guard: None,
             library_watch: None,
+            game_detection_revision: None,
         });
         let line = reply.to_ndjson_line();
         let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();

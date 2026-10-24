@@ -11,11 +11,11 @@ use crate::protocol::{
 use crate::tracking_owner::TrackingOwner;
 
 use super::{
-    apply_companion_settings, apply_config, apply_led, apply_library_watch, apply_mode,
-    apply_parental_guard, apply_play_sessions_ack, apply_rumble, companion_snapshot, current,
-    current_axis, current_battery, current_pads, drain_buttons, drain_parental_blocked,
-    ensure_settings_watcher, set_native_vk_request, take_cursor_moved, take_touchpad,
-    SettingsSync, SETTINGS_GEN,
+    apply_companion_settings, apply_config, apply_game_detection, apply_led, apply_library_watch,
+    apply_mode, apply_parental_guard, apply_play_sessions_ack, apply_rumble, companion_snapshot,
+    current, current_axis, current_battery, current_pads, drain_buttons, drain_parental_blocked,
+    ensure_settings_watcher, game_detection_revision, set_native_vk_request, take_cursor_moved,
+    take_touchpad, SettingsSync, SETTINGS_GEN,
 };
 
 const KEEPALIVE: Duration = Duration::from_secs(1);
@@ -174,6 +174,7 @@ pub(super) fn handshake<R: Read, W: Write>(
         companion_settings: Some(settings_snapshot),
         parental_guard: None,
         library_watch: None,
+        game_detection_revision: game_detection_revision(),
     });
     session.write_frame(reply.to_ndjson_line().as_bytes())?;
     #[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
@@ -373,6 +374,7 @@ fn drain_inbound<R: Read, W: Write>(
                 }
             }
             Ok(DownFrame::ShutDown(_)) => handle_shut_down(),
+            Ok(DownFrame::GameDetection(payload)) => apply_game_detection(&payload),
             Err(error) => {
                 crate::install::log_line(&format!("pipe inbound frame parse error: {error}"));
             }

@@ -1,7 +1,7 @@
 #![cfg(any(windows, target_os = "linux"))]
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Once, RwLock};
+use std::sync::{Arc, Mutex, Once, RwLock};
 
 pub(crate) const BUILTIN_DENYLIST_EXES: &[&str] = &[
     "warmup-companion.exe",
@@ -130,7 +130,24 @@ pub(crate) enum GameListError {
     TooManyLocalGameDirs,
     TooManyNames,
     TooLarge,
+    BadChunk,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChunkOutcome {
+    Pending,
+    Installed(u64),
+}
+
+struct Assembly {
+    chunks: u32,
+    received: Vec<bool>,
+    list: GameList,
+}
+
+const MAX_CHUNKS: u32 = 128;
+
+static ASSEMBLY: Mutex<Option<Assembly>> = Mutex::new(None);
 
 struct Index {
     revision: u64,
@@ -395,4 +412,56 @@ pub(crate) fn denylist_names() -> Vec<String> {
             .collect()
     });
     exes.into_iter().chain(stems).collect()
+}
+
+pub(crate) fn accept_chunk(
+    payload: &crate::protocol::GameDetectionPayload,
+) -> Result<ChunkOutcome, GameListError> {
+    if payload.chunks == 0 || payload.chunks > MAX_CHUNKS || payload.chunk >= payload.chunks {
+        return Err(GameListError::BadChunk);
+    }
+    let mut slot = ASSEMBLY.lock().map_err(|_| GameListError::BadChunk)?;
+    let fresh = slot.as_ref().is_none_or(|assembly| {
+        assembly.list.revision != payload.revision || assembly.chunks != payload.chunks
+    });
+    if fresh {
+        *slot = Some(Assembly {
+            chunks: payload.chunks,
+            received: vec![false; payload.chunks as usize],
+            list: GameList {
+                revision: payload.revision,
+                ..GameList::default()
+            },
+        });
+    }
+    let Some(assembly) = slot.as_mut() else {
+        return Err(GameListError::BadChunk);
+    };
+    let index = payload.chunk as usize;
+    if !assembly.received[index] {
+        assembly.received[index] = true;
+        let list = &mut assembly.list;
+        list.patterns.extend(payload.patterns.iter().cloned());
+        list.steam_app_ids
+            .extend(payload.steam_app_ids.iter().cloned());
+        list.local_game_dirs
+            .extend(payload.local_game_dirs.iter().cloned());
+        list.denylist_exes
+            .extend(payload.denylist_exes.iter().cloned());
+        list.background_tool_stems
+            .extend(payload.background_tool_stems.iter().cloned());
+        if let Err(error) = validate(list) {
+            *slot = None;
+            return Err(error);
+        }
+    }
+    if !assembly.received.iter().all(|got| *got) {
+        return Ok(ChunkOutcome::Pending);
+    }
+    let Some(done) = slot.take() else {
+        return Err(GameListError::BadChunk);
+    };
+    drop(slot);
+    install(&done.list)?;
+    Ok(ChunkOutcome::Installed(done.list.revision))
 }
