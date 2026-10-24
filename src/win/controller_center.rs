@@ -377,6 +377,16 @@ fn voice_installed(id: &str) -> bool {
     }
 }
 
+#[cfg(windows)]
+fn voice_removable(_id: &str) -> bool {
+    true
+}
+
+#[cfg(windows)]
+fn hidden_item(_it: &Item) -> bool {
+    false
+}
+
 fn voice_active(id: &str) -> bool {
     if !voice_installed(id) {
         return false;
@@ -385,7 +395,11 @@ fn voice_active(id: &str) -> bool {
     let engine = read_speech("engine.txt");
     #[cfg(not(windows))]
     let engine = voice_engine();
-    if id.starts_with("parakeet") {
+    #[cfg(windows)]
+    let named_engine = id.starts_with("parakeet");
+    #[cfg(not(windows))]
+    let named_engine = true;
+    if named_engine {
         engine == id
     } else {
         !engine.starts_with("parakeet") && read_speech("model.txt") == format!("ggml-{id}.bin")
@@ -396,7 +410,11 @@ fn use_voice_model(id: &'static str) {
     if voice_active(id) {
         return;
     }
-    if id.starts_with("parakeet") {
+    #[cfg(windows)]
+    let named_engine = id.starts_with("parakeet");
+    #[cfg(not(windows))]
+    let named_engine = true;
+    if named_engine {
         crate::win::speech_input::set_engine(id);
     } else {
         if let Err(e) = std::fs::write(speech_dir().join("model.txt"), format!("ggml-{id}.bin")) {
@@ -554,7 +572,7 @@ fn removable_voice(ui: &Ui, target: Target) -> Option<&'static str> {
     let Kind::VoiceModel { id } = ui.items.get(i)?.kind else {
         return None;
     };
-    (!voice_busy() && voice_installed(id)).then_some(id)
+    (!voice_busy() && voice_installed(id) && voice_removable(id)).then_some(id)
 }
 
 fn request_voice_remove(ui: &mut Ui, target: Target) {
@@ -1337,7 +1355,7 @@ fn rows(tab: usize, items: &[Item], led_open: bool) -> Vec<(Target, Rect)> {
     for (i, it) in items
         .iter()
         .enumerate()
-        .filter(|(_, it)| it.tab == tab && (led_open || !is_led(&it.kind)))
+        .filter(|(_, it)| it.tab == tab && (led_open || !is_led(&it.kind)) && !hidden_item(it))
     {
         stack.push((Target::Item(i), item_height(it)));
     }
