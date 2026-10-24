@@ -126,6 +126,51 @@ pub const BUILTINS: &[Builtin] = &[
     },
 ];
 
+#[cfg(target_os = "linux")]
+pub const HYPRLAND_ID: &str = "hyprland";
+
+#[cfg(target_os = "linux")]
+static HYPRLAND: Builtin = Builtin {
+    name: "Hyprland desktop",
+    exes: &[HYPRLAND_ID],
+    map: &[
+        ("LT", "hypr:workspace e-1"),
+        ("RT", "hypr:workspace e+1"),
+        ("Y", "hypr:togglespecialworkspace"),
+        ("X", "hypr:fullscreen 0"),
+    ],
+    presets: &[
+        ("Previous workspace", "hypr:workspace e-1"),
+        ("Next workspace", "hypr:workspace e+1"),
+        ("Workspace 1", "hypr:workspace 1"),
+        ("Workspace 2", "hypr:workspace 2"),
+        ("Workspace 3", "hypr:workspace 3"),
+        ("Workspace 4", "hypr:workspace 4"),
+        ("Workspace 5", "hypr:workspace 5"),
+        ("Workspace 6", "hypr:workspace 6"),
+        ("Workspace 7", "hypr:workspace 7"),
+        ("Workspace 8", "hypr:workspace 8"),
+        ("Workspace 9", "hypr:workspace 9"),
+        ("Move window to previous workspace", "hypr:movetoworkspace e-1"),
+        ("Move window to next workspace", "hypr:movetoworkspace e+1"),
+        ("Toggle special workspace", "hypr:togglespecialworkspace"),
+        ("Fullscreen", "hypr:fullscreen 0"),
+        ("Toggle floating", "hypr:togglefloating"),
+        ("Close window", "hypr:killactive"),
+        ("Back and forth", "hypr:workspace previous_per_monitor"),
+    ],
+};
+
+#[cfg(target_os = "linux")]
+fn builtins() -> impl Iterator<Item = &'static Builtin> {
+    BUILTINS.iter().chain(std::iter::once(&HYPRLAND))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn builtins() -> impl Iterator<Item = &'static Builtin> {
+    BUILTINS.iter()
+}
+
 pub const APP_PRESETS: &[(&str, &str)] = &[
     ("Copy", "ctrl+c"),
     ("Paste", "ctrl+v"),
@@ -226,8 +271,7 @@ impl Profile {
 }
 
 pub fn builtin_profiles() -> Vec<Profile> {
-    BUILTINS
-        .iter()
+    builtins()
         .map(|b| {
             let mut p = Profile {
                 exes: b.exes.iter().map(|s| s.to_string()).collect(),
@@ -251,8 +295,7 @@ pub fn new_profile(exe: &str) -> Profile {
 }
 
 fn builtin_for(exe: &str) -> Option<&'static Builtin> {
-    BUILTINS
-        .iter()
+    builtins()
         .find(|b| b.exes.iter().any(|e| e.eq_ignore_ascii_case(exe)))
 }
 
@@ -438,21 +481,27 @@ pub fn chord_for_foreground(button: &str) -> Option<ProfileAction> {
     let settings = crate::config::settings_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .unwrap_or_default();
-    let (exe, class_name) = crate::linux_game_detect::foreground_identity()?;
-    for id in profile_candidates(&exe, &class_name) {
-        if setting(&settings, &format!("profile.{id}.{button}"))
-            .is_some_and(|value| value.eq_ignore_ascii_case("none"))
-        {
-            return None;
-        }
-        if setting(&settings, &format!("profile.{id}")).is_some_and(is_off) {
-            return None;
-        }
-        if let Some(action) = action_for(&settings, &id, button) {
-            return Some(action);
+    let hyprland = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some_and(|v| !v.is_empty());
+    let identity = crate::linux_game_detect::foreground_identity();
+    if let Some((exe, class_name)) = identity {
+        for id in profile_candidates(&exe, &class_name) {
+            if setting(&settings, &format!("profile.{id}.{button}"))
+                .is_some_and(|value| value.eq_ignore_ascii_case("none"))
+            {
+                return None;
+            }
+            if setting(&settings, &format!("profile.{id}")).is_some_and(is_off) {
+                break;
+            }
+            if let Some(action) = action_for(&settings, &id, button) {
+                return Some(action);
+            }
         }
     }
-    None
+    if !hyprland {
+        return None;
+    }
+    action_for(&settings, HYPRLAND_ID, button)
 }
 
 fn split_key(key: &str) -> Option<(&str, Option<&str>)> {
