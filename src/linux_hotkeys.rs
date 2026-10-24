@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use zbus::blocking::{Connection, Proxy};
@@ -15,6 +15,8 @@ const APP_ID: &str = "warmup-companion";
 const UNIT_NAME: &str = "warmup-companion.service";
 const SYNC_EVERY: Duration = Duration::from_secs(1);
 const BIND_CHECK_TICKS: u32 = 3;
+const RECONNECT_MIN: Duration = Duration::from_secs(1);
+const RECONNECT_MAX: Duration = Duration::from_secs(60);
 const SIGNAL_POLL: Duration = Duration::from_millis(100);
 const LABEL_PREFIX: &str = "warmUP Companion: ";
 
@@ -94,6 +96,7 @@ enum Target {
 }
 
 static STARTED: AtomicBool = AtomicBool::new(false);
+static GENERATION: AtomicU64 = AtomicU64::new(0);
 static CENTER_ACCEL: Mutex<Option<String>> = Mutex::new(None);
 static CENTER_SIGNAL: AtomicBool = AtomicBool::new(false);
 static VOICE_SIGNAL: AtomicBool = AtomicBool::new(false);
@@ -151,34 +154,137 @@ pub(crate) fn release() {
 }
 
 fn run() {
-    match Portal::open() {
-        Ok(portal) => {
-            if let Some(trigger) = portal.triggers.get(Hotkey::Center.id()) {
-                set_center_accel(Some(trigger.clone()));
-            }
-            if hyprland() {
-                let names = global_names();
-                for hotkey in Hotkey::ALL {
-                    if portal.triggers.contains_key(hotkey.id()) {
-                        continue;
-                    }
-                    if let Some(name) = names.get(hotkey.id()) {
-                        spawn_hypr_sync(hotkey, Target::Global(name.clone()));
+    let mut synced = false;
+    let mut first = true;
+    let mut backoff = RECONNECT_MIN;
+    loop {
+        match Portal::open() {
+            Ok(portal) => {
+                first = false;
+                backoff = RECONNECT_MIN;
+                let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+                if let Some(trigger) = portal.triggers.get(Hotkey::Center.id()) {
+                    set_center_accel(Some(trigger.clone()));
+                }
+                if hyprland() && !synced {
+                    let names = global_names();
+                    for hotkey in Hotkey::ALL {
+                        if portal.triggers.contains_key(hotkey.id()) {
+                            continue;
+                        }
+                        if let Some(name) = names.get(hotkey.id()) {
+                            spawn_hypr_sync(hotkey, Target::Global(name.clone()));
+                            synced = true;
+                        }
                     }
                 }
-            }
-            portal.listen();
-        }
-        Err(e) => {
-            log(&format!("global shortcuts portal unavailable: {e}"));
-            if hyprland() && service_main() {
-                install_signal_handlers();
-                for hotkey in Hotkey::ALL {
-                    spawn_hypr_sync(hotkey, Target::Signal(hotkey.signal()));
+                let portal = Arc::new(portal);
+                for (name, watch) in [
+                    ("warmup-hotkeys-activated", listen as fn(&Portal, u64)),
+                    ("warmup-hotkeys-changed", follow_changes as fn(&Portal, u64)),
+                ] {
+                    let portal = portal.clone();
+                    let _ = std::thread::Builder::new()
+                        .name(name.into())
+                        .spawn(move || watch(&portal, generation));
                 }
-                poll_signals();
+                wait_for_portal_restart(&portal.conn);
+                log("the global shortcuts portal went away, reconnecting");
+                std::thread::sleep(backoff);
+            }
+            Err(e) if first => {
+                log(&format!("global shortcuts portal unavailable: {e}"));
+                if hyprland() && service_main() {
+                    install_signal_handlers();
+                    for hotkey in Hotkey::ALL {
+                        spawn_hypr_sync(hotkey, Target::Signal(hotkey.signal()));
+                    }
+                    poll_signals();
+                }
+                return;
+            }
+            Err(e) => {
+                log(&format!("global shortcuts portal: {e}; retrying in {}s", backoff.as_secs()));
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(RECONNECT_MAX);
             }
         }
+    }
+}
+
+fn wait_for_portal_restart(conn: &Connection) {
+    let changes = zbus::blocking::fdo::DBusProxy::new(conn)
+        .and_then(|dbus| dbus.receive_name_owner_changed());
+    let Ok(changes) = changes else {
+        loop {
+            std::thread::park();
+        }
+    };
+    for change in changes {
+        if change.args().is_ok_and(|args| args.name().as_str() == DEST) {
+            return;
+        }
+    }
+}
+
+fn current(generation: u64) -> bool {
+    GENERATION.load(Ordering::SeqCst) == generation
+}
+
+fn listen(portal: &Portal, generation: u64) {
+    let Ok(proxy) = Proxy::new(&portal.conn, DEST, PORTAL_PATH, IFACE) else {
+        return;
+    };
+    let Ok(signals) = proxy.receive_signal("Activated") else {
+        return;
+    };
+    for message in signals {
+        if !current(generation) {
+            return;
+        }
+        let Ok((session, id, _, _)) = message
+            .body()
+            .deserialize::<(OwnedObjectPath, String, u64, HashMap<String, OwnedValue>)>()
+        else {
+            continue;
+        };
+        if session != portal.session {
+            continue;
+        }
+        if let Some(hotkey) = Hotkey::from_id(&id) {
+            hotkey.run();
+        }
+    }
+}
+
+fn follow_changes(portal: &Portal, generation: u64) {
+    let Ok(proxy) = Proxy::new(&portal.conn, DEST, PORTAL_PATH, IFACE) else {
+        return;
+    };
+    let Ok(signals) = proxy.receive_signal("ShortcutsChanged") else {
+        return;
+    };
+    for message in signals {
+        if !current(generation) {
+            return;
+        }
+        let Ok((session, shortcuts)) = message.body().deserialize::<(
+            OwnedObjectPath,
+            Vec<(String, HashMap<String, OwnedValue>)>,
+        )>() else {
+            continue;
+        };
+        if session != portal.session || hyprland() {
+            continue;
+        }
+        let trigger = shortcuts
+            .iter()
+            .find(|(id, _)| id == Hotkey::Center.id())
+            .and_then(|(_, props)| props.get("trigger_description"))
+            .and_then(|v| String::try_from(v.clone()).ok())
+            .filter(|t| !t.is_empty());
+        log(&format!("Control Center shortcut is now {trigger:?}"));
+        set_center_accel(trigger);
     }
 }
 
@@ -254,29 +360,6 @@ impl Portal {
             session,
             triggers,
         })
-    }
-
-    fn listen(&self) {
-        let Ok(proxy) = Proxy::new(&self.conn, DEST, PORTAL_PATH, IFACE) else {
-            return;
-        };
-        let Ok(signals) = proxy.receive_signal("Activated") else {
-            return;
-        };
-        for message in signals {
-            let Ok((session, id, _, _)) = message
-                .body()
-                .deserialize::<(OwnedObjectPath, String, u64, HashMap<String, OwnedValue>)>()
-            else {
-                continue;
-            };
-            if session != self.session {
-                continue;
-            }
-            if let Some(hotkey) = Hotkey::from_id(&id) {
-                hotkey.run();
-            }
-        }
     }
 }
 
