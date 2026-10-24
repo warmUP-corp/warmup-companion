@@ -20,6 +20,11 @@ pub fn write_report() -> Result<PathBuf, String> {
         ("hyprctl-version.txt".to_string(), hyprctl("version")),
         ("hyprctl-devices.txt".to_string(), hyprctl("devices")),
         ("hyprctl-monitors.txt".to_string(), hyprctl("monitors")),
+        ("library-watch.json".to_string(), state_file(&crate::paths::library_watch_file())),
+        ("pending-play-sessions.json".to_string(), state_file(&crate::paths::pending_play_sessions_file())),
+        ("parental-guard.json".to_string(), state_file(&crate::paths::parental_guard_file())),
+        ("crash-report.txt".to_string(), state_file(&crate::crash::report_file())),
+        ("crash-report.last.txt".to_string(), state_file(&crate::crash::last_report_file())),
     ];
     let bytes = ustar(&files);
     std::fs::write(&path, bytes).map_err(|error| format!("write {}: {error}", path.display()))?;
@@ -106,6 +111,16 @@ fn log_tail() -> Vec<u8> {
                 body.push('\n');
             }
             body.into_bytes()
+        }
+        Err(error) => format!("read {}: {error}\n", path.display()).into_bytes(),
+    }
+}
+
+fn state_file(path: &std::path::Path) -> Vec<u8> {
+    match std::fs::read(path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            format!("{} does not exist.\n", path.display()).into_bytes()
         }
         Err(error) => format!("read {}: {error}\n", path.display()).into_bytes(),
     }

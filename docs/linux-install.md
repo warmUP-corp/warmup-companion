@@ -62,6 +62,7 @@ If either variable is missing, the service logs the reason and exits. `verify` a
 | Log and runtime status | `$XDG_STATE_HOME/warmup-companion/` |
 | Library watchlist and unsent play sessions | `$XDG_STATE_HOME/warmup-companion/library-watch.json`, `pending-play-sessions.json` |
 | Kid Mode block list | `$XDG_STATE_HOME/warmup-companion/parental-guard.json` |
+| Crash report | `$XDG_STATE_HOME/warmup-companion/crash-report.txt`, `crash-report.last.txt` once read |
 | Installed binary | `$XDG_DATA_HOME/warmup-companion/bin/warmup-companion` |
 | Input socket | `$XDG_RUNTIME_DIR/warmup/input.sock` |
 
@@ -109,7 +110,7 @@ While warmUP is closed, the companion counts play time for the games in the watc
 
 While Kid Mode blocking is on, the companion checks running programs every two seconds, matching them the same way, and stops any blocked game with SIGTERM, then SIGKILL 0.8 seconds later. The service runs as your user, so it can only stop games running under your own account.
 
-`warmup-companion settings` reads and writes `$XDG_CONFIG_HOME/warmup-companion/settings.ini`. `warmup-companion --controller-center` opens Control Center on its own, without the controller. `warmup-companion diagnostics` writes a tarball under `$XDG_STATE_HOME/warmup-companion/diagnostics/`.
+`warmup-companion settings` reads and writes `$XDG_CONFIG_HOME/warmup-companion/settings.ini`. `warmup-companion --controller-center` opens Control Center on its own, without the controller. `warmup-companion diagnostics` writes a tarball under `$XDG_STATE_HOME/warmup-companion/diagnostics/`. It holds the unit status, the journal, the service log, device and Hyprland details, the watchlist, the unsent play sessions, the Kid Mode block list and both crash reports.
 
 ## Hyprland-only features
 
