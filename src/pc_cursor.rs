@@ -955,7 +955,8 @@ fn apply_uinput(
                 let lua = match swipe {
                     Swipe::Left => r#"hl.dsp.focus({ workspace = "e-1" })"#,
                     Swipe::Right => r#"hl.dsp.focus({ workspace = "e+1" })"#,
-                    Swipe::Up | Swipe::Down => return,
+                    Swipe::Up => r#"hl.dsp.focus({ workspace = "previous" })"#,
+                    Swipe::Down => r#"hl.dsp.focus({ workspace = "emptym" })"#,
                 };
                 let _ = std::thread::Builder::new()
                     .name("hypr-swipe".into())

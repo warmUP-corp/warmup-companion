@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux with Hyprland, a touchpad swipe down moves to an empty workspace so the desktop shows, and a swipe up goes back to the workspace you came from. Before, both did nothing on Hyprland. KDE Plasma keeps its overview and show-desktop shortcuts.
 - On Linux, pasting into a terminal (Alacritty, kitty, foot, WezTerm, Ghostty, Konsole, GNOME Terminal, xterm) uses Ctrl+Shift+V. A copied picture or copied files are typed as quoted paths instead, like on Windows; a picture is saved under Pictures/Screenshots first, and a screenshot you just took is typed as its saved file.
 - On Linux, LB + RB + RT takes a screenshot and LB + RB + LT takes one of the focused window, and holding View + LB does it while a game has the controller, like on Windows. The picture is copied to the clipboard, saved under Pictures/Screenshots with the Windows file name, and a notification opens it. The companion uses `grim` and `wl-copy`, and falls back to the desktop's screenshot portal.
 - On Linux with Hyprland, the stick moves the pointer at a speed matched to the focused screen, like on Windows. On a screen larger than 1080p, one stick throw now crosses the same share of the screen instead of moving slower.

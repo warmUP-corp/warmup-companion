@@ -148,7 +148,7 @@ View + Y and the keyboard's paste key send Ctrl+Shift+V when the focused window 
 These v0.10 features read Hyprland's IPC socket, so they work only on Hyprland:
 
 - **Per-app button shortcuts.** The focused app comes from Hyprland's active window. On KDE Plasma and other desktops no app is ever focused for the companion, so buttons keep their default actions.
-- **Workspace swipes.** A sideways touchpad swipe moves to the previous or next workspace on Hyprland. Swipe up and down do nothing there. On KDE Plasma, swipes send Plasma's shortcuts instead (Ctrl+Meta+Left/Right, Meta+W, Meta+D). Other desktops ignore swipes.
+- **Workspace swipes.** A sideways touchpad swipe moves to the previous or next workspace on Hyprland. Hyprland has no task view or show-desktop of its own, so swipe down moves to an empty workspace on the current screen, which shows the desktop, and swipe up goes back to the workspace you were on before. On KDE Plasma, swipes send Plasma's shortcuts instead (Ctrl+Meta+Left/Right, Meta+W, Meta+D). Other desktops ignore swipes.
 - **Pause input while a game is running.** See below.
 
 On Hyprland, "Pause input while a game is running" sleeps the pad while the focused window is fullscreen, or a floating window covers the monitor, unless that program is a browser, launcher, or shell. KDE Plasma's KWin does not advertise `zwlr_foreign_toplevel_management_v1`, so the same switch does not see games there.
