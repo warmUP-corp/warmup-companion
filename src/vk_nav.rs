@@ -1109,7 +1109,9 @@ fn foreground_info() -> (usize, String, String, String) {
     let Some((exe, class, title)) = crate::linux_game_detect::foreground_window() else {
         return (0, String::new(), String::new(), String::new());
     };
-    let base = if class.eq_ignore_ascii_case("dev.warmup.console") {
+    let base = if class.eq_ignore_ascii_case("dev.warmup.console")
+        || class.eq_ignore_ascii_case("warmup")
+    {
         "warmup".to_string()
     } else {
         exe.rsplit('/').next().unwrap_or(&exe).to_string()
