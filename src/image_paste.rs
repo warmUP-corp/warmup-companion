@@ -500,16 +500,12 @@ pub(crate) fn copy_to_clipboard(mime: &str, bytes: &[u8]) -> bool {
 
 #[cfg(target_os = "linux")]
 fn clipboard_types() -> Option<Vec<String>> {
-    let out = std::process::Command::new("wl-paste")
-        .arg("--list-types")
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return Some(Vec::new());
-    }
+    let out = match wl_paste(&["--list-types"]) {
+        Ok(out) => out.unwrap_or_default(),
+        Err(_) => return None,
+    };
     Some(
-        String::from_utf8_lossy(&out.stdout)
+        String::from_utf8_lossy(&out)
             .lines()
             .map(|line| line.trim().to_string())
             .filter(|line| !line.is_empty())
@@ -519,12 +515,47 @@ fn clipboard_types() -> Option<Vec<String>> {
 
 #[cfg(target_os = "linux")]
 fn clipboard_bytes(mime: &str) -> Option<Vec<u8>> {
-    let out = std::process::Command::new("wl-paste")
-        .args(["--no-newline", "--type", mime])
+    wl_paste(&["--no-newline", "--type", mime])
+        .ok()
+        .flatten()
+        .filter(|out| !out.is_empty())
+}
+
+#[cfg(target_os = "linux")]
+fn wl_paste(args: &[&str]) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+    let mut child = std::process::Command::new("wl-paste")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    (out.status.success() && !out.stdout.is_empty()).then_some(out.stdout)
+        .spawn()?;
+    let mut stdout = child.stdout.take();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = Vec::new();
+        if let Some(stdout) = stdout.as_mut() {
+            let _ = stdout.read_to_end(&mut out);
+        }
+        let _ = tx.send(out);
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break Some(status),
+            None if Instant::now() >= deadline => break None,
+            None => std::thread::sleep(Duration::from_millis(10)),
+        }
+    };
+    let Some(status) = status else {
+        let _ = child.kill();
+        let _ = child.wait();
+        crate::install::log_line(&format!("paste: wl-paste {} timed out", args.join(" ")));
+        return Ok(None);
+    };
+    let out = rx.recv_timeout(Duration::from_millis(500)).unwrap_or_default();
+    Ok(status.success().then_some(out))
 }
 
 #[cfg(target_os = "linux")]
