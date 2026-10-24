@@ -100,6 +100,13 @@ pub struct LibraryWatchGameEntry {
     pub install_dir_prefixes: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalGameDir {
+    pub game_id: String,
+    pub prefix: String,
+}
+
 /// Library watchlist pushed by warmUP for offline playtime tracking.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]

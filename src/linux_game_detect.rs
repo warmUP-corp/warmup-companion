@@ -9,8 +9,6 @@ const EXTERNAL_FULLSCREEN_AXIS_PERCENT: i64 = 85;
 const EXTERNAL_FULLSCREEN_OVERLAP_PERCENT: i64 = 72;
 const DETECT_INTERVAL: Duration = Duration::from_millis(500);
 
-const EXTERNAL_GAME_EXE_DENYLIST: &[&str] = crate::game_list::BUILTIN_DENYLIST_EXES;
-
 #[derive(Clone, Copy)]
 struct DetectionCache {
     checked_at: Instant,
@@ -168,9 +166,8 @@ fn is_denied(name: &str) -> bool {
     if base.is_empty() {
         return false;
     }
-    EXTERNAL_GAME_EXE_DENYLIST
+    crate::game_list::denylist_names()
         .iter()
-        .chain(crate::game_list::BUILTIN_BACKGROUND_TOOL_STEMS)
         .any(|entry| {
             let stem = deny_stem(entry);
             base == stem
