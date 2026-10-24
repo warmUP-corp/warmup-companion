@@ -352,6 +352,18 @@ impl Backend {
             return;
         }
         if crate::gamepad_backend::game_owns_controller() {
+            // The light stays the game's until it lets go, but rumble still plays: warmUP only
+            // sends it in game for a press the player is making right now (the record hold's
+            // ticks and its confirm pulse), and dropping it left that hold without any feel.
+            for cmd in &cmds {
+                match *cmd {
+                    PadCommand::Rumble { strong, weak, ms } => self.rumble(strong, weak, ms),
+                    PadCommand::TriggerRumble { left, right, ms } => {
+                        self.trigger_rumble(left, right, ms)
+                    }
+                    PadCommand::Led { .. } | PadCommand::LedRelease => {}
+                }
+            }
             match cmds.iter().rev().find_map(|cmd| match *cmd {
                 PadCommand::Led { r, g, b } => Some(Some((r, g, b))),
                 PadCommand::LedRelease => Some(None),
