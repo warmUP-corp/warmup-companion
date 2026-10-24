@@ -165,6 +165,10 @@ impl PanelThread {
     pub(crate) fn hide(&self) -> Result<(), String> {
         self.post(Cmd::Hide)
     }
+
+    pub(crate) fn is_alive(&self) -> bool {
+        self.join.as_ref().is_some_and(|join| !join.is_finished())
+    }
 }
 
 impl Drop for PanelThread {

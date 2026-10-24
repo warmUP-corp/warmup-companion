@@ -28,6 +28,10 @@ pub(crate) fn open_with(build: Build, at: POINT) {
     let Ok(mut guard) = slot.lock() else {
         return;
     };
+    if guard.as_ref().is_some_and(|t| !t.is_alive()) {
+        crate::install::log_line("menu: panel thread is gone, starting it again");
+        *guard = None;
+    }
     if guard.is_none() {
         let spec = linux_panel::Spec {
             thread: "warmup-tray-menu",
