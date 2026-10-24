@@ -1129,7 +1129,6 @@ impl GamepadPoll {
                     self.backend.haptic_confirm();
                 }
             }
-            #[cfg(windows)]
             if view_action == ViewChordAction::Paste {
                 let skip = native_vk_suppressed || Self::service_signin_desktop();
                 crate::install::log_line(&format!(
