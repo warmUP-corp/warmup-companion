@@ -358,6 +358,31 @@ fn spawn_warmup(exe: &std::path::Path) -> std::io::Result<()> {
     if crate::config::service_mode() {
         let mut cmd = std::process::Command::new("systemd-run");
         cmd.args(["--user", "--collect", "--quiet"]);
+        for name in [
+            "WAYLAND_DISPLAY",
+            "DISPLAY",
+            "XAUTHORITY",
+            "HYPRLAND_INSTANCE_SIGNATURE",
+            "XDG_CURRENT_DESKTOP",
+            "XDG_SESSION_TYPE",
+            "XDG_SESSION_DESKTOP",
+            "DESKTOP_SESSION",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "XDG_DATA_DIRS",
+            "PATH",
+            "LANG",
+            "LC_ALL",
+            "GDK_BACKEND",
+            "GDK_SCALE",
+            "QT_QPA_PLATFORM",
+            "WEBKIT_DISABLE_DMABUF_RENDERER",
+        ] {
+            if let Some(value) = std::env::var_os(name) {
+                let mut arg = std::ffi::OsString::from(format!("--setenv={name}="));
+                arg.push(value);
+                cmd.arg(arg);
+            }
+        }
         if let Some(parent) = exe.parent() {
             cmd.arg(format!("--working-directory={}", parent.display()));
         }
