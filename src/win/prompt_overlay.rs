@@ -52,8 +52,6 @@ const TIPS_H: i32 = 180;
 const REPAINT_TIMER_ID: usize = 12;
 /// ~60 fps so the reactive voice glow animates smoothly.
 const REPAINT_TIMER_MS: u32 = 16;
-/// Userland debug replays the Winlogon connect sequence on a loop so the morph
-/// can be watched on the normal desktop: no pad → card → ready prompt.
 
 const PROMPT_PREFIX: &str = "Press ";
 const PROMPT_SUFFIX: &str = " for keyboard";
@@ -69,20 +67,6 @@ struct PromptOverlayController {
     thread_kind: Option<PromptThreadKind>,
     last_visual: Option<PromptVisual>,
     state: PromptState,
-}
-
-impl std::ops::Deref for PromptOverlayController {
-    type Target = PromptState;
-
-    fn deref(&self) -> &PromptState {
-        &self.state
-    }
-}
-
-impl std::ops::DerefMut for PromptOverlayController {
-    fn deref_mut(&mut self) -> &mut PromptState {
-        &mut self.state
-    }
 }
 
 pub use crate::prompt_state::request_controller_tips;
@@ -799,14 +783,14 @@ mod tests {
         let mut controller = PromptOverlayController::default();
         let now = Instant::now();
 
-        controller.update_connected_visual(true, now);
-        assert!(controller.connected_visual_until.is_some());
+        controller.state.update_connected_visual(true, now);
+        assert!(controller.state.connected_visual_until.is_some());
 
-        controller.update_connected_visual(false, now + CONNECTED_VISUAL_DURATION);
-        assert!(controller.connected_visual_until.is_none());
+        controller.state.update_connected_visual(false, now + CONNECTED_VISUAL_DURATION);
+        assert!(controller.state.connected_visual_until.is_none());
 
-        controller.update_connected_visual(true, now + CONNECTED_VISUAL_DURATION * 2);
-        assert!(controller.connected_visual_until.is_none());
+        controller.state.update_connected_visual(true, now + CONNECTED_VISUAL_DURATION * 2);
+        assert!(controller.state.connected_visual_until.is_none());
     }
 
     #[test]

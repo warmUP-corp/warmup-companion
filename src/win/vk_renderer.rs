@@ -35,14 +35,15 @@ use windows::Win32::Graphics::DirectComposition::{
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
-    IDWriteTextLayout, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
     DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL,
     DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_FAR,
     DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS, DWRITE_WORD_WRAPPING_NO_WRAP,
-    DWRITE_WORD_WRAPPING_WRAP,
+    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
+#[cfg(feature = "vk-panels")]
+use windows::Win32::Graphics::DirectWrite::{IDWriteTextLayout, DWRITE_TEXT_METRICS};
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
@@ -71,8 +72,10 @@ use crate::vk_nav::KeyAction;
 use crate::vk_nav::{KeyCell, KeyPos, KeyRow};
 #[cfg(test)]
 use crate::vk_paint::{caps_icon, is_action_key, shift_icon, styled_glyph};
+#[cfg(feature = "vk-panels")]
+pub(crate) use crate::vk_paint::{icon_draw_px, paint_icon};
 pub(crate) use crate::vk_paint::{
-    icon_draw_px, is_playstation_label, paint_focus_ring, paint_icon, paint_key,
+    is_playstation_label, paint_focus_ring, paint_key,
     paint_strip, ControllerIconFamily, Edges, KeyState, KeyStyle, StripGeom, StripPaint, VkIcon,
 };
 #[cfg(test)]
@@ -125,6 +128,7 @@ fn colorref(c: u32) -> D2D1_COLOR_F {
     }
 }
 
+#[cfg(feature = "vk-panels")]
 fn colorref_alpha(c: u32, alpha: f32) -> D2D1_COLOR_F {
     let mut col = colorref(c);
     col.a = alpha;
@@ -171,6 +175,7 @@ fn translate(dx: f32, dy: f32) -> Matrix3x2 {
     }
 }
 
+#[cfg(feature = "vk-panels")]
 fn rounded(rect: D2D_RECT_F, radius: f32) -> D2D1_ROUNDED_RECT {
     D2D1_ROUNDED_RECT {
         rect,
@@ -179,6 +184,7 @@ fn rounded(rect: D2D_RECT_F, radius: f32) -> D2D1_ROUNDED_RECT {
     }
 }
 
+#[cfg(feature = "vk-panels")]
 fn deflate(rect: D2D_RECT_F, d: f32) -> D2D_RECT_F {
     D2D_RECT_F {
         left: rect.left + d,
@@ -188,6 +194,7 @@ fn deflate(rect: D2D_RECT_F, d: f32) -> D2D_RECT_F {
     }
 }
 
+#[cfg(feature = "vk-panels")]
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().collect()
 }
@@ -765,6 +772,7 @@ impl VkRenderer {
         self.draw_svg_icon_alpha(icon, rect, color, 1.0)
     }
 
+    #[cfg(feature = "vk-panels")]
     unsafe fn draw_svg_icon_alpha(
         &mut self,
         icon: VkIcon,
@@ -776,6 +784,7 @@ impl VkRenderer {
         self.draw_svg_icon_sized(icon, rect, color, opacity, draw_px)
     }
 
+    #[cfg(feature = "vk-panels")]
     unsafe fn draw_svg_icon_sized(
         &mut self,
         icon: VkIcon,
@@ -1576,6 +1585,7 @@ impl VkRenderer {
     }
 
     /// Measure a text run's width in DIPs at the given format.
+    #[cfg(feature = "vk-panels")]
     unsafe fn measure_text(&self, text: &str, format: &IDWriteTextFormat) -> f32 {
         let wide: Vec<u16> = text.encode_utf16().collect();
         let layout: Option<IDWriteTextLayout> = self
@@ -1668,330 +1678,6 @@ impl VkRenderer {
             .ok()
             .map_err(|e| format!("Present: {e}"))?;
         Ok(())
-    }
-
-    pub unsafe fn draw_prompt_card(&mut self, p: &PromptCard) -> Result<(), String> {
-        let (cw, ch) = self.dip_canvas();
-        let art = match ControllerArt::from_label(p.controller_label) {
-            Some(art) => {
-                self.ensure_controller_art(art)?;
-                self.controller_art_cache
-                    .get(&ControllerArtCacheKey { art })
-                    .map(|(bitmap, w, h)| (bitmap.clone(), *w, *h))
-            }
-            None => None,
-        };
-        let canvas = crate::vk_paint::PromptCanvas {
-            cw,
-            ch,
-            dpr: 1.0,
-            t: self.prompt_started.elapsed().as_secs_f32(),
-            title_px: self.text_format.GetFontSize(),
-            dip_scale: self.dip_scale,
-        };
-        self.d2d_context.BeginDraw();
-        self.d2d_context.Clear(Some(&D2D1_COLOR_F {
-            r: 0.0,
-            g: 0.0,
-            b: 0.0,
-            a: 0.0,
-        }));
-        let mut paint_art = |g: &mut Gfx, _: ControllerArt, rect: crate::mono_ui::Rect, alpha: f32| {
-            if let Some((bitmap, w, h)) = &art {
-                let dest = crate::vk_paint::fit_rect(rect, *w as f32, *h as f32);
-                g.draw_bitmap(bitmap, dest, alpha.clamp(0.0, 1.0), true);
-            }
-        };
-        crate::vk_paint::paint_prompt_card(&mut self.gfx, p, &canvas, &mut paint_art)?;
-        self.set_transform(&IDENTITY);
-        self.d2d_context
-            .EndDraw(None, None)
-            .map_err(|e| format!("EndDraw: {e}"))?;
-        self.swapchain
-            .Present(1, DXGI_PRESENT(0))
-            .ok()
-            .map_err(|e| format!("Present: {e}"))?;
-        Ok(())
-    }
-
-    unsafe fn tip_items(
-        &self,
-        tokens: &[TipToken],
-        family: ControllerIconFamily,
-        format: &IDWriteTextFormat,
-        chip_px: f32,
-        gap: f32,
-    ) -> (Vec<(TipItem, f32)>, f32) {
-        let items: Vec<(TipItem, f32)> = tokens
-            .iter()
-            .filter_map(|&token| tip_item(token, family))
-            .map(|item| {
-                let w = match item {
-                    TipItem::Icon(_) => chip_px,
-                    TipItem::Text(t, _) => self.measure_text(t, format),
-                };
-                (item, w)
-            })
-            .collect();
-        let w = items.iter().map(|i| i.1).sum::<f32>() + gap * items.len().saturating_sub(1) as f32;
-        (items, w)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    unsafe fn draw_tip_row(
-        &mut self,
-        items: &[(TipItem, f32)],
-        left: f32,
-        band: D2D_RECT_F,
-        gap: f32,
-        format: &IDWriteTextFormat,
-        text: u32,
-        dim: u32,
-        alpha: f32,
-    ) -> Result<(), String> {
-        if alpha <= 0.01 {
-            return Ok(());
-        }
-        let text_brush = solid_brush(&self.d2d_context, colorref_alpha(text, alpha))?;
-        let dim_brush = solid_brush(&self.d2d_context, colorref_alpha(dim, alpha * 0.6))?;
-        let mut x = left;
-        for (item, w) in items {
-            let slot = D2D_RECT_F {
-                left: x,
-                top: band.top,
-                right: x + w,
-                bottom: band.bottom,
-            };
-            match *item {
-                TipItem::Icon(icon) => self.draw_svg_icon_sized(icon, slot, text, alpha, *w)?,
-                TipItem::Text(t, faint) => self.d2d_context.DrawText(
-                    &wide(t),
-                    format,
-                    &slot,
-                    if faint { &dim_brush } else { &text_brush },
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    DWRITE_MEASURING_MODE_NATURAL,
-                ),
-            }
-            x += w + gap;
-        }
-        Ok(())
-    }
-
-    pub unsafe fn draw_tips(&mut self, p: &TipsPill) -> Result<(), String> {
-        let (cw, ch) = self.dip_canvas();
-        let spec = prompt_spec(p.style);
-        let family = ControllerIconFamily::from_label(p.controller_label);
-        let (label, counter_format) = match spec {
-            Some(spec) => {
-                let fonts = self.ensure_prompt_fonts(spec)?;
-                (fonts.label, fonts.status)
-            }
-            None => {
-                let _ = self
-                    .prompt_format
-                    .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                let _ = self
-                    .prompt_format
-                    .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                let _ = self
-                    .text_format
-                    .SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-                (self.prompt_format.clone(), self.text_format.clone())
-            }
-        };
-        let (pill_h, pill_bottom, radius, chip, gap, pad_x) = match spec {
-            Some(s) => (
-                s.pill_h,
-                s.pill_bottom,
-                s.radius,
-                s.chip_px,
-                s.pill_gap,
-                s.pill_pad_x,
-            ),
-            None => (96.0, 6.0, 46.0, 56.0, 12.0, 36.0),
-        };
-        let (text, dim) = match spec {
-            Some(s) => (0x00FFFFFF, s.dim_text),
-            None => (p.text, mix_color(p.text, p.bg, 0.58)),
-        };
-
-        let counter = format!("{}/{}", p.index + 1, p.count.max(1));
-        let counter_w = self.measure_text(&counter, &counter_format);
-        let counter_gap = gap * 2.0;
-        let (items, content_w) = self.tip_items(p.cue, family, &label, chip, gap);
-        let prev = p
-            .prev_cue
-            .map(|tokens| self.tip_items(tokens, family, &label, chip, gap));
-        let morph_t = if prev.is_some() {
-            p.morph_t.clamp(0.0, 1.0)
-        } else {
-            1.0
-        };
-        let pill_w_for = |w: f32| (w + counter_gap + counter_w + pad_x * 2.0).min(cw - 8.0);
-        let pill_w = match &prev {
-            Some((_, prev_w)) => lerp(pill_w_for(*prev_w), pill_w_for(content_w), morph_t),
-            None => pill_w_for(content_w),
-        };
-        let bottom = ch - pill_bottom;
-        let pill = D2D_RECT_F {
-            left: (cw - pill_w) * 0.5,
-            top: bottom - pill_h,
-            right: (cw + pill_w) * 0.5,
-            bottom,
-        };
-        let pill_cy = bottom - pill_h * 0.5;
-        let alpha = p.alpha.clamp(0.0, 1.0);
-
-        self
-            .set_transform(&scale_about(p.scale, cw * 0.5, pill_cy));
-        self.d2d_context.BeginDraw();
-        self.d2d_context.Clear(Some(&D2D1_COLOR_F {
-            r: 0.0,
-            g: 0.0,
-            b: 0.0,
-            a: 0.0,
-        }));
-
-        let shape = rounded(pill, radius);
-        match spec {
-            Some(s) => {
-                let (dy, blur, a) = s.pill_shadow;
-                self.draw_outer_shadow(&shape, (dy, blur, a * alpha))?;
-                let fill = solid_brush(
-                    &self.d2d_context,
-                    colorref_alpha(s.pill_fill, s.pill_fill_alpha * alpha),
-                )?;
-                self.d2d_context.FillRoundedRectangle(&shape, &fill);
-                let stroke = solid_brush(
-                    &self.d2d_context,
-                    colorref_alpha(0x00FFFFFF, s.ready_stroke_alpha * alpha),
-                )?;
-                self.d2d_context.DrawRoundedRectangle(
-                    &rounded(deflate(pill, 0.5), radius - 0.5),
-                    &stroke,
-                    1.0,
-                    None,
-                );
-            }
-            None => {
-                let t = self.prompt_started.elapsed().as_secs_f32();
-                let pulse = (t * 0.33).fract();
-                let pulse_alpha = (1.0 - pulse).powi(2);
-                let glow = colorref_mix(0x00FFFFFF, p.border, 0.38);
-                let bg = solid_brush(&self.d2d_context, colorref_alpha(p.bg, alpha))?;
-                let halo = solid_brush(
-                    &self.d2d_context,
-                    colorref_alpha(glow, 0.30 * pulse_alpha * alpha),
-                )?;
-                let edge = solid_brush(&self.d2d_context, colorref_alpha(glow, alpha))?;
-                self.d2d_context.FillRoundedRectangle(&shape, &bg);
-                self.d2d_context
-                    .DrawRoundedRectangle(&shape, &halo, 2.0 + 8.0 * pulse, None);
-                self.d2d_context
-                    .DrawRoundedRectangle(&shape, &edge, 1.5, None);
-            }
-        }
-
-        let counter_left = pill.right - pad_x - counter_w;
-        let row_right = counter_left - counter_gap;
-        let row_left = pill.left + pad_x;
-        let centred = |w: f32| row_left + ((row_right - row_left - w) * 0.5).max(0.0);
-        let old_alpha = 1.0 - (morph_t / 0.3).clamp(0.0, 1.0);
-        let new_alpha = ((morph_t - 0.35) / 0.65).clamp(0.0, 1.0);
-        let new_alpha = if prev.is_some() {
-            new_alpha * new_alpha * (3.0 - 2.0 * new_alpha)
-        } else {
-            1.0
-        };
-        if let Some((prev_items, prev_w)) = &prev {
-            self.draw_tip_row(
-                prev_items,
-                centred(*prev_w),
-                pill,
-                gap,
-                &label,
-                text,
-                dim,
-                old_alpha * alpha,
-            )?;
-        }
-        self.draw_tip_row(
-            &items,
-            centred(content_w),
-            pill,
-            gap,
-            &label,
-            text,
-            dim,
-            new_alpha * alpha,
-        )?;
-
-        let divider = solid_brush(&self.d2d_context, colorref_alpha(dim, 0.25 * alpha))?;
-        let divider_x = counter_left - counter_gap * 0.5;
-        self.d2d_context.DrawLine(
-            D2D_POINT_2F {
-                x: divider_x,
-                y: pill_cy - pill_h * 0.22,
-            },
-            D2D_POINT_2F {
-                x: divider_x,
-                y: pill_cy + pill_h * 0.22,
-            },
-            &divider,
-            1.0,
-            None,
-        );
-        let counter_brush = solid_brush(&self.d2d_context, colorref_alpha(dim, 0.8 * alpha))?;
-        self.d2d_context.DrawText(
-            &wide(&counter),
-            &counter_format,
-            &D2D_RECT_F {
-                left: counter_left,
-                top: pill.top,
-                right: counter_left + counter_w,
-                bottom: pill.bottom,
-            },
-            &counter_brush,
-            D2D1_DRAW_TEXT_OPTIONS_NONE,
-            DWRITE_MEASURING_MODE_NATURAL,
-        );
-        if spec.is_none() {
-            let _ = self.text_format.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
-        }
-
-        self.set_transform(&IDENTITY);
-        self.d2d_context
-            .EndDraw(None, None)
-            .map_err(|e| format!("EndDraw: {e}"))?;
-        self.swapchain
-            .Present(1, DXGI_PRESENT(0))
-            .ok()
-            .map_err(|e| format!("Present: {e}"))?;
-        Ok(())
-    }
-
-
-    unsafe fn draw_outer_shadow(
-        &mut self,
-        shape: &D2D1_ROUNDED_RECT,
-        (dy, blur, alpha): (f32, f32, f32),
-    ) -> Result<(), String> {
-        let r = shape.rect;
-        let g = &mut self.gfx;
-        crate::vk_paint::paint_outer_shadow(
-            g,
-            crate::mono_ui::Rect {
-                x: r.left,
-                y: r.top,
-                w: r.right - r.left,
-                h: r.bottom - r.top,
-            },
-            shape.radiusX,
-            dy,
-            blur,
-            alpha,
-        )
     }
 
     /// Compile (once) and draw the cloud into its bitmap.
@@ -2125,9 +1811,6 @@ impl VkRenderer {
 
 pub(crate) use crate::vk_paint::ControllerArt;
 pub use crate::vk_paint::{PromptCard, TipsPill};
-
-#[derive(Clone, Copy)]
-
 
 /// Everything one frame of the dictation pill needs. `alpha`/`scale` carry the
 /// enter/exit transition; `label_alpha` fades a freshly swapped phase title in.
