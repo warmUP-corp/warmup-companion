@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- On Linux, the companion knows when the warmUP launcher is the focused window on Hyprland. Dictation does not start or type into the launcher, and in the warmUP browser window L3 and R3 open the on-screen keyboard and dictation while warmUP is running, like on Windows.
 - On Linux, View + Y pastes the clipboard with the keyboard closed, like on Windows.
 - On Linux, `warmup-companion install` works while the companion is running. It used to fail with "Text file busy"; the new binary now replaces the running one and the running service restarts on it.
 - On Linux, holding Share shows the same shortcut sheet as Windows, in the keyboard's own colours, and the TV layout shows the grouped TV sheet. On a TV, a short hint for the full shortcut list appears above the keys for the first three seconds while the suggestion bar is empty.

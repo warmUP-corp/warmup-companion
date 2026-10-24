@@ -36,15 +36,7 @@ const HAPTIC_ALERT_MS: u32 = 45;
 const HAPTIC_TICK_MS: u32 = 8;
 
 fn warmup_browser_foreground(button: Button) -> bool {
-    #[cfg(windows)]
-    {
-        matches!(button, Button::L3 | Button::R3) && crate::vk_nav::foreground_is_warmup_browser()
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = button;
-        false
-    }
+    matches!(button, Button::L3 | Button::R3) && crate::vk_nav::foreground_is_warmup_browser()
 }
 
 /// Desktop text-entry shortcuts belong to the companion, not the launcher's dock/topbar.
