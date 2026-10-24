@@ -495,20 +495,10 @@ pub fn dispatch_install_or_service(args: &[String]) {
         }
         _ => {}
     }
+    #[cfg(not(feature = "gamepad"))]
     if args.iter().any(|a| a == "--controller-center") {
-        #[cfg(feature = "gamepad")]
-        {
-            crate::win::controller_center::show();
-            while crate::win::controller_center::owns_pad() {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-            std::process::exit(0);
-        }
-        #[cfg(not(feature = "gamepad"))]
-        {
-            eprintln!("Rebuild with default features enabled: cargo build --release");
-            std::process::exit(1);
-        }
+        eprintln!("Rebuild with default features enabled: cargo build --release");
+        std::process::exit(1);
     }
     if args.iter().any(|a| a == "--service") {
         #[cfg(feature = "service")]

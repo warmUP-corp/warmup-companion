@@ -81,6 +81,15 @@ pub mod controller_center;
 #[path = "win/tray_menu.rs"]
 pub(crate) mod tray_menu;
 
+#[cfg(feature = "gamepad")]
+#[path = "win/update_window.rs"]
+pub(crate) mod update_window;
+
+#[cfg(feature = "gamepad")]
+pub(crate) mod vk_renderer {
+    pub(crate) use crate::vk_paint::is_playstation_label;
+}
+
 #[allow(dead_code)]
 #[path = "win/controller_tips.rs"]
 pub mod controller_tips;
@@ -113,7 +122,12 @@ pub mod vk_ui {
 
 pub mod speech_input {
     #[cfg_attr(not(feature = "gamepad"), allow(dead_code))]
-    pub fn set_engine(_name: &str) {}
+    pub fn set_engine(name: &str) {
+        #[cfg(feature = "speech")]
+        crate::linux_speech::set_engine(name);
+        #[cfg(not(feature = "speech"))]
+        let _ = name;
+    }
 
     #[cfg_attr(not(feature = "gamepad"), allow(dead_code))]
     pub fn unload_engine() {

@@ -24,6 +24,22 @@ pub fn notify(summary: &str, body: &str) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+pub fn notify_with_actions(
+    summary: &str,
+    body: &str,
+    actions: &[(&str, &str)],
+) -> Result<String, String> {
+    let mut notification = notify_rust::Notification::new();
+    notification.summary(summary).body(body);
+    for (id, label) in actions {
+        notification.action(id, label);
+    }
+    let handle = notification.show().map_err(|error| error.to_string())?;
+    let mut chosen = String::new();
+    handle.wait_for_action(|action| chosen = action.to_string());
+    Ok(chosen)
+}
+
 pub fn notify_screenshot(path: &std::path::Path, copied: bool) {
     let name = path
         .file_name()

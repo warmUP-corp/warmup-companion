@@ -61,7 +61,7 @@ warmup-companion update
 
 Releases do not carry a Linux build yet. Until they do, `update` says the release has no Linux build and changes nothing. To update before then, pull the source, build it again, and run `./target/release/warmup-companion install`. Installing over an existing install replaces the binary; run `systemctl --user restart warmup-companion` afterwards.
 
-While `update_check` is on in `settings.ini` (the default), the service checks shortly after it starts and once a day after that. When a newer release has a Linux build, it shows a notification with the full path of the installed program, since `~/.local/share/warmup-companion/bin` is usually not on `PATH`. Turn the check off with `warmup-companion settings set update_check false`.
+While `update_check` is on in `settings.ini` (the default), the service checks shortly after it starts and once a day after that. When a newer release has a Linux build, it shows a notification with Install and Later buttons, like on Windows. Install, or a click on the notification, opens the update window. The same window opens from the tray under Updates: it shows what is new, the download and checksum progress, and the Check automatically switch, and the controller drives it with the D-pad, A and B. Turn the check off with `warmup-companion settings set update_check false`.
 
 ## Session environment
 
@@ -123,11 +123,15 @@ If Steam Input grabs the controller, the pad disappears from SDL. The companion 
 
 The virtual pointer is a relative mouse. The compositor's pointer acceleration still applies, so the on-screen distance will not match the raw stick math one-for-one.
 
-L3 opens the on-screen keyboard on a layer above other windows. It does not take keyboard focus, so typing still goes to the window you were using. A mouse click or a tap on a key or a suggestion works too. Docked mode sits on the bottom edge and reserves that strip; floating mode stays centred on the bottom edge. `warmup-companion type <text>` types into the focused window without opening the keyboard, including characters outside the current layout. Enter on the stick is still its own key, separate from that typing device. The lock screen cannot show the keyboard. The first time a controller connects after an update, the controller tips pill from Windows walks through the main shortcuts at the bottom of the screen.
+L3 opens the on-screen keyboard on a layer above other windows. It does not take keyboard focus, so typing still goes to the window you were using. A mouse click or a tap on a key or a suggestion works too. Docked mode sits on the bottom edge and reserves that strip; floating mode stays centred on the bottom edge. `warmup-companion type <text>` types into the focused window without opening the keyboard, including characters outside the current layout. Enter on the stick is still its own key, separate from that typing device. The lock screen cannot show the keyboard. The first time a controller connects after an update, the controller tips pill from Windows walks through the main shortcuts at the bottom of the screen. Show controller tips in the tray replays it.
 
 ## Tray and settings
 
 The running service adds a StatusNotifierItem. Left-click it for the companion menu, the same one Windows shows: pause input, Control Center, keyboard settings, game detection, voice typing, updates, the log, diagnostics, uninstall and exit. The D-pad, A and B work in it, and a click outside or Esc closes it. Right-click shows the same settings as a plain menu. Select + Start on the controller also opens and closes Control Center, and the controller drives it while it is open.
+
+Ctrl+Alt+C opens and closes Control Center and Ctrl+Alt+V starts or stops voice typing, like on Windows. The companion registers both through the desktop's global shortcuts portal (`org.freedesktop.portal.GlobalShortcuts`), so KDE Plasma lists them in its shortcut settings, where they can be changed. xdg-desktop-portal-hyprland registers them without a key, so on Hyprland the companion also binds Ctrl+Alt+C and Ctrl+Alt+V to them with `hyprctl` while it runs. A combo you already bound yourself is left alone. Ctrl+Alt+V is bound only while voice typing is on. For the portal the companion writes a hidden `warmup-companion.desktop` entry to `~/.local/share/applications`. Without the portal, the Hyprland binds signal the systemd service directly. The tray shows Ctrl+Alt+C next to Control Center when the shortcut is active.
+
+The Voice tab in Control Center manages the dictation model R3 uses, like on Windows. It downloads Parakeet (NVIDIA) or Parakeet Redux from Hugging Face together with the CPU build of ONNX Runtime from Microsoft's GitHub release, shows the progress, marks the model in use as Active, and removes a model with Delete or X. Models live in `~/.local/share/warmup-companion/speech/<model>`. The Microphone choice picks the PipeWire or PulseAudio input dictation records from.
 
 While warmUP is closed, the companion counts play time for the games in the watchlist warmUP last sent. It reads `/proc` every two seconds and only looks at your own processes. A game matches by its program name or by its install folder; for a Wine or Proton game the program name is the Windows `.exe` name. A session ends ten seconds after the game is gone and stays in `pending-play-sessions.json` until warmUP connects and confirms it.
 
@@ -135,7 +139,7 @@ While Kid Mode blocking is on, the companion checks running programs every two s
 
 When warmUP asks the companion to shut down while Kid Mode is blocking, the companion refuses. If `$XDG_STATE_HOME/warmup-companion/parental-security.log` already exists, it also appends one JSON line for the refused request.
 
-`warmup-companion settings` reads and writes `$XDG_CONFIG_HOME/warmup-companion/settings.ini`. `warmup-companion --controller-center` opens Control Center on its own, without the controller. `warmup-companion diagnostics` writes a tarball under `$XDG_STATE_HOME/warmup-companion/diagnostics/`. It holds the unit status, the journal, the service log, device and Hyprland details, the watchlist, the unsent play sessions, the Kid Mode block list and both crash reports.
+`warmup-companion settings` reads and writes `$XDG_CONFIG_HOME/warmup-companion/settings.ini`. `warmup-companion --controller-center` opens Control Center on its own, without the controller. Like on Windows, it adds its own tray icon and keeps running after the window closes, so the tray can open it again; stop it with Ctrl+C. `warmup-companion diagnostics` writes a tarball under `$XDG_STATE_HOME/warmup-companion/diagnostics/`. It holds the unit status, the journal, the service log, device and Hyprland details, the watchlist, the unsent play sessions, the Kid Mode block list and both crash reports.
 
 ## Screenshots
 

@@ -1,16 +1,24 @@
 use std::cell::RefCell;
+#[cfg(windows)]
 use std::sync::{Mutex, OnceLock};
 
+#[cfg(windows)]
 use windows::core::{w, PCWSTR};
+#[cfg(windows)]
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+#[cfg(windows)]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+#[cfg(windows)]
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+#[cfg(windows)]
 use windows::Win32::UI::HiDpi::{
     GetDpiForWindow, SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+#[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
 };
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowRect, KillTimer,
     SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, HMENU, HTCAPTION, HTCLIENT,
@@ -19,22 +27,43 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_APPWINDOW, WS_EX_LAYERED, WS_POPUP,
 };
 
+#[cfg(windows)]
 use windows::Foundation::Numerics::Matrix3x2;
 
+#[cfg(windows)]
 use super::desktop_window::{self, DesktopApp, DesktopWindowThread};
 use crate::mono_ui::*;
 use super::tray_menu::lucide;
+#[cfg(windows)]
 use crate::updater::{self, Phase, Snapshot};
+#[cfg(not(windows))]
+use crate::linux_update::{self as updater, Phase, Snapshot};
 
+#[cfg(not(windows))]
+#[path = "update_window/linux.rs"]
+mod linux;
+#[cfg(not(windows))]
+use linux::*;
+#[cfg(not(windows))]
+pub(crate) use linux::show;
+
+#[cfg(windows)]
 const CLASS: PCWSTR = w!("WarmupUpdateWindow");
+#[cfg(windows)]
 const TIMER_ID: usize = 41;
+#[cfg(windows)]
 const TIMER_MS: u32 = 33;
 const WIN_W: f32 = 520.0;
 const WIN_R: f32 = 24.0;
+#[cfg(windows)]
 const PAD_X: f32 = 72.0;
+#[cfg(windows)]
 const PAD_TOP: f32 = 48.0;
+#[cfg(windows)]
 const PAD_BOTTOM: f32 = 96.0;
+#[cfg(windows)]
 const SHADOW_DY: f32 = 24.0;
+#[cfg(windows)]
 const SHADOW_SIGMA: f32 = 30.0;
 const TITLE_H: f32 = 64.0;
 const SIDE: f32 = 24.0;
@@ -55,6 +84,7 @@ const SHIMMER_SPEED: f32 = 7.0;
 
 const CIRCLE_CHECK: &str =
     lucide!(r#"<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>"#);
+#[cfg_attr(not(windows), allow(dead_code))]
 const LOADER: &str = lucide!(r#"<path d="M21 12a9 9 0 1 1-6.219-8.56"/>"#);
 const CIRCLE: &str = lucide!(r#"<circle cx="12" cy="12" r="10"/>"#);
 const SHIELD: &str = lucide!(
@@ -82,6 +112,7 @@ enum Step {
     Todo,
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 struct Ui {
     hwnd: HWND,
     scale: f32,
@@ -99,10 +130,13 @@ thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
 }
 
+#[cfg(windows)]
 static THREAD: OnceLock<Mutex<Option<DesktopWindowThread>>> = OnceLock::new();
 
+#[cfg(windows)]
 struct UpdateApp;
 
+#[cfg(windows)]
 impl DesktopApp for UpdateApp {
     const THREAD_NAME: &'static str = "warmup-update-window";
     const CLASS_NAME: PCWSTR = CLASS;
@@ -118,6 +152,7 @@ impl DesktopApp for UpdateApp {
     }
 }
 
+#[cfg(windows)]
 pub(crate) fn show() {
     let slot = THREAD.get_or_init(|| Mutex::new(None));
     let Ok(mut guard) = slot.lock() else {
@@ -219,6 +254,7 @@ fn win_h(snap: &Snapshot) -> f32 {
     body_end(snap) + FOOTER_H
 }
 
+#[cfg(windows)]
 fn surface_px(scale: f32, h: f32) -> (i32, i32) {
     (
         ((WIN_W + 2.0 * PAD_X) * scale).ceil() as i32,
@@ -346,6 +382,7 @@ fn steps(snap: &Snapshot) -> [(&'static str, Step, String); 3] {
     }
 }
 
+#[cfg(windows)]
 fn ui_show() {
     super::controller_center::set_menu_owns_pad(true);
     if let Some(hwnd) = UI.with(|u| u.borrow().as_ref().map(|u| u.hwnd)) {
@@ -408,6 +445,7 @@ fn ui_show() {
     }
 }
 
+#[cfg(windows)]
 fn ui_hide() {
     super::controller_center::set_menu_owns_pad(false);
     if let Some(ui) = UI.with(|u| u.borrow_mut().take()) {
@@ -428,6 +466,7 @@ fn with_ui(f: impl FnOnce(&mut Ui)) {
     });
 }
 
+#[cfg(windows)]
 fn place(ui: &Ui) {
     let s = ui.scale;
     let h = win_h(&ui.snap);
@@ -598,12 +637,14 @@ fn click(ui: &mut Ui, x: f32, y: f32) -> bool {
     }
 }
 
+#[cfg(windows)]
 fn design_point(ui: &Ui, lparam: LPARAM) -> (f32, f32) {
     let x = (lparam.0 & 0xffff) as i16 as f32;
     let y = ((lparam.0 >> 16) & 0xffff) as i16 as f32;
     (x / ui.scale - PAD_X, y / ui.scale - PAD_TOP)
 }
 
+#[cfg(windows)]
 fn paint(ui: &mut Ui) {
     let mut gfx = match ui.gfx.take() {
         Some(g) => g,
@@ -622,6 +663,7 @@ fn paint(ui: &mut Ui) {
     ui.gfx = Some(gfx);
 }
 
+#[cfg(windows)]
 unsafe fn render(ui: &Ui, g: &mut Gfx) -> Result<(), String> {
     let s = ui.scale;
     let h = win_h(&ui.snap);
@@ -775,6 +817,7 @@ fn progress_target(snap: &Snapshot) -> f32 {
     }
 }
 
+#[cfg(windows)]
 fn base_transform(ui: &Ui) -> Matrix3x2 {
     let s = ui.scale;
     Matrix3x2 {
@@ -787,6 +830,7 @@ fn base_transform(ui: &Ui) -> Matrix3x2 {
     }
 }
 
+#[cfg(windows)]
 unsafe fn draw_spinner(ui: &Ui, g: &mut Gfx, r: Rect) {
     let angle = (ui.spin as f32 * SPIN_DEG) % 360.0;
     let base = base_transform(ui);
@@ -873,6 +917,7 @@ unsafe fn draw_error(ui: &Ui, g: &mut Gfx) {
     }
 }
 
+#[cfg(windows)]
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_NCHITTEST => {

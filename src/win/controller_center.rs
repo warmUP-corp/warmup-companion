@@ -59,7 +59,7 @@ const RED: u32 = 0x003A45FF;
 const REPEAT_DELAY: Duration = Duration::from_millis(400);
 const REPEAT_EVERY: Duration = Duration::from_millis(90);
 
-#[cfg(windows)]
+#[cfg(any(windows, feature = "speech"))]
 const TABS: [(&str, Icon); 6] = [
     ("General", Icon::Settings),
     ("Mouse", Icon::Mouse),
@@ -68,7 +68,7 @@ const TABS: [(&str, Icon); 6] = [
     ("Apps", Icon::AppWindow),
     ("Voice", Icon::Mic),
 ];
-#[cfg(not(windows))]
+#[cfg(not(any(windows, feature = "speech")))]
 const TABS: [(&str, Icon); 5] = [
     ("General", Icon::Settings),
     ("Mouse", Icon::Mouse),
@@ -273,6 +273,12 @@ fn led_choice(swatch: i32, effect: i32) -> (Option<&'static str>, &'static str) 
     }
 }
 
+#[cfg(not(windows))]
+const VOICE_MODELS: &[(&str, &str, &str)] = &[
+    ("Parakeet Redux", "parakeet-redux", "420 MB"),
+    ("Parakeet (NVIDIA)", "parakeet", "670 MB"),
+];
+#[cfg(windows)]
 const VOICE_MODELS: &[(&str, &str, &str)] = &[
     ("Parakeet Redux", "parakeet-redux", "420 MB"),
     ("Parakeet (NVIDIA)", "parakeet", "670 MB"),
@@ -338,6 +344,12 @@ fn read_speech(name: &str) -> String {
         .unwrap_or_default()
 }
 
+#[cfg(not(windows))]
+fn voice_installed(id: &str) -> bool {
+    voice_model_installed(id)
+}
+
+#[cfg(windows)]
 fn voice_installed(id: &str) -> bool {
     let dir = speech_dir();
     match id {
@@ -369,7 +381,10 @@ fn voice_active(id: &str) -> bool {
     if !voice_installed(id) {
         return false;
     }
+    #[cfg(windows)]
     let engine = read_speech("engine.txt");
+    #[cfg(not(windows))]
+    let engine = voice_engine();
     if id.starts_with("parakeet") {
         engine == id
     } else {
@@ -787,6 +802,10 @@ fn current(item: &Item) -> (bool, i32) {
         Kind::PausePoll => (crate::gamepad_backend::userland_poll_paused(), 0),
         Kind::Vocabulary => (crate::config::vocabulary().coding, 0),
         Kind::Choice { key, .. } => {
+            #[cfg(not(windows))]
+            if *key == "voice_mic" {
+                return (false, choice_index(&item.kind, &mic_value()));
+            }
             let value = match *key {
                 "vk_style" => vk_style_name(crate::config::vk_style()),
                 "vk_display" => vk_display_name(crate::config::vk_display()),
@@ -1254,6 +1273,11 @@ fn style_card_art(i: usize) -> (crate::config::VkStyle, &'static MiniLayout) {
 }
 
 fn set(key: &str, value: &str) {
+    #[cfg(not(windows))]
+    if key == "voice_mic" {
+        set_mic(value);
+        return;
+    }
     if let Err(e) = crate::config::set_gamepad_setting(key, value) {
         crate::install::log_line(&format!("control center: set {key}={value}: {e}"));
     }

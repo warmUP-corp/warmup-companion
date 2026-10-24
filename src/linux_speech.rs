@@ -7,11 +7,30 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+#[allow(dead_code)]
+#[path = "win/coding_vocab.rs"]
+mod coding_vocab;
 use cpal::{FromSample, Sample, SampleFormat};
 
 const MAX_RECORD_S: f32 = 180.0;
 const AUTO_STOP_S: f32 = 2.5;
 const PORT: u16 = 17182;
+const RUNTIME: &str = "libonnxruntime.so";
+const ORT_VERSION: &str = "1.24.4";
+const PARAKEET_REPO: &str = "istupakov/parakeet-tdt-0.6b-v3-onnx";
+const PARAKEET_REV: &str = "main";
+const PARAKEET_FILES: [&str; 3] = [
+    "encoder-model.int8.onnx",
+    "decoder_joint-model.int8.onnx",
+    "vocab.txt",
+];
+const REDUX_REPO: &str = "eschmidbauer/parakeet-redux-onnx";
+const REDUX_REV: &str = "1c285ba78d6f1880803f65355133a5ad3559a407";
+const REDUX_FILES: [&str; 3] = ["encoder-model.onnx", "decoder_joint-model.onnx", "vocab.txt"];
+const MODEL_IDS: [&str; 2] = ["parakeet", "parakeet-redux"];
+const MIC_CACHE_FOR: Duration = Duration::from_secs(2);
+const DOWNLOAD_POLL: Duration = Duration::from_millis(250);
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -39,6 +58,505 @@ pub fn level() -> f32 {
 
 pub fn available() -> bool {
     model_dir().is_some() && onnx_runtime().is_some()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mic {
+    pub name: String,
+    pub label: String,
+}
+
+pub fn speech_dir() -> PathBuf {
+    crate::paths::data_dir().join("speech")
+}
+
+fn mic_choice_path() -> PathBuf {
+    speech_dir().join("mic.txt")
+}
+
+pub fn mic_choice() -> Option<String> {
+    std::fs::read_to_string(mic_choice_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+pub fn set_mic_choice(name: &str) {
+    let path = mic_choice_path();
+    if name.trim().is_empty() {
+        let _ = std::fs::remove_file(&path);
+    } else {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, name.trim());
+    }
+}
+
+pub fn list_mics() -> Vec<Mic> {
+    static CACHE: Mutex<Option<(Instant, Vec<Mic>)>> = Mutex::new(None);
+    if let Ok(cache) = CACHE.lock() {
+        if let Some((at, mics)) = cache.as_ref() {
+            if at.elapsed() < MIC_CACHE_FOR {
+                return mics.clone();
+            }
+        }
+    }
+    let mics = query_mics();
+    if let Ok(mut cache) = CACHE.lock() {
+        *cache = Some((Instant::now(), mics.clone()));
+    }
+    mics
+}
+
+fn query_mics() -> Vec<Mic> {
+    let Ok(output) = Command::new("pactl")
+        .args(["-f", "json", "list", "sources"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let Ok(serde_json::Value::Array(sources)) = serde_json::from_slice(&output.stdout) else {
+        return Vec::new();
+    };
+    sources
+        .iter()
+        .filter(|source| {
+            source["properties"]["media.class"]
+                .as_str()
+                .is_some_and(|class| class.starts_with("Audio/Source"))
+        })
+        .filter_map(|source| {
+            let name = source["name"].as_str()?.to_string();
+            let label = source["description"]
+                .as_str()
+                .map(|d| d.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|d| !d.is_empty())
+                .unwrap_or_else(|| name.clone());
+            Some(Mic { name, label })
+        })
+        .collect()
+}
+
+struct MicStream {
+    _cpal: Option<cpal::Stream>,
+    _alsa: Option<AlsaCapture>,
+}
+
+struct AlsaCapture {
+    stop: std::sync::Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for AlsaCapture {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+static MIC_WARNED: Mutex<Option<String>> = Mutex::new(None);
+
+fn warn_mic_fallback(want: &str, reason: &str) {
+    crate::install::log_line(&format!(
+        "speech: chosen mic {want} unavailable ({reason}), recording from the default input"
+    ));
+    let Ok(mut warned) = MIC_WARNED.lock() else {
+        return;
+    };
+    if warned.as_deref() == Some(want) {
+        return;
+    }
+    *warned = Some(want.to_string());
+    let label = list_mics()
+        .into_iter()
+        .find(|m| m.name == want)
+        .map(|m| m.label)
+        .unwrap_or_else(|| want.to_string());
+    let _ = crate::linux_notify::notify(
+        "Voice typing uses the default microphone",
+        &format!("{label} could not be opened, so dictation records from the default input."),
+    );
+}
+
+fn open_chosen_mic(
+    want: &str,
+    buf: &std::sync::Arc<Mutex<Vec<f32>>>,
+) -> Result<(AlsaCapture, u32), String> {
+    if want.contains('"') || want.contains('\\') {
+        return Err("unsupported source name".into());
+    }
+    let mut errors = Vec::new();
+    for pcm in [
+        format!("pipewire:NODE=\"{want}\""),
+        format!("pulse:DEVICE=\"{want}\""),
+    ] {
+        match open_alsa_capture(&pcm, buf.clone()) {
+            Ok(opened) => {
+                crate::install::log_line(&format!(
+                    "speech: source = {want} via {}",
+                    pcm.split(':').next().unwrap_or("")
+                ));
+                return Ok(opened);
+            }
+            Err(error) => errors.push(error),
+        }
+    }
+    Err(errors.join("; "))
+}
+
+fn open_alsa_capture(
+    pcm_name: &str,
+    buf: std::sync::Arc<Mutex<Vec<f32>>>,
+) -> Result<(AlsaCapture, u32), String> {
+    use alsa::pcm::{Access, Format, HwParams, PCM};
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let (tx, rx) = std::sync::mpsc::channel::<Result<u32, String>>();
+    let name = pcm_name.to_string();
+    let flag = stop.clone();
+    let thread = std::thread::Builder::new()
+        .name("warmup-mic".into())
+        .spawn(move || {
+            let opened = (|| -> Result<(PCM, u32), alsa::Error> {
+                let pcm = PCM::new(&name, alsa::Direction::Capture, false)?;
+                {
+                    let hwp = HwParams::any(&pcm)?;
+                    hwp.set_access(Access::RWInterleaved)?;
+                    hwp.set_format(Format::float())?;
+                    hwp.set_channels(1)?;
+                    hwp.set_rate_near(48_000, alsa::ValueOr::Nearest)?;
+                    hwp.set_period_size_near(960, alsa::ValueOr::Nearest)?;
+                    pcm.hw_params(&hwp)?;
+                }
+                let rate = pcm.hw_params_current()?.get_rate()?;
+                pcm.start()?;
+                Ok((pcm, rate))
+            })();
+            let (pcm, rate) = match opened {
+                Ok(opened) => opened,
+                Err(error) => {
+                    let _ = tx.send(Err(format!("{name}: {error}")));
+                    return;
+                }
+            };
+            let io = match pcm.io_f32() {
+                Ok(io) => io,
+                Err(error) => {
+                    let _ = tx.send(Err(format!("{name}: {error}")));
+                    return;
+                }
+            };
+            let _ = tx.send(Ok(rate));
+            let mut chunk = [0f32; 960];
+            while !flag.load(Ordering::SeqCst) {
+                match io.readi(&mut chunk) {
+                    Ok(frames) => push_mono(&chunk[..frames], 1, &buf),
+                    Err(error) => {
+                        if pcm.try_recover(error, true).is_err() {
+                            crate::install::log_line(&format!("mic stream error: {error}"));
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .map_err(|error| error.to_string())?;
+    match rx.recv() {
+        Ok(Ok(rate)) => Ok((
+            AlsaCapture {
+                stop,
+                thread: Some(thread),
+            },
+            rate,
+        )),
+        Ok(Err(error)) => {
+            let _ = thread.join();
+            Err(error)
+        }
+        Err(_) => {
+            let _ = thread.join();
+            Err(format!("{pcm_name}: capture thread ended"))
+        }
+    }
+}
+
+fn open_mic(buf: &std::sync::Arc<Mutex<Vec<f32>>>) -> Result<(MicStream, u32), String> {
+    if let Some(want) = mic_choice() {
+        if list_mics().iter().any(|m| m.name == want) {
+            match open_chosen_mic(&want, buf) {
+                Ok((capture, rate)) => {
+                    let stream = MicStream {
+                        _cpal: None,
+                        _alsa: Some(capture),
+                    };
+                    return Ok((stream, rate));
+                }
+                Err(error) => warn_mic_fallback(&want, &error),
+            }
+        } else {
+            crate::install::log_line(&format!(
+                "speech: chosen mic {want} is not connected, recording from the default input"
+            ));
+        }
+    }
+    let host = cpal::default_host();
+    let device = host
+        .default_input_device()
+        .ok_or_else(|| "no microphone is available".to_string())?;
+    crate::install::log_line(&format!(
+        "speech: mic = {}",
+        device.name().unwrap_or_else(|_| "<unknown>".into())
+    ));
+    let supported = device
+        .default_input_config()
+        .map_err(|error| format!("default_input_config: {error}"))?;
+    let in_rate = supported.sample_rate().0;
+    let channels = supported.channels() as usize;
+    let sample_format = supported.sample_format();
+    let config: cpal::StreamConfig = supported.into();
+    let err_fn = |error: cpal::StreamError| {
+        crate::install::log_line(&format!("mic stream error: {error}"));
+    };
+    macro_rules! build {
+        ($t:ty) => {{
+            let buf = buf.clone();
+            device.build_input_stream(
+                &config,
+                move |data: &[$t], _: &cpal::InputCallbackInfo| push_mono(data, channels, &buf),
+                err_fn,
+                None,
+            )
+        }};
+    }
+    let stream = match sample_format {
+        SampleFormat::F32 => build!(f32),
+        SampleFormat::F64 => build!(f64),
+        SampleFormat::I16 => build!(i16),
+        SampleFormat::I32 => build!(i32),
+        SampleFormat::I8 => build!(i8),
+        SampleFormat::U16 => build!(u16),
+        SampleFormat::U8 => build!(u8),
+        other => return Err(format!("unsupported mic sample format: {other:?}")),
+    }
+    .map_err(|error| format!("build_input_stream: {error}"))?;
+    stream
+        .play()
+        .map_err(|error| format!("mic stream play: {error}"))?;
+    let stream = MicStream {
+        _cpal: Some(stream),
+        _alsa: None,
+    };
+    Ok((stream, in_rate))
+}
+
+fn engine_path() -> PathBuf {
+    speech_dir().join("engine.txt")
+}
+
+pub fn engine() -> String {
+    std::fs::read_to_string(engine_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| MODEL_IDS.contains(&s.as_str()))
+        .unwrap_or_else(|| {
+            let redux_only = !has_model(&speech_dir().join("parakeet"))
+                && has_model(&speech_dir().join("parakeet-redux"));
+            if redux_only {
+                "parakeet-redux"
+            } else {
+                "parakeet"
+            }
+            .to_string()
+        })
+}
+
+pub fn set_engine(name: &str) {
+    let next = if name == "parakeet-redux" {
+        "parakeet-redux"
+    } else {
+        "parakeet"
+    };
+    let changed = engine() != next;
+    if let Some(parent) = engine_path().parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(engine_path(), next);
+    if changed {
+        quit_server();
+    }
+}
+
+pub fn model_installed(id: &str) -> bool {
+    let dir = speech_dir().join(id);
+    MODEL_IDS.contains(&id) && has_model(&dir) && runtime_for(&dir).is_some()
+}
+
+pub fn parakeet_available() -> bool {
+    model_installed("parakeet")
+}
+
+pub fn redux_available() -> bool {
+    model_installed("parakeet-redux")
+}
+
+pub fn download_model(id: &str, progress: impl Fn(u8)) -> Result<(), String> {
+    let (repo, rev, files): (&str, &str, &[&str]) = match id {
+        "parakeet" => (PARAKEET_REPO, PARAKEET_REV, &PARAKEET_FILES),
+        "parakeet-redux" => (REDUX_REPO, REDUX_REV, &REDUX_FILES),
+        _ => return Err(format!("unknown voice model {id}")),
+    };
+    let dir = speech_dir().join(id);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut jobs: Vec<(String, PathBuf)> = files
+        .iter()
+        .filter(|f| !dir.join(f).is_file())
+        .map(|f| {
+            (
+                format!("https://huggingface.co/{repo}/resolve/{rev}/{f}?download=true"),
+                dir.join(f),
+            )
+        })
+        .collect();
+    let runtime = dir.join(RUNTIME);
+    let sibling = MODEL_IDS
+        .iter()
+        .map(|other| speech_dir().join(other).join(RUNTIME))
+        .find(|p| *p != runtime && p.is_file());
+    let archive = dir.join("onnxruntime.tgz");
+    let need_runtime = !runtime.is_file();
+    if need_runtime {
+        match &sibling {
+            Some(from) => {
+                std::fs::copy(from, &runtime).map_err(|e| format!("{}: {e}", runtime.display()))?;
+            }
+            None => jobs.push((ort_url()?, archive.clone())),
+        }
+    }
+    let sizes: Vec<u64> = jobs.iter().map(|(url, _)| remote_size(url)).collect();
+    let total = sizes.iter().sum::<u64>().max(1);
+    let mut done = 0u64;
+    progress(0);
+    for ((url, path), size) in jobs.iter().zip(&sizes) {
+        crate::install::log_line(&format!("speech: downloading {url}"));
+        fetch(url, path, |got| {
+            progress((((done + got) * 100) / total).min(99) as u8);
+        })?;
+        done += size;
+    }
+    if archive.is_file() {
+        let unpacked = unpack_runtime(&archive, &dir);
+        let _ = std::fs::remove_file(&archive);
+        unpacked?;
+    }
+    if !model_installed(id) {
+        return Err(format!("{} is incomplete after the download", dir.display()));
+    }
+    set_engine(id);
+    progress(100);
+    Ok(())
+}
+
+fn ort_url() -> Result<String, String> {
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "aarch64",
+        other => return Err(format!("no ONNX Runtime build for {other}")),
+    };
+    Ok(format!(
+        "https://github.com/microsoft/onnxruntime/releases/download/v{ORT_VERSION}/onnxruntime-linux-{arch}-{ORT_VERSION}.tgz"
+    ))
+}
+
+fn curl() -> Command {
+    let mut command = Command::new("curl");
+    command
+        .args(["-fsSL", "--proto", "=https", "--proto-redir", "=https"])
+        .args(["--connect-timeout", "15", "-A", "warmup-companion"]);
+    command
+}
+
+fn remote_size(url: &str) -> u64 {
+    let Ok(output) = curl().args(["-I", url]).stderr(Stdio::null()).output() else {
+        return 0;
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<u64>().ok())
+                .flatten()
+        })
+        .last()
+        .unwrap_or(0)
+}
+
+fn fetch(url: &str, path: &Path, on_progress: impl Fn(u64)) -> Result<(), String> {
+    let part = path.with_extension("part");
+    let _ = std::fs::remove_file(&part);
+    let mut child = curl()
+        .arg("-o")
+        .arg(&part)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("curl is needed to download voice models: {e}"))?;
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| format!("curl: {e}"))? {
+            break status;
+        }
+        on_progress(std::fs::metadata(&part).map_or(0, |m| m.len()));
+        std::thread::sleep(DOWNLOAD_POLL);
+    };
+    if !status.success() {
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let _ = pipe.read_to_string(&mut stderr);
+        }
+        let _ = std::fs::remove_file(&part);
+        return Err(format!("{url}: {}", stderr.trim()));
+    }
+    std::fs::rename(&part, path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn unpack_runtime(archive: &Path, dir: &Path) -> Result<(), String> {
+    let staging = dir.join("onnxruntime-unpack");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|e| format!("{}: {e}", staging.display()))?;
+    let pattern = format!("*/lib/{RUNTIME}.{ORT_VERSION}");
+    let status = Command::new("tar")
+        .arg("-xzf")
+        .arg(archive)
+        .arg("-C")
+        .arg(&staging)
+        .args(["--wildcards", &pattern])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("tar: {e}"))?;
+    let found = std::fs::read_dir(&staging)
+        .ok()
+        .and_then(|mut entries| entries.find_map(|e| e.ok()))
+        .map(|e| e.path().join("lib").join(format!("{RUNTIME}.{ORT_VERSION}")))
+        .filter(|p| p.is_file());
+    let result = match (status.success(), found) {
+        (true, Some(lib)) => std::fs::rename(&lib, dir.join(RUNTIME))
+            .map_err(|e| format!("{}: {e}", dir.join(RUNTIME).display())),
+        _ => Err(format!("{} has no {RUNTIME}", archive.display())),
+    };
+    let _ = std::fs::remove_dir_all(&staging);
+    result
 }
 
 pub fn request_stop() {
@@ -119,7 +637,7 @@ pub fn toggle() {
         return;
     }
     if !available() {
-        let message = "Dictation needs the Parakeet model and ONNX Runtime next to it.";
+        let message = "Dictation needs a voice model. Download Parakeet in Control Center under Voice.";
         crate::install::log_line(message);
         let _ = crate::linux_notify::notify("Warmup Companion", message);
         return;
@@ -291,50 +809,8 @@ fn set_level(level: f32) {
 fn record_and_type() -> Result<(), String> {
     let _media = MediaPause::hold();
     ensure_server()?;
-    let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or_else(|| "no microphone is available".to_string())?;
-    crate::install::log_line(&format!(
-        "speech: mic = {}",
-        device.name().unwrap_or_else(|_| "<unknown>".into())
-    ));
-    let supported = device
-        .default_input_config()
-        .map_err(|error| format!("default_input_config: {error}"))?;
-    let in_rate = supported.sample_rate().0;
-    let channels = supported.channels() as usize;
-    let sample_format = supported.sample_format();
-    let config: cpal::StreamConfig = supported.into();
     let buf = std::sync::Arc::new(Mutex::new(Vec::<f32>::new()));
-    let err_fn = |error: cpal::StreamError| {
-        crate::install::log_line(&format!("mic stream error: {error}"));
-    };
-    macro_rules! build {
-        ($t:ty) => {{
-            let buf = buf.clone();
-            device.build_input_stream(
-                &config,
-                move |data: &[$t], _: &cpal::InputCallbackInfo| push_mono(data, channels, &buf),
-                err_fn,
-                None,
-            )
-        }};
-    }
-    let stream = match sample_format {
-        SampleFormat::F32 => build!(f32),
-        SampleFormat::F64 => build!(f64),
-        SampleFormat::I16 => build!(i16),
-        SampleFormat::I32 => build!(i32),
-        SampleFormat::I8 => build!(i8),
-        SampleFormat::U16 => build!(u16),
-        SampleFormat::U8 => build!(u8),
-        other => return Err(format!("unsupported mic sample format: {other:?}")),
-    }
-    .map_err(|error| format!("build_input_stream: {error}"))?;
-    stream
-        .play()
-        .map_err(|error| format!("mic stream play: {error}"))?;
+    let (stream, in_rate) = open_mic(&buf)?;
     let ready = std::thread::spawn(wait_ready);
     let tick = Duration::from_millis(50);
     let dt = tick.as_secs_f32();
@@ -401,7 +877,7 @@ fn record_and_type() -> Result<(), String> {
     }
     let samples = resample_16k(&all, in_rate);
     let heard = transcribe_via_server(&samples)?;
-    let clean = clean_transcript(&heard);
+    let clean = coding_vocab::current().fix(&clean_transcript(&heard));
     if clean.is_empty() {
         crate::install::log_line(&format!("speech: heard ({secs:.1}s) non-speech, skipped"));
         return Ok(());
@@ -420,9 +896,16 @@ fn has_model(dir: &Path) -> bool {
 }
 
 fn model_dir() -> Option<PathBuf> {
-    let own = crate::paths::data_dir().join("speech").join("parakeet");
-    if has_model(&own) {
-        return Some(own);
+    let classic = speech_dir().join("parakeet");
+    let redux = speech_dir().join("parakeet-redux");
+    if engine() == "parakeet-redux" && has_model(&redux) {
+        return Some(redux);
+    }
+    if has_model(&classic) {
+        return Some(classic);
+    }
+    if has_model(&redux) {
+        return Some(redux);
     }
     if let Some(home) = std::env::var_os("HOME") {
         let bundled = PathBuf::from(home)
@@ -435,17 +918,19 @@ fn model_dir() -> Option<PathBuf> {
 }
 
 fn onnx_runtime() -> Option<PathBuf> {
+    runtime_for(&model_dir()?)
+}
+
+fn runtime_for(dir: &Path) -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("ORT_DYLIB_PATH") {
         let path = PathBuf::from(path);
         if path.is_file() {
             return Some(path);
         }
     }
-    if let Some(dir) = model_dir() {
-        let beside = dir.join("libonnxruntime.so");
-        if beside.is_file() {
-            return Some(beside);
-        }
+    let beside = dir.join(RUNTIME);
+    if beside.is_file() {
+        return Some(beside);
     }
     [
         "/usr/lib/libonnxruntime.so",

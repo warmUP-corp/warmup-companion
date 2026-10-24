@@ -45,6 +45,8 @@ mod tray;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
 mod linux_tray;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
+mod linux_hotkeys;
+#[cfg(all(target_os = "linux", feature = "gamepad"))]
 mod linux_notify;
 #[cfg(all(target_os = "linux", feature = "gamepad"))]
 mod linux_panel;
@@ -724,10 +726,22 @@ fn main() {
     std::env::set_var("__NV_DISABLE_EXPLICIT_SYNC", "1");
     let _sentry = sentry_telemetry::init();
     let args: Vec<String> = env::args().collect();
+    #[cfg(all(target_os = "linux", feature = "gamepad"))]
+    if args.iter().any(|a| a == "--controller-center") {
+        linux_hotkeys::release_on_exit_signals();
+        linux_tray::exit_ends_process();
+        linux_tray::spawn();
+        win::controller_center::show();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+    }
     #[cfg(any(windows, target_os = "linux"))]
     cli::dispatch_install_or_service(&args);
     #[cfg(all(windows, feature = "gamepad"))]
     tray::spawn();
+    #[cfg(all(target_os = "linux", feature = "gamepad"))]
+    linux_tray::spawn();
     // Dev aid: open the Controller Center directly (no service, no tray click).
     #[cfg(all(windows, feature = "gamepad"))]
     if args.iter().any(|a| a == "--controller-center") {
@@ -740,7 +754,13 @@ fn main() {
     let use_real_win32 = args.iter().any(|a| a == "--real")
         || env::var_os("WARMUP_REAL_VK").is_some_and(|v| v != "0");
     if args.iter().any(|a| a == "--gamepad") {
-        #[cfg(feature = "gamepad")]
+        #[cfg(all(target_os = "linux", feature = "gamepad"))]
+        {
+            let result = warmup_launch::run_gamepad_mode();
+            linux_hotkeys::release();
+            return result;
+        }
+        #[cfg(all(not(target_os = "linux"), feature = "gamepad"))]
         {
             return warmup_launch::run_gamepad_mode();
         }
