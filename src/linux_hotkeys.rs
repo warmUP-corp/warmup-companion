@@ -14,6 +14,7 @@ const REGISTRY: &str = "org.freedesktop.host.portal.Registry";
 const APP_ID: &str = "warmup-companion";
 const UNIT_NAME: &str = "warmup-companion.service";
 const SYNC_EVERY: Duration = Duration::from_secs(1);
+const BIND_CHECK_TICKS: u32 = 3;
 const SIGNAL_POLL: Duration = Duration::from_millis(100);
 const LABEL_PREFIX: &str = "warmUP Companion: ";
 
@@ -372,25 +373,72 @@ fn global_names() -> HashMap<&'static str, String> {
     names
 }
 
-fn bound_by_other(hotkey: Hotkey) -> bool {
-    let Some(json) = hyprctl(&["binds", "-j"]) else {
-        return false;
-    };
-    let Ok(serde_json::Value::Array(binds)) = serde_json::from_str::<serde_json::Value>(&json)
+struct ComboBinds {
+    ours: bool,
+    others: Vec<serde_json::Value>,
+}
+
+fn combo_binds(hotkey: Hotkey) -> Option<ComboBinds> {
+    let json = hyprctl(&["binds", "-j"])?;
+    let serde_json::Value::Array(binds) = serde_json::from_str::<serde_json::Value>(&json).ok()?
     else {
-        return false;
+        return None;
     };
-    binds.iter().any(|b| {
-        b["modmask"].as_u64() == Some(12)
-            && b["submap"].as_str().unwrap_or_default().is_empty()
-            && b["key"]
+    let mut combo = ComboBinds {
+        ours: false,
+        others: Vec::new(),
+    };
+    for bind in binds {
+        let on_combo = bind["modmask"].as_u64() == Some(12)
+            && bind["submap"].as_str().unwrap_or_default().is_empty()
+            && bind["key"]
                 .as_str()
-                .is_some_and(|k| k.eq_ignore_ascii_case(hotkey.hypr_key()))
-            && !b["description"]
-                .as_str()
-                .unwrap_or_default()
-                .starts_with(LABEL_PREFIX)
-    })
+                .is_some_and(|k| k.eq_ignore_ascii_case(hotkey.hypr_key()));
+        if !on_combo {
+            continue;
+        }
+        if bind["description"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with(LABEL_PREFIX)
+        {
+            combo.ours = true;
+        } else {
+            combo.others.push(bind);
+        }
+    }
+    Some(combo)
+}
+
+fn bound_by_other(hotkey: Hotkey) -> bool {
+    combo_binds(hotkey).is_some_and(|c| !c.others.is_empty())
+}
+
+fn legacy_bind_line(hotkey: Hotkey, bind: &serde_json::Value) -> Option<(String, String)> {
+    let dispatcher = bind["dispatcher"].as_str()?;
+    if dispatcher == "__lua" {
+        return None;
+    }
+    let flag = |key: &str, letter: char| bind[key].as_bool().unwrap_or(false).then_some(letter);
+    let mut flags: String = [
+        flag("locked", 'l'),
+        flag("release", 'r'),
+        flag("repeat", 'e'),
+        flag("non_consuming", 'n'),
+        flag("mouse", 'm'),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let arg = bind["arg"].as_str().unwrap_or_default();
+    let line = match bind["description"].as_str().filter(|d| !d.is_empty()) {
+        Some(description) => {
+            flags.push('d');
+            format!("CTRL ALT, {}, {description}, {dispatcher}, {arg}", hotkey.hypr_key())
+        }
+        None => format!("CTRL ALT, {}, {dispatcher}, {arg}", hotkey.hypr_key()),
+    };
+    Some((format!("bind{flags}"), line))
 }
 
 fn hypr_bind(hotkey: Hotkey, target: &Target) -> bool {
@@ -430,30 +478,36 @@ fn hypr_bind(hotkey: Hotkey, target: &Target) -> bool {
 }
 
 fn hypr_unbind(hotkey: Hotkey) {
-    let ours = hyprctl(&["binds", "-j"])
-        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default()
-        .iter()
-        .any(|b| {
-            b["modmask"].as_u64() == Some(12)
-                && b["key"]
-                    .as_str()
-                    .is_some_and(|k| k.eq_ignore_ascii_case(hotkey.hypr_key()))
-                && b["description"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .starts_with(LABEL_PREFIX)
-        });
-    if !ours {
+    let Some(combo) = combo_binds(hotkey) else {
+        return;
+    };
+    if !combo.ours {
         return;
     }
+    let restore: Option<Vec<(String, String)>> = combo
+        .others
+        .iter()
+        .map(|bind| legacy_bind_line(hotkey, bind))
+        .collect();
+    let Some(restore) = restore else {
+        log(&format!(
+            "left {} bound: another bind shares the combo and cannot be restored",
+            hotkey.label()
+        ));
+        return;
+    };
     let legacy = format!("CTRL ALT, {}", hotkey.hypr_key());
-    if let Some(out) = hyprctl(&["keyword", "unbind", &legacy]) {
-        if out.contains("non-legacy") {
+    match hyprctl(&["keyword", "unbind", &legacy]) {
+        Some(out) if out.contains("non-legacy") => {
             let lua = format!("hl.unbind(\"CTRL + ALT + {}\")", hotkey.hypr_key());
             let _ = hyprctl(&["eval", &lua]);
         }
+        Some(_) => {
+            for (keyword, line) in restore {
+                let _ = hyprctl(&["keyword", &keyword, &line]);
+            }
+        }
+        None => {}
     }
 }
 
@@ -473,10 +527,20 @@ fn spawn_hypr_sync(hotkey: Hotkey, target: Target) {
         .name(format!("warmup-hotkey-{}", hotkey.id()))
         .spawn(move || {
             let mut bound: Option<bool> = None;
+            let mut ok = false;
+            let mut tick: u32 = 0;
             loop {
                 let want = wanted(hotkey);
-                if bound != Some(want) {
-                    let ok = if want {
+                let lost = want
+                    && ok
+                    && tick % BIND_CHECK_TICKS == 0
+                    && combo_binds(hotkey).is_some_and(|c| !c.ours);
+                if lost {
+                    log(&format!("{} bind is gone, binding it again", hotkey.label()));
+                }
+                tick = tick.wrapping_add(1);
+                if bound != Some(want) || lost {
+                    ok = if want {
                         hypr_bind(hotkey, &target)
                     } else {
                         hypr_unbind(hotkey);
