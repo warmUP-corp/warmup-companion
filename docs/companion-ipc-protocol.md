@@ -112,7 +112,7 @@ warmUP sends its known-game list in one or more chunks so that every NDJSON line
 
 | Field | Meaning |
 |---|---|
-| `patterns` | Discord-style win32 path tails, e.g. `binaries/win64/game.exe`; a leading `>` is ignored, matching is on the normalised path |
+| `patterns` | win32 path tails of known game executables, e.g. `binaries/win64/game.exe`; a leading `>` is ignored, matching is on the normalised path |
 | `steamAppIds` | Steam app ids whose games count when they run under `steamapps/common` |
 | `localGameDirs` | install folders of manually added games; `prefix` in either slash style, matched case-insensitively |
 | `denylistExes` | exe file names that are never games; when non-empty it replaces the companion's built-in list |
