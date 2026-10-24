@@ -90,6 +90,7 @@ pub struct Frame {
     pub sheet: bool,
     pub sheet_hint: bool,
     pub voice: Option<Voice>,
+    pub slide: f32,
 }
 
 pub struct Glide {
@@ -1059,6 +1060,17 @@ pub fn paint_prompt_card(g: &mut Gfx, card: &crate::vk_paint::PromptCard, width:
     painted
 }
 
+pub fn slide_down(pixels: &mut [u8], width: u32, offset: u32) {
+    let row = width as usize * 4;
+    let rows = if row == 0 { 0 } else { pixels.len() / row };
+    let shift = (offset as usize).min(rows);
+    if shift == 0 {
+        return;
+    }
+    pixels.copy_within(0..(rows - shift) * row, shift * row);
+    pixels[..shift * row].fill(0);
+}
+
 pub fn to_argb(pixels: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(pixels.len());
     for px in pixels.chunks_exact(4) {
@@ -1126,6 +1138,7 @@ mod tests {
             sheet: false,
             sheet_hint: false,
             voice: None,
+            slide: 0.0,
         };
         let mut glide = Glide::default();
         let started = std::time::Instant::now();
@@ -1190,6 +1203,7 @@ mod tests {
             sheet: true,
             sheet_hint: false,
             voice: None,
+            slide: 0.0,
         };
         paint_frame(&mut g, &frame, &mut Glide::default());
         assert!(g.pixels().chunks_exact(4).any(|px| px[0] != 0x1F || px[1] != 0x1F || px[2] != 0x1F));

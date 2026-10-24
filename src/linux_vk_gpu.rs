@@ -79,6 +79,7 @@ struct Uniforms {
     halo: [f32; 4],
     halo_style: [f32; 4],
     halo_color: [f32; 4],
+    slide: [f32; 4],
 }
 
 impl Presenter {
@@ -378,6 +379,7 @@ impl Presenter {
             halo,
             halo_style,
             halo_color,
+            slide: [frame.slide, 0.0, 0.0, 0.0],
         };
         self.queue.write_buffer(&self.uniform, 0, bytes_of(&uniforms));
         let gpu_at = Instant::now();
@@ -637,6 +639,7 @@ struct Uniforms {
     halo: vec4<f32>,
     halo_style: vec4<f32>,
     halo_color: vec4<f32>,
+    slide: vec4<f32>,
 }
 @group(0) @binding(0) var base_tex: texture_2d<f32>;
 @group(0) @binding(1) var base_samp: sampler;
@@ -662,7 +665,11 @@ fn over(dst: vec4<f32>, src: vec4<f32>) -> vec4<f32> {
 }
 
 @fragment
-fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+    let pos = vec4<f32>(frag.x, frag.y - u.slide.x, frag.zw);
+    if (pos.y < 0.0) {
+        return vec4<f32>(0.0);
+    }
     let uv = pos.xy / max(u.tex.xy, vec2<f32>(1.0));
     var color = textureSample(base_tex, base_samp, uv);
     let press = max(u.extra.w, 0.9);

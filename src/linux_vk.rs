@@ -42,6 +42,8 @@ static KEYBOARD_OPEN: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_GONE: AtomicBool = AtomicBool::new(false);
 static OUTPUT_IS_TV: AtomicBool = AtomicBool::new(false);
 const SHEET_HINT_FOR: Duration = Duration::from_secs(3);
+const SHOW_SLIDE_MS: f32 = 180.0;
+const HIDE_SLIDE_MS: f32 = 130.0;
 const PROMPT_W: u32 = 720;
 const PROMPT_H: u32 = 420;
 const PROMPT_MARGIN_BOTTOM: i32 = 72;
@@ -272,6 +274,9 @@ fn keyboard_loop(wake: UnixStream) -> Result<(), String> {
             shell.dirty = true;
         }
     }
+    if !wayland_dead && !shell.exit && shell.configured && (shell.gpu_presented || shell.buffer.is_some()) {
+        wayland_dead = !slide_out(&mut shell, &mut queue, &qh);
+    }
     shell.gpu.take();
     if !wayland_dead {
         if let smithay_client_toolkit::shell::wlr_layer::SurfaceKind::Wlr(proxy) = shell.layer.kind() {
@@ -283,6 +288,36 @@ fn keyboard_loop(wake: UnixStream) -> Result<(), String> {
     drop(queue);
     let _ = conn.flush();
     Ok(())
+}
+
+fn slide_out(shell: &mut Shell, queue: &mut wayland_client::EventQueue<Shell>, qh: &QueueHandle<Shell>) -> bool {
+    let started = std::time::Instant::now();
+    let deadline = started + Duration::from_millis(HIDE_SLIDE_MS as u64 + 120);
+    shell.slide = Some((started, true));
+    shell.slide_waiting = false;
+    shell.dirty = true;
+    loop {
+        if queue.dispatch_pending(shell).is_err() {
+            return false;
+        }
+        if !shell.slide_hidden().1 || std::time::Instant::now() >= deadline {
+            return true;
+        }
+        if shell.dirty && !shell.frame_pending {
+            shell.draw(qh);
+        }
+        if queue.flush().is_err() {
+            return false;
+        }
+        let Some(guard) = queue.prepare_read() else {
+            continue;
+        };
+        let mut fds = [nix::poll::PollFd::new(guard.connection_fd(), nix::poll::PollFlags::POLLIN)];
+        let _ = nix::poll::poll(&mut fds, nix::poll::PollTimeout::from(16u16));
+        if fds[0].any().unwrap_or(false) && guard.read().is_err() {
+            return false;
+        }
+    }
 }
 
 struct Shell {
@@ -325,6 +360,8 @@ struct Shell {
     voice_level: f32,
     voice_level_at: Option<std::time::Instant>,
     voice_started: Option<std::time::Instant>,
+    slide: Option<(std::time::Instant, bool)>,
+    slide_waiting: bool,
 }
 
 impl Shell {
@@ -391,6 +428,8 @@ impl Shell {
             voice_level: 0.0,
             voice_level_at: None,
             voice_started: None,
+            slide: None,
+            slide_waiting: false,
         };
         shell.apply_layout();
         Ok(shell)
@@ -518,6 +557,11 @@ impl Shell {
         let theme = crate::config::keyboard_theme();
         let (scale_w, ui) = self.key_scales(look, &rows);
         let voice = self.voice_state();
+        if self.slide.is_none() && !self.gpu_presented && self.buffer.is_none() {
+            self.slide_waiting = true;
+        }
+        let (hidden, sliding) = self.slide_hidden();
+        let slide = (hidden * self.logical_h as f32 * scale).round();
         let frame = draw::Frame {
             logical_w: self.logical_w as f32,
             logical_h: self.logical_h as f32,
@@ -543,6 +587,7 @@ impl Shell {
             sheet: crate::vk_sheet::shown(),
             sheet_hint: self.sheet_hint(look),
             voice,
+            slide,
         };
         if self.logical_w == 0 || self.logical_h == 0 {
             return;
@@ -552,6 +597,7 @@ impl Shell {
                 Ok(()) => {
                     self.gpu_errors = 0;
                     self.gpu_presented = true;
+                    self.dirty |= sliding;
                     return;
                 }
                 Err(error) => {
@@ -579,9 +625,10 @@ impl Shell {
             let nimbus = nimbus_frame();
             draw::paint_voice_key(&mut self.gfx, &frame, nimbus.as_ref().map(|(px, bytes)| (bytes.as_slice(), *px)));
         }
-        let pixels = draw::to_argb(&self.gfx.pixels());
+        let mut pixels = draw::to_argb(&self.gfx.pixels());
         let buffer_w = self.gfx.width() as i32;
         let buffer_h = self.gfx.height() as i32;
+        draw::slide_down(&mut pixels, buffer_w as u32, slide as u32);
         let stride = buffer_w * 4;
         let Ok((buffer, canvas)) = self.pool.create_buffer(
             buffer_w,
@@ -603,7 +650,7 @@ impl Shell {
         surface.damage_buffer(0, 0, buffer_w, buffer_h);
         surface.frame(qh, surface.clone());
         self.frame_pending = true;
-        self.dirty = self.glide.animating;
+        self.dirty = self.glide.animating || sliding;
         if let Err(error) = buffer.attach_to(surface) {
             crate::install::log_line(&format!("keyboard buffer: {error}"));
             return;
@@ -651,6 +698,26 @@ impl Shell {
             draw::REF_MON_W * layout,
             draw::ui_scale() * layout / draw::design_scale(look.style),
         )
+    }
+
+    fn slide_hidden(&mut self) -> (f32, bool) {
+        if self.slide_waiting {
+            return (1.0, true);
+        }
+        let Some((at, hiding)) = self.slide else {
+            return (0.0, false);
+        };
+        let total = if hiding { HIDE_SLIDE_MS } else { SHOW_SLIDE_MS };
+        let t = at.elapsed().as_secs_f32() * 1000.0 / total;
+        let eased = crate::vk_motion::ease_out_cubic(t);
+        if hiding {
+            (eased, t < 1.0)
+        } else {
+            if t >= 1.0 {
+                self.slide = None;
+            }
+            (1.0 - eased, t < 1.0)
+        }
     }
 
     fn click(&mut self, surface: &wl_surface::WlSurface, x: f32, y: f32) {
@@ -1030,6 +1097,11 @@ impl CompositorHandler for Shell {
             return;
         }
         self.frame_pending = false;
+        if self.slide_waiting {
+            self.slide_waiting = false;
+            self.slide = Some((std::time::Instant::now(), false));
+            self.dirty = true;
+        }
         if self.dirty && self.configured {
             self.draw(qh);
         }
