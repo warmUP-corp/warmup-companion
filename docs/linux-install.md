@@ -81,7 +81,10 @@ If either variable is missing, the service logs the reason and exits. `verify` a
 | Settings | `$XDG_CONFIG_HOME/warmup-companion/settings.ini` |
 | Log and runtime status | `$XDG_STATE_HOME/warmup-companion/` |
 | Installed binary | `$XDG_DATA_HOME/warmup-companion/bin/warmup-companion` |
+| Controller database | `$XDG_DATA_HOME/warmup-companion/gamecontrollerdb.txt` |
 | Input socket | `$XDG_RUNTIME_DIR/warmup/input.sock` |
+
+`install` copies the SDL controller database from `WARMUP_GAMECONTROLLER_DB`, or else from the warmUP launcher it finds (its `resources/gamecontrollerdb.txt`, or `/usr/lib/warmUP/resources/` for the `.deb` and `.rpm`). Without it, the companion uses the controller mappings built into SDL.
 
 The socket directory is mode `0700` and the socket is mode `0600`. The companion accepts a client only when that client's user id matches its own. The desktop connects to this socket with the same protocol version 6 frames the Windows build uses on its named pipe.
 

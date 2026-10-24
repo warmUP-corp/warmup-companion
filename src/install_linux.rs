@@ -172,6 +172,7 @@ fn install_inner(dev_exe: Option<&Path>) -> Result<(), String> {
         }
     }
     let replaced = copy_binary(&src, &dest)?;
+    copy_gamecontroller_db()?;
 
     let unit_path = crate::paths::systemd_user_unit_file();
     if let Some(parent) = unit_path.parent() {
@@ -196,6 +197,36 @@ fn install_inner(dev_exe: Option<&Path>) -> Result<(), String> {
     println!(
         "Gaming distros already allow /dev/uinput. On any other distribution, install docs/linux-install.md before the pointer will move."
     );
+    Ok(())
+}
+
+fn copy_gamecontroller_db() -> Result<(), String> {
+    let mut candidates = vec![std::env::var_os("WARMUP_GAMECONTROLLER_DB").map(PathBuf::from)];
+    #[cfg(feature = "gamepad")]
+    candidates.push(
+        crate::warmup_launch::warmup_exe_path()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("resources/gamecontrollerdb.txt"))),
+    );
+    candidates.push(Some(PathBuf::from("/usr/lib/warmUP/resources/gamecontrollerdb.txt")));
+    candidates.push(Some(PathBuf::from("/usr/lib/warmup/resources/gamecontrollerdb.txt")));
+    let dest = crate::paths::data_dir().join("gamecontrollerdb.txt");
+    for candidate in candidates.into_iter().flatten() {
+        if candidate.is_file() {
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent).map_err(|error| format!("create data dir: {error}"))?;
+            }
+            fs::copy(&candidate, &dest).map_err(|error| format!("copy controller DB: {error}"))?;
+            crate::install::log_line(&format!(
+                "controller DB {} -> {}",
+                candidate.display(),
+                dest.display()
+            ));
+            println!("Controller DB: {}", dest.display());
+            return Ok(());
+        }
+    }
+    crate::install::log_line("warning: gamecontrollerdb.txt not found; set WARMUP_GAMECONTROLLER_DB");
     Ok(())
 }
 
