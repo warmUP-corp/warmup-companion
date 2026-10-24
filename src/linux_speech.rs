@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -37,9 +37,11 @@ const SYSTEM_START_WAIT: Duration = Duration::from_secs(3);
 const MIC_OPEN_WAIT: Duration = Duration::from_secs(5);
 const MIC_STOP_WAIT: Duration = Duration::from_secs(1);
 const MIC_CACHE_FOR: Duration = Duration::from_secs(2);
+const ENGINE_STOP_WAIT: Duration = Duration::from_secs(2);
 const DOWNLOAD_POLL: Duration = Duration::from_millis(250);
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
+static ENGINE_CHILDREN: Mutex<Vec<Child>> = Mutex::new(Vec::new());
 static STOP: AtomicBool = AtomicBool::new(false);
 static DISCARD: AtomicBool = AtomicBool::new(false);
 static PHASE: AtomicU8 = AtomicU8::new(0);
@@ -1160,15 +1162,44 @@ fn ensure_server() -> Result<(), String> {
         return Ok(());
     }
     let exe = std::env::current_exe().map_err(|error| error.to_string())?;
-    Command::new(exe)
+    let child = Command::new(exe)
         .arg("--parakeet-server")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|error| format!("voice engine: {error}"))?;
+    if let Ok(mut children) = ENGINE_CHILDREN.lock() {
+        children.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+        children.push(child);
+    }
     crate::install::log_line("speech: starting the voice engine");
     Ok(())
+}
+
+pub fn stop_engine() {
+    let mut children = match ENGINE_CHILDREN.lock() {
+        Ok(mut children) => std::mem::take(&mut *children),
+        Err(_) => return,
+    };
+    children.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+    if children.is_empty() {
+        return;
+    }
+    crate::install::log_line("speech: stopping the voice engine");
+    for child in &children {
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+    }
+    let deadline = Instant::now() + ENGINE_STOP_WAIT;
+    while !children.is_empty() && Instant::now() < deadline {
+        children.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    for mut child in children {
+        crate::install::log_line("speech: the voice engine ignored SIGTERM, killing it");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
 fn wait_ready() -> Result<(), String> {
