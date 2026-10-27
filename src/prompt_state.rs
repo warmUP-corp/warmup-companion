@@ -104,10 +104,6 @@ pub fn fullscreen_border(visual: PromptVisual) -> bool {
     visual_is_voice(visual)
 }
 
-pub fn click_through(visual: PromptVisual) -> bool {
-    fullscreen_border(visual) || visual_is_tips(visual)
-}
-
 pub fn userland_only(visual: PromptVisual) -> bool {
     visual_is_voice(visual) || visual_is_tips(visual)
 }
@@ -233,7 +229,7 @@ impl PromptState {
             } else if inputs.connected {
                 Some(PromptVisual::Ready)
             } else {
-                Some(PromptVisual::NoPad)
+                None
             }
         } else {
             tip.map(|i| PromptVisual::Tips(i as u8))
