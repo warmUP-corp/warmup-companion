@@ -18,11 +18,11 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::ValidateRect;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, GetWindowLongPtrW, KillTimer,
-    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
-    HMENU, HTTRANSPARENT, HWND_TOPMOST, LWA_ALPHA, SM_SHUTTINGDOWN, SWP_FRAMECHANGED,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, KillTimer,
+    SetLayeredWindowAttributes, SetTimer, SetWindowPos, ShowWindow,
+    HMENU, HWND_TOPMOST, LWA_ALPHA, SM_SHUTTINGDOWN, SWP_FRAMECHANGED,
     SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, WM_DESTROY, WM_DISPLAYCHANGE,
-    WM_DPICHANGED, WM_NCHITTEST, WM_PAINT, WM_TIMER, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WM_DPICHANGED, WM_PAINT, WM_TIMER, WS_EX_LAYERED, WS_EX_NOACTIVATE,
     WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
@@ -300,19 +300,9 @@ unsafe fn target_rect_for_visual(visual: PromptVisual) -> PromptRect {
     rect
 }
 
-/// Move the overlay to `visual`'s rect. Transcription is click-through: the
-/// window covers the display, and a hit would otherwise swallow the desktop
-/// and the keyboard under the border.
+/// Move the overlay to `visual`'s rect.
 unsafe fn place_overlay(hwnd: HWND, visual: PromptVisual, show: bool) {
     let rect = target_rect_for_visual(visual);
-    let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-    let bit = WS_EX_TRANSPARENT.0;
-    let ex = if click_through(visual) {
-        ex | bit
-    } else {
-        ex & !bit
-    };
-    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex as isize);
     let mut flags = SWP_NOACTIVATE | SWP_FRAMECHANGED;
     if show {
         flags |= SWP_SHOWWINDOW;
@@ -585,7 +575,8 @@ unsafe fn create_prompt_window() -> Result<HWND, String> {
             | WS_EX_TOOLWINDOW
             | WS_EX_NOACTIVATE
             | WS_EX_NOREDIRECTIONBITMAP
-            | WS_EX_LAYERED,
+            | WS_EX_LAYERED
+            | WS_EX_TRANSPARENT,
         WINDOW_CLASS,
         w!("Warmup Prompt Overlay"),
         WS_POPUP,
@@ -617,9 +608,6 @@ unsafe extern "system" fn prompt_wndproc(
     match msg {
         // Fullscreen transcription frame must not eat clicks meant for the
         // desktop or the keyboard underneath the border.
-        WM_NCHITTEST if click_through(VISUAL_STATE.with(|state| state.get())) => {
-            LRESULT(HTTRANSPARENT as isize)
-        }
         WM_PAINT => {
             render_prompt(hwnd);
             let _ = ValidateRect(hwnd, None);
@@ -869,11 +857,10 @@ mod tests {
     }
 
     #[test]
-    fn tips_visual_is_a_click_through_bottom_pill() {
+    fn tips_visual_is_a_bottom_pill() {
         for i in 0..controller_tips::cue_count() as u8 {
             let visual = PromptVisual::Tips(i);
             assert_eq!(PromptVisual::from_lparam(visual.as_lparam()), visual);
-            assert!(click_through(visual));
             assert!(!fullscreen_border(visual));
             assert_eq!(thread_kind_for_visual(visual), PromptThreadKind::Tips);
         }
@@ -881,7 +868,6 @@ mod tests {
         assert_eq!(rect.w, TIPS_W);
         assert_eq!(rect.y + rect.h, 1080 - MARGIN_BOTTOM);
         assert_eq!(overlay_rect(PromptVisual::Tips(0), 1024, 768, 1.0).w, 1024);
-        assert!(!click_through(PromptVisual::Ready));
     }
 
     #[test]
