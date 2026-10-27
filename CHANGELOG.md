@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## v0.11.2
+
+- On Windows, the mouse works again on UAC prompts ("Do you want to allow this app to make changes to your device?") when no controller is connected. An invisible part of the companion's sign-in hint covered the Yes and No buttons and caught the clicks, so the prompt could only be answered with a controller. The hint no longer catches clicks, and the "connect a controller" hint is no longer shown on the sign-in and UAC screens.
+
 ## v0.11.1
 
 - On Linux, the tray menu opens again. Opening it used to stop its window silently the first time, after which clicking the tray icon did nothing until the companion was restarted. The update window was affected in the same way.
