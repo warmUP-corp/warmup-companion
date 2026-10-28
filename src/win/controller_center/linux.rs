@@ -553,7 +553,7 @@ impl PanelApp for CenterPanel {
             if let Some(vk) = key.vk {
                 after = key_down(ui, vk);
             }
-            if matches!(after, After::Stay) && apps::typing(ui) {
+            if matches!(after, After::Stay) && apps::add_open(ui) {
                 for ch in key.text.as_deref().unwrap_or("").chars() {
                     apps::char_input(ui, ch);
                 }

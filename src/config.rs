@@ -611,6 +611,8 @@ const SETTINGS_TEMPLATE: &str = r#"# Warmup Companion settings. One `key = value
 
 # Use Guide-only gamepad polling when a fullscreen game is foreground (true|false)
 # sleep_on_game = true
+# Programs that are never treated as a game, comma separated, e.g. obs64.exe, vlc.exe
+# game_blacklist =
 # Legacy alias for sleep_on_game; never terminates the loop.
 # auto_stop_on_game = false
 # prompt_userland_debug = false
@@ -1021,6 +1023,15 @@ fn validate_gamepad_setting(key: &str, value: &str) -> Result<(), String> {
             "always" | "signin" => Ok(()),
             _ => Err("run_mode must be always or signin".to_string()),
         },
+        "game_blacklist" => {
+            if value.len() > 2000 {
+                Err("game_blacklist must be at most 2000 characters".to_string())
+            } else if value.contains(['\n', '\r', '=']) {
+                Err("game_blacklist must not contain newlines or '='".to_string())
+            } else {
+                Ok(())
+            }
+        }
         "vocabulary" => {
             if value.len() > 2000 {
                 Err("vocabulary must be at most 2000 characters".to_string())

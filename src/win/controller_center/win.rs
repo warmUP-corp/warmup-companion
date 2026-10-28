@@ -522,7 +522,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_CHAR => {
             with_ui(|ui| {
-                if apps::typing(ui) {
+                if apps::add_open(ui) {
                     if let Some(ch) = char::from_u32(wparam.0 as u32) {
                         apps::char_input(ui, ch);
                         paint(ui);

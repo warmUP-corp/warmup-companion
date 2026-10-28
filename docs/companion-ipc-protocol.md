@@ -118,7 +118,7 @@ warmUP sends its known-game list in one or more chunks so that every NDJSON line
 | `denylistExes` | exe file names that are never games; when non-empty it replaces the companion's built-in list |
 | `backgroundToolStems` | exe stems of always-on tools; when non-empty it replaces the built-in `wallpaper32`, `wallpaper64` |
 
-Once a list is stored, the companion's own game signal (sleep on game, standalone game detection) only counts the fullscreen foreground window when its process is a known game by the rules above. Without a list it keeps the plain fullscreen heuristic. The companion also accepts a `game_detection` frame whose fields sit beside `type` instead of inside `payload`.
+The companion's own game signal (sleep on game, standalone game detection) does not use this list: it counts any fullscreen foreground window that is not on the denylist or in the user's `game_blacklist` setting. The companion also accepts a `game_detection` frame whose fields sit beside `type` instead of inside `payload`.
 
 ### `GamepadConfig` payload
 

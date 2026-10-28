@@ -5,7 +5,8 @@ pub(super) const APPS_TAB: usize = 4;
 const ROW_H: f32 = 59.0;
 const LIST_Y: f32 = CONTENT_Y + ROW_H + ROW_GAP;
 const LIST_STEP: f32 = ROW_H + ROW_GAP;
-const MAX_ROWS: usize = 6;
+const APPS_Y: f32 = LIST_Y + LIST_STEP;
+const MAX_ROWS: usize = 5;
 const TILE_W: f32 = (CONTENT_W - ROW_GAP) / 2.0;
 const TILE_H: f32 = 48.0;
 const TILE_STEP: f32 = TILE_H + ROW_GAP;
@@ -15,6 +16,9 @@ const DLG_IN: f32 = DLG_W - 48.0;
 const OPTION_STEP: f32 = 48.0;
 const PICK_STEP: f32 = 56.0;
 const MAX_PICKS: usize = 5;
+const SEARCH_Y: f32 = 86.0;
+const PICKS_LABEL_Y: f32 = 150.0;
+const PICKS_Y: f32 = 173.0;
 const GLYPHS: [usize; 14] = [0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15];
 const CHIP_W: f32 = (DLG_IN - 24.0) / 4.0;
 const G_A: &[usize] = &[0];
@@ -44,8 +48,15 @@ pub(super) enum Dialog {
     Add {
         focus: usize,
         first: usize,
-        typing: Option<String>,
+        query: String,
+        typing: bool,
     },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pick {
+    App(usize),
+    Typed,
 }
 
 #[derive(Default)]
@@ -56,6 +67,9 @@ pub(super) struct State {
     saved: Vec<Profile>,
     pub(super) editing: Option<usize>,
     pub(super) dialog: Option<Dialog>,
+    pub(super) blacklist: Vec<String>,
+    saved_blacklist: Vec<String>,
+    blacklist_open: bool,
     first: usize,
     wheel: i32,
 }
@@ -97,12 +111,16 @@ fn settings_text() -> String {
 }
 
 pub(super) fn load() -> State {
-    let (on, profiles) = ap::load(&settings_text());
+    let text = settings_text();
+    let (on, profiles) = ap::load(&text);
+    let blacklist = crate::game_list::parse_blacklist(&text);
     State {
         on,
         saved_on: on,
         saved: profiles.clone(),
         profiles,
+        saved_blacklist: blacklist.clone(),
+        blacklist,
         ..State::default()
     }
 }
@@ -112,7 +130,7 @@ pub(super) fn reload(st: &mut State) {
 }
 
 pub(super) fn dirty(st: &State) -> bool {
-    st.on != st.saved_on || st.profiles != st.saved
+    st.on != st.saved_on || st.profiles != st.saved || st.blacklist != st.saved_blacklist
 }
 
 pub(super) fn apply(st: &mut State) {
@@ -123,28 +141,29 @@ pub(super) fn apply(st: &mut State) {
             crate::install::log_line(&format!("controller center: app profiles: {e}"));
         }
     }
+    if st.blacklist != st.saved_blacklist {
+        if let Err(e) = crate::config::set_gamepad_setting("game_blacklist", &st.blacklist.join(", ")) {
+            crate::install::log_line(&format!("controller center: blacklist: {e}"));
+        }
+    }
     reload(st);
 }
 
 pub(super) fn enter(st: &mut State) {
     st.editing = None;
     st.dialog = None;
+    st.blacklist_open = false;
     st.first = 0;
     prewarm();
 }
 
 pub(super) fn leave(ui: &mut Ui) {
-    if matches!(
-        ui.apps.dialog,
-        Some(Dialog::Add {
-            typing: Some(_),
-            ..
-        })
-    ) {
-        end_typing(ui, false);
+    if typing(ui) {
+        end_typing(ui);
     }
     ui.apps.editing = None;
     ui.apps.dialog = None;
+    ui.apps.blacklist_open = false;
 }
 
 fn installed(_st: &State) -> &'static [(String, String)] {
@@ -155,6 +174,21 @@ fn profile_index(st: &State, exe: &str) -> Option<usize> {
     st.profiles
         .iter()
         .position(|p| p.exes.iter().any(|e| e.eq_ignore_ascii_case(exe)))
+}
+
+fn taken(st: &State, exe: &str) -> bool {
+    if st.blacklist_open {
+        st.blacklist.iter().any(|e| e.eq_ignore_ascii_case(exe))
+    } else {
+        profile_index(st, exe).is_some()
+    }
+}
+
+fn installed_name(st: &State, exe: &str) -> String {
+    installed(st)
+        .iter()
+        .find(|(_, e)| e.eq_ignore_ascii_case(exe))
+        .map_or_else(|| exe.to_string(), |(n, _)| n.clone())
 }
 
 fn name(st: &State, p: &Profile) -> String {
@@ -228,30 +262,30 @@ pub(super) fn rows(ui: &Ui) -> Vec<(Target, Rect)> {
         }
         return out;
     }
-    out.push((
-        Target::AppsToggle,
-        rect(CONTENT_X, CONTENT_Y, CONTENT_W, ROW_H),
-    ));
-    let shown = st.profiles.len().saturating_sub(st.first).min(MAX_ROWS);
+    let (top, len, row): (f32, usize, fn(usize) -> Target) = if st.blacklist_open {
+        out.push((
+            Target::ProfileHeader,
+            rect(CONTENT_X, CONTENT_Y, CONTENT_W, ROW_H),
+        ));
+        (LIST_Y, st.blacklist.len(), Target::Blacklisted)
+    } else {
+        out.push((
+            Target::AppsToggle,
+            rect(CONTENT_X, CONTENT_Y, CONTENT_W, ROW_H),
+        ));
+        out.push((Target::Blacklist, rect(CONTENT_X, LIST_Y, CONTENT_W, ROW_H)));
+        (APPS_Y, st.profiles.len(), Target::App)
+    };
+    let shown = len.saturating_sub(st.first).min(MAX_ROWS);
     for slot in 0..shown {
         out.push((
-            Target::App(st.first + slot),
-            rect(
-                CONTENT_X,
-                LIST_Y + slot as f32 * LIST_STEP,
-                CONTENT_W,
-                ROW_H,
-            ),
+            row(st.first + slot),
+            rect(CONTENT_X, top + slot as f32 * LIST_STEP, CONTENT_W, ROW_H),
         ));
     }
     out.push((
         Target::AddApp,
-        rect(
-            CONTENT_X,
-            LIST_Y + shown as f32 * LIST_STEP,
-            CONTENT_W,
-            TILE_H,
-        ),
+        rect(CONTENT_X, top + shown as f32 * LIST_STEP, CONTENT_W, TILE_H),
     ));
     out
 }
@@ -271,8 +305,13 @@ pub(super) fn order(ui: &Ui) -> Vec<Target> {
     if st.editing.is_some() {
         out.push(Target::ProfileHeader);
         out.extend((0..BUTTONS.len()).map(Target::Map));
+    } else if st.blacklist_open {
+        out.push(Target::ProfileHeader);
+        out.extend((0..st.blacklist.len()).map(Target::Blacklisted));
+        out.push(Target::AddApp);
     } else {
         out.push(Target::AppsToggle);
+        out.push(Target::Blacklist);
         out.extend((0..st.profiles.len()).map(Target::App));
         out.push(Target::AddApp);
     }
@@ -281,7 +320,7 @@ pub(super) fn order(ui: &Ui) -> Vec<Target> {
 }
 
 pub(super) fn keep_visible(ui: &mut Ui) {
-    if let Target::App(i) = ui.focus {
+    if let Target::App(i) | Target::Blacklisted(i) = ui.focus {
         let st = &mut ui.apps;
         if i < st.first {
             st.first = i;
@@ -324,6 +363,22 @@ pub(super) fn activate(ui: &mut Ui, target: Target) {
             ui.focus = Target::ProfileHeader;
         }
         Target::AddApp => open_add(st),
+        Target::Blacklist => {
+            st.blacklist_open = true;
+            st.first = 0;
+            ui.focus = Target::ProfileHeader;
+        }
+        Target::Blacklisted(i) => {
+            if i < st.blacklist.len() {
+                st.blacklist.remove(i);
+            }
+            ui.focus = match st.blacklist.len() {
+                0 => Target::AddApp,
+                n => Target::Blacklisted(i.min(n - 1)),
+            };
+            st.first = st.first.min(st.blacklist.len().saturating_sub(MAX_ROWS));
+        }
+        Target::ProfileHeader if st.blacklist_open => {}
         Target::ProfileHeader => {
             if let Some(p) = st.editing.and_then(|i| st.profiles.get_mut(i)) {
                 p.enabled = !p.enabled;
@@ -341,14 +396,11 @@ pub(super) fn activate(ui: &mut Ui, target: Target) {
 
 fn open_add(st: &mut State) {
     prewarm();
-    let list = installed(st);
-    let focus = (0..list.len())
-        .find(|i| profile_index(st, &list[*i].1).is_none())
-        .unwrap_or(list.len());
     st.dialog = Some(Dialog::Add {
-        focus,
+        focus: 0,
         first: 0,
-        typing: None,
+        query: String::new(),
+        typing: false,
     });
 }
 
@@ -363,20 +415,27 @@ pub(super) fn back(ui: &mut Ui) -> bool {
             st.dialog = Some(Dialog::Action { button, focus });
             true
         }
-        Some(Dialog::Add {
-            typing: Some(_),
-            focus,
-            first,
-        }) => {
-            st.dialog = Some(Dialog::Add {
-                focus,
-                first,
-                typing: Some(String::new()),
-            });
-            end_typing(ui, false);
+        Some(Dialog::Add { query, typing, .. }) => {
+            if typing || !query.is_empty() {
+                st.dialog = Some(Dialog::Add {
+                    focus: 0,
+                    first: 0,
+                    query: String::new(),
+                    typing,
+                });
+                if typing {
+                    end_typing(ui);
+                }
+            }
             true
         }
         Some(_) => true,
+        None if st.blacklist_open => {
+            st.blacklist_open = false;
+            st.first = 0;
+            ui.focus = Target::Blacklist;
+            true
+        }
         None => match st.editing.take() {
             Some(i) => {
                 ui.focus = Target::App(i);
@@ -403,7 +462,7 @@ pub(super) fn pad(ui: &mut Ui, button: &str) -> bool {
             page_add(ui, if button == "LB" { -1 } else { 1 });
             true
         }
-        "LB" | "RB" => modal || ui.apps.editing.is_some(),
+        "LB" | "RB" => modal || ui.apps.editing.is_some() || ui.apps.blacklist_open,
         "Y" => modal,
         _ => modal && pad_nav(button).is_none(),
     }
@@ -412,6 +471,12 @@ pub(super) fn pad(ui: &mut Ui, button: &str) -> bool {
 pub(super) fn reset(ui: &mut Ui) {
     let st = &mut ui.apps;
     if st.dialog.is_some() {
+        return;
+    }
+    if st.blacklist_open {
+        st.blacklist.clear();
+        st.first = 0;
+        ui.focus = Target::AddApp;
         return;
     }
     match st.editing {
@@ -448,6 +513,20 @@ pub(super) fn remove_editing(ui: &mut Ui) {
 
 fn add_app(ui: &mut Ui, exe: &str) {
     let st = &mut ui.apps;
+    if st.blacklist_open {
+        let exe = exe.to_ascii_lowercase();
+        let i = match st.blacklist.iter().position(|e| *e == exe) {
+            Some(i) => i,
+            None => {
+                st.blacklist.push(exe);
+                st.blacklist.len() - 1
+            }
+        };
+        st.dialog = None;
+        ui.focus = Target::Blacklisted(i);
+        keep_visible(ui);
+        return;
+    }
     let i = match profile_index(st, exe) {
         Some(i) => i,
         None => {
@@ -460,25 +539,62 @@ fn add_app(ui: &mut Ui, exe: &str) {
     ui.focus = Target::ProfileHeader;
 }
 
-fn selectable(st: &State, i: usize) -> bool {
+fn query(st: &State) -> &str {
+    match &st.dialog {
+        Some(Dialog::Add { query, .. }) => query.trim(),
+        _ => "",
+    }
+}
+
+fn picks(st: &State) -> Vec<Pick> {
+    let q = query(st);
+    let needle = q.to_lowercase();
     let list = installed(st);
-    i >= list.len() || profile_index(st, &list[i].1).is_none()
+    let mut out: Vec<Pick> = list
+        .iter()
+        .enumerate()
+        .filter(|(_, (n, e))| {
+            needle.is_empty()
+                || n.to_lowercase().contains(&needle)
+                || e.to_lowercase().contains(&needle)
+        })
+        .map(|(i, _)| Pick::App(i))
+        .collect();
+    if !q.is_empty() {
+        let exe = program_name(q);
+        if !list.iter().any(|(_, e)| e.eq_ignore_ascii_case(&exe)) {
+            out.push(Pick::Typed);
+        }
+    }
+    out
+}
+
+fn pick_exe(st: &State, pick: Pick) -> String {
+    match pick {
+        Pick::App(i) => installed(st)[i].1.clone(),
+        Pick::Typed => program_name(query(st)),
+    }
+}
+
+fn selectable(st: &State, picks: &[Pick], k: usize) -> bool {
+    k == 0 || picks.get(k - 1).is_some_and(|p| !taken(st, &pick_exe(st, *p)))
 }
 
 fn step_add(st: &State, from: usize, delta: i32) -> usize {
-    let last = installed(st).len() as i64;
+    let picks = picks(st);
+    let last = picks.len() as i64;
     let target = (from as i64 + delta as i64).clamp(0, last);
     let dir = delta.signum() as i64;
     let mut i = target;
     while (0..=last).contains(&i) {
-        if i != from as i64 && selectable(st, i as usize) {
+        if i != from as i64 && selectable(st, &picks, i as usize) {
             return i as usize;
         }
         i += dir;
     }
     let mut i = target - dir;
-    while i != from as i64 && (0..=last).contains(&i) {
-        if selectable(st, i as usize) {
+    while (i - from as i64) * dir > 0 {
+        if selectable(st, &picks, i as usize) {
             return i as usize;
         }
         i -= dir;
@@ -487,21 +603,78 @@ fn step_add(st: &State, from: usize, delta: i32) -> usize {
 }
 
 fn set_add_focus(st: &mut State, to: usize) {
-    let n = installed(st).len();
     if let Some(Dialog::Add { focus, first, .. }) = &mut st.dialog {
         *focus = to;
-        if to < n {
-            if to < *first {
-                *first = to;
-            } else if to >= *first + MAX_PICKS {
-                *first = to + 1 - MAX_PICKS;
-            }
+        match to.checked_sub(1) {
+            None => *first = 0,
+            Some(slot) if slot < *first => *first = slot,
+            Some(slot) if slot >= *first + MAX_PICKS => *first = slot + 1 - MAX_PICKS,
+            Some(_) => {}
+        }
+    }
+}
+
+fn edit_query(st: &mut State, edit: impl FnOnce(&mut String)) {
+    if let Some(Dialog::Add {
+        focus,
+        first,
+        query,
+        ..
+    }) = &mut st.dialog
+    {
+        let before = query.len();
+        edit(query);
+        if query.len() != before {
+            *focus = 0;
+            *first = 0;
+        }
+    }
+}
+
+fn commit_pick(ui: &mut Ui, k: usize) {
+    let st = &ui.apps;
+    let picks = picks(st);
+    if k == 0 || !selectable(st, &picks, k) {
+        return;
+    }
+    let exe = pick_exe(st, picks[k - 1]);
+    if typing(ui) {
+        end_typing(ui);
+    }
+    add_app(ui, &exe);
+}
+
+fn typed_enter(ui: &mut Ui) {
+    let Some(Dialog::Add { focus, .. }) = ui.apps.dialog else {
+        return;
+    };
+    if focus > 0 {
+        commit_pick(ui, focus);
+        return;
+    }
+    let st = &ui.apps;
+    let picks = picks(st);
+    let open: Vec<usize> = (1..=picks.len())
+        .filter(|k| selectable(st, &picks, *k))
+        .collect();
+    let apps: Vec<usize> = open
+        .iter()
+        .copied()
+        .filter(|k| matches!(picks[k - 1], Pick::App(_)))
+        .collect();
+    let typed = open.iter().copied().find(|k| picks[k - 1] == Pick::Typed);
+    match (apps.as_slice(), typed) {
+        (&[k], _) | (&[], Some(k)) => commit_pick(ui, k),
+        (&[], None) => {}
+        (&[k, ..], _) => {
+            end_typing(ui);
+            set_add_focus(&mut ui.apps, k);
         }
     }
 }
 
 pub(super) fn wheel(ui: &mut Ui, delta: i32) -> bool {
-    if ui.tab != APPS_TAB || typing(ui) {
+    if ui.tab != APPS_TAB {
         return false;
     }
     let st = &mut ui.apps;
@@ -512,13 +685,17 @@ pub(super) fn wheel(ui: &mut Ui, delta: i32) -> bool {
     }
     st.wheel -= steps * 120;
     if let Some(Dialog::Add { focus, first, .. }) = st.dialog {
-        let n = installed(st).len();
+        let picks = picks(st);
+        let n = picks.len();
         let top = (first as i32 - steps).clamp(0, n.saturating_sub(MAX_PICKS) as i32) as usize;
         let window = top..(top + MAX_PICKS).min(n);
         let mut to = focus;
-        if focus < n && !window.contains(&focus) {
-            let mut candidates: Vec<usize> = window.filter(|i| selectable(st, *i)).collect();
-            if focus > top {
+        if focus > 0 && !window.contains(&(focus - 1)) {
+            let mut candidates: Vec<usize> = window
+                .map(|s| s + 1)
+                .filter(|k| selectable(st, &picks, *k))
+                .collect();
+            if focus - 1 > top {
                 candidates.reverse();
             }
             to = candidates.first().copied().unwrap_or(focus);
@@ -532,23 +709,27 @@ pub(super) fn wheel(ui: &mut Ui, delta: i32) -> bool {
     if st.dialog.is_some() || st.editing.is_some() {
         return false;
     }
-    let n = st.profiles.len();
+    let n = if st.blacklist_open {
+        st.blacklist.len()
+    } else {
+        st.profiles.len()
+    };
     st.first = (st.first as i32 - steps).clamp(0, n.saturating_sub(MAX_ROWS) as i32) as usize;
-    if let Target::App(i) = ui.focus {
+    if let Target::App(i) | Target::Blacklisted(i) = ui.focus {
         let last = (st.first + MAX_ROWS).min(n) - 1;
-        ui.focus = Target::App(i.clamp(st.first, last));
+        let i = i.clamp(st.first, last);
+        ui.focus = if st.blacklist_open {
+            Target::Blacklisted(i)
+        } else {
+            Target::App(i)
+        };
     }
     true
 }
 
 fn page_add(ui: &mut Ui, dir: i32) {
     let st = &mut ui.apps;
-    if let Some(Dialog::Add {
-        focus,
-        typing: None,
-        ..
-    }) = st.dialog
-    {
+    if let Some(Dialog::Add { focus, .. }) = st.dialog {
         let to = step_add(st, focus, dir * MAX_PICKS as i32);
         set_add_focus(st, to);
     }
@@ -556,12 +737,7 @@ fn page_add(ui: &mut Ui, dir: i32) {
 
 fn dialog_nav(ui: &mut Ui, nav: Nav) {
     let st = &mut ui.apps;
-    if let Some(Dialog::Add {
-        focus,
-        typing: None,
-        ..
-    }) = st.dialog
-    {
+    if let Some(Dialog::Add { focus, .. }) = st.dialog {
         let to = match nav {
             Nav::Up => step_add(st, focus, -1),
             Nav::Down => step_add(st, focus, 1),
@@ -633,15 +809,11 @@ fn combo_from(spec: Option<&str>) -> ([bool; 4], usize) {
 
 fn dialog_activate(ui: &mut Ui) {
     let st = &mut ui.apps;
-    if let Some(Dialog::Add {
-        focus,
-        typing: None,
-        ..
-    }) = st.dialog
-    {
-        match installed(st).get(focus).map(|(_, e)| e.clone()) {
-            Some(exe) => add_app(ui, &exe),
-            None => start_typing(ui),
+    if let Some(Dialog::Add { focus, .. }) = st.dialog {
+        if focus == 0 {
+            start_typing(ui);
+        } else {
+            commit_pick(ui, focus);
         }
         return;
     }
@@ -699,46 +871,46 @@ fn dialog_activate(ui: &mut Ui) {
 
 fn start_typing(ui: &mut Ui) {
     if let Some(Dialog::Add { typing, .. }) = &mut ui.apps.dialog {
-        *typing = Some(String::new());
+        *typing = true;
         OWNS_PAD.store(false, Ordering::SeqCst);
         crate::pipe_server::request_native_vk(true);
     }
 }
 
-fn end_typing(ui: &mut Ui, commit: bool) {
-    let Some(Dialog::Add { typing, .. }) = &mut ui.apps.dialog else {
-        return;
-    };
-    let text = typing.take().unwrap_or_default();
-    crate::pipe_server::request_native_vk(false);
-    let _ = take_pad_edges();
-    OWNS_PAD.store(true, Ordering::SeqCst);
-    let name = text.trim();
-    if commit && !name.is_empty() {
-        let exe = program_name(name);
-        add_app(ui, &exe);
+fn end_typing(ui: &mut Ui) {
+    if let Some(Dialog::Add { typing, .. }) = &mut ui.apps.dialog {
+        *typing = false;
+    }
+    if !OWNS_PAD.load(Ordering::SeqCst) {
+        crate::pipe_server::request_native_vk(false);
+        let _ = take_pad_edges();
+        OWNS_PAD.store(true, Ordering::SeqCst);
     }
 }
 
 pub(super) fn typing(ui: &Ui) -> bool {
-    matches!(
-        ui.apps.dialog,
-        Some(Dialog::Add {
-            typing: Some(_),
-            ..
-        })
-    )
+    matches!(ui.apps.dialog, Some(Dialog::Add { typing: true, .. }))
+}
+
+pub(super) fn add_open(ui: &Ui) -> bool {
+    ui.tab == APPS_TAB && matches!(ui.apps.dialog, Some(Dialog::Add { .. }))
 }
 
 pub(super) fn char_input(ui: &mut Ui, ch: char) {
-    if let Some(Dialog::Add {
-        typing: Some(text), ..
-    }) = &mut ui.apps.dialog
-    {
-        if !ch.is_control() && !"\\/:*?\"<>|=".contains(ch) && text.chars().count() < 64 {
-            text.push(ch);
+    let Some(Dialog::Add { typing, query, .. }) = &mut ui.apps.dialog else {
+        return;
+    };
+    if !*typing {
+        if !ch.is_alphanumeric() {
+            return;
         }
+        *typing = true;
     }
+    let blank = ch.is_whitespace() && query.chars().last().is_none_or(char::is_whitespace);
+    if ch.is_control() || blank || "\\/:*?\"<>|=".contains(ch) || query.chars().count() >= 64 {
+        return;
+    }
+    edit_query(&mut ui.apps, |q| q.push(ch));
 }
 
 fn held_mods() -> [bool; 4] {
@@ -794,18 +966,15 @@ pub(super) fn key_down(ui: &mut Ui, vk: u16) -> Option<After> {
     }
     if typing(ui) {
         match vk {
-            v if v == VK_RETURN.0 => end_typing(ui, true),
+            v if v == VK_RETURN.0 => typed_enter(ui),
             v if v == VK_ESCAPE.0 => {
                 back(ui);
             }
-            0x08 => {
-                if let Some(Dialog::Add {
-                    typing: Some(text), ..
-                }) = &mut ui.apps.dialog
-                {
-                    text.pop();
-                }
-            }
+            v if v == VK_UP.0 => dialog_nav(ui, Nav::Up),
+            v if v == VK_DOWN.0 => dialog_nav(ui, Nav::Down),
+            0x08 => edit_query(&mut ui.apps, |q| {
+                q.pop();
+            }),
             _ => {}
         }
         return Some(After::Stay);
@@ -861,10 +1030,13 @@ pub(super) fn hints(ui: &Ui) -> Vec<(&'static [usize], &'static str)> {
             ),
             (G_B, "Cancel"),
         ],
-        Some(Dialog::Add {
-            typing: Some(_), ..
-        }) => vec![],
-        Some(Dialog::Add { .. }) => vec![(G_A, "Add"), (G_B, "Cancel"), (G_SHOULDERS, "Page")],
+        Some(Dialog::Add { typing: true, .. }) => vec![],
+        Some(Dialog::Add { focus, query, .. }) => vec![
+            (G_A, if *focus == 0 { "Search" } else { "Add" }),
+            (G_B, if query.is_empty() { "Cancel" } else { "Clear" }),
+            (G_SHOULDERS, "Page"),
+        ],
+        None if st.blacklist_open => vec![(G_A, "Remove"), (G_B, "Back"), (G_Y, "Clear")],
         None => match editing_profile(st) {
             Some(p) => vec![
                 (G_A, "Change"),
@@ -903,9 +1075,20 @@ pub(super) fn click_dialog(ui: &mut Ui, x: f32, y: f32) {
     if !card.contains(x, y) {
         return;
     }
+    if let Some(Dialog::Add { first, .. }) = ui.apps.dialog {
+        if search_rect(card).contains(x, y) {
+            set_add_focus(&mut ui.apps, 0);
+            start_typing(ui);
+            return;
+        }
+        let n = picks(&ui.apps).len();
+        let shown = n.saturating_sub(first).min(MAX_PICKS);
+        if let Some(s) = (0..shown).find(|s| pick_rect(card, *s).contains(x, y)) {
+            commit_pick(ui, first + s + 1);
+        }
+        return;
+    }
     let n_opts = editing_profile(&ui.apps).map_or(0, |p| options(p).len());
-    let type_r = type_rect(ui, card);
-    let n_installed = installed(&ui.apps).len();
     match &mut ui.apps.dialog {
         Some(Dialog::Action { focus, .. }) => {
             let Some(i) = (0..n_opts).find(|i| option_rect(card, *i).contains(x, y)) else {
@@ -934,25 +1117,6 @@ pub(super) fn click_dialog(ui: &mut Ui, x: f32, y: f32) {
                 return;
             }
         }
-        Some(Dialog::Add {
-            first,
-            typing: None,
-            ..
-        }) => {
-            let first = *first;
-            let shown = n_installed.saturating_sub(first).min(MAX_PICKS);
-            let Some(i) = (0..shown)
-                .find(|s| pick_rect(card, *s).contains(x, y))
-                .map(|s| first + s)
-                .or_else(|| type_r.contains(x, y).then_some(n_installed))
-            else {
-                return;
-            };
-            if !selectable(&ui.apps, i) {
-                return;
-            }
-            set_add_focus(&mut ui.apps, i);
-        }
         _ => return,
     }
     dialog_activate(ui);
@@ -966,20 +1130,9 @@ fn dialog_height(ui: &Ui) -> f32 {
             106.0 + n * OPTION_STEP - 4.0 + 24.0
         }
         Some(Dialog::Combo { .. }) => 418.0,
-        Some(Dialog::Add { .. }) => add_type_y(ui) + 52.0 + 24.0,
+        Some(Dialog::Add { .. }) => PICKS_Y + MAX_PICKS as f32 * PICK_STEP + 20.0 + 24.0,
         None => 0.0,
     }
-}
-
-fn add_list_h(ui: &Ui) -> f32 {
-    let n = installed(&ui.apps).len();
-    let shown = n.clamp(1, MAX_PICKS);
-    let more = if n > MAX_PICKS { 24.0 } else { 0.0 };
-    shown as f32 * PICK_STEP - 4.0 + more
-}
-
-fn add_type_y(ui: &Ui) -> f32 {
-    109.0 + add_list_h(ui) + 12.0 + 1.0 + 12.0
 }
 
 fn dialog_card(ui: &Ui) -> Option<Rect> {
@@ -1018,14 +1171,14 @@ fn combo_button(card: Rect, ok: bool) -> Rect {
 fn pick_rect(card: Rect, slot: usize) -> Rect {
     rect(
         card.x + 24.0,
-        card.y + 109.0 + slot as f32 * PICK_STEP,
+        card.y + PICKS_Y + slot as f32 * PICK_STEP,
         DLG_IN,
         52.0,
     )
 }
 
-fn type_rect(ui: &Ui, card: Rect) -> Rect {
-    rect(card.x + 24.0, card.y + add_type_y(ui), DLG_IN, 52.0)
+fn search_rect(card: Rect) -> Rect {
+    rect(card.x + 24.0, card.y + SEARCH_Y, DLG_IN, 52.0)
 }
 
 unsafe fn keycaps_width(g: &mut Gfx, caps: &[String]) -> f32 {
@@ -1122,6 +1275,61 @@ pub(super) unsafe fn draw_row(ui: &Ui, g: &mut Gfx, target: Target, r: Rect) {
             );
             draw_toggle(g, &t, toggle_rect(r), st.on);
         }
+        Target::Blacklist => {
+            two_lines(
+                g,
+                &t,
+                rect(r.x + ROW_PAD, r.y, r.w - 2.0 * ROW_PAD - 170.0, r.h),
+                "Blacklist",
+                "Programs that never count as a game",
+                false,
+            );
+            if is_new(ui, "blacklist") {
+                let x = r.x + ROW_PAD + g.measure("Blacklist", 14.0, false) + 8.0;
+                draw_new_chip(g, &t, x, r.y + 20.5);
+            }
+            let chev = rect(r.x + r.w - ROW_PAD - 18.0, r.y + 20.5, 18.0, 18.0);
+            g.icon(Icon::ChevronRight, chev, t.dim, DIM_ALPHA, s);
+            let n = st.blacklist.len();
+            g.text(
+                &format!("{n} program{}", if n == 1 { "" } else { "s" }),
+                rect(chev.x - 8.0 - 140.0, r.y, 140.0, r.h),
+                13.0,
+                false,
+                t.dim,
+                DIM_ALPHA,
+                Align::Right,
+            );
+        }
+        Target::Blacklisted(i) => {
+            let Some(exe) = st.blacklist.get(i) else {
+                return;
+            };
+            let av = rect(r.x + 16.0, r.y + 13.0, 33.0, 33.0);
+            g.fill(av, 10.0, t.bg, 1.0);
+            g.icon(
+                Icon::AppWindow,
+                rect(av.x + 7.5, av.y + 7.5, 18.0, 18.0),
+                t.accent,
+                1.0,
+                s,
+            );
+            two_lines(
+                g,
+                &t,
+                rect(r.x + 61.0, r.y, 340.0, r.h),
+                &installed_name(st, exe),
+                exe,
+                false,
+            );
+            g.icon(
+                Icon::Trash,
+                rect(r.x + r.w - ROW_PAD - 18.0, r.y + 20.5, 18.0, 18.0),
+                t.dim,
+                DIM_ALPHA,
+                s,
+            );
+        }
         Target::App(i) => {
             let p = &st.profiles[i];
             let av = rect(r.x + 16.0, r.y + 13.0, 33.0, 33.0);
@@ -1176,7 +1384,8 @@ pub(super) unsafe fn draw_row(ui: &Ui, g: &mut Gfx, target: Target, r: Rect) {
             );
         }
         Target::AddApp => {
-            let lw = g.measure("Add app", 14.0, false);
+            let add = if st.blacklist_open { "Add program" } else { "Add app" };
+            let lw = g.measure(add, 14.0, false);
             let x0 = r.x + (r.w - (28.0 + lw)) / 2.0;
             g.icon(
                 Icon::Plus,
@@ -1186,7 +1395,7 @@ pub(super) unsafe fn draw_row(ui: &Ui, g: &mut Gfx, target: Target, r: Rect) {
                 s,
             );
             g.text(
-                "Add app",
+                add,
                 rect(x0 + 28.0, r.y, lw + 4.0, r.h),
                 14.0,
                 false,
@@ -1194,7 +1403,12 @@ pub(super) unsafe fn draw_row(ui: &Ui, g: &mut Gfx, target: Target, r: Rect) {
                 1.0,
                 Align::Left,
             );
-            let below = st.profiles.len().saturating_sub(st.first + MAX_ROWS);
+            let len = if st.blacklist_open {
+                st.blacklist.len()
+            } else {
+                st.profiles.len()
+            };
+            let below = len.saturating_sub(st.first + MAX_ROWS);
             let more = match (below, st.first) {
                 (0, 0) => return,
                 (0, above) => format!("{above} more above \u{00B7} scroll up"),
@@ -1220,6 +1434,23 @@ pub(super) unsafe fn draw_row(ui: &Ui, g: &mut Gfx, target: Target, r: Rect) {
                 t.dim,
                 DIM_ALPHA,
                 Align::Left,
+            );
+        }
+        Target::ProfileHeader if st.blacklist_open => {
+            g.icon(
+                Icon::ChevronLeft,
+                rect(r.x + 14.0, r.y + 20.5, 18.0, 18.0),
+                t.dim,
+                DIM_ALPHA,
+                s,
+            );
+            two_lines(
+                g,
+                &t,
+                rect(r.x + 40.0, r.y, 420.0, r.h),
+                "Blacklist",
+                "Fullscreen windows of these programs never pause the controller",
+                false,
             );
         }
         Target::ProfileHeader => {
@@ -1560,25 +1791,113 @@ pub(super) unsafe fn draw_dialog(ui: &Ui, g: &mut Gfx) {
         Some(Dialog::Add {
             focus,
             first,
+            query,
             typing,
         }) => {
-            title(g, None, "Add an app");
+            title(
+                g,
+                None,
+                if st.blacklist_open {
+                    "Add a program to the blacklist"
+                } else {
+                    "Add an app"
+                },
+            );
             body(
                 g,
                 0,
-                if typing.is_some() {
-                    "Type the program name. Enter adds it, Esc cancels."
+                if *typing {
+                    "Type to search. Enter adds the match, Esc clears."
                 } else {
-                    "Pick an installed app, or type its program name."
+                    "Pick an installed app, or search by name."
                 },
             );
-            label(g, 86.0, "Installed apps");
-            let list = installed(st);
-            let shown = list.len().saturating_sub(*first).min(MAX_PICKS);
-            if list.is_empty() {
+            let sr = search_rect(card);
+            let av = rect(sr.x + 12.0, sr.y + 10.0, 32.0, 32.0);
+            if *typing {
+                g.fill(sr, 12.0, t.bg, 1.0);
+                if *focus == 0 {
+                    g.ring(sr, 12.0, 2.0, t.ring, 1.0);
+                } else {
+                    g.ring(sr, 12.0, 1.0, t.line, t.line_alpha);
+                }
+                g.icon(
+                    Icon::Keyboard,
+                    rect(av.x + 7.0, av.y + 7.0, 18.0, 18.0),
+                    t.accent,
+                    1.0,
+                    s,
+                );
+                let room = sr.w - 72.0;
+                let mut shown_text = query.as_str();
+                while g.measure(shown_text, 14.0, false) > room {
+                    let mut rest = shown_text.chars();
+                    rest.next();
+                    shown_text = rest.as_str();
+                }
+                let (text, c, a) = if query.is_empty() {
+                    (TYPE_PLACEHOLDER, t.dim, DIM_ALPHA)
+                } else {
+                    (shown_text, t.text, 1.0)
+                };
+                g.text(
+                    text,
+                    rect(sr.x + 56.0, sr.y, room, sr.h),
+                    14.0,
+                    false,
+                    c,
+                    a,
+                    Align::Left,
+                );
+                let cx = if query.is_empty() {
+                    sr.x + 55.0
+                } else {
+                    sr.x + 57.0 + g.measure(shown_text, 14.0, false)
+                };
+                g.fill(rect(cx, sr.y + 16.0, 1.5, 20.0), 0.0, t.accent, 1.0);
+            } else {
+                g.fill(sr, 12.0, t.bg, 1.0);
+                focus_box(g, &t, sr, *focus == 0);
+                g.icon(
+                    Icon::Keyboard,
+                    rect(av.x + 7.0, av.y + 7.0, 18.0, 18.0),
+                    t.dim,
+                    DIM_ALPHA,
+                    s,
+                );
+                let tr = rect(sr.x + 56.0, sr.y, sr.w - 68.0, sr.h);
+                if query.is_empty() {
+                    two_lines(
+                        g,
+                        &t,
+                        tr,
+                        "Search apps or type a program name",
+                        TYPE_CAPTION,
+                        false,
+                    );
+                } else {
+                    two_lines(g, &t, tr, query, "Search \u{00B7} A to edit", false);
+                }
+            }
+            let picks = picks(st);
+            let n_apps = picks.iter().filter(|p| matches!(p, Pick::App(_))).count();
+            let q = query.trim();
+            let heading = if q.is_empty() {
+                "Installed apps".to_string()
+            } else if INSTALLED.get().is_none() {
+                "Finding installed apps\u{2026}".to_string()
+            } else if n_apps == 0 {
+                "No installed app matches".to_string()
+            } else if n_apps == 1 {
+                "1 match".to_string()
+            } else {
+                format!("{n_apps} matches")
+            };
+            label(g, PICKS_LABEL_Y, &heading);
+            if picks.is_empty() {
                 g.text(
                     if INSTALLED.get().is_none() {
-                        "Finding installed apps…"
+                        "Finding installed apps\u{2026}"
                     } else {
                         "No installed apps found"
                     },
@@ -1590,27 +1909,37 @@ pub(super) unsafe fn draw_dialog(ui: &Ui, g: &mut Gfx) {
                     Align::Center,
                 );
             }
+            let shown = picks.len().saturating_sub(*first).min(MAX_PICKS);
             for slot in 0..shown {
-                let i = first + slot;
-                let (n, exe) = &list[i];
+                let k = first + slot + 1;
+                let pick = picks[k - 1];
+                let exe = pick_exe(st, pick);
+                let (top, sub, icon) = match pick {
+                    Pick::App(i) => (installed(st)[i].0.clone(), exe.clone(), Icon::AppWindow),
+                    Pick::Typed => (
+                        format!("Use \"{exe}\""),
+                        "Program name you typed".to_string(),
+                        Icon::Keyboard,
+                    ),
+                };
                 let r = pick_rect(card, slot);
-                let has = profile_index(st, exe).is_some();
-                focus_box(g, &t, r, i == *focus && typing.is_none());
+                let has = taken(st, &exe);
+                focus_box(g, &t, r, k == *focus);
                 let a = if has { 0.5 } else { 1.0 };
                 let av = rect(r.x + 12.0, r.y + 10.0, 32.0, 32.0);
                 g.fill(av, 10.0, t.bg, a);
                 g.icon(
-                    Icon::AppWindow,
+                    icon,
                     rect(av.x + 7.0, av.y + 7.0, 18.0, 18.0),
                     t.accent,
                     a,
                     s,
                 );
                 let tw = r.w - 68.0 - if has { 112.0 } else { 0.0 };
-                let n = fit(g, n, tw, 14.0, false);
-                let exe = fit(g, exe, tw, 12.0, false);
+                let top = fit(g, &top, tw, 14.0, false);
+                let sub = fit(g, &sub, tw, 12.0, false);
                 g.text(
-                    &n,
+                    &top,
                     rect(r.x + 56.0, r.y + 9.0, tw, 17.0),
                     14.0,
                     false,
@@ -1619,7 +1948,7 @@ pub(super) unsafe fn draw_dialog(ui: &Ui, g: &mut Gfx) {
                     Align::Left,
                 );
                 g.text(
-                    &exe,
+                    &sub,
                     rect(r.x + 56.0, r.y + 28.0, tw, 15.0),
                     12.0,
                     false,
@@ -1629,7 +1958,11 @@ pub(super) unsafe fn draw_dialog(ui: &Ui, g: &mut Gfx) {
                 );
                 if has {
                     g.text(
-                        "Has a profile",
+                        if st.blacklist_open {
+                            "Already listed"
+                        } else {
+                            "Has a profile"
+                        },
                         rect(r.x + r.w - 112.0, r.y, 100.0, r.h),
                         12.0,
                         false,
@@ -1639,14 +1972,14 @@ pub(super) unsafe fn draw_dialog(ui: &Ui, g: &mut Gfx) {
                     );
                 }
             }
-            if list.len() > MAX_PICKS {
-                let below = list.len() - first - shown;
+            if picks.len() > MAX_PICKS {
+                let below = picks.len() - first - shown;
                 let more = if below > 0 {
                     format!("{below} more \u{00B7} LB / RB page")
                 } else {
                     "LB / RB page".to_string()
                 };
-                let y = card.y + 109.0 + shown as f32 * PICK_STEP;
+                let y = card.y + PICKS_Y + MAX_PICKS as f32 * PICK_STEP;
                 let mw = g.measure(&more, 11.0, false);
                 let x0 = x + (DLG_IN - (20.0 + mw)) / 2.0;
                 if below > 0 {
@@ -1667,72 +2000,6 @@ pub(super) unsafe fn draw_dialog(ui: &Ui, g: &mut Gfx) {
                     DIM_ALPHA,
                     Align::Left,
                 );
-            }
-            let tr = type_rect(ui, card);
-            g.fill_rect(rect(x, tr.y - 13.0, DLG_IN, 1.0), t.line, t.line_alpha);
-            match typing {
-                Some(text) => {
-                    g.fill(tr, 12.0, t.bg, 1.0);
-                    g.ring(tr, 12.0, 2.0, t.ring, 1.0);
-                    let (shown_text, c, a) = if text.is_empty() {
-                        (TYPE_PLACEHOLDER, t.dim, DIM_ALPHA)
-                    } else {
-                        (text.as_str(), t.text, 1.0)
-                    };
-                    let tw = g.measure(shown_text, 14.0, false);
-                    g.text(
-                        shown_text,
-                        rect(tr.x + 16.0, tr.y, tr.w - 32.0, tr.h),
-                        14.0,
-                        false,
-                        c,
-                        a,
-                        Align::Left,
-                    );
-                    let cx = if text.is_empty() {
-                        tr.x + 15.0
-                    } else {
-                        tr.x + 17.0 + tw
-                    };
-                    g.fill(rect(cx, tr.y + 16.0, 1.5, 20.0), 0.0, t.accent, 1.0);
-                }
-                None => {
-                    focus_box(g, &t, tr, *focus >= list.len());
-                    let av = rect(tr.x + 12.0, tr.y + 10.0, 32.0, 32.0);
-                    g.fill(av, 10.0, t.bg, 1.0);
-                    g.icon(
-                        Icon::Keyboard,
-                        rect(av.x + 7.0, av.y + 7.0, 18.0, 18.0),
-                        t.dim,
-                        DIM_ALPHA,
-                        s,
-                    );
-                    g.text(
-                        "Type a program name\u{2026}",
-                        rect(tr.x + 56.0, tr.y + 9.0, 300.0, 17.0),
-                        14.0,
-                        false,
-                        t.text,
-                        1.0,
-                        Align::Left,
-                    );
-                    g.text(
-                        TYPE_CAPTION,
-                        rect(tr.x + 56.0, tr.y + 28.0, 300.0, 15.0),
-                        12.0,
-                        false,
-                        t.dim,
-                        DIM_ALPHA,
-                        Align::Left,
-                    );
-                    g.icon(
-                        Icon::ChevronRight,
-                        rect(tr.x + tr.w - 30.0, tr.y + 17.0, 18.0, 18.0),
-                        t.dim,
-                        DIM_ALPHA,
-                        s,
-                    );
-                }
             }
         }
         None => {}
