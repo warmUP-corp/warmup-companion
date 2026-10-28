@@ -387,6 +387,12 @@ fn program_of(exec: &str) -> Option<String> {
     (!base.is_empty()).then_some(base)
 }
 
+pub(super) fn load_app_icons() {}
+
+pub(super) unsafe fn draw_app_icon(_g: &mut Gfx, _exe: &str, _dst: Rect, _alpha: f32) -> bool {
+    false
+}
+
 pub(super) fn installed_apps() -> Vec<(String, String)> {
     const WRAPPERS: [&str; 6] = ["flatpak", "snap", "sh", "bash", "gtk-launch", "gio"];
     let mut seen_ids: Vec<String> = Vec::new();

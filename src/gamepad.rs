@@ -737,6 +737,8 @@ impl GamepadPoll {
             cursor.set_right_button(false);
         }
         self.last_vk_open = vk_open;
+        #[cfg(any(windows, target_os = "linux"))]
+        crate::win::controller_center::set_vk_open(vk_open);
 
         #[cfg(windows)]
         if crate::config::service_mode() {

@@ -25,6 +25,7 @@ const G_A: &[usize] = &[0];
 const G_B: &[usize] = &[1];
 const G_Y: &[usize] = &[3];
 const G_SHOULDERS: &[usize] = &[4, 5];
+const G_L3: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ComboFocus {
@@ -72,6 +73,7 @@ pub(super) struct State {
     blacklist_open: bool,
     first: usize,
     wheel: i32,
+    vk_seen: bool,
 }
 
 static INSTALLED: OnceLock<Vec<(String, String)>> = OnceLock::new();
@@ -86,6 +88,8 @@ pub(super) fn prewarm() {
         .name("apps-scan".into())
         .spawn(|| {
             let _ = INSTALLED.set(installed_apps());
+            SCAN_DONE.store(true, Ordering::SeqCst);
+            load_app_icons();
             SCAN_DONE.store(true, Ordering::SeqCst);
         });
     if spawned.is_err() {
@@ -872,6 +876,7 @@ fn dialog_activate(ui: &mut Ui) {
 fn start_typing(ui: &mut Ui) {
     if let Some(Dialog::Add { typing, .. }) = &mut ui.apps.dialog {
         *typing = true;
+        ui.apps.vk_seen = false;
         OWNS_PAD.store(false, Ordering::SeqCst);
         crate::pipe_server::request_native_vk(true);
     }
@@ -890,6 +895,31 @@ fn end_typing(ui: &mut Ui) {
 
 pub(super) fn typing(ui: &Ui) -> bool {
     matches!(ui.apps.dialog, Some(Dialog::Add { typing: true, .. }))
+}
+
+fn vk_typing(ui: &Ui) -> bool {
+    typing(ui) && !OWNS_PAD.load(Ordering::SeqCst)
+}
+
+pub(super) fn sync_vk(ui: &mut Ui) -> bool {
+    if !vk_typing(ui) {
+        return false;
+    }
+    if vk_open() {
+        ui.apps.vk_seen = true;
+        return false;
+    }
+    if !ui.apps.vk_seen {
+        return false;
+    }
+    end_typing(ui);
+    let st = &mut ui.apps;
+    let picks = picks(st);
+    let to = (1..=picks.len())
+        .find(|k| selectable(st, &picks, *k))
+        .unwrap_or(0);
+    set_add_focus(st, to);
+    true
 }
 
 pub(super) fn add_open(ui: &Ui) -> bool {
@@ -1247,6 +1277,30 @@ unsafe fn two_lines(g: &mut Gfx, t: &Theme, r: Rect, title: &str, caption: &str,
     );
 }
 
+unsafe fn avatar_icon(
+    g: &mut Gfx,
+    av: Rect,
+    exe: Option<&str>,
+    icon: Icon,
+    ink: u32,
+    alpha: f32,
+    s: f32,
+) {
+    let inset = (av.w - 24.0) / 2.0;
+    let real = rect(av.x + inset, av.y + inset, 24.0, 24.0);
+    if exe.is_some_and(|e| draw_app_icon(g, e, real, alpha)) {
+        return;
+    }
+    let inset = (av.w - 18.0) / 2.0;
+    g.icon(
+        icon,
+        rect(av.x + inset, av.y + inset, 18.0, 18.0),
+        ink,
+        alpha,
+        s,
+    );
+}
+
 fn browser_caption() -> String {
     format!(
         "Built-in \u{00B7} Chrome, Edge, Firefox +{}",
@@ -1307,13 +1361,7 @@ pub(super) unsafe fn draw_row(ui: &Ui, g: &mut Gfx, target: Target, r: Rect) {
             };
             let av = rect(r.x + 16.0, r.y + 13.0, 33.0, 33.0);
             g.fill(av, 10.0, t.bg, 1.0);
-            g.icon(
-                Icon::AppWindow,
-                rect(av.x + 7.5, av.y + 7.5, 18.0, 18.0),
-                t.accent,
-                1.0,
-                s,
-            );
+            avatar_icon(g, av, Some(exe), Icon::AppWindow, t.accent, 1.0, s);
             two_lines(
                 g,
                 &t,
@@ -1339,17 +1387,11 @@ pub(super) unsafe fn draw_row(ui: &Ui, g: &mut Gfx, target: Target, r: Rect) {
             } else {
                 (t.dim, DIM_ALPHA)
             };
-            g.icon(
-                if p.browsers {
-                    Icon::Globe
-                } else {
-                    Icon::AppWindow
-                },
-                rect(av.x + 7.5, av.y + 7.5, 18.0, 18.0),
-                ic,
-                ia,
-                s,
-            );
+            if p.browsers {
+                avatar_icon(g, av, None, Icon::Globe, ic, ia, s);
+            } else {
+                avatar_icon(g, av, Some(&p.exes[0]), Icon::AppWindow, ic, ia, s);
+            }
             let caption = if p.browsers {
                 browser_caption()
             } else if ap::has_builtin(&p.exes[0]) {
@@ -1803,15 +1845,55 @@ pub(super) unsafe fn draw_dialog(ui: &Ui, g: &mut Gfx) {
                     "Add an app"
                 },
             );
-            body(
-                g,
-                0,
-                if *typing {
-                    "Type to search. Enter adds the match, Esc clears."
-                } else {
-                    "Pick an installed app, or search by name."
-                },
-            );
+            if *typing && vk_typing(ui) {
+                let y = card.y + 54.0;
+                let lead = "Press";
+                let lw = g.measure(lead, 13.0, false);
+                g.text(
+                    lead,
+                    rect(x, y, lw + 4.0, 16.0),
+                    13.0,
+                    false,
+                    t.dim,
+                    DIM_ALPHA,
+                    Align::Left,
+                );
+                let gx = x + lw + 6.0;
+                g.icon(
+                    Icon::Pad(ps, G_L3),
+                    rect(gx, y - 2.0, 20.0, 20.0),
+                    t.text,
+                    1.0,
+                    s,
+                );
+                let tx = gx + 26.0;
+                let tail = fit(
+                    g,
+                    "to close the keyboard and pick from the list.",
+                    DLG_IN - (tx - x),
+                    13.0,
+                    false,
+                );
+                g.text(
+                    &tail,
+                    rect(tx, y, DLG_IN - (tx - x), 16.0),
+                    13.0,
+                    false,
+                    t.dim,
+                    DIM_ALPHA,
+                    Align::Left,
+                );
+            } else {
+                body(
+                    g,
+                    0,
+                    if *typing {
+                        "Type to search. Enter adds the match, Esc clears."
+                    } else {
+                        "Pick an installed app, or search by name."
+                    },
+                );
+            }
             let sr = search_rect(card);
             let av = rect(sr.x + 12.0, sr.y + 10.0, 32.0, 32.0);
             if *typing {
@@ -1928,13 +2010,8 @@ pub(super) unsafe fn draw_dialog(ui: &Ui, g: &mut Gfx) {
                 let a = if has { 0.5 } else { 1.0 };
                 let av = rect(r.x + 12.0, r.y + 10.0, 32.0, 32.0);
                 g.fill(av, 10.0, t.bg, a);
-                g.icon(
-                    icon,
-                    rect(av.x + 7.0, av.y + 7.0, 18.0, 18.0),
-                    t.accent,
-                    a,
-                    s,
-                );
+                let real = matches!(pick, Pick::App(_)).then_some(exe.as_str());
+                avatar_icon(g, av, real, icon, t.accent, a, s);
                 let tw = r.w - 68.0 - if has { 112.0 } else { 0.0 };
                 let top = fit(g, &top, tw, 14.0, false);
                 let sub = fit(g, &sub, tw, 12.0, false);

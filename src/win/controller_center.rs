@@ -1680,9 +1680,18 @@ static PAD_EDGES: Mutex<Vec<(&'static str, bool)>> = Mutex::new(Vec::new());
 const PAD_EDGE_CAP: usize = 64;
 
 static MENU_OWNS: AtomicBool = AtomicBool::new(false);
+static VK_OPEN: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn owns_pad() -> bool {
     OWNS_PAD.load(Ordering::SeqCst) || MENU_OWNS.load(Ordering::SeqCst)
+}
+
+pub(crate) fn set_vk_open(open: bool) {
+    VK_OPEN.store(open, Ordering::SeqCst);
+}
+
+fn vk_open() -> bool {
+    VK_OPEN.load(Ordering::SeqCst)
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -2267,6 +2276,7 @@ fn confirm_pad(button: &str) -> Option<ConfirmInput> {
 fn tick(ui: &mut Ui) -> (bool, After) {
     let live = Live::read();
     let mut dirty = live != ui.live || apps::take_scan_done();
+    dirty |= apps::sync_vk(ui);
     ui.live = live;
     let dl = voice_dl();
     if dl != ui.voice_dl {
