@@ -166,13 +166,18 @@ fn documents_dir() -> Option<String> {
 }
 
 fn known_folder(id: &windows::core::GUID) -> Option<String> {
+    folder_of(id, true)
+}
+
+fn folder_of(id: &windows::core::GUID, signed_in_user: bool) -> Option<String> {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::System::Com::CoTaskMemFree;
     use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
     use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT};
     unsafe {
         let mut token = HANDLE::default();
-        let have_token = WTSQueryUserToken(WTSGetActiveConsoleSessionId(), &mut token).is_ok();
+        let have_token = signed_in_user
+            && WTSQueryUserToken(WTSGetActiveConsoleSessionId(), &mut token).is_ok();
         let result = if have_token {
             SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, token)
         } else {
@@ -635,8 +640,10 @@ pub(super) fn installed_apps() -> Vec<(String, String)> {
         COINIT_APARTMENTTHREADED, STGM_READ,
     };
     use windows::Win32::UI::Shell::{
-        FOLDERID_CommonPrograms, FOLDERID_Programs, IShellLinkW, ShellLink,
+        FOLDERID_CommonPrograms, FOLDERID_Profile, FOLDERID_Programs, IShellLinkW, ShellLink,
     };
+    let own_profile = folder_of(&FOLDERID_Profile, false);
+    let user_profile = known_folder(&FOLDERID_Profile);
     let mut links = Vec::new();
     let mut dirs: Vec<std::path::PathBuf> = [&FOLDERID_Programs, &FOLDERID_CommonPrograms]
         .into_iter()
@@ -692,7 +699,16 @@ pub(super) fn installed_apps() -> Vec<(String, String)> {
                 continue;
             }
             let len = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
-            let target = String::from_utf16_lossy(&buf[..len]);
+            let mut target = String::from_utf16_lossy(&buf[..len]);
+            if let (Some(own), Some(user)) = (&own_profile, &user_profile) {
+                if !own.eq_ignore_ascii_case(user)
+                    && target.len() > own.len()
+                    && target.is_char_boundary(own.len())
+                    && target[..own.len()].eq_ignore_ascii_case(own)
+                {
+                    target = format!("{user}{}", &target[own.len()..]);
+                }
+            }
             if !std::path::Path::new(&target).is_file() {
                 continue;
             }
