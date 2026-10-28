@@ -98,7 +98,29 @@ pub(crate) fn is_denylisted_exe(exe_file_name: &str, image_path: Option<&str>) -
         Some(index) if !index.denylist_exes.is_empty() => index.denylist_exes.contains(&base),
         _ => BUILTIN_DENYLIST_EXES.contains(&base.as_str()),
     };
-    listed || is_background_tool_stem(base.strip_suffix(".exe").unwrap_or(&base))
+    let stem = base.strip_suffix(".exe").unwrap_or(&base);
+    listed
+        || is_background_tool_stem(stem)
+        || blacklist()
+            .iter()
+            .any(|name| name.strip_suffix(".exe").unwrap_or(name) == stem)
+}
+
+pub(crate) fn blacklist() -> Vec<String> {
+    crate::paths::settings_file()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| parse_blacklist(&text))
+        .unwrap_or_default()
+}
+
+pub(crate) fn parse_blacklist(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| line.split_once('='))
+        .filter(|(key, _)| key.trim() == "game_blacklist")
+        .flat_map(|(_, value)| value.split(','))
+        .map(|name| normalize(file_name(&normalize(name))))
+        .filter(|name| !name.is_empty())
+        .collect()
 }
 
 const MAX_TOTAL_BYTES: usize = 2 * 1024 * 1024;
@@ -441,7 +463,7 @@ pub(crate) fn denylist_names() -> Vec<String> {
             .map(|stem| stem.to_string())
             .collect()
     });
-    exes.into_iter().chain(stems).collect()
+    exes.into_iter().chain(stems).chain(blacklist()).collect()
 }
 
 pub(crate) fn accept_chunk(
@@ -641,12 +663,4 @@ pub(crate) fn watch_owner(
         [only] if only.install_dir_prefixes.is_empty() => Some(only.game_id.clone()),
         _ => None,
     }
-}
-
-pub(crate) fn is_known_game_image(image_path: &str, steam_app_id: Option<&str>) -> bool {
-    is_detectable_image(image_path)
-        || (is_steam_library_path(image_path)
-            && steam_app_id
-                .is_some_and(|id| is_listed_steam_app(id) && !is_background_tool_steam_app(id)))
-        || local_game_dir_for(image_path).is_some()
 }

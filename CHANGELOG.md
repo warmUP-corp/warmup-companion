@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## v0.12.0
+
+- Any fullscreen window counts as a game again when the companion decides whether to put the controller to sleep while warmUP is closed. Since v0.11.0 only games on warmUP's list counted, so games warmUP did not know about kept full controller input. Browsers, launchers and the other programs the companion already ignored still never count. Offline play time is still only counted for games on warmUP's list.
+- New Blacklist in the Controller Center, under Apps: programs on it never count as a game. Pick an installed app or type a program name, then press Apply. The list is stored as `game_blacklist` in `settings.ini`.
+- The app picker in the Controller Center (used for app shortcuts and the Blacklist) opens with a search field at the top. Typing filters the installed apps as you go; Enter adds the only match, and with several matches the controller picks from the filtered list. A program that is not installed can still be added by its typed name.
+- Pressing the left stick (L3) closes the on-screen keyboard while searching without adding anything: the filtered list stays and the controller picks from it.
+- The app picker, the Blacklist and the app shortcut list show each app's real Windows icon. Start-menu shortcuts whose program no longer exists are left out.
+- New features in the Controller Center carry a NEW chip on their tab and row until you have opened that tab once.
+
 ## v0.11.2
 
 - On Windows, the mouse works again on UAC prompts ("Do you want to allow this app to make changes to your device?") when no controller is connected. An invisible part of the companion's sign-in hint covered the Yes and No buttons and caught the clicks, so the prompt could only be answered with a controller. The hint no longer catches clicks, and the "connect a controller" hint is no longer shown on the sign-in and UAC screens.

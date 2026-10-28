@@ -127,24 +127,7 @@ fn surface_active() -> bool {
         .lock()
         .ok()
         .and_then(|slot| slot.clone())
-        .is_some_and(|surface| {
-            surface_is_standalone_game(&surface) && surface_is_known_game(&surface)
-        })
-}
-
-fn surface_is_known_game(surface: &Surface) -> bool {
-    if surface.pid == 0 || !crate::game_list::has_index() {
-        return true;
-    }
-    let Some(path) = crate::process_guard::image_path(surface.pid) else {
-        return false;
-    };
-    let steam_app_id = if crate::game_list::is_steam_library_path(&path) {
-        crate::process_guard::steam_running_app_id(surface.pid)
-    } else {
-        None
-    };
-    crate::game_list::is_known_game_image(&path, steam_app_id.as_deref())
+        .is_some_and(|surface| surface_is_standalone_game(&surface))
 }
 
 fn publish(surface: Option<Surface>) {

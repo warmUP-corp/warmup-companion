@@ -32,6 +32,12 @@ pub(super) const TYPE_CAPTION: &str = "Opens the keyboard \u{00B7} for example n
 const WINDOW_CLASS: PCWSTR = w!("WarmupControllerCenter");
 const TIMER_ID: usize = 31;
 const TIMER_MS: u32 = 33;
+const EXE_ICON_PX: u32 = 48;
+
+type Pixels = (u32, u32, Vec<u8>);
+
+static APP_TARGETS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+static EXE_ICONS: OnceLock<HashMap<String, Pixels>> = OnceLock::new();
 
 thread_local! {
     static APP_ICONS: RefCell<HashMap<i32, HICON>> = RefCell::new(HashMap::new());
@@ -160,13 +166,18 @@ fn documents_dir() -> Option<String> {
 }
 
 fn known_folder(id: &windows::core::GUID) -> Option<String> {
+    folder_of(id, true)
+}
+
+fn folder_of(id: &windows::core::GUID, signed_in_user: bool) -> Option<String> {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::System::Com::CoTaskMemFree;
     use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
     use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT};
     unsafe {
         let mut token = HANDLE::default();
-        let have_token = WTSQueryUserToken(WTSGetActiveConsoleSessionId(), &mut token).is_ok();
+        let have_token = signed_in_user
+            && WTSQueryUserToken(WTSGetActiveConsoleSessionId(), &mut token).is_ok();
         let result = if have_token {
             SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, token)
         } else {
@@ -522,7 +533,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_CHAR => {
             with_ui(|ui| {
-                if apps::typing(ui) {
+                if apps::add_open(ui) {
                     if let Some(ch) = char::from_u32(wparam.0 as u32) {
                         apps::char_input(ui, ch);
                         paint(ui);
@@ -629,8 +640,10 @@ pub(super) fn installed_apps() -> Vec<(String, String)> {
         COINIT_APARTMENTTHREADED, STGM_READ,
     };
     use windows::Win32::UI::Shell::{
-        FOLDERID_CommonPrograms, FOLDERID_Programs, IShellLinkW, ShellLink,
+        FOLDERID_CommonPrograms, FOLDERID_Profile, FOLDERID_Programs, IShellLinkW, ShellLink,
     };
+    let own_profile = folder_of(&FOLDERID_Profile, false);
+    let user_profile = known_folder(&FOLDERID_Profile);
     let mut links = Vec::new();
     let mut dirs: Vec<std::path::PathBuf> = [&FOLDERID_Programs, &FOLDERID_CommonPrograms]
         .into_iter()
@@ -653,6 +666,7 @@ pub(super) fn installed_apps() -> Vec<(String, String)> {
         }
     }
     let mut out: Vec<(String, String)> = Vec::new();
+    let mut targets: Vec<(String, String)> = Vec::new();
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         for link in links {
@@ -685,7 +699,19 @@ pub(super) fn installed_apps() -> Vec<(String, String)> {
                 continue;
             }
             let len = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
-            let target = String::from_utf16_lossy(&buf[..len]);
+            let mut target = String::from_utf16_lossy(&buf[..len]);
+            if let (Some(own), Some(user)) = (&own_profile, &user_profile) {
+                if !own.eq_ignore_ascii_case(user)
+                    && target.len() > own.len()
+                    && target.is_char_boundary(own.len())
+                    && target[..own.len()].eq_ignore_ascii_case(own)
+                {
+                    target = format!("{user}{}", &target[own.len()..]);
+                }
+            }
+            if !std::path::Path::new(&target).is_file() {
+                continue;
+            }
             let Some(exe) = std::path::Path::new(&target)
                 .file_name()
                 .and_then(|s| s.to_str())
@@ -695,11 +721,147 @@ pub(super) fn installed_apps() -> Vec<(String, String)> {
             };
             if !out.iter().any(|(_, e)| e.eq_ignore_ascii_case(exe)) {
                 out.push((name.to_string(), exe.to_string()));
+                targets.push((exe.to_ascii_lowercase(), target.clone()));
             }
         }
     }
+    if let Ok(mut t) = APP_TARGETS.lock() {
+        *t = targets;
+    }
     out.sort_by_key(|(n, _)| n.to_lowercase());
     out
+}
+
+pub(super) fn load_app_icons() {
+    let targets = APP_TARGETS
+        .lock()
+        .map(|mut t| std::mem::take(&mut *t))
+        .unwrap_or_default();
+    let icons = targets
+        .into_iter()
+        .filter_map(|(exe, target)| unsafe { exe_icon(&target) }.map(|px| (exe, px)))
+        .collect();
+    let _ = EXE_ICONS.set(icons);
+}
+
+unsafe fn exe_icon(path: &str) -> Option<Pixels> {
+    use windows::Win32::Foundation::S_OK;
+    use windows::Win32::UI::Shell::SHDefExtractIconW;
+    use windows::Win32::UI::WindowsAndMessaging::DestroyIcon;
+    let mut icon = HICON::default();
+    let hr = SHDefExtractIconW(
+        &HSTRING::from(path),
+        0,
+        0,
+        Some(&mut icon),
+        None,
+        EXE_ICON_PX,
+    );
+    if hr != S_OK || icon.is_invalid() {
+        return None;
+    }
+    let px = icon_pixels(icon);
+    let _ = DestroyIcon(icon);
+    px
+}
+
+unsafe fn icon_pixels(icon: HICON) -> Option<Pixels> {
+    use windows::Win32::Graphics::Gdi::DeleteObject;
+    use windows::Win32::UI::WindowsAndMessaging::{GetIconInfo, ICONINFO};
+    let mut info = ICONINFO::default();
+    GetIconInfo(icon, &mut info).ok()?;
+    let color = bitmap_bgra(info.hbmColor);
+    let mask = match &color {
+        Some((_, _, px)) if px.chunks_exact(4).all(|p| p[3] == 0) => bitmap_bgra(info.hbmMask),
+        _ => None,
+    };
+    if !info.hbmColor.is_invalid() {
+        let _ = DeleteObject(info.hbmColor);
+    }
+    if !info.hbmMask.is_invalid() {
+        let _ = DeleteObject(info.hbmMask);
+    }
+    let (w, h, mut px) = color?;
+    if let Some((mw, mh, m)) = mask {
+        if mw != w || mh < h {
+            return None;
+        }
+        for (p, k) in px.chunks_exact_mut(4).zip(m.chunks_exact(4)) {
+            p[3] = if k[..3] == [0, 0, 0] { 255 } else { 0 };
+        }
+    }
+    for p in px.chunks_exact_mut(4) {
+        let a = p[3] as u32;
+        let (b, g, r) = (p[0] as u32, p[1] as u32, p[2] as u32);
+        p[0] = (r * a / 255) as u8;
+        p[1] = (g * a / 255) as u8;
+        p[2] = (b * a / 255) as u8;
+    }
+    Some((w, h, px))
+}
+
+unsafe fn bitmap_bgra(bmp: windows::Win32::Graphics::Gdi::HBITMAP) -> Option<Pixels> {
+    use windows::Win32::Graphics::Gdi::{
+        GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        DIB_RGB_COLORS,
+    };
+    if bmp.is_invalid() {
+        return None;
+    }
+    let mut bm = BITMAP::default();
+    let got = GetObjectW(
+        bmp,
+        std::mem::size_of::<BITMAP>() as i32,
+        Some(&mut bm as *mut BITMAP as *mut _),
+    );
+    let (w, h) = (bm.bmWidth, bm.bmHeight.abs());
+    if got == 0 || w <= 0 || h <= 0 {
+        return None;
+    }
+    let mut bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: w,
+            biHeight: -h,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut px = vec![0u8; w as usize * h as usize * 4];
+    let dc = GetDC(None);
+    if dc.is_invalid() {
+        return None;
+    }
+    let lines = GetDIBits(
+        dc,
+        bmp,
+        0,
+        h as u32,
+        Some(px.as_mut_ptr().cast()),
+        &mut bmi,
+        DIB_RGB_COLORS,
+    );
+    ReleaseDC(None, dc);
+    (lines == h).then_some((w as u32, h as u32, px))
+}
+
+pub(super) unsafe fn draw_app_icon(g: &mut Gfx, exe: &str, dst: Rect, alpha: f32) -> bool {
+    let exe = exe.to_ascii_lowercase();
+    let Some((w, h, px)) = EXE_ICONS.get().and_then(|m| m.get(&exe)) else {
+        return false;
+    };
+    let key = format!("exe-icon:{exe}");
+    if !g.images.contains_key(&key) {
+        g.set_image(&key, *w, *h, px);
+        if !g.images.contains_key(&key) {
+            return false;
+        }
+    }
+    g.draw_image(&key, dst, alpha, true);
+    true
 }
 
 fn surface_px(scale: f32) -> (i32, i32) {

@@ -87,6 +87,65 @@ const PROMO_BUTTON: Rect = rect(TAB_X + 12.0, 404.0 + 216.0 - 44.0, TAB_W - 24.0
 const PROMO_FILL: u32 = 0x002E2C2C;
 const PROMO_BUTTON_FILL: u32 = 0x003C3A3A;
 const PROMO_SUB: &str = "All your games in one library, built for the controller.";
+const NEW_IN_PATCH: &[(&str, usize)] = &[("blacklist", apps::APPS_TAB)];
+const NEW_CHIP: &str = "NEW";
+
+fn seen_new() -> Vec<String> {
+    crate::paths::seen_new_file()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| text.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+fn unseen_new() -> Vec<&'static str> {
+    let seen = seen_new();
+    NEW_IN_PATCH
+        .iter()
+        .map(|(id, _)| *id)
+        .filter(|id| !seen.iter().any(|s| s == id))
+        .collect()
+}
+
+fn mark_tab_seen(ui: &mut Ui) {
+    let ids: Vec<&'static str> = NEW_IN_PATCH
+        .iter()
+        .filter(|(id, tab)| *tab == ui.tab && ui.new_fresh.contains(id) && !ui.new_seen.contains(id))
+        .map(|(id, _)| *id)
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    ui.new_seen.extend(&ids);
+    let Some(path) = crate::paths::seen_new_file() else {
+        return;
+    };
+    let mut seen = seen_new();
+    seen.extend(ids.iter().map(|id| id.to_string()));
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, seen.join("\n"));
+}
+
+fn is_new(ui: &Ui, id: &str) -> bool {
+    ui.new_fresh.contains(&id)
+}
+
+fn tab_is_new(ui: &Ui, tab: usize) -> bool {
+    NEW_IN_PATCH
+        .iter()
+        .any(|(id, t)| *t == tab && ui.new_fresh.contains(id) && !ui.new_seen.contains(id))
+}
+
+unsafe fn new_chip_w(g: &mut Gfx) -> f32 {
+    g.measure(NEW_CHIP, 10.0, true) + 14.0
+}
+
+unsafe fn draw_new_chip(g: &mut Gfx, t: &Theme, x: f32, cy: f32) {
+    let r = rect(x, cy - 9.0, new_chip_w(g), 18.0);
+    g.fill(r, 9.0, t.accent, 1.0);
+    g.text(NEW_CHIP, r, 10.0, true, t.on_accent, 1.0, Align::Center);
+}
 
 #[cfg_attr(not(windows), allow(dead_code))]
 fn ico_entry(bytes: &[u8], want: u32) -> Option<(usize, usize)> {
@@ -1319,6 +1378,8 @@ enum Target {
     AddApp,
     ProfileHeader,
     Map(usize),
+    Blacklist,
+    Blacklisted(usize),
 }
 
 impl Target {
@@ -1606,6 +1667,8 @@ struct Ui {
     promo: Option<(i32, i32, Vec<u8>)>,
     apps: apps::State,
     voice_dl: Option<VoiceDl>,
+    new_fresh: Vec<&'static str>,
+    new_seen: Vec<&'static str>,
 }
 
 thread_local! {
@@ -1617,9 +1680,18 @@ static PAD_EDGES: Mutex<Vec<(&'static str, bool)>> = Mutex::new(Vec::new());
 const PAD_EDGE_CAP: usize = 64;
 
 static MENU_OWNS: AtomicBool = AtomicBool::new(false);
+static VK_OPEN: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn owns_pad() -> bool {
     OWNS_PAD.load(Ordering::SeqCst) || MENU_OWNS.load(Ordering::SeqCst)
+}
+
+pub(crate) fn set_vk_open(open: bool) {
+    VK_OPEN.store(open, Ordering::SeqCst);
+}
+
+fn vk_open() -> bool {
+    VK_OPEN.load(Ordering::SeqCst)
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -1728,6 +1800,8 @@ fn new_ui(hwnd: HWND, scale: f32) -> Ui {
         promo: promo_art(scale),
         apps: apps::load(),
         voice_dl: voice_dl(),
+        new_fresh: unseen_new(),
+        new_seen: Vec::new(),
     }
 }
 
@@ -1932,6 +2006,7 @@ fn switch_tab(ui: &mut Ui, tab: usize) {
         return;
     }
     ui.tab = tab;
+    mark_tab_seen(ui);
     if tab == apps::APPS_TAB {
         apps::enter(&mut ui.apps);
     }
@@ -2008,7 +2083,9 @@ fn activate(ui: &mut Ui, target: Target) -> After {
         | Target::App(_)
         | Target::AddApp
         | Target::ProfileHeader
-        | Target::Map(_) => apps::activate(ui, target),
+        | Target::Map(_)
+        | Target::Blacklist
+        | Target::Blacklisted(_) => apps::activate(ui, target),
         _ => {}
     }
     After::Stay
@@ -2047,9 +2124,7 @@ fn click(ui: &mut Ui, x: f32, y: f32) -> After {
         return After::Stay;
     }
     if ui.apps.dialog.is_some() {
-        if !apps::typing(ui) {
-            apps::click_dialog(ui, x, y);
-        }
+        apps::click_dialog(ui, x, y);
         return After::Stay;
     }
     if CLOSE.inset(-7.0).contains(x, y) {
@@ -2124,7 +2199,9 @@ fn click(ui: &mut Ui, x: f32, y: f32) -> After {
         | Target::App(_)
         | Target::AddApp
         | Target::ProfileHeader
-        | Target::Map(_) => apps::click_page(ui, t, r, x),
+        | Target::Map(_)
+        | Target::Blacklist
+        | Target::Blacklisted(_) => apps::click_page(ui, t, r, x),
         _ => {}
     }
     After::Stay
@@ -2199,6 +2276,7 @@ fn confirm_pad(button: &str) -> Option<ConfirmInput> {
 fn tick(ui: &mut Ui) -> (bool, After) {
     let live = Live::read();
     let mut dirty = live != ui.live || apps::take_scan_done();
+    dirty |= apps::sync_vk(ui);
     ui.live = live;
     let dl = voice_dl();
     if dl != ui.voice_dl {
@@ -2332,6 +2410,10 @@ unsafe fn draw_window(ui: &Ui, g: &mut Gfx) {
             a,
             Align::Left,
         );
+        if tab_is_new(ui, i) {
+            let x = r.x + r.w - 14.0 - new_chip_w(g);
+            draw_new_chip(g, &t, x, r.y + r.h / 2.0);
+        }
     }
 
     if let Some((w, h, px)) = &ui.promo {
@@ -3006,7 +3088,9 @@ unsafe fn draw_row(ui: &Ui, g: &mut Gfx, target: Target, r: Rect) {
         | Target::App(_)
         | Target::AddApp
         | Target::ProfileHeader
-        | Target::Map(_) => apps::draw_row(ui, g, target, r),
+        | Target::Map(_)
+        | Target::Blacklist
+        | Target::Blacklisted(_) => apps::draw_row(ui, g, target, r),
     }
 }
 

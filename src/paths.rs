@@ -4,6 +4,7 @@ pub const LOG_NAME: &str = "service.log";
 const SETTINGS_FILE: &str = "settings.ini";
 const RUNTIME_STATUS_FILE: &str = "runtime-status.ini";
 const USERLAND_POLL_FILE: &str = "userland-poll.mode";
+const SEEN_NEW_FILE: &str = "seen-new.txt";
 
 #[cfg(windows)]
 pub const DATA_DIR: &str = r"C:\ProgramData\WarmupVk";
@@ -98,6 +99,10 @@ pub fn runtime_status_file() -> Option<PathBuf> {
     {
         local_app_warmup().map(|dir| dir.join(RUNTIME_STATUS_FILE))
     }
+}
+
+pub fn seen_new_file() -> Option<PathBuf> {
+    runtime_status_file().map(|path| path.with_file_name(SEEN_NEW_FILE))
 }
 
 pub fn userland_poll_mode_file() -> Option<PathBuf> {
