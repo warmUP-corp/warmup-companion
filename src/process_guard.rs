@@ -1,15 +1,6 @@
-//! Win32 process snapshot, image-path, and terminate helpers for Kid Mode / playtime.
-
 #![cfg(any(windows, target_os = "linux"))]
 
-#[cfg(windows)]
-use std::time::Duration;
-
 use crate::tracking_owner::TrackingOwner;
-
-pub(crate) fn snapshot_processes() -> Vec<(u32, String, Option<String>)> {
-    snapshot_processes_filtered(None)
-}
 
 pub(crate) fn snapshot_processes_for_owner(
     owner: &TrackingOwner,
@@ -189,131 +180,6 @@ fn process_image_path(handle: windows::Win32::Foundation::HANDLE) -> Option<Stri
     Some(String::from_utf16_lossy(&buf[..size as usize]))
 }
 
-#[cfg(windows)]
-pub(crate) fn terminate_blocked_process(pid: u32) -> bool {
-    request_window_close(pid);
-    let _ = std::thread::Builder::new()
-        .name("warmup-terminate-pid".into())
-        .spawn(move || {
-            std::thread::sleep(Duration::from_millis(800));
-            let _ = terminate_pid_with_privilege(pid);
-        });
-    true
-}
-
-#[cfg(windows)]
-fn terminate_pid_with_privilege(pid: u32) -> bool {
-    enable_debug_privilege();
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
-
-    unsafe {
-        if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, pid) {
-            let ok = TerminateProcess(handle, 1).is_ok();
-            let _ = CloseHandle(handle);
-            if ok {
-                crate::install::log_line(&format!("parental guard terminated pid {pid}"));
-                return true;
-            }
-        }
-    }
-    false
-}
-
-#[cfg(windows)]
-pub(crate) fn enable_debug_privilege() {
-    use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, LUID};
-    use windows::Win32::Security::{
-        AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
-        TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
-    };
-    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-
-    unsafe {
-        let mut token = HANDLE::default();
-        if OpenProcessToken(
-            GetCurrentProcess(),
-            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
-            &mut token,
-        )
-        .is_err()
-        {
-            return;
-        }
-        let mut luid = LUID::default();
-        let name = windows::core::w!("SeDebugPrivilege");
-        if LookupPrivilegeValueW(None, PCWSTR(name.as_ptr()), &mut luid).is_err() {
-            let _ = CloseHandle(token);
-            return;
-        }
-        let tp = TOKEN_PRIVILEGES {
-            PrivilegeCount: 1,
-            Privileges: [LUID_AND_ATTRIBUTES {
-                Luid: luid,
-                Attributes: SE_PRIVILEGE_ENABLED,
-            }],
-        };
-        let _ = AdjustTokenPrivileges(token, false, Some(&tp), 0, None, None);
-        let _ = CloseHandle(token);
-    }
-}
-
-#[cfg(windows)]
-fn request_window_close(pid: u32) {
-    use windows::Win32::Foundation::{LPARAM, WPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
-
-    if let Some(hwnd) = largest_visible_hwnd(pid) {
-        unsafe {
-            let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
-        }
-    }
-}
-
-#[cfg(windows)]
-fn largest_visible_hwnd(pid: u32) -> Option<windows::Win32::Foundation::HWND> {
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
-    };
-
-    struct Ctx {
-        pid: u32,
-        best: Option<HWND>,
-        best_area: i32,
-    }
-
-    unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let ctx = &mut *(lparam.0 as *mut Ctx);
-        let mut wpid = 0u32;
-        let _ = GetWindowThreadProcessId(hwnd, Some(&mut wpid));
-        if wpid != ctx.pid || !IsWindowVisible(hwnd).as_bool() {
-            return BOOL(1);
-        }
-        let mut rect = RECT::default();
-        if GetWindowRect(hwnd, &mut rect).is_err() {
-            return BOOL(1);
-        }
-        let area = (rect.right - rect.left) * (rect.bottom - rect.top);
-        if area > ctx.best_area {
-            ctx.best_area = area;
-            ctx.best = Some(hwnd);
-        }
-        BOOL(1)
-    }
-
-    let mut ctx = Ctx {
-        pid,
-        best: None,
-        best_area: 0,
-    };
-    unsafe {
-        let _ = EnumWindows(Some(cb), LPARAM(&mut ctx as *mut _ as _));
-    }
-    ctx.best
-}
-
 #[cfg(target_os = "linux")]
 pub(crate) fn image_path(pid: u32) -> Option<String> {
     if !proc_is_live(pid) {
@@ -384,13 +250,6 @@ fn proc_real_uid(pid: u32) -> Option<u32> {
         .next()?
         .parse()
         .ok()
-}
-
-#[cfg(target_os = "linux")]
-fn proc_start_ticks(pid: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let after_comm = &stat[stat.rfind(')')? + 1..];
-    after_comm.split_whitespace().nth(19)?.parse().ok()
 }
 
 #[cfg(target_os = "linux")]
@@ -525,33 +384,6 @@ fn resolve_wine_path(pid: u32, windows_path: &str) -> Option<String> {
     }
     Some(path.to_string_lossy().into_owned())
 }
-
-#[cfg(target_os = "linux")]
-pub(crate) fn terminate_blocked_process(pid: u32) -> bool {
-    if !proc_is_live(pid) {
-        return false;
-    }
-    let Some(started) = proc_start_ticks(pid) else {
-        return false;
-    };
-    if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } != 0 {
-        return std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-    }
-    let _ = std::thread::Builder::new()
-        .name("warmup-terminate-pid".into())
-        .spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(800));
-            if proc_start_ticks(pid) == Some(started)
-                && unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) } == 0
-            {
-                crate::install::log_line(&format!("parental guard terminated pid {pid}"));
-            }
-        });
-    true
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn enable_debug_privilege() {}
 
 #[cfg(all(test, windows))]
 mod tests {

@@ -57,7 +57,9 @@ pub(crate) fn run_boot_gamepad_loop(
     // connection state over IPC (#347).
     crate::pipe_server::spawn();
     #[cfg(any(windows, target_os = "linux"))]
-    crate::parental_guard::spawn_guardian_loop();
+    for stale in ["parental-guard.json", "parental-security.log"] {
+        let _ = std::fs::remove_file(crate::paths::state_dir().join(stale));
+    }
     #[cfg(any(windows, target_os = "linux"))]
     crate::playtime_tracker::spawn_tracker_loop();
     let on_action = |action: crate::gamepad::VkLoopAction| match action {

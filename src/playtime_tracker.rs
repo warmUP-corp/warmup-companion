@@ -6,7 +6,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::parental_guard;
 use crate::pipe_server::{self, TrackingOwner};
 use crate::playtime_store::{
     acknowledge_closed_sessions, closed_sessions_for_wire, finalize_open, finalize_owner_sessions,
@@ -68,7 +67,7 @@ fn compute_running_games(owner: &TrackingOwner) -> RunningGamesPayload {
         .unwrap_or_default();
     let our_pid = std::process::id();
     let processes: Vec<(u32, String, Option<String>)> =
-        parental_guard::snapshot_processes_for_owner(owner)
+        crate::process_guard::snapshot_processes_for_owner(owner)
             .into_iter()
             .filter(|(pid, _, _)| *pid != 0 && *pid != our_pid)
             .collect();
@@ -181,7 +180,7 @@ fn tick_tracker() {
     let now = unix_now_secs();
     let our_pid = std::process::id();
     let processes: Vec<(u32, String, Option<String>)> =
-        parental_guard::snapshot_processes_for_owner(&owner)
+        crate::process_guard::snapshot_processes_for_owner(&owner)
             .into_iter()
             .filter(|(pid, _, _)| *pid != 0 && *pid != our_pid)
             .collect();

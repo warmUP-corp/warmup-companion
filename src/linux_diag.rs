@@ -22,7 +22,6 @@ pub fn write_report() -> Result<PathBuf, String> {
         ("hyprctl-monitors.txt".to_string(), hyprctl("monitors")),
         ("library-watch.json".to_string(), state_file(&crate::paths::library_watch_file())),
         ("pending-play-sessions.json".to_string(), state_file(&crate::paths::pending_play_sessions_file())),
-        ("parental-guard.json".to_string(), state_file(&crate::paths::parental_guard_file())),
         ("crash-report.txt".to_string(), state_file(&crate::crash::report_file())),
         ("crash-report.last.txt".to_string(), state_file(&crate::crash::last_report_file())),
     ];

@@ -10,9 +10,8 @@
 use crate::gamepad_backend::PadCommand;
 use crate::protocol::{
     AxisPayload, BatteryPayload, ButtonPayload, CompanionSettingsPayload, ConfigPayload,
-    ConnectionPayload, KeyboardThemePayload, ModeSnapshot, PadBatteryPayload,
-    ParentalBlockedPayload, ParentalGuardPayload, RumblePayload, SettingsChangedPayload,
-    TouchpadPayload,
+    ConnectionPayload, KeyboardThemePayload, ModeSnapshot, PadBatteryPayload, RumblePayload,
+    SettingsChangedPayload, TouchpadPayload,
 };
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -804,9 +803,6 @@ static STATE: OnceLock<Mutex<ConnectionPayload>> = OnceLock::new();
 static BUTTONS: OnceLock<Mutex<VecDeque<ButtonPayload>>> = OnceLock::new();
 const BUTTON_QUEUE_CAP: usize = 256;
 
-static PARENTAL_BLOCKED: OnceLock<Mutex<VecDeque<ParentalBlockedPayload>>> = OnceLock::new();
-const PARENTAL_BLOCKED_QUEUE_CAP: usize = 32;
-
 /// Last published `GUIDE` edge state, for consecutive-Guide-edge dedupe (SDL3 can emit
 /// duplicate Guide edges on some firmware) — preserves the desktop's old behaviour.
 static LAST_GUIDE: OnceLock<Mutex<Option<bool>>> = OnceLock::new();
@@ -818,24 +814,6 @@ fn state() -> &'static Mutex<ConnectionPayload> {
 fn buttons() -> &'static Mutex<VecDeque<ButtonPayload>> {
     BUTTONS.get_or_init(|| Mutex::new(VecDeque::new()))
 }
-
-fn parental_blocked_queue() -> &'static Mutex<VecDeque<ParentalBlockedPayload>> {
-    PARENTAL_BLOCKED.get_or_init(|| Mutex::new(VecDeque::new()))
-}
-
-/// Queue a Kid Mode block notification for the connected warmUP desktop client.
-#[cfg(any(windows, target_os = "linux"))]
-pub fn publish_parental_blocked(payload: ParentalBlockedPayload) {
-    if let Ok(mut q) = parental_blocked_queue().lock() {
-        while q.len() >= PARENTAL_BLOCKED_QUEUE_CAP {
-            q.pop_front();
-        }
-        q.push_back(payload);
-    }
-}
-
-#[cfg(not(any(windows, target_os = "linux")))]
-pub fn publish_parental_blocked(_payload: ParentalBlockedPayload) {}
 
 fn last_guide() -> &'static Mutex<Option<bool>> {
     LAST_GUIDE.get_or_init(|| Mutex::new(None))
@@ -944,14 +922,6 @@ fn drain_buttons() -> Vec<ButtonPayload> {
         .unwrap_or_default()
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
-fn drain_parental_blocked() -> Vec<ParentalBlockedPayload> {
-    parental_blocked_queue()
-        .lock()
-        .map(|mut q| q.drain(..).collect())
-        .unwrap_or_default()
-}
-
 #[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
 fn apply_library_watch(owner: &TrackingOwner, payload: &crate::protocol::LibraryWatchPayload) {
     if let Err(error) = crate::library_watch::apply_watch(owner, payload) {
@@ -963,14 +933,6 @@ fn apply_library_watch(owner: &TrackingOwner, payload: &crate::protocol::Library
 
 #[cfg(not(all(any(windows, target_os = "linux"), feature = "gamepad")))]
 fn apply_library_watch(_owner: &TrackingOwner, _payload: &crate::protocol::LibraryWatchPayload) {}
-
-#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
-fn apply_parental_guard(payload: &ParentalGuardPayload) {
-    crate::parental_guard::apply_guard(payload);
-}
-
-#[cfg(not(all(any(windows, target_os = "linux"), feature = "gamepad")))]
-fn apply_parental_guard(_payload: &ParentalGuardPayload) {}
 
 #[cfg(any(windows, target_os = "linux"))]
 fn apply_game_detection(payload: &crate::protocol::GameDetectionPayload) {
@@ -1059,16 +1021,6 @@ fn reset_button_stream() {
 
 fn inbound_frame_ready(peeked: &[u8], available: u32) -> bool {
     peeked.contains(&b'\n') || available as usize > peeked.len()
-}
-
-#[cfg(test)]
-fn pipe_shutdown_refused(kid_mode_blocking: bool) -> bool {
-    kid_mode_blocking
-}
-
-#[cfg(test)]
-fn parental_security_log_writable(path: &std::path::Path) -> bool {
-    path.is_file()
 }
 
 #[cfg(any(windows, target_os = "linux"))]
@@ -1385,26 +1337,6 @@ mod tests {
             }
         ));
         assert!(matches!(cmds[1], PadCommand::Led { r: 7, g: 8, b: 9 }));
-    }
-
-    #[test]
-    fn pipe_shutdown_is_refused_only_when_kid_mode_blocks() {
-        assert!(!pipe_shutdown_refused(false));
-        assert!(pipe_shutdown_refused(true));
-    }
-
-    #[test]
-    fn parental_security_log_is_used_only_when_the_file_exists() {
-        let missing = std::path::Path::new("no-such-parental-security.log");
-        assert!(!parental_security_log_writable(missing));
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "warmup-parental-security-{}.log",
-            std::process::id()
-        ));
-        std::fs::write(&path, b"").unwrap();
-        assert!(parental_security_log_writable(&path));
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
