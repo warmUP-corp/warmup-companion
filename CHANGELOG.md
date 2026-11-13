@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## v0.12.1
+
 - Kid Mode is removed, because warmUP is now for adults only. The companion no longer stops games started outside warmUP, no longer tells warmUP about blocked games, and always follows warmUP's request to close it. On Windows it no longer asks for the debug privilege it needed to stop other programs. The saved block list (`parental-guard.json`) and the Kid Mode security log (`parental-security.log`) are deleted when the companion starts, so an install that had Kid Mode on comes up normally. Older warmUP versions that still send Kid Mode settings keep working; the companion ignores them. Offline play time and the "Close Companion with warmUP" start and stop rights are unchanged. On Linux, `warmup-companion diagnostics` no longer packs the Kid Mode block list.
 
 ## v0.12.0
