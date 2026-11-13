@@ -112,10 +112,6 @@ mod hid_reader;
 mod library_watch;
 #[cfg(all(windows, feature = "gamepad"))]
 mod pad_decode;
-#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
-mod parental_guard;
-#[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
-mod parental_store;
 #[cfg(feature = "gamepad")]
 mod app_profiles;
 #[cfg(feature = "gamepad")]

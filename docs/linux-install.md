@@ -81,7 +81,6 @@ If either variable is missing, the service logs the reason and exits. `verify` a
 | Settings | `$XDG_CONFIG_HOME/warmup-companion/settings.ini` |
 | Log and runtime status | `$XDG_STATE_HOME/warmup-companion/` |
 | Library watchlist and unsent play sessions | `$XDG_STATE_HOME/warmup-companion/library-watch.json`, `pending-play-sessions.json` |
-| Kid Mode block list | `$XDG_STATE_HOME/warmup-companion/parental-guard.json` |
 | Known-game list from warmUP | `$XDG_STATE_HOME/warmup-companion/game-list.json` |
 | Crash report | `$XDG_STATE_HOME/warmup-companion/crash-report.txt`, `crash-report.last.txt` once read |
 | Installed binary | `$XDG_DATA_HOME/warmup-companion/bin/warmup-companion` |
@@ -138,11 +137,7 @@ On Omarchy, the Voice engine menu and the Voice tab also offer System dictation 
 
 While warmUP is closed, the companion counts play time for the games in the watchlist warmUP last sent. It reads `/proc` every two seconds and only looks at your own processes. A game matches by its program name or by its install folder; for a Wine or Proton game the program name is the Windows `.exe` name. A session ends ten seconds after the game is gone and stays in `pending-play-sessions.json` until warmUP connects and confirms it. Once warmUP has sent its list of known games, only games on that list are counted: a listed program path, a listed Steam app running from `steamapps/common` (read from the game's `SteamAppId`), or a game you added by hand, running from its own folder.
 
-While Kid Mode blocking is on, the companion checks running programs every two seconds, matching them the same way, and stops any blocked game with SIGTERM, then SIGKILL 0.8 seconds later. The service runs as your user, so it can only stop games running under your own account. This is intended: on Windows the service runs as SYSTEM and can stop a blocked game started by any account, but on Linux a game started by another user is not stopped. warmUP is still told that a blocked game is running. Most games end at once on SIGTERM, without a chance to save.
-
-When warmUP asks the companion to shut down while Kid Mode is blocking, the companion refuses. If `$XDG_STATE_HOME/warmup-companion/parental-security.log` already exists, it also appends one JSON line for the refused request.
-
-`warmup-companion settings` reads and writes `$XDG_CONFIG_HOME/warmup-companion/settings.ini`. `warmup-companion --controller-center` opens Control Center on its own, without the controller. Like on Windows, it adds its own tray icon and keeps running after the window closes, so the tray can open it again; stop it with Ctrl+C. `warmup-companion diagnostics` writes a tarball under `$XDG_STATE_HOME/warmup-companion/diagnostics/`. It holds the unit status, the journal, the service log, device and Hyprland details, the watchlist, the unsent play sessions, the Kid Mode block list and both crash reports.
+`warmup-companion settings` reads and writes `$XDG_CONFIG_HOME/warmup-companion/settings.ini`. `warmup-companion --controller-center` opens Control Center on its own, without the controller. Like on Windows, it adds its own tray icon and keeps running after the window closes, so the tray can open it again; stop it with Ctrl+C. `warmup-companion diagnostics` writes a tarball under `$XDG_STATE_HOME/warmup-companion/diagnostics/`. It holds the unit status, the journal, the service log, device and Hyprland details, the watchlist, the unsent play sessions and both crash reports.
 
 ## Screenshots
 

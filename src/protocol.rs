@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// v4 also tolerates additive `axis` up-frames for controller calibration/test UI.
 ///
-/// v5: additive `parental_guard` down-frame and `parental_blocked` up-frame for Kid Mode
-/// system-wide game blocking.
+/// v5: additive `parental_guard` down-frame and `parental_blocked` up-frame, both retired;
+/// a `parental_guard` frame or hello field from an older client is ignored.
 ///
 /// v6: additive `library_watch` down-frame, `play_sessions` up-frame, and
 /// `play_sessions_ack` down-frame for offline companion playtime tracking.
@@ -65,30 +65,9 @@ pub struct Hello {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub companion_settings: Option<CompanionSettingsPayload>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parental_guard: Option<ParentalGuardPayload>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_watch: Option<LibraryWatchPayload>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub game_detection_revision: Option<u64>,
-}
-
-/// Kid Mode system-wide blocking rules for the companion guardian loop.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct ParentalGuardPayload {
-    pub enabled: bool,
-    #[serde(default)]
-    pub blocked_exe_stems: Vec<String>,
-    #[serde(default)]
-    pub blocked_install_dir_prefixes: Vec<String>,
-}
-
-/// Companion terminated a non-allowlisted game process started outside warmUP.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ParentalBlockedPayload {
-    pub exe_stem: String,
-    pub pid: u32,
 }
 
 /// One installed library game the companion may match while warmUP is disconnected.
@@ -407,7 +386,6 @@ pub enum UpFrame {
     Battery(BatteryPayload),
     Pads(PadsPayload),
     Touchpad(TouchpadPayload),
-    ParentalBlocked(ParentalBlockedPayload),
     PlaySessions(PlaySessionsPayload),
     SettingsChanged(SettingsChangedPayload),
     RunningGames(RunningGamesPayload),
@@ -428,7 +406,6 @@ pub enum DownFrame {
     Led(LedPayload),
     CompanionSettings(CompanionSettingsPayload),
     NativeVk(NativeVkPayload),
-    ParentalGuard(ParentalGuardPayload),
     LibraryWatch(LibraryWatchPayload),
     PlaySessionsAck(PlaySessionsAckPayload),
     ShutDown(ShutDownPayload),
@@ -461,7 +438,7 @@ impl UpFrame {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
             "hello" | "connection" | "button" | "cursor_moved" | "axis" | "battery" | "pads"
-            | "touchpad" | "parental_blocked" | "play_sessions" | "settings_changed"
+            | "touchpad" | "play_sessions" | "settings_changed"
             | "running_games" => {
                 serde_json::from_str(line)
             }
@@ -478,7 +455,7 @@ impl DownFrame {
         let env: Envelope = serde_json::from_str(line)?;
         match env.ty.as_str() {
             "hello" | "config" | "mode" | "rumble" | "led" | "companion_settings" | "native_vk"
-            | "parental_guard" | "library_watch" | "play_sessions_ack" | "shut_down" => {
+            | "library_watch" | "play_sessions_ack" | "shut_down" => {
                 serde_json::from_str(line)
             }
             "game_detection" => {
@@ -673,31 +650,19 @@ mod tests {
     }
 
     #[test]
-    fn parental_blocked_up_frame_round_trips() {
-        let frame = UpFrame::ParentalBlocked(ParentalBlockedPayload {
-            exe_stem: "game".into(),
-            pid: 1234,
-        });
-        let line = frame.to_ndjson_line();
-        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
-        assert_eq!(json["type"], "parental_blocked");
-        assert_eq!(json["payload"]["exeStem"], "game");
-        assert_eq!(UpFrame::parse_line(line.trim_end()).unwrap(), frame);
-    }
-
-    #[test]
-    fn parental_guard_down_frame_round_trips() {
-        let frame = DownFrame::ParentalGuard(ParentalGuardPayload {
-            enabled: true,
-            blocked_exe_stems: vec!["game".into()],
-            blocked_install_dir_prefixes: vec![r"c:\games\blocked".into()],
-        });
-        let line = frame.to_ndjson_line();
-        let json: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
-        assert_eq!(json["type"], "parental_guard");
-        assert_eq!(json["payload"]["enabled"], true);
-        assert_eq!(json["payload"]["blockedExeStems"][0], "game");
-        assert_eq!(DownFrame::parse_line(line.trim_end()).unwrap(), frame);
+    fn retired_parental_guard_from_older_clients_is_ignored() {
+        let frame =
+            r#"{"type":"parental_guard","payload":{"enabled":true,"blockedExeStems":["game"]}}"#;
+        assert_eq!(DownFrame::parse_line(frame).unwrap(), DownFrame::Unknown);
+        let hello =
+            r#"{"type":"hello","payload":{"protocolVersion":6,"parentalGuard":{"enabled":true}}}"#;
+        assert!(matches!(
+            DownFrame::parse_line(hello).unwrap(),
+            DownFrame::Hello(Hello {
+                protocol_version: 6,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -744,7 +709,6 @@ mod tests {
                 userland_poll_paused: Some(false),
                 prompt_userland_debug: None,
             }),
-            parental_guard: None,
             library_watch: None,
             game_detection_revision: None,
         });
@@ -788,7 +752,6 @@ mod tests {
             config: Some(serde_json::to_value(&config).unwrap()),
             mode: None,
             companion_settings: Some(settings.clone()),
-            parental_guard: None,
             library_watch: None,
             game_detection_revision: None,
         });

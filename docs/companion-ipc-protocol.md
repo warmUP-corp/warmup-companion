@@ -225,8 +225,7 @@ warmUP (desktop, not elevated) sends one NDJSON line after a successful `hello`.
 
 No up-frame ack. Behavior:
 
-1. If Kid Mode blocking is active (`parental_guard.enabled` from the last `parental_guard` / `hello` snapshot), the companion **refuses** the request and stays running. It logs the refusal to the service log. If the parental security log already exists (`C:\ProgramData\WarmupVk\parental-security.log` on Windows, `$XDG_STATE_HOME/warmup-companion/parental-security.log` on Linux), it appends one JSON line: `{"kind":"shut-down-refused","detail":"Kid Mode blocking is active","ts":<unix_secs>}`.
-2. Otherwise the companion writes the clean-exit marker `C:\ProgramData\WarmupVk\companion-clean-exit` first (mtime is what warmUP's Kid Mode watchdog treats as a graceful stop; 30s window), then asks SCM to stop `WarmupVkSvc` (`sc stop` from the LocalSystem worker). The service process exits; the client sees the pipe drop.
+The companion writes the clean-exit marker `C:\ProgramData\WarmupVk\companion-clean-exit` first (older warmUP versions read its mtime as a graceful stop; 30s window), then asks SCM to stop `WarmupVkSvc` (`sc stop` from the LocalSystem worker). The service process exits; the client sees the pipe drop.
 
 `Restart App` / updates must not send this frame. Use it only for "Close Companion with warmUP".
 
@@ -245,7 +244,8 @@ fields keep the native keyboard's current dark/light default for that color slot
 - While native VK input is unsuppressed (Windows desktop), L3/R3 edges stay local to the companion and are not also emitted as launcher `button` frames. This prevents the same shortcut from opening the keyboard/dictation and the minimized launcher's dock/topbar. Foreground launcher navigation still receives L3/R3; Guide forwarding is unchanged.
 - `axis` is an additive v4-compatible up-frame; old desktop clients ignore it as unknown, old companions simply omit it.
 - `led` is an additive v4-compatible down-frame for one-shot test writes; old companions ignore it as unknown.
-- `shut_down` is an additive v6-compatible down-frame for unelevated companion stop. Old companions ignore it as unknown; Kid Mode blocking refuses it and keeps the service running.
+- `shut_down` is an additive v6-compatible down-frame for unelevated companion stop. Old companions ignore it as unknown.
+- The v5 `parental_guard` down-frame, the `hello.parentalGuard` field and the `parental_blocked` up-frame are retired (Kid Mode was removed). The companion ignores `parental_guard` as an unknown frame and `hello.parentalGuard` as an unknown field, and never sends `parental_blocked`. This needs no version bump: v5 and v6 clients that still send them keep working.
 - `game_detection`, `running_games` and `hello.gameDetectionRevision` are additive on v6. Old companions ignore `game_detection` as unknown and never send the revision, so the desktop keeps sending the list on each connection; old desktops ignore `running_games`.
 - `settings_changed` is an additive v6-compatible up-frame for companion→desktop settings sync when the shared ini changes locally. Old desktops ignore it as unknown.
 - Additive fields may stay on the current protocol when both directions are default/unknown-field tolerant.

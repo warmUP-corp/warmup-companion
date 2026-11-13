@@ -172,10 +172,6 @@ pub fn game_list_file() -> PathBuf {
     state_dir().join("game-list.json")
 }
 
-pub fn parental_guard_file() -> PathBuf {
-    state_dir().join("parental-guard.json")
-}
-
 pub fn pending_play_sessions_file() -> PathBuf {
     state_dir().join("pending-play-sessions.json")
 }

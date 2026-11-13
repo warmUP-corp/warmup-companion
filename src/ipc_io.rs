@@ -12,11 +12,10 @@ use crate::tracking_owner::TrackingOwner;
 
 use super::{
     apply_companion_settings, apply_config, apply_game_detection, apply_led, apply_library_watch,
-    apply_mode, apply_parental_guard, apply_play_sessions_ack, apply_rumble, companion_snapshot,
-    current, current_axis, current_battery, current_pads, current_running_games, drain_buttons,
-    drain_parental_blocked, ensure_settings_watcher, game_detection_revision,
-    reset_game_detection, set_native_vk_request, set_running_games_owner, take_cursor_moved, take_touchpad,
-    SettingsSync, SETTINGS_GEN,
+    apply_mode, apply_play_sessions_ack, apply_rumble, companion_snapshot, current, current_axis,
+    current_battery, current_pads, current_running_games, drain_buttons, ensure_settings_watcher,
+    game_detection_revision, reset_game_detection, set_native_vk_request, set_running_games_owner,
+    take_cursor_moved, take_touchpad, SettingsSync, SETTINGS_GEN,
 };
 
 const KEEPALIVE: Duration = Duration::from_secs(1);
@@ -159,9 +158,6 @@ pub(super) fn handshake<R: Read, W: Write>(
             if let Some(mode) = hello.mode {
                 apply_mode(&mode);
             }
-            if let Some(guard) = hello.parental_guard {
-                apply_parental_guard(&guard);
-            }
             if let Some(watch) = hello.library_watch {
                 apply_library_watch(&identity.owner, &watch);
             }
@@ -183,7 +179,6 @@ pub(super) fn handshake<R: Read, W: Write>(
         config: serde_json::to_value(config_snapshot).ok(),
         mode: None,
         companion_settings: Some(settings_snapshot),
-        parental_guard: None,
         library_watch: None,
         game_detection_revision: game_detection_revision(),
     });
@@ -290,14 +285,6 @@ pub(super) fn stream<R: Read, W: Write>(
                 }
             }
         }
-        for blocked in drain_parental_blocked() {
-            if session
-                .write_frame(UpFrame::ParentalBlocked(blocked).to_ndjson_line().as_bytes())
-                .is_err()
-            {
-                return;
-            }
-        }
         let battery = current_battery();
         if battery.is_some() && battery != last_battery {
             if let Some(snapshot) = battery {
@@ -399,7 +386,6 @@ fn drain_inbound<R: Read, W: Write>(
             Ok(DownFrame::Led(payload)) => apply_led(&payload),
             Ok(DownFrame::CompanionSettings(payload)) => apply_companion_settings(sync, &payload),
             Ok(DownFrame::NativeVk(payload)) => set_native_vk_request(&payload),
-            Ok(DownFrame::ParentalGuard(payload)) => apply_parental_guard(&payload),
             Ok(DownFrame::LibraryWatch(payload)) => apply_library_watch(owner, &payload),
             Ok(DownFrame::PlaySessionsAck(payload)) => {
                 let removed = apply_play_sessions_ack(owner, &payload, issued_session_ids);
@@ -423,14 +409,6 @@ fn drain_inbound<R: Read, W: Write>(
 }
 
 fn handle_shut_down() {
-    #[cfg(all(any(windows, target_os = "linux"), feature = "gamepad"))]
-    {
-        if crate::parental_guard::is_blocking_active() {
-            crate::install::log_line("pipe shut_down refused: Kid Mode blocking is active");
-            crate::parental_guard::log_refused_shutdown();
-            return;
-        }
-    }
     crate::install::request_service_stop();
     #[cfg(feature = "gamepad")]
     crate::gamepad::request_stop();
